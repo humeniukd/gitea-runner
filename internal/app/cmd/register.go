@@ -75,6 +75,7 @@ type registerArgs struct {
 	NoInteractive bool
 	InstanceAddr  string
 	Token         string
+	TokenFile     string
 	RunnerName    string
 	Labels        string
 	Ephemeral     bool
@@ -207,10 +208,23 @@ func (r *registerInputs) assignToNext(stage registerStage, value string, cfg *co
 	return StageUnknown
 }
 
-func initInputs(regArgs *registerArgs) *registerInputs {
+func initInputs(regArgs *registerArgs) (*registerInputs, error) {
+	var token string
+	if regArgs.Token == "" && regArgs.TokenFile == "" {
+		return nil, fmt.Errorf("Missing Token argument. token or token-file should be set.")
+	}
+	if regArgs.TokenFile != "" {
+		token_bytes, err := os.ReadFile(regArgs.TokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("Cannot read the token file: %s, %v", regArgs.TokenFile, err)
+		}
+		token = string(token_bytes)
+	} else {
+		token = regArgs.Token
+	}
 	inputs := &registerInputs{
 		InstanceAddr: regArgs.InstanceAddr,
-		Token:        regArgs.Token,
+		Token:        token,
 		RunnerName:   regArgs.RunnerName,
 		Ephemeral:    regArgs.Ephemeral,
 	}
@@ -219,7 +233,7 @@ func initInputs(regArgs *registerArgs) *registerInputs {
 	if regArgs.Labels != "" {
 		inputs.Labels = strings.Split(regArgs.Labels, ",")
 	}
-	return inputs
+	return inputs, nil
 }
 
 func registerInteractive(ctx context.Context, configFile string, regArgs *registerArgs) error {
@@ -235,7 +249,10 @@ func registerInteractive(ctx context.Context, configFile string, regArgs *regist
 	if f, err := os.Stat(cfg.Runner.File); err == nil && !f.IsDir() {
 		stage = StageOverwriteLocalConfig
 	}
-	inputs := initInputs(regArgs)
+	inputs, err := initInputs(regArgs)
+	if err != nil {
+		return err
+	}
 
 	for {
 		cmdString := inputs.stageValue(stage)
@@ -292,7 +309,10 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
 	if err != nil {
 		return err
 	}
-	inputs := initInputs(regArgs)
+	inputs, err := initInputs(regArgs)
+	if err != nil {
+		return err
+	}
 	// specify labels in config file.
 	if len(cfg.Runner.Labels) > 0 {
 		if regArgs.Labels != "" {
