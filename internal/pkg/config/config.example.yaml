@@ -82,6 +82,8 @@ runner:
   # terminal; tools like `docker build` emit redrawing progress frames into the captured log
   # when a TTY is present.
   allocate_pty: false
+  # If no labels match the job's runs-on, this will be used
+  default_platform: "gitea/runner-images:ubuntu-latest"
 
 cache:
   # Enable cache server to use actions/cache.
