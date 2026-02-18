@@ -241,7 +241,7 @@ jobs:
 			args: args{
 				task: &runnerv1.Task{
 					WorkflowPayload: []byte("name: \"Special: characters & test\"\non: push\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'echo \"hello: world\"'\n      - run: 'echo \"quotes & ampersands\"'\n      - run: |\n          echo \"multiline\"\n          echo \"script\"\n"),
-					Needs: map[string]*runnerv1.TaskNeed{},
+					Needs:           map[string]*runnerv1.TaskNeed{},
 				},
 			},
 			assert: func(t *testing.T, wf *model.Workflow) {
