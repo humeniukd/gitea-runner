@@ -26,6 +26,8 @@ type Reporter struct {
 	cancel context.CancelFunc
 
 	closed  bool
+	closedM sync.Mutex
+
 	client  client.Client
 	clientM sync.Mutex
 
@@ -184,7 +186,13 @@ func (r *Reporter) RunDaemon() {
 	}
 
 	_ = r.ReportLog(false)
-	_ = r.ReportState()
+
+	r.closedM.Lock()
+	defer r.closedM.Unlock()
+
+	if !r.closed {
+		_ = r.ReportState()
+	}
 
 	time.AfterFunc(time.Second, r.RunDaemon)
 }
@@ -226,7 +234,9 @@ func (r *Reporter) SetOutputs(outputs map[string]string) {
 }
 
 func (r *Reporter) Close(lastWords string) error {
+	r.closedM.Lock()
 	r.closed = true
+	r.closedM.Unlock()
 
 	r.stateMu.Lock()
 	if r.state.Result == runnerv1.Result_RESULT_UNSPECIFIED {
