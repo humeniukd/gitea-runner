@@ -25,8 +25,7 @@ type Reporter struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	closed bool
-
+	closed  bool
 	client  client.Client
 	clientM sync.Mutex
 
@@ -300,7 +299,8 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	return nil
 }
 
-// ReportState reports the current task state unless the reporter is closed.
+// ReportState skips when closed so RunDaemon cannot send a completed state
+// before Close sends the final logs.
 func (r *Reporter) ReportState() error {
 	r.stateMu.RLock()
 	closed := r.closed
@@ -311,6 +311,7 @@ func (r *Reporter) ReportState() error {
 	return r.reportState()
 }
 
+// reportState sends unconditionally. Used by Close after final logs are uploaded.
 func (r *Reporter) reportState() error {
 	r.clientM.Lock()
 	defer r.clientM.Unlock()
