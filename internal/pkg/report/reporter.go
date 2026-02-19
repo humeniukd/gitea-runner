@@ -178,25 +178,19 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 }
 
 func (r *Reporter) RunDaemon() {
-	r.closedM.Lock()
-	if r.closed {
-		r.closedM.Unlock()
-		return
-	}
-	r.closedM.Unlock()
-
 	if r.ctx.Err() != nil {
 		return
 	}
 
-	_ = r.ReportLog(false)
-
 	r.closedM.Lock()
 	defer r.closedM.Unlock()
 
-	if !r.closed {
-		_ = r.ReportState()
+	if r.closed {
+		return
 	}
+
+	_ = r.ReportLog(false)
+	_ = r.ReportState()
 
 	time.AfterFunc(time.Second, r.RunDaemon)
 }
