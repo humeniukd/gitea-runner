@@ -27,7 +27,7 @@ type Reporter struct {
 
 	closed bool
 
-	client client.Client
+	client  client.Client
 	clientM sync.Mutex
 
 	logOffset   int
