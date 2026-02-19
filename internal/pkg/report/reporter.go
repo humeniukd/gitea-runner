@@ -176,15 +176,13 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 }
 
 func (r *Reporter) RunDaemon() {
-	if r.ctx.Err() != nil {
-		return
-	}
-
 	r.stateMu.RLock()
 	closed := r.closed
 	r.stateMu.RUnlock()
-
 	if closed {
+		return
+	}
+	if r.ctx.Err() != nil {
 		return
 	}
 
