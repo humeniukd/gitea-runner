@@ -261,7 +261,7 @@ func (r *Reporter) Close(lastWords string) error {
 		if err := r.ReportLog(true); err != nil {
 			return err
 		}
-		return r.ReportState()
+		return r.reportState()
 	}, retry.Context(r.ctx))
 }
 
@@ -300,7 +300,18 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	return nil
 }
 
+// ReportState reports the current task state unless the reporter is closed.
 func (r *Reporter) ReportState() error {
+	r.stateMu.RLock()
+	closed := r.closed
+	r.stateMu.RUnlock()
+	if closed {
+		return nil
+	}
+	return r.reportState()
+}
+
+func (r *Reporter) reportState() error {
 	r.clientM.Lock()
 	defer r.clientM.Unlock()
 
