@@ -178,9 +178,13 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 }
 
 func (r *Reporter) RunDaemon() {
+	r.closedM.Lock()
 	if r.closed {
+		r.closedM.Unlock()
 		return
 	}
+	r.closedM.Unlock()
+
 	if r.ctx.Err() != nil {
 		return
 	}

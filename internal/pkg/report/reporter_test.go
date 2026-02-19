@@ -6,7 +6,9 @@ package report
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	connect_go "connectrpc.com/connect"
@@ -194,4 +196,45 @@ func TestReporter_Fire(t *testing.T) {
 
 		assert.Equal(t, int64(3), reporter.state.Steps[0].LogLength)
 	})
+}
+
+func TestReporter_RunDaemonClose_Race(t *testing.T) {
+	client := mocks.NewClient(t)
+	client.On("UpdateLog", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
+			return connect_go.NewResponse(&runnerv1.UpdateLogResponse{
+				AckIndex: req.Msg.Index + int64(len(req.Msg.Rows)),
+			}), nil
+		},
+	)
+	client.On("UpdateTask", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req *connect_go.Request[runnerv1.UpdateTaskRequest]) (*connect_go.Response[runnerv1.UpdateTaskResponse], error) {
+			return connect_go.NewResponse(&runnerv1.UpdateTaskResponse{}), nil
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	taskCtx, err := structpb.NewStruct(map[string]interface{}{})
+	require.NoError(t, err)
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{
+		Context: taskCtx,
+	})
+	reporter.ResetSteps(1)
+
+	// Start the daemon loop in a separate goroutine.
+	// RunDaemon reads r.closed and reschedules itself via time.AfterFunc.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		reporter.RunDaemon()
+	}()
+
+	// Close concurrently — this races with RunDaemon on r.closed.
+	assert.NoError(t, reporter.Close(""))
+
+	// Cancel context so pending AfterFunc callbacks exit quickly.
+	cancel()
+	wg.Wait()
+	time.Sleep(2 * time.Second)
 }
