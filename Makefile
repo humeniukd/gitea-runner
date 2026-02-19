@@ -112,7 +112,7 @@ security-check: deps-tools
 	GOEXPERIMENT= $(GO) run $(GOVULNCHECK_PACKAGE) -show color ./...
 
 test: fmt-check security-check
-	@$(GO) test -v -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
+	@$(GO) test -v -race -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
 
 .PHONY: vet
 vet:
