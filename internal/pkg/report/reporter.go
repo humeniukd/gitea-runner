@@ -37,6 +37,7 @@ type Reporter struct {
 	state   *runnerv1.TaskState
 	stateMu sync.RWMutex
 	outputs sync.Map
+	daemon  chan struct{}
 
 	debugOutputEnabled  bool
 	stopCommandEndToken string
@@ -63,6 +64,7 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 		state: &runnerv1.TaskState{
 			Id: task.Id,
 		},
+		daemon: make(chan struct{}),
 	}
 
 	if task.Secrets["ACTIONS_STEP_DEBUG"] == "true" {
@@ -109,6 +111,7 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 	if stage != "Main" {
 		if v, ok := entry.Data["jobResult"]; ok {
 			if jobResult, ok := r.parseResult(v); ok {
+				// We need to ensure log upload before this upload
 				r.state.Result = jobResult
 				r.state.StoppedAt = timestamppb.New(timestamp)
 				for _, s := range r.state.Steps {
@@ -179,15 +182,14 @@ func (r *Reporter) RunDaemon() {
 	r.stateMu.RLock()
 	closed := r.closed
 	r.stateMu.RUnlock()
-	if closed {
-		return
-	}
-	if r.ctx.Err() != nil {
+	if closed || r.ctx.Err() != nil {
+		// Acknowledge close
+		close(r.daemon)
 		return
 	}
 
 	_ = r.ReportLog(false)
-	_ = r.ReportState()
+	_ = r.ReportState(false)
 
 	time.AfterFunc(time.Second, r.RunDaemon)
 }
@@ -253,12 +255,19 @@ func (r *Reporter) Close(lastWords string) error {
 		})
 	}
 	r.stateMu.Unlock()
+	// Wait for Acknowledge
+	select {
+	case <-r.daemon:
+	case <-time.After(60 * time.Second):
+		close(r.daemon)
+		log.Error("No Response from RunDaemon for 60s, continue best effort")
+	}
 
 	return retry.Do(func() error {
 		if err := r.ReportLog(true); err != nil {
 			return err
 		}
-		return r.reportState()
+		return r.ReportState(true)
 	}, retry.Context(r.ctx))
 }
 
@@ -297,26 +306,20 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	return nil
 }
 
-// ReportState skips when closed so RunDaemon cannot send a completed state
-// before Close sends the final logs.
-func (r *Reporter) ReportState() error {
-	r.stateMu.RLock()
-	closed := r.closed
-	r.stateMu.RUnlock()
-	if closed {
-		return nil
-	}
-	return r.reportState()
-}
-
-// reportState sends unconditionally. Used by Close after final logs are uploaded.
-func (r *Reporter) reportState() error {
+// ReportState only reports the job result if reportResult is true
+// RunDaemon never reports results even if result is set
+func (r *Reporter) ReportState(reportResult bool) error {
 	r.clientM.Lock()
 	defer r.clientM.Unlock()
 
 	r.stateMu.RLock()
 	state := proto.Clone(r.state).(*runnerv1.TaskState)
 	r.stateMu.RUnlock()
+
+	// Only report result from Close to reliable sent logs
+	if !reportResult {
+		state.Result = runnerv1.Result_RESULT_UNSPECIFIED
+	}
 
 	outputs := make(map[string]string)
 	r.outputs.Range(func(k, v interface{}) bool {

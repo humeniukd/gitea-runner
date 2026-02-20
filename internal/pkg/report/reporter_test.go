@@ -178,6 +178,7 @@ func TestReporter_Fire(t *testing.T) {
 		reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{
 			Context: taskCtx,
 		})
+		reporter.RunDaemon()
 		defer func() {
 			assert.NoError(t, reporter.Close(""))
 		}()
@@ -267,14 +268,18 @@ func TestReporter_EphemeralRunnerDeletion(t *testing.T) {
 
 	// Step 3: RunDaemon's ReportState() — with the fix, this returns early
 	// because closed=true, preventing the server from deleting the runner.
-	assert.NoError(t, reporter.ReportState())
+	assert.NoError(t, reporter.ReportState(false))
 	assert.False(t, runnerDeleted, "runner must not be deleted by RunDaemon's ReportState")
 
 	// Step 4: Close's final log upload succeeds because the runner is still alive.
 	// Flush pending rows first, then send the noMore signal (matching Close's retry behavior).
 	assert.NoError(t, reporter.ReportLog(false))
+	// Acknowledge Close as done in daemon
+	close(reporter.daemon)
 	err = reporter.ReportLog(true)
 	assert.NoError(t, err, "final log upload must not fail: runner should not be deleted before Close finishes sending logs")
+	err = reporter.ReportState(true)
+	assert.NoError(t, err, "final state update should work: runner should not be deleted before Close finishes sending logs")
 }
 
 func TestReporter_RunDaemonClose_Race(t *testing.T) {
