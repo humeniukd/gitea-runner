@@ -74,6 +74,8 @@ type Config struct {
 	Planner          model.PlannerConfig // Configuration for the workflow planner
 	Action           model.ActionConfig  // Configuration for action reading
 	MainContextNames []string            // e.g. "github", "gitea", "forgejo"
+	ContextData      map[string]interface{}
+	EventJSON        string
 }
 
 func (runnerConfig *Config) GetGitHubServerURL() string {
@@ -129,7 +131,9 @@ func New(runnerConfig *Config) (Runner, error) {
 
 func (runner *runnerImpl) configure() (Runner, error) {
 	runner.eventJSON = "{}"
-	if runner.config.EventPath != "" {
+	if runner.config.EventJSON != "" {
+		runner.eventJSON = runner.config.EventJSON
+	} else if runner.config.EventPath != "" {
 		log.Debugf("Reading event.json from %s", runner.config.EventPath)
 		eventJSONBytes, err := os.ReadFile(runner.config.EventPath)
 		if err != nil {
@@ -295,6 +299,7 @@ func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, mat
 		StepResults: make(map[string]*model.StepResult),
 		Matrix:      matrix,
 		caller:      runner.caller,
+		ContextData: runner.config.ContextData,
 	}
 	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
 	rc.Name = rc.ExprEval.Interpolate(ctx, run.String())
