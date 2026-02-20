@@ -264,7 +264,7 @@ func (r *Reporter) Close(lastWords string) error {
 		log.Error("No Response from RunDaemon for 60s, continue best effort")
 	}
 
-	// Report the job outcome even when all log‑retry attempts have been exhausted
+	// Report the job outcome even when all log upload retry attempts have been exhausted
 	return errors.Join(
 		retry.Do(func() error {
 			return r.ReportLog(true)
