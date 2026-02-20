@@ -296,10 +296,11 @@ func (r *Reporter) ReportLog(noMore bool) error {
 
 	r.stateMu.Lock()
 	r.logRows = r.logRows[ack-r.logOffset:]
+	submitted := r.logOffset + len(rows)
 	r.logOffset = ack
 	r.stateMu.Unlock()
 
-	if noMore && ack < r.logOffset+len(rows) {
+	if noMore && ack < submitted {
 		return fmt.Errorf("not all logs are submitted")
 	}
 
