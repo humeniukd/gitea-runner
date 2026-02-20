@@ -5,6 +5,7 @@ package report
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -263,12 +264,15 @@ func (r *Reporter) Close(lastWords string) error {
 		log.Error("No Response from RunDaemon for 60s, continue best effort")
 	}
 
-	return retry.Do(func() error {
-		if err := r.ReportLog(true); err != nil {
-			return err
-		}
-		return r.ReportState(true)
-	}, retry.Context(r.ctx))
+	// Report the job outcome even when all log‑retry attempts have been exhausted
+	return errors.Join(
+		retry.Do(func() error {
+			return r.ReportLog(true)
+		}, retry.Context(r.ctx)),
+		retry.Do(func() error {
+			return r.ReportState(true)
+		}, retry.Context(r.ctx)),
+	)
 }
 
 func (r *Reporter) ReportLog(noMore bool) error {
