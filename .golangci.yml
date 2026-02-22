@@ -50,7 +50,6 @@ linters:
         - equalFold
       disabled-checks:
         - ifElseChain
-        - singleCaseSwitch # Every time this occurred in the code, there was no other way.
     revive:
       severity: error
       rules:
@@ -77,15 +76,7 @@ linters:
     staticcheck:
       checks:
         - all
-        - -ST1003
         - -ST1005
-        - -QF1001
-        - -QF1006
-        - -QF1008
-    testifylint:
-      disable:
-        - go-require
-        - require-error
     usetesting:
       os-temp-dir: true
     perfsprint:
@@ -102,12 +93,6 @@ linters:
       - legacy
       - std-error-handling
     rules:
-      - linters:
-          - dupl
-          - errcheck
-          - staticcheck
-          - unparam
-        path: _test\.go
       - linters:
           - forbidigo
         path: cmd
