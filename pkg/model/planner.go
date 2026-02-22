@@ -60,6 +60,13 @@ type PlannerConfig struct {
 	Workflow  WorkflowConfig
 }
 
+// CombineWorkflowPlanner combines workflows to a WorkflowPlanner
+func CombineWorkflowPlanner(workflows ...*Workflow) WorkflowPlanner {
+	return &workflowPlanner{
+		workflows: workflows,
+	}
+}
+
 // NewWorkflowPlanner will load a specific workflow, all workflows from a directory or all workflows from a directory and its subdirectories
 func NewWorkflowPlanner(path string, config PlannerConfig) (WorkflowPlanner, error) {
 	path, err := filepath.Abs(path)
