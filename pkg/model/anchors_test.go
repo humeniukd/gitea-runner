@@ -3,7 +3,6 @@ package model
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -20,7 +19,7 @@ test:
 	}
 	require.NoError(t, err)
 	err = resolveAliases(&node)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestVerifyNoRecursion(t *testing.T) {
@@ -100,13 +99,13 @@ c: *a
 			var node yaml.Node
 			err := yaml.Unmarshal([]byte(tt.yaml), &node)
 			if tt.yamlErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
 			err = resolveAliases(&node)
 			if tt.anchorErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
 			}

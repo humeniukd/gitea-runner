@@ -43,7 +43,7 @@ jobs:
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
 	}).UnmarshalYAML(&node)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestAdditionalFunctionsSteps(t *testing.T) {
@@ -98,7 +98,7 @@ jobs:
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
 	}).UnmarshalYAML(&node)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestFailure2(t *testing.T) {
@@ -115,7 +115,7 @@ jobs:
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
 	}).UnmarshalYAML(&node)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestEscape(t *testing.T) {

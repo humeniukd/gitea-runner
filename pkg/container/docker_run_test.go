@@ -184,7 +184,7 @@ func TestDockerExecFailure(t *testing.T) {
 	}
 
 	err := cr.execExt([]string{""}, map[string]string{}, "user", "workdir")(ctx)
-	assert.Error(t, err, "exit with `FAILURE`: 1")
+	require.Error(t, err, "exit with `FAILURE`: 1")
 
 	conn.AssertExpectations(t)
 	client.AssertExpectations(t)

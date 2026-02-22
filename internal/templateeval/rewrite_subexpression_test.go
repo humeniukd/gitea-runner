@@ -74,14 +74,14 @@ func TestRewriteSubExpression_ForceFormatMultiple(t *testing.T) {
 func TestRewriteSubExpression_UnclosedExpression(t *testing.T) {
 	in := "Hello ${{ 'world' " // missing closing }}
 	_, _, err := rewriteSubExpression(in, false)
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unclosed expression")
 }
 
 func TestRewriteSubExpression_UnclosedString(t *testing.T) {
 	in := "Hello ${{ 'world }}, you are ${{ 'awesome' }}"
 	_, _, err := rewriteSubExpression(in, false)
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unclosed string")
 }
 

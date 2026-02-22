@@ -246,19 +246,19 @@ jobs:
 
 	jobType, err := workflow.Jobs["remote-reusable-workflow-missing-version"].Type()
 	assert.Equal(t, JobTypeInvalid, jobType)
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	jobType, err = workflow.Jobs["remote-reusable-workflow-bad-extension"].Type()
 	assert.Equal(t, JobTypeInvalid, jobType)
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	jobType, err = workflow.Jobs["local-reusable-workflow-bad-extension"].Type()
 	assert.Equal(t, JobTypeInvalid, jobType)
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	jobType, err = workflow.Jobs["local-reusable-workflow-bad-path"].Type()
 	assert.Equal(t, JobTypeInvalid, jobType)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestReadWorkflow_StepsTypes(t *testing.T) {
@@ -283,7 +283,7 @@ jobs:
 `
 
 	_, err := ReadWorkflow(strings.NewReader(yaml), WorkflowConfig{})
-	assert.Error(t, err, "read workflow should fail")
+	require.Error(t, err, "read workflow should fail")
 }
 
 // See: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idoutputs
@@ -582,7 +582,7 @@ jobs:
 `
 
 	_, err := ReadWorkflow(strings.NewReader(yaml), WorkflowConfig{Strict: true})
-	assert.Error(t, err, "read workflow should succeed")
+	require.Error(t, err, "read workflow should succeed")
 }
 
 func TestReadWorkflow_AnchorStrict(t *testing.T) {

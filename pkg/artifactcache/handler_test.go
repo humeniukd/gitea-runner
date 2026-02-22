@@ -42,7 +42,7 @@ func TestHandler(t *testing.T) {
 			assert.Nil(t, handler.server)
 			assert.Nil(t, handler.listener)
 			_, err := http.Post(fmt.Sprintf("%s/caches/%d", base, 1), "", nil)
-			assert.Error(t, err)
+			require.Error(t, err)
 		})
 	}()
 

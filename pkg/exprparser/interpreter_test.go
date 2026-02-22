@@ -103,7 +103,7 @@ func TestOperators(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			output, err := NewInterpeter(env, Config{}).Evaluate(tt.input, DefaultStatusCheckNone)
 			if tt.error != "" {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Equal(t, tt.error, err.Error())
 			} else {
 				require.NoError(t, err)

@@ -21,7 +21,7 @@ func TestNewWorkflow(t *testing.T) {
 
 	// error case
 	errorWorkflow := NewErrorExecutor(errors.New("test error"))
-	assert.Error(errorWorkflow(ctx))
+	require.Error(t, errorWorkflow(ctx))
 
 	// multiple success case
 	runcount := 0

@@ -213,7 +213,7 @@ func TestGitCloneExecutor(t *testing.T) {
 
 			err := clone(context.Background())
 			if tt.Err != nil {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Equal(t, tt.Err, err)
 			} else {
 				require.NoError(t, err)

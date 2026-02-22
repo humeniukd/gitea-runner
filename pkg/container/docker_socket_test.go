@@ -128,7 +128,7 @@ func TestGetSocketAndHostNoHostInvalidSocket(t *testing.T) {
 	assert.False(t, found, "Expected no default socket to be found")
 	assert.Empty(t, defaultSocket, "Expected no default socket to be found")
 	assert.Equal(t, SocketAndHost{}, ret, "Expected to match default socket location")
-	assert.Error(t, err, "Expected an error in invalid state")
+	require.Error(t, err, "Expected an error in invalid state")
 }
 
 func TestGetSocketAndHostOnlySocketValidButUnusualLocation(t *testing.T) {

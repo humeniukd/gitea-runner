@@ -134,7 +134,7 @@ func TestGraphWithSomeMissing(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 
 	plan, err := planner.PlanAll()
-	assert.Error(t, err, "unable to build dependency graph for no first (no-first.yml)")
+	require.Error(t, err, "unable to build dependency graph for no first (no-first.yml)")
 	assert.NotNil(t, plan)
 	assert.Len(t, plan.Stages, 1)
 	assert.Contains(t, buf.String(), "unable to build dependency graph for missing (missing.yml)")
@@ -204,7 +204,7 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 
 	planner, err := model.NewWorkflowPlanner(fullWorkflowPath, model.PlannerConfig{})
 	if j.errorMessage != "" && err != nil {
-		assert.Error(t, err, j.errorMessage)
+		require.Error(t, err, j.errorMessage)
 	} else if assert.NoError(t, err, fullWorkflowPath) {
 		plan, err := planner.PlanEvent(j.eventName)
 		assert.NotEqual(t, (err == nil), (plan == nil), "PlanEvent should return either a plan or an error")
@@ -213,7 +213,7 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 			if j.errorMessage == "" {
 				require.NoError(t, err, fullWorkflowPath)
 			} else {
-				assert.Error(t, err, j.errorMessage)
+				require.Error(t, err, j.errorMessage)
 			}
 		}
 	}

@@ -23,6 +23,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
+	"github.com/stretchr/testify/require"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/skip"
@@ -185,7 +186,7 @@ func TestParseRunWithInvalidArgs(t *testing.T) {
 	flags, _ := setupRunFlags()
 	for _, tc := range tests {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
-			assert.Error(t, flags.Parse(tc.args), tc.error)
+			require.Error(t, flags.Parse(tc.args), tc.error)
 		})
 	}
 }
@@ -606,7 +607,7 @@ func TestParseNetworkConfig(t *testing.T) {
 			_, hConfig, nwConfig, err := parseRun(tc.flags)
 
 			if tc.expectedErr != "" {
-				assert.Error(t, err, tc.expectedErr)
+				require.Error(t, err, tc.expectedErr)
 				return
 			}
 

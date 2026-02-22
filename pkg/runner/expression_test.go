@@ -144,7 +144,7 @@ func TestEvaluateRunContext(t *testing.T) {
 			assertObject := assert.New(t)
 			out, err := ee.evaluate(context.Background(), table.in, exprparser.DefaultStatusCheckNone)
 			if table.errMesg == "" {
-				assertObject.NoError(err, table.in)
+				require.NoError(t, err, table.in)
 				if i, ok := table.out.(int); ok {
 					table.out = float64(i)
 				}
@@ -186,7 +186,7 @@ func TestEvaluateStep(t *testing.T) {
 			assertObject := assert.New(t)
 			out, err := ee.evaluate(context.Background(), table.in, exprparser.DefaultStatusCheckNone)
 			if table.errMesg == "" {
-				assertObject.NoError(err, table.in)
+				require.NoError(t, err, table.in)
 				assertObject.Equal(table.out, out, table.in)
 			} else {
 				assertObject.Error(err, table.in)

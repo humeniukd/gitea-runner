@@ -314,31 +314,31 @@ func TestIsContinueOnError(t *testing.T) {
 	step := createTestStep(t, "name: test")
 	continueOnError, err := isContinueOnError(context.Background(), step.getStepModel().RawContinueOnError, step, stepStageMain)
 	assertObject.False(continueOnError)
-	assertObject.NoError(err)
+	require.NoError(t, err)
 
 	// explicit true
 	step = createTestStep(t, "continue-on-error: true")
 	continueOnError, err = isContinueOnError(context.Background(), step.getStepModel().RawContinueOnError, step, stepStageMain)
 	assertObject.True(continueOnError)
-	assertObject.NoError(err)
+	require.NoError(t, err)
 
 	// explicit false
 	step = createTestStep(t, "continue-on-error: false")
 	continueOnError, err = isContinueOnError(context.Background(), step.getStepModel().RawContinueOnError, step, stepStageMain)
 	assertObject.False(continueOnError)
-	assertObject.NoError(err)
+	require.NoError(t, err)
 
 	// expression true
 	step = createTestStep(t, "continue-on-error: ${{ 'test' == 'test' }}")
 	continueOnError, err = isContinueOnError(context.Background(), step.getStepModel().RawContinueOnError, step, stepStageMain)
 	assertObject.True(continueOnError)
-	assertObject.NoError(err)
+	require.NoError(t, err)
 
 	// expression false
 	step = createTestStep(t, "continue-on-error: ${{ 'test' != 'test' }}")
 	continueOnError, err = isContinueOnError(context.Background(), step.getStepModel().RawContinueOnError, step, stepStageMain)
 	assertObject.False(continueOnError)
-	assertObject.NoError(err)
+	require.NoError(t, err)
 
 	// expression parse error
 	step = createTestStep(t, "continue-on-error: ${{ 'test' != test }}")
@@ -368,7 +368,7 @@ func TestSymlinkJoin(t *testing.T) {
 		if entry.err == "" {
 			require.NoError(t, err)
 		} else {
-			assert.Error(t, err, entry.err)
+			require.Error(t, err, entry.err)
 		}
 		assert.Equal(t, entry.result, result)
 	}

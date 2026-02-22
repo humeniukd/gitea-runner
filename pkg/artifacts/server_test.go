@@ -311,7 +311,7 @@ func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 			if tjfi.errorMessage == "" {
 				require.NoError(t, err, fullWorkflowPath)
 			} else {
-				assert.Error(t, err, tjfi.errorMessage)
+				require.Error(t, err, tjfi.errorMessage)
 			}
 		} else {
 			assert.Nil(t, plan)

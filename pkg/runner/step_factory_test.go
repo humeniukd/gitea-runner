@@ -78,5 +78,5 @@ func TestStepFactoryInvalidStep(t *testing.T) {
 
 	_, err := sf.newStep(model, &RunContext{})
 
-	assert.Error(t, err)
+	require.Error(t, err)
 }

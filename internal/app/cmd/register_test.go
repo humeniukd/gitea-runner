@@ -6,7 +6,7 @@ package cmd
 import (
 	"testing"
 
-	"gotest.tools/v3/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRegisterNonInteractiveReturnsLabelValidationError(t *testing.T) {
@@ -15,5 +15,5 @@ func TestRegisterNonInteractiveReturnsLabelValidationError(t *testing.T) {
 		Token:        "token",
 		InstanceAddr: "http://localhost:3000",
 	})
-	assert.Error(t, err, "unsupported schema: invalid")
+	require.Error(t, err, "unsupported schema: invalid")
 }
