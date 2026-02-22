@@ -56,11 +56,11 @@ func (e *Evaluator) EvaluateBoolean(expr string) (bool, error) {
 	return result.IsTruthy(), nil
 }
 
-func (e *Evaluator) ToRaw(result *EvaluationResult) (interface{}, error) {
+func (e *Evaluator) ToRaw(result *EvaluationResult) (any, error) {
 	if col, ok := result.TryGetCollectionInterface(); ok {
 		switch node := col.(type) {
 		case ReadOnlyObject[any]:
-			rawMap := map[string]interface{}{}
+			rawMap := map[string]any{}
 			for k, v := range node.GetEnumerator() {
 				rawRes, err := e.ToRaw(CreateIntermediateResult(e.Context(), v))
 				if err != nil {
@@ -70,7 +70,7 @@ func (e *Evaluator) ToRaw(result *EvaluationResult) (interface{}, error) {
 			}
 			return rawMap, nil
 		case ReadOnlyArray[any]:
-			rawArray := []interface{}{}
+			rawArray := []any{}
 			for _, v := range node.GetEnumerator() {
 				rawRes, err := e.ToRaw(CreateIntermediateResult(e.Context(), v))
 				if err != nil {
@@ -85,7 +85,7 @@ func (e *Evaluator) ToRaw(result *EvaluationResult) (interface{}, error) {
 }
 
 // Evaluate parses and evaluates the expression, returning a boolean result.
-func (e *Evaluator) EvaluateRaw(expr string) (interface{}, error) {
+func (e *Evaluator) EvaluateRaw(expr string) (any, error) {
 	root, err := exprparser.Parse(expr)
 	if err != nil {
 		return false, fmt.Errorf("parse error: %w", err)
@@ -97,16 +97,16 @@ func (e *Evaluator) EvaluateRaw(expr string) (interface{}, error) {
 	return e.ToRaw(result)
 }
 
-type FilteredArray []interface{}
+type FilteredArray []any
 
-func (a FilteredArray) GetAt(i int64) interface{} {
+func (a FilteredArray) GetAt(i int64) any {
 	if int(i) > len(a) {
 		return nil
 	}
 	return a[i]
 }
 
-func (a FilteredArray) GetEnumerator() []interface{} {
+func (a FilteredArray) GetEnumerator() []any {
 	return a
 }
 
@@ -244,7 +244,7 @@ func (e *Evaluator) evalUnaryNode(node *exprparser.UnaryNode) (*EvaluationResult
 	}
 }
 
-func processIndex(col interface{}, right *EvaluationResult) interface{} {
+func processIndex(col any, right *EvaluationResult) any {
 	if mapVal, ok := col.(ReadOnlyObject[any]); ok {
 		key, ok := right.Value().(string)
 		if !ok {
@@ -264,7 +264,7 @@ func processIndex(col interface{}, right *EvaluationResult) interface{} {
 	return nil
 }
 
-func processStar(subcol interface{}, ret FilteredArray) FilteredArray {
+func processStar(subcol any, ret FilteredArray) FilteredArray {
 	if array, ok := subcol.(ReadOnlyArray[any]); ok {
 		ret = append(ret, array.GetEnumerator()...)
 	} else if obj, ok := subcol.(ReadOnlyObject[any]); ok {

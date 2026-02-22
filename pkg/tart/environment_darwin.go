@@ -161,9 +161,11 @@ func (e *Environment) exec(ctx context.Context, command []string, _ string, env 
 		wd = e.ToContainerPath(e.Path)
 	}
 	envs := ""
+	var envsSb164 strings.Builder
 	for k, v := range env {
-		envs += shellquote.Join(k) + "=" + shellquote.Join(v) + " "
+		envsSb164.WriteString(shellquote.Join(k) + "=" + shellquote.Join(v) + " ")
 	}
+	envs += envsSb164.String()
 	return e.execRaw(ctx, "cd "+shellquote.Join(wd)+"\nenv "+envs+shellquote.Join(command...)+"\nexit $?")
 }
 
@@ -224,7 +226,7 @@ func (e *Environment) GetContainerArchive(ctx context.Context, srcPath string) (
 	return e.HostEnvironment.GetContainerArchive(ctx, e.ToHostPath(srcPath))
 }
 
-func (e *Environment) GetRunnerContext(ctx context.Context) map[string]interface{} {
+func (e *Environment) GetRunnerContext(ctx context.Context) map[string]any {
 	rctx := e.HostEnvironment.GetRunnerContext(ctx)
 	rctx["temp"] = e.ToContainerPath(e.TmpDir)
 	rctx["tool_cache"] = e.ToContainerPath(e.ToolCache)

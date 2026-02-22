@@ -10,7 +10,7 @@ import (
 // It behaves like the C# implementation in the repository –
 // it supports escaped braces and numeric argument indices.
 // Format specifiers (e.g. :D) are recognised but currently ignored.
-func Format(formatStr string, args ...interface{}) (string, error) {
+func Format(formatStr string, args ...any) (string, error) {
 	var sb strings.Builder
 	i := 0
 	for i < len(formatStr) {
@@ -47,7 +47,7 @@ func Format(formatStr string, args ...interface{}) (string, error) {
 				}
 				// append argument (format specifier is ignored here)
 				arg := args[idx]
-				sb.WriteString(fmt.Sprintf("%v", arg))
+				fmt.Fprintf(&sb, "%v", arg)
 				if spec != "" {
 					// placeholder for future specifier handling
 					_ = spec

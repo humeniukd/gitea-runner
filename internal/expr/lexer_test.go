@@ -22,13 +22,13 @@ func TestLexer(t *testing.T) {
 	for i, tok := range tokens {
 		t.Logf("Token %d: Kind=%v, Value=%v", i, tok.Kind, tok.Value)
 	}
-	assert.Equal(t, tokens[1].Kind, TokenKindDereference)
+	assert.Equal(t, TokenKindDereference, tokens[1].Kind)
 }
 
 func TestLexerNumbers(t *testing.T) {
 	table := []struct {
 		in  string
-		out interface{}
+		out any
 	}{
 		{"-Infinity", math.Inf(-1)},
 		{"Infinity", math.Inf(1)},

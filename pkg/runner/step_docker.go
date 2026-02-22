@@ -123,7 +123,7 @@ func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd []
 		Name:        createContainerName(rc.jobContainerName(), step.ID),
 		Env:         envList,
 		Mounts:      mounts,
-		NetworkMode: fmt.Sprintf("container:%s", rc.jobContainerName()),
+		NetworkMode: "container:" + rc.jobContainerName(),
 		Binds:       binds,
 		Stdout:      logWriter,
 		Stderr:      logWriter,

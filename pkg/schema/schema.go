@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -53,7 +54,7 @@ type ValidationErrorCollection struct {
 }
 
 func indent(builder *strings.Builder, in string) {
-	for _, v := range strings.Split(in, "\n") {
+	for v := range strings.SplitSeq(in, "\n") {
 		if v != "" {
 			builder.WriteString("  ")
 			builder.WriteString(v)
@@ -242,7 +243,7 @@ func (s *Node) checkSingleExpression(exprNode exprparser.Node) error {
 		case *exprparser.ValueNode:
 			return nil
 		default:
-			return fmt.Errorf("expressions are not allowed here")
+			return errors.New("expressions are not allowed here")
 		}
 	}
 
@@ -290,8 +291,8 @@ func (s *Node) GetFunctions() []FunctionInfo {
 		},
 	})
 	for _, v := range s.Context {
-		i := strings.Index(v, "(")
-		if i == -1 {
+		found := strings.Contains(v, "(")
+		if !found {
 			continue
 		}
 		smatch := functions.FindStringSubmatch(v)
@@ -348,7 +349,7 @@ func (s *Node) checkExpression(node *yaml.Node) (bool, error) {
 		if parseErr != nil {
 			err = errors.Join(err, ValidationError{
 				Location: toLocation(node),
-				Message:  fmt.Sprintf("failed to parse: %s", parseErr.Error()),
+				Message:  "failed to parse: " + parseErr.Error(),
 			})
 			continue
 		}
@@ -409,10 +410,8 @@ func (s *Node) UnmarshalYAML(node *yaml.Node) error {
 		return node.Decode(&b)
 	} else if def.AllowedValues != nil {
 		s := node.Value
-		for _, v := range *def.AllowedValues {
-			if s == v {
-				return nil
-			}
+		if slices.Contains(*def.AllowedValues, s) {
+			return nil
 		}
 		return ValidationError{
 			Location: toLocation(node),
@@ -448,7 +447,7 @@ func (s *Node) checkString(node *yaml.Node, def Definition) error {
 		if parseErr != nil {
 			return ValidationError{
 				Location: toLocation(node),
-				Message:  fmt.Sprintf("failed to parse: %s", parseErr.Error()),
+				Message:  "failed to parse: " + parseErr.Error(),
 			}
 		}
 		cerr := s.checkSingleExpression(exprNode)
@@ -650,7 +649,7 @@ func (s *Node) checkMapping(node *yaml.Node, def Definition) error {
 				if col := AsValidationErrorCollection(err); col != nil {
 					allErrors.AddError(ValidationError{
 						Location: toLocation(node.Content[i+1]),
-						Message:  fmt.Sprintf("error found in value of key %s", k.Value),
+						Message:  "error found in value of key " + k.Value,
 					})
 					allErrors.Collections = append(allErrors.Collections, *col)
 					continue
@@ -669,7 +668,7 @@ func (s *Node) checkMapping(node *yaml.Node, def Definition) error {
 				allErrors.AddError(ValidationError{
 					Location: toLocation(node),
 					Kind:     ValidationKindMissingProperty,
-					Message:  fmt.Sprintf("missing property %s", k),
+					Message:  "missing property " + k,
 				})
 			}
 		}

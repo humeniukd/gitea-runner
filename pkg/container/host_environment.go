@@ -83,7 +83,7 @@ func (e *HostEnvironment) CopyTarStream(ctx context.Context, destPath string, ta
 			continue
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("copyTarStream has been cancelled")
+			return errors.New("copyTarStream has been cancelled")
 		}
 		if err := cp.WriteFile(ti.Name, ti.FileInfo(), ti.Linkname, tr); err != nil {
 			return err
@@ -224,7 +224,7 @@ func (l *localEnv) Getenv(name string) string {
 func lookupPathHost(cmd string, env map[string]string, writer io.Writer) (string, error) {
 	f, err := lookpath.LookPath2(cmd, &localEnv{env: env})
 	if err != nil {
-		err := "Cannot find: " + fmt.Sprint(cmd) + " in PATH"
+		err := "Cannot find: " + cmd + " in PATH"
 		if _, _err := writer.Write([]byte(err + "\n")); _err != nil {
 			return "", fmt.Errorf("%v: %w", err, _err)
 		}
@@ -343,7 +343,7 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 	}
 	if tty != nil {
 		writer.AutoStop = true
-		if _, err := tty.Write([]byte("\x04")); err != nil {
+		if _, err := tty.WriteString("\x04"); err != nil {
 			common.Logger(ctx).Debug("Failed to write EOT")
 		}
 	}
@@ -451,8 +451,8 @@ func goOsToActionOs(os string) string {
 	return os
 }
 
-func (e *HostEnvironment) GetRunnerContext(_ context.Context) map[string]interface{} {
-	return map[string]interface{}{
+func (e *HostEnvironment) GetRunnerContext(_ context.Context) map[string]any {
+	return map[string]any{
 		"os":         goOsToActionOs(runtime.GOOS),
 		"arch":       goArchToActionArch(runtime.GOARCH),
 		"temp":       e.TmpDir,

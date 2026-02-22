@@ -40,15 +40,15 @@ func TestGetImagePullOptions(t *testing.T) {
 	config.SetDir("/non-existent/docker")
 
 	options, err := getImagePullOptions(ctx, NewDockerPullExecutorInput{})
-	assert.Nil(t, err, "Failed to create ImagePullOptions")
-	assert.Equal(t, "", options.RegistryAuth, "RegistryAuth should be empty if no username or password is set")
+	assert.NoError(t, err, "Failed to create ImagePullOptions")
+	assert.Empty(t, options.RegistryAuth, "RegistryAuth should be empty if no username or password is set")
 
 	options, err = getImagePullOptions(ctx, NewDockerPullExecutorInput{
 		Image:    "",
 		Username: "username",
 		Password: "password",
 	})
-	assert.Nil(t, err, "Failed to create ImagePullOptions")
+	assert.NoError(t, err, "Failed to create ImagePullOptions")
 	assert.Equal(t, "eyJ1c2VybmFtZSI6InVzZXJuYW1lIiwicGFzc3dvcmQiOiJwYXNzd29yZCJ9", options.RegistryAuth, "Username and Password should be provided")
 
 	config.SetDir("testdata/docker-pull-options")
@@ -56,6 +56,6 @@ func TestGetImagePullOptions(t *testing.T) {
 	options, err = getImagePullOptions(ctx, NewDockerPullExecutorInput{
 		Image: "nektos/act",
 	})
-	assert.Nil(t, err, "Failed to create ImagePullOptions")
+	assert.NoError(t, err, "Failed to create ImagePullOptions")
 	assert.Equal(t, "eyJ1c2VybmFtZSI6InVzZXJuYW1lIiwicGFzc3dvcmQiOiJwYXNzd29yZFxuIiwic2VydmVyYWRkcmVzcyI6Imh0dHBzOi8vaW5kZXguZG9ja2VyLmlvL3YxLyJ9", options.RegistryAuth, "RegistryAuth should be taken from local docker config")
 }

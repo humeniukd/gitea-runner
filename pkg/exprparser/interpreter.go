@@ -18,16 +18,16 @@ type EvaluationEnvironment struct {
 	Job       *model.JobContext
 	Jobs      *map[string]*model.WorkflowCallResult
 	Steps     map[string]*model.StepResult
-	Runner    map[string]interface{}
+	Runner    map[string]any
 	Secrets   map[string]string
 	Vars      map[string]string
-	Strategy  map[string]interface{}
-	Matrix    map[string]interface{}
+	Strategy  map[string]any
+	Matrix    map[string]any
 	Needs     map[string]Needs
-	Inputs    map[string]interface{}
-	HashFiles func([]reflect.Value) (interface{}, error)
+	Inputs    map[string]any
+	HashFiles func([]reflect.Value) (any, error)
 	EnvCS     bool
-	CtxData   map[string]interface{}
+	CtxData   map[string]any
 }
 
 type CaseSensitiveDict map[string]string
@@ -69,7 +69,7 @@ func (dsc DefaultStatusCheck) String() string {
 }
 
 type Interpreter interface {
-	Evaluate(input string, defaultStatusCheck DefaultStatusCheck) (interface{}, error)
+	Evaluate(input string, defaultStatusCheck DefaultStatusCheck) (any, error)
 }
 
 type interperterImpl struct {
@@ -151,7 +151,7 @@ func toRaw(left reflect.Value) any {
 
 // All values are evaluated as string, funcs that takes objects are implemented elsewhere
 type externalFunc struct {
-	f func([]reflect.Value) (interface{}, error)
+	f func([]reflect.Value) (any, error)
 }
 
 func (e externalFunc) Evaluate(ev *eval.Evaluator, args []exprparser.Node) (*eval.EvaluationResult, error) {
@@ -170,7 +170,7 @@ func (e externalFunc) Evaluate(ev *eval.Evaluator, args []exprparser.Node) (*eva
 	return eval.CreateIntermediateResult(ev.Context(), res), nil
 }
 
-func (impl *interperterImpl) Evaluate(input string, defaultStatusCheck DefaultStatusCheck) (interface{}, error) {
+func (impl *interperterImpl) Evaluate(input string, defaultStatusCheck DefaultStatusCheck) (any, error) {
 	input = strings.TrimPrefix(input, "${{")
 	input = strings.TrimSuffix(input, "}}")
 	if defaultStatusCheck != DefaultStatusCheckNone && input == "" {
@@ -226,10 +226,10 @@ func (impl *interperterImpl) GetFunctions() eval.CaseInsensitiveObject[eval.Func
 	if impl.env.HashFiles != nil {
 		functions["hashfiles"] = &externalFunc{impl.env.HashFiles}
 	}
-	functions["always"] = &externalFunc{func(_ []reflect.Value) (interface{}, error) {
+	functions["always"] = &externalFunc{func(_ []reflect.Value) (any, error) {
 		return impl.always()
 	}}
-	functions["success"] = &externalFunc{func(_ []reflect.Value) (interface{}, error) {
+	functions["success"] = &externalFunc{func(_ []reflect.Value) (any, error) {
 		if impl.config.Context == "job" {
 			return impl.jobSuccess()
 		}
@@ -238,7 +238,7 @@ func (impl *interperterImpl) GetFunctions() eval.CaseInsensitiveObject[eval.Func
 		}
 		return nil, fmt.Errorf("context '%s' must be one of 'job' or 'step'", impl.config.Context)
 	}}
-	functions["failure"] = &externalFunc{func(_ []reflect.Value) (interface{}, error) {
+	functions["failure"] = &externalFunc{func(_ []reflect.Value) (any, error) {
 		if impl.config.Context == "job" {
 			return impl.jobFailure()
 		}
@@ -247,7 +247,7 @@ func (impl *interperterImpl) GetFunctions() eval.CaseInsensitiveObject[eval.Func
 		}
 		return nil, fmt.Errorf("context '%s' must be one of 'job' or 'step'", impl.config.Context)
 	}}
-	functions["cancelled"] = &externalFunc{func(_ []reflect.Value) (interface{}, error) {
+	functions["cancelled"] = &externalFunc{func(_ []reflect.Value) (any, error) {
 		return impl.cancelled()
 	}}
 	return functions
@@ -287,7 +287,7 @@ func (impl *interperterImpl) GetVariables() eval.ReadOnlyObject[any] {
 			res := eval.CreateIntermediateResult(eval.NewEvaluationContext(), rawOtherCtx)
 			if rOtherCd, ok := res.TryGetCollectionInterface(); ok {
 				if otherCd, ok := rOtherCd.(eval.ReadOnlyObject[any]); ok {
-					if rawPayload, ok := cd.(map[string]interface{}); ok {
+					if rawPayload, ok := cd.(map[string]any); ok {
 						for k, v := range rawPayload {
 							// skip empty values, because github.workspace was set by Gitea Actions to an empty string
 							if mk, _ := otherCd.GetKv(k); v != "" && v != nil {
@@ -304,7 +304,7 @@ func (impl *interperterImpl) GetVariables() eval.ReadOnlyObject[any] {
 	return vars
 }
 
-func IsTruthy(input interface{}) bool {
+func IsTruthy(input any) bool {
 	value := reflect.ValueOf(input)
 	switch value.Kind() {
 	case reflect.Bool:

@@ -55,6 +55,6 @@ func TestWorkflow(t *testing.T) {
 
 	// Check that a valid job id returns non-error
 	result, err := createStages(&workflow, "valid_job")
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.NotNil(t, result)
 }

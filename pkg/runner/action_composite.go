@@ -2,8 +2,9 @@ package runner
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gitea.com/gitea/act_runner/pkg/common"
@@ -25,7 +26,7 @@ func evaluateCompositeInputAndEnv(ctx context.Context, parent *RunContext, step 
 
 	for inputID, input := range step.getActionModel().Inputs {
 		envKey := regexp.MustCompile("[^A-Z0-9-]").ReplaceAllString(strings.ToUpper(inputID), "_")
-		envKey = fmt.Sprintf("INPUT_%s", strings.ToUpper(envKey))
+		envKey = "INPUT_" + strings.ToUpper(envKey)
 
 		// lookup if key is defined in the step but the already
 		// evaluated value from the environment
@@ -77,7 +78,7 @@ func newCompositeRunContext(ctx context.Context, parent *RunContext, step action
 		nodeToolFullPath: parent.nodeToolFullPath,
 	}
 	if parent.ContextData != nil {
-		compositerc.ContextData = map[string]interface{}{}
+		compositerc.ContextData = map[string]any{}
 		for k, v := range parent.ContextData {
 			if !strings.EqualFold("inputs", k) {
 				compositerc.ContextData[k] = v
@@ -99,7 +100,7 @@ func execAsComposite(step actionStep) common.Executor {
 		steps := step.getCompositeSteps()
 
 		if steps == nil || steps.main == nil {
-			return fmt.Errorf("missing steps in composite action")
+			return errors.New("missing steps in composite action")
 		}
 
 		ctx = WithCompositeLogger(ctx, &compositeRC.Masks)
@@ -147,7 +148,7 @@ func (rc *RunContext) compositeExecutor(action *model.Action) *compositeSteps {
 
 	for i, step := range action.Runs.Steps {
 		if step.ID == "" {
-			step.ID = fmt.Sprintf("%d", i)
+			step.ID = strconv.Itoa(i)
 		}
 
 		// create a copy of the step, since this composite action could

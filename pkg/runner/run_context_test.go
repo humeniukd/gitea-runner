@@ -21,7 +21,7 @@ import (
 
 func TestRunContext_EvalBool(t *testing.T) {
 	var yml yaml.Node
-	err := yml.Encode(map[string][]interface{}{
+	err := yml.Encode(map[string][]any{
 		"os":  {"Linux", "Windows"},
 		"foo": {"bar", "baz"},
 	})
@@ -49,7 +49,7 @@ func TestRunContext_EvalBool(t *testing.T) {
 				},
 			},
 		},
-		Matrix: map[string]interface{}{
+		Matrix: map[string]any{
 			"os":  "Linux",
 			"foo": "bar",
 		},
@@ -162,7 +162,7 @@ func TestRunContext_EvalBool(t *testing.T) {
 				assertObject.Error(err)
 			}
 
-			assertObject.Equal(table.out, b, fmt.Sprintf("Expected %s to be %v, was %v", table.in, table.out, b))
+			assertObject.Equal(table.out, b, "Expected %s to be %v, was %v", table.in, table.out, b)
 		})
 	}
 }
@@ -178,9 +178,11 @@ func updateTestIfWorkflow(t *testing.T, tables []struct {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	var envsSb181 strings.Builder
 	for _, k := range keys {
-		envs += fmt.Sprintf("  %s: %s\n", k, rc.Env[k])
+		fmt.Fprintf(&envsSb181, "  %s: %s\n", k, rc.Env[k])
 	}
+	envs += envsSb181.String()
 	// editorconfig-checker-disable
 	workflow := fmt.Sprintf(`
 name: "Test what expressions result in true and false on GitHub"
@@ -196,6 +198,7 @@ jobs:
 `, envs)
 	// editorconfig-checker-enable
 
+	var workflowSb199 strings.Builder
 	for i, table := range tables {
 		if table.wantErr || strings.HasPrefix(table.in, "github.actor") {
 			continue
@@ -211,11 +214,12 @@ jobs:
 			echo = `run: echo OK`
 			name = fmt.Sprintf(`"✅ I should run, expr: %s"`, expr)
 		}
-		workflow += fmt.Sprintf("\n      - name: %s\n        id: step%d\n        if: %s\n        %s\n", name, i, table.in, echo)
+		fmt.Fprintf(&workflowSb199, "\n      - name: %s\n        id: step%d\n        if: %s\n        %s\n", name, i, table.in, echo)
 		if table.out {
-			workflow += fmt.Sprintf("\n      - name: \"Double checking expr: %s\"\n        if: steps.step%d.conclusion == 'skipped'\n        run: echo \"%s should have been true, but wasn't\"\n", expr, i, table.in)
+			fmt.Fprintf(&workflowSb199, "\n      - name: \"Double checking expr: %s\"\n        if: steps.step%d.conclusion == 'skipped'\n        run: echo \"%s should have been true, but wasn't\"\n", expr, i, table.in)
 		}
 	}
+	workflow += workflowSb199.String()
 
 	file, err := os.Create("../../.github/workflows/test-if.yml")
 	if err != nil {
@@ -281,7 +285,7 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 						assert.Contains(t, gotbind, fullBind)
 					} else {
 						mountkey := testcase.rc.jobContainerName()
-						assert.EqualValues(t, testcase.wantmount, gotmount[mountkey])
+						assert.Equal(t, testcase.wantmount, gotmount[mountkey])
 					}
 				})
 			}
@@ -341,7 +345,7 @@ func TestGetGitHubContext(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 
 	cwd, err := os.Getwd()
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	rc := &RunContext{
 		Config: &Config{
@@ -355,7 +359,7 @@ func TestGetGitHubContext(t *testing.T) {
 		},
 		Name:           "GitHubContextTest",
 		CurrentStep:    "step",
-		Matrix:         map[string]interface{}{},
+		Matrix:         map[string]any{},
 		Env:            map[string]string{},
 		ExtraPath:      []string{},
 		StepResults:    map[string]*model.StepResult{},
@@ -397,7 +401,7 @@ func TestGetGitHubContextOverlay(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 
 	cwd, err := os.Getwd()
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	rc := &RunContext{
 		Config: &Config{
@@ -411,13 +415,13 @@ func TestGetGitHubContextOverlay(t *testing.T) {
 		},
 		Name:           "GitHubContextTest",
 		CurrentStep:    "step",
-		Matrix:         map[string]interface{}{},
+		Matrix:         map[string]any{},
 		Env:            map[string]string{},
 		ExtraPath:      []string{},
 		StepResults:    map[string]*model.StepResult{},
 		OutputMappings: map[MappableOutput]MappableOutput{},
-		ContextData: map[string]interface{}{
-			"github": map[string]interface{}{
+		ContextData: map[string]any{
+			"github": map[string]any{
 				"actor":            "me",
 				"repository":       "myowner/myrepo",
 				"repository_owner": "myowner",
@@ -721,7 +725,7 @@ func TestRunContextGetEnv(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
 			envMap := test.rc.GetEnv()
-			assert.EqualValues(t, test.want, envMap[test.targetEnv])
+			assert.Equal(t, test.want, envMap[test.targetEnv])
 		})
 	}
 }
@@ -744,7 +748,7 @@ func TestSetRuntimeVariables(t *testing.T) {
 
 	tkn, _, err := jwt.NewParser().ParseUnverified(runtimeToken, jwt.MapClaims{})
 	assert.NotNil(t, tkn)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 }
 
 func TestSetRuntimeVariablesWithRunID(t *testing.T) {
@@ -769,7 +773,7 @@ func TestSetRuntimeVariablesWithRunID(t *testing.T) {
 	claims := jwt.MapClaims{}
 	tkn, _, err := jwt.NewParser().ParseUnverified(runtimeToken, &claims)
 	assert.NotNil(t, tkn)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	scp, ok := claims["scp"]
 	assert.True(t, ok, "scp claim exists")
 	assert.Equal(t, "Actions.Results:45:45", scp, "contains expected scp claim")

@@ -2,8 +2,10 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"testing"
 
 	"gitea.com/gitea/act_runner/pkg/common"
@@ -38,9 +40,9 @@ type jobInfoMock struct {
 	mock.Mock
 }
 
-func (jim *jobInfoMock) matrix() map[string]interface{} {
+func (jim *jobInfoMock) matrix() map[string]any {
 	args := jim.Called()
-	return args.Get(0).(map[string]interface{})
+	return args.Get(0).(map[string]any)
 }
 
 func (jim *jobInfoMock) steps() []*model.Step {
@@ -232,12 +234,7 @@ func TestNewJobExecutor(t *testing.T) {
 	}
 
 	contains := func(needle string, haystack []string) bool {
-		for _, item := range haystack {
-			if item == needle {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(haystack, needle)
 	}
 
 	for _, tt := range table {
@@ -287,7 +284,7 @@ func TestNewJobExecutor(t *testing.T) {
 				sm.On("main").Return(func(_ context.Context) error {
 					executorOrder = append(executorOrder, "step"+stepModel.ID)
 					if tt.hasError {
-						return fmt.Errorf("error")
+						return errors.New("error")
 					}
 					return nil
 				})
@@ -303,7 +300,7 @@ func TestNewJobExecutor(t *testing.T) {
 			}
 
 			if len(tt.steps) > 0 {
-				jim.On("matrix").Return(map[string]interface{}{})
+				jim.On("matrix").Return(map[string]any{})
 
 				jim.On("interpolateOutputs").Return(func(_ context.Context) error {
 					executorOrder = append(executorOrder, "interpolateOutputs")
@@ -327,7 +324,7 @@ func TestNewJobExecutor(t *testing.T) {
 
 			executor := newJobExecutor(jim, sfm, rc)
 			err := executor(ctx)
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 			assert.Equal(t, tt.executedSteps, executorOrder)
 
 			jim.AssertExpectations(t)

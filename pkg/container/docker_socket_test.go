@@ -25,7 +25,7 @@ func TestGetSocketAndHostWithSocket(t *testing.T) {
 	ret, err := GetSocketAndHost(socketURI)
 
 	// Assert
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.Equal(t, SocketAndHost{socketURI, dockerHost}, ret)
 }
 
@@ -38,7 +38,7 @@ func TestGetSocketAndHostNoSocket(t *testing.T) {
 	ret, err := GetSocketAndHost("")
 
 	// Assert
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.Equal(t, SocketAndHost{dockerHost, dockerHost}, ret)
 }
 
@@ -54,7 +54,7 @@ func TestGetSocketAndHostOnlySocket(t *testing.T) {
 
 	// Assert
 	assert.NoError(t, err, "Expected no error from GetSocketAndHost")
-	assert.Equal(t, true, defaultSocketFound, "Expected to find default socket")
+	assert.True(t, defaultSocketFound, "Expected to find default socket")
 	assert.Equal(t, socketURI, ret.Socket, "Expected socket to match common location")
 	assert.Equal(t, defaultSocket, ret.Host, "Expected ret.Host to match default socket location")
 }
@@ -69,7 +69,7 @@ func TestGetSocketAndHostDontMount(t *testing.T) {
 	ret, err := GetSocketAndHost("-")
 
 	// Assert
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.Equal(t, SocketAndHost{"-", dockerHost}, ret)
 }
 
@@ -83,8 +83,8 @@ func TestGetSocketAndHostNoHostNoSocket(t *testing.T) {
 	ret, err := GetSocketAndHost("")
 
 	// Assert
-	assert.Equal(t, true, found, "Expected a default socket to be found")
-	assert.Nil(t, err, "Expected no error from GetSocketAndHost")
+	assert.True(t, found, "Expected a default socket to be found")
+	assert.NoError(t, err, "Expected no error from GetSocketAndHost")
 	assert.Equal(t, SocketAndHost{defaultSocket, defaultSocket}, ret, "Expected to match default socket location")
 }
 
@@ -93,7 +93,7 @@ func TestGetSocketAndHostNoHostNoSocket(t *testing.T) {
 // > This happens if neither DOCKER_HOST nor --container-daemon-socket has a value, but socketLocation() returns a URI
 func TestGetSocketAndHostNoHostNoSocketDefaultLocation(t *testing.T) {
 	// Arrange
-	mySocketFile, tmpErr := os.CreateTemp("", "act-*.sock")
+	mySocketFile, tmpErr := os.CreateTemp(t.TempDir(), "act-*.sock")
 	mySocket := mySocketFile.Name()
 	unixSocket := "unix://" + mySocket
 	defer os.RemoveAll(mySocket)
@@ -108,8 +108,8 @@ func TestGetSocketAndHostNoHostNoSocketDefaultLocation(t *testing.T) {
 
 	// Assert
 	assert.Equal(t, unixSocket, defaultSocket, "Expected default socket to match common socket location")
-	assert.Equal(t, true, found, "Expected default socket to be found")
-	assert.Nil(t, err, "Expected no error from GetSocketAndHost")
+	assert.True(t, found, "Expected default socket to be found")
+	assert.NoError(t, err, "Expected no error from GetSocketAndHost")
 	assert.Equal(t, SocketAndHost{unixSocket, unixSocket}, ret, "Expected to match default socket location")
 }
 
@@ -124,8 +124,8 @@ func TestGetSocketAndHostNoHostInvalidSocket(t *testing.T) {
 	ret, err := GetSocketAndHost(mySocket)
 
 	// Assert
-	assert.Equal(t, false, found, "Expected no default socket to be found")
-	assert.Equal(t, "", defaultSocket, "Expected no default socket to be found")
+	assert.False(t, found, "Expected no default socket to be found")
+	assert.Empty(t, defaultSocket, "Expected no default socket to be found")
 	assert.Equal(t, SocketAndHost{}, ret, "Expected to match default socket location")
 	assert.Error(t, err, "Expected an error in invalid state")
 }
@@ -142,9 +142,9 @@ func TestGetSocketAndHostOnlySocketValidButUnusualLocation(t *testing.T) {
 
 	// Assert
 	// Default socket locations
-	assert.Equal(t, "", defaultSocket, "Expect default socket location to be empty")
-	assert.Equal(t, false, found, "Expected no default socket to be found")
+	assert.Empty(t, defaultSocket, "Expect default socket location to be empty")
+	assert.False(t, found, "Expected no default socket to be found")
 	// Sane default
-	assert.Nil(t, err, "Expect no error from GetSocketAndHost")
+	assert.NoError(t, err, "Expect no error from GetSocketAndHost")
 	assert.Equal(t, socketURI, ret.Host, "Expect host to default to unusual socket")
 }

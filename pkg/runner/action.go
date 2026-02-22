@@ -154,14 +154,14 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, subpath stri
 	var prepImage common.Executor
 	var image string
 	forcePull := false
-	if strings.HasPrefix(action.Runs.Image, "docker://") {
-		image = strings.TrimPrefix(action.Runs.Image, "docker://")
+	if after, ok := strings.CutPrefix(action.Runs.Image, "docker://"); ok {
+		image = after
 		// Apply forcePull only for prebuild docker images
 		forcePull = rc.Config.ForcePull
 	} else {
 		// "-dockeraction" ensures that "./", "./test " won't get converted to "act-:latest", "act-test-:latest" which are invalid docker image names
 		image = fmt.Sprintf("%s-dockeraction:%s", regexp.MustCompile("[^a-zA-Z0-9]").ReplaceAllString(actionName, "-"), "latest")
-		image = fmt.Sprintf("act-%s", strings.TrimLeft(image, "-"))
+		image = "act-" + strings.TrimLeft(image, "-")
 		image = strings.ToLower(image)
 		contextDir, fileName := path.Split(path.Join(subpath, action.Runs.Image))
 
@@ -298,7 +298,7 @@ func newStepContainer(ctx context.Context, step step, image string, cmd []string
 	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
 
 	binds, mounts := rc.GetBindsAndMounts()
-	networkMode := fmt.Sprintf("container:%s", rc.jobContainerName())
+	networkMode := "container:" + rc.jobContainerName()
 	var workdir string
 	if rc.IsHostEnv(ctx) {
 		networkMode = "default"
@@ -333,7 +333,7 @@ func populateEnvsFromSavedState(env *map[string]string, step actionStep, rc *Run
 	state, ok := rc.IntraActionState[step.getStepModel().ID]
 	if ok {
 		for name, value := range state {
-			envName := fmt.Sprintf("STATE_%s", name)
+			envName := "STATE_" + name
 			(*env)[envName] = value
 		}
 	}
@@ -343,7 +343,7 @@ func populateEnvsFromInput(ctx context.Context, env *map[string]string, action *
 	eval := rc.NewExpressionEvaluator(ctx)
 	for inputID, input := range action.Inputs {
 		envKey := regexp.MustCompile("[^A-Z0-9-]").ReplaceAllString(strings.ToUpper(inputID), "_")
-		envKey = fmt.Sprintf("INPUT_%s", envKey)
+		envKey = "INPUT_" + envKey
 		if _, ok := (*env)[envKey]; !ok {
 			(*env)[envKey] = eval.Interpolate(ctx, input.Default)
 		}
@@ -429,7 +429,7 @@ func runPreStep(step actionStep) common.Executor {
 			if steps := step.getCompositeSteps(); steps != nil && steps.pre != nil {
 				return steps.pre(ctx)
 			}
-			return fmt.Errorf("missing steps in composite action")
+			return errors.New("missing steps in composite action")
 
 		default:
 			return nil
@@ -512,7 +512,7 @@ func runPostStep(step actionStep) common.Executor {
 			if steps := step.getCompositeSteps(); steps != nil && steps.post != nil {
 				return steps.post(ctx)
 			}
-			return fmt.Errorf("missing steps in composite action")
+			return errors.New("missing steps in composite action")
 
 		default:
 			return nil

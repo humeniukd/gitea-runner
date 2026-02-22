@@ -6,7 +6,7 @@ import (
 
 // Test boolean and comparison operations using the evaluator.
 func TestEvaluator_BooleanOps(t *testing.T) {
-	ctx := &EvaluationContext{Variables: CaseInsensitiveObject[any](map[string]interface{}{"a": 5, "b": 3})}
+	ctx := &EvaluationContext{Variables: CaseInsensitiveObject[any](map[string]any{"a": 5, "b": 3})}
 	eval := NewEvaluator(ctx)
 
 	tests := []struct {
@@ -44,7 +44,7 @@ func TestEvaluator_Raw(t *testing.T) {
 
 	tests := []struct {
 		expr string
-		want interface{}
+		want any
 	}{
 		{"a.b['x']", nil},
 		{"(a.b).c['x']", nil},

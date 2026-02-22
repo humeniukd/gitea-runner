@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -87,7 +88,7 @@ func TestGraphMissingEvent(t *testing.T) {
 	plan, err := planner.PlanEvent("push")
 	assert.NoError(t, err)
 	assert.NotNil(t, plan)
-	assert.Equal(t, 0, len(plan.Stages))
+	assert.Empty(t, plan.Stages)
 
 	assert.Contains(t, buf.String(), "no events found for workflow: no-event.yml")
 	log.SetOutput(out)
@@ -100,7 +101,7 @@ func TestGraphMissingFirst(t *testing.T) {
 	plan, err := planner.PlanEvent("push")
 	assert.EqualError(t, err, "unable to build dependency graph for no first (no-first.yml)")
 	assert.NotNil(t, plan)
-	assert.Equal(t, 0, len(plan.Stages))
+	assert.Empty(t, plan.Stages)
 }
 
 func TestGraphWithMissing(t *testing.T) {
@@ -114,7 +115,7 @@ func TestGraphWithMissing(t *testing.T) {
 
 	plan, err := planner.PlanEvent("push")
 	assert.NotNil(t, plan)
-	assert.Equal(t, 0, len(plan.Stages))
+	assert.Empty(t, plan.Stages)
 	assert.EqualError(t, err, "unable to build dependency graph for missing (missing.yml)")
 	assert.Contains(t, buf.String(), "unable to build dependency graph for missing (missing.yml)")
 	log.SetOutput(out)
@@ -134,7 +135,7 @@ func TestGraphWithSomeMissing(t *testing.T) {
 	plan, err := planner.PlanAll()
 	assert.Error(t, err, "unable to build dependency graph for no first (no-first.yml)")
 	assert.NotNil(t, plan)
-	assert.Equal(t, 1, len(plan.Stages))
+	assert.Len(t, plan.Stages, 1)
 	assert.Contains(t, buf.String(), "unable to build dependency graph for missing (missing.yml)")
 	assert.Contains(t, buf.String(), "unable to build dependency graph for no first (no-first.yml)")
 	log.SetOutput(out)
@@ -148,18 +149,18 @@ func TestGraphEvent(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, plan)
 	assert.NotNil(t, plan.Stages)
-	assert.Equal(t, len(plan.Stages), 3, "stages")
-	assert.Equal(t, len(plan.Stages[0].Runs), 1, "stage0.runs")
-	assert.Equal(t, len(plan.Stages[1].Runs), 1, "stage1.runs")
-	assert.Equal(t, len(plan.Stages[2].Runs), 1, "stage2.runs")
-	assert.Equal(t, plan.Stages[0].Runs[0].JobID, "check", "jobid")
-	assert.Equal(t, plan.Stages[1].Runs[0].JobID, "build", "jobid")
-	assert.Equal(t, plan.Stages[2].Runs[0].JobID, "test", "jobid")
+	assert.Len(t, plan.Stages, 3, "stages")
+	assert.Len(t, plan.Stages[0].Runs, 1, "stage0.runs")
+	assert.Len(t, plan.Stages[1].Runs, 1, "stage1.runs")
+	assert.Len(t, plan.Stages[2].Runs, 1, "stage2.runs")
+	assert.Equal(t, "check", plan.Stages[0].Runs[0].JobID, "jobid")
+	assert.Equal(t, "build", plan.Stages[1].Runs[0].JobID, "jobid")
+	assert.Equal(t, "test", plan.Stages[2].Runs[0].JobID, "jobid")
 
 	plan, err = planner.PlanEvent("release")
 	assert.NoError(t, err)
 	assert.NotNil(t, plan)
-	assert.Equal(t, 0, len(plan.Stages))
+	assert.Empty(t, plan.Stages)
 }
 
 type TestJobFileInfo struct {
@@ -177,7 +178,7 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 	log.SetLevel(logLevel)
 
 	workdir, err := filepath.Abs(j.workdir)
-	assert.Nil(t, err, workdir)
+	assert.NoError(t, err, workdir)
 
 	fullWorkflowPath := filepath.Join(workdir, j.workflowPath)
 	runnerConfig := &Config{
@@ -198,18 +199,18 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 	}
 
 	runner, err := New(runnerConfig)
-	assert.Nil(t, err, j.workflowPath)
+	assert.NoError(t, err, j.workflowPath)
 
 	planner, err := model.NewWorkflowPlanner(fullWorkflowPath, model.PlannerConfig{})
 	if j.errorMessage != "" && err != nil {
 		assert.Error(t, err, j.errorMessage)
-	} else if assert.Nil(t, err, fullWorkflowPath) {
+	} else if assert.NoError(t, err, fullWorkflowPath) {
 		plan, err := planner.PlanEvent(j.eventName)
-		assert.True(t, (err == nil) != (plan == nil), "PlanEvent should return either a plan or an error")
+		assert.NotEqual(t, (err == nil), (plan == nil), "PlanEvent should return either a plan or an error")
 		if err == nil && plan != nil {
 			err = runner.NewPlanExecutor(plan)(ctx)
 			if j.errorMessage == "" {
-				assert.Nil(t, err, fullWorkflowPath)
+				assert.NoError(t, err, fullWorkflowPath)
 			} else {
 				assert.Error(t, err, j.errorMessage)
 			}
@@ -434,7 +435,7 @@ func TestPullAndPostStepFailureIsJobFailure(t *testing.T) {
 			var hasJobResult, hasStepResult bool
 			for scan.Scan() {
 				t.Log(scan.Text())
-				entry := map[string]interface{}{}
+				entry := map[string]any{}
 				if json.Unmarshal(scan.Bytes(), &entry) == nil {
 					if val, ok := entry["jobResult"]; ok {
 						assert.Equal(t, "failure", val)
@@ -461,14 +462,14 @@ func (c mockCache) Fetch(ctx context.Context, cacheDir string, url string, ref s
 	_ = url
 	_ = ref
 	_ = token
-	return "", fmt.Errorf("fetch failure")
+	return "", errors.New("fetch failure")
 }
 func (c mockCache) GetTarArchive(ctx context.Context, cacheDir string, sha string, includePrefix string) (io.ReadCloser, error) {
 	_ = ctx
 	_ = cacheDir
 	_ = sha
 	_ = includePrefix
-	return nil, fmt.Errorf("fetch failure")
+	return nil, errors.New("fetch failure")
 }
 
 func TestFetchFailureIsJobFailure(t *testing.T) {
@@ -504,7 +505,7 @@ func TestFetchFailureIsJobFailure(t *testing.T) {
 			var hasJobResult bool
 			for scan.Scan() {
 				t.Log(scan.Text())
-				entry := map[string]interface{}{}
+				entry := map[string]any{}
 				if json.Unmarshal(scan.Bytes(), &entry) == nil {
 					if val, ok := entry["jobResult"]; ok {
 						assert.Equal(t, "failure", val)
@@ -735,11 +736,11 @@ func (f *maskJobLoggerFactory) WithJobLogger() *log.Logger {
 
 func TestMaskValues(t *testing.T) {
 	assertNoSecret := func(text string, _ string) {
-		index := strings.Index(text, "composite secret")
-		if index > -1 {
+		found := strings.Contains(text, "composite secret")
+		if found {
 			fmt.Printf("\nFound Secret in the given text:\n%s\n", text)
 		}
-		assert.False(t, strings.Contains(text, "composite secret"))
+		assert.NotContains(t, text, "composite secret")
 	}
 
 	if testing.Short() {

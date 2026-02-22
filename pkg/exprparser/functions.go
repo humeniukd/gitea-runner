@@ -13,11 +13,11 @@ func (impl *interperterImpl) getNeedsTransitive(job *model.Job) []string {
 	return needs
 }
 
-func (impl *interperterImpl) always() (interface{}, error) {
+func (impl *interperterImpl) always() (any, error) {
 	return true, nil
 }
 
-func (impl *interperterImpl) jobSuccess() (interface{}, error) {
+func (impl *interperterImpl) jobSuccess() (any, error) {
 	jobs := impl.config.Run.Workflow.Jobs
 	jobNeeds := impl.getNeedsTransitive(impl.config.Run.Job())
 
@@ -30,11 +30,11 @@ func (impl *interperterImpl) jobSuccess() (interface{}, error) {
 	return true, nil
 }
 
-func (impl *interperterImpl) stepSuccess() (interface{}, error) {
+func (impl *interperterImpl) stepSuccess() (any, error) {
 	return impl.env.Job.Status == "success", nil
 }
 
-func (impl *interperterImpl) jobFailure() (interface{}, error) {
+func (impl *interperterImpl) jobFailure() (any, error) {
 	jobs := impl.config.Run.Workflow.Jobs
 	jobNeeds := impl.getNeedsTransitive(impl.config.Run.Job())
 
@@ -47,10 +47,10 @@ func (impl *interperterImpl) jobFailure() (interface{}, error) {
 	return false, nil
 }
 
-func (impl *interperterImpl) stepFailure() (interface{}, error) {
+func (impl *interperterImpl) stepFailure() (any, error) {
 	return impl.env.Job.Status == "failure", nil
 }
 
-func (impl *interperterImpl) cancelled() (interface{}, error) {
+func (impl *interperterImpl) cancelled() (any, error) {
 	return impl.env.Job.Status == "cancelled", nil
 }

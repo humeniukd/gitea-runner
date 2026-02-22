@@ -133,8 +133,8 @@ func (rc *RunContext) addPath(ctx context.Context, arg string) {
 
 func parseKeyValuePairs(kvPairs string, separator string) map[string]string {
 	rtn := make(map[string]string)
-	kvPairList := strings.Split(kvPairs, separator)
-	for _, kvPair := range kvPairList {
+	kvPairList := strings.SplitSeq(kvPairs, separator)
+	for kvPair := range kvPairList {
 		kv := strings.Split(kvPair, "=")
 		if len(kv) == 2 {
 			rtn[kv[0]] = kv[1]

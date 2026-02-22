@@ -40,7 +40,7 @@ func newActionCacheReusableWorkflowExecutor(rc *RunContext, filename string, rem
 		if err != nil {
 			return err
 		}
-		archive, err := cache.GetTarArchive(ctx, filename, sha, fmt.Sprintf(".github/workflows/%s", remoteReusableWorkflow.Filename))
+		archive, err := cache.GetTarArchive(ctx, filename, sha, ".github/workflows/"+remoteReusableWorkflow.Filename)
 		if err != nil {
 			return err
 		}

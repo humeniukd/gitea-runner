@@ -235,7 +235,7 @@ func ExecWithEnv(
 
 func firstNonEmptyLine(outputs ...string) string {
 	for _, output := range outputs {
-		for _, line := range strings.Split(output, "\n") {
+		for line := range strings.SplitSeq(output, "\n") {
 			if line != "" {
 				return line
 			}
@@ -246,5 +246,5 @@ func firstNonEmptyLine(outputs ...string) string {
 }
 
 func (vm *VM) tartRunOutputPath() string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("%s-tart-run-output.log", vm.id))
+	return filepath.Join(os.TempDir(), vm.id+"-tart-run-output.log")
 }

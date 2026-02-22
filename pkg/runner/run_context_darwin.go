@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -85,7 +84,7 @@ func (rc *RunContext) startTartEnvironment() common.Executor {
 		rc.cleanUpJobContainer = rc.JobContainer.Remove()
 		for k, v := range rc.JobContainer.GetRunnerContext(ctx) {
 			if v, ok := v.(string); ok {
-				rc.Env[fmt.Sprintf("RUNNER_%s", strings.ToUpper(k))] = v
+				rc.Env["RUNNER_"+strings.ToUpper(k)] = v
 			}
 		}
 

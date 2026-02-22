@@ -51,7 +51,7 @@ const (
 type Token struct {
 	Kind  TokenKind
 	Raw   string
-	Value interface{}
+	Value any
 	Index int
 }
 
@@ -256,7 +256,7 @@ func (l *Lexer) readNumber() *Token {
 		}
 	}
 	// Try to parse as float64
-	var val interface{} = raw
+	var val any = raw
 	if f, err := strconv.ParseFloat(raw, 64); err == nil {
 		val = f
 	}

@@ -152,7 +152,7 @@ func TestSetupEnv(t *testing.T) {
 	sm.On("getEnv").Return(&env)
 
 	err := setupEnv(context.Background(), sm)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	// These are commit or system specific
 	delete((env), "GITHUB_REF")
@@ -313,37 +313,37 @@ func TestIsContinueOnError(t *testing.T) {
 	step := createTestStep(t, "name: test")
 	continueOnError, err := isContinueOnError(context.Background(), step.getStepModel().RawContinueOnError, step, stepStageMain)
 	assertObject.False(continueOnError)
-	assertObject.Nil(err)
+	assertObject.NoError(err)
 
 	// explicit true
 	step = createTestStep(t, "continue-on-error: true")
 	continueOnError, err = isContinueOnError(context.Background(), step.getStepModel().RawContinueOnError, step, stepStageMain)
 	assertObject.True(continueOnError)
-	assertObject.Nil(err)
+	assertObject.NoError(err)
 
 	// explicit false
 	step = createTestStep(t, "continue-on-error: false")
 	continueOnError, err = isContinueOnError(context.Background(), step.getStepModel().RawContinueOnError, step, stepStageMain)
 	assertObject.False(continueOnError)
-	assertObject.Nil(err)
+	assertObject.NoError(err)
 
 	// expression true
 	step = createTestStep(t, "continue-on-error: ${{ 'test' == 'test' }}")
 	continueOnError, err = isContinueOnError(context.Background(), step.getStepModel().RawContinueOnError, step, stepStageMain)
 	assertObject.True(continueOnError)
-	assertObject.Nil(err)
+	assertObject.NoError(err)
 
 	// expression false
 	step = createTestStep(t, "continue-on-error: ${{ 'test' != 'test' }}")
 	continueOnError, err = isContinueOnError(context.Background(), step.getStepModel().RawContinueOnError, step, stepStageMain)
 	assertObject.False(continueOnError)
-	assertObject.Nil(err)
+	assertObject.NoError(err)
 
 	// expression parse error
 	step = createTestStep(t, "continue-on-error: ${{ 'test' != test }}")
 	continueOnError, err = isContinueOnError(context.Background(), step.getStepModel().RawContinueOnError, step, stepStageMain)
 	assertObject.False(continueOnError)
-	assertObject.NotNil(err)
+	assertObject.Error(err)
 }
 
 func TestSymlinkJoin(t *testing.T) {

@@ -74,7 +74,7 @@ func FindGitRevision(ctx context.Context, file string) (shortSha string, sha str
 	}
 
 	if head.Hash().IsZero() {
-		return "", "", fmt.Errorf("head sha1 could not be resolved")
+		return "", "", errors.New("head sha1 could not be resolved")
 	}
 
 	hash := head.Hash().String()
@@ -319,7 +319,7 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 		cloneLock.Lock()
 		defer cloneLock.Unlock()
 
-		refName := plumbing.ReferenceName(fmt.Sprintf("refs/heads/%s", input.Ref))
+		refName := plumbing.ReferenceName("refs/heads/" + input.Ref)
 		r, err := CloneIfRequired(ctx, refName, input, logger)
 		if err != nil {
 			return err

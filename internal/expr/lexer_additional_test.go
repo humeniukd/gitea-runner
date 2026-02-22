@@ -12,7 +12,7 @@ func TestLexerMultiple(t *testing.T) {
 	cases := []struct {
 		expr     string
 		expected []TokenKind
-		values   []interface{} // optional, nil if not checking values
+		values   []any // optional, nil if not checking values
 	}{
 		{
 			expr: "github.event_name == 'push'",
@@ -67,12 +67,12 @@ func TestLexerMultiple(t *testing.T) {
 		{
 			expr:     "true",
 			expected: []TokenKind{TokenKindBoolean},
-			values:   []interface{}{true},
+			values:   []any{true},
 		},
 		{
 			expr:     "123",
 			expected: []TokenKind{TokenKindNumber},
-			values:   []interface{}{123.0},
+			values:   []any{123.0},
 		},
 		{
 			expr:     "(a && b)",
@@ -85,7 +85,7 @@ func TestLexerMultiple(t *testing.T) {
 		{
 			expr:     "'Hello i''s escaped'",
 			expected: []TokenKind{TokenKindString},
-			values:   []interface{}{"Hello i's escaped"},
+			values:   []any{"Hello i's escaped"},
 		},
 	}
 
@@ -99,7 +99,7 @@ func TestLexerMultiple(t *testing.T) {
 			}
 			tokens = append(tokens, tok)
 		}
-		assert.Equal(t, len(tc.expected), len(tokens), "expression: %s", tc.expr)
+		assert.Len(t, tokens, len(tc.expected), "expression: %s", tc.expr)
 		for i, kind := range tc.expected {
 			assert.Equal(t, kind, tokens[i].Kind, "expr %s token %d", tc.expr, i)
 		}

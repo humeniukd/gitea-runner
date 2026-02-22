@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -216,7 +216,7 @@ func TestDockerCopyTarStreamErrorInCopyFiles(t *testing.T) {
 
 	conn := &mockConn{}
 
-	merr := fmt.Errorf("failure")
+	merr := errors.New("failure")
 
 	client := &mockDockerClient{}
 	client.On("CopyToContainer", ctx, "123", "/", mock.Anything, mock.AnythingOfType("container.CopyToContainerOptions")).Return(merr)
@@ -241,7 +241,7 @@ func TestDockerCopyTarStreamErrorInMkdir(t *testing.T) {
 
 	conn := &mockConn{}
 
-	merr := fmt.Errorf("failure")
+	merr := errors.New("failure")
 
 	client := &mockDockerClient{}
 	client.On("CopyToContainer", ctx, "123", "/", mock.Anything, mock.AnythingOfType("container.CopyToContainerOptions")).Return(nil)

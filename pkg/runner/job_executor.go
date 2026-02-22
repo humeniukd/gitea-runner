@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"gitea.com/gitea/act_runner/pkg/common"
@@ -10,7 +11,7 @@ import (
 )
 
 type jobInfo interface {
-	matrix() map[string]interface{}
+	matrix() map[string]any
 	steps() []*model.Step
 	startContainer() common.Executor
 	stopContainer() common.Executor
@@ -70,7 +71,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			}
 		}
 		if stepModel.ID == "" {
-			stepModel.ID = fmt.Sprintf("%d", i)
+			stepModel.ID = strconv.Itoa(i)
 		}
 
 		step, err := sf.newStep(stepModel, rc)

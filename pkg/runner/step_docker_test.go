@@ -97,7 +97,7 @@ func TestStepDockerMain(t *testing.T) {
 	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/pathcmd.txt").Return(io.NopCloser(&bytes.Buffer{}), nil)
 
 	err := sd.main()(ctx)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	assert.Equal(t, "node:14", input.Image)
 
@@ -109,8 +109,8 @@ func TestStepDockerPrePost(t *testing.T) {
 	sd := &stepDocker{}
 
 	err := sd.pre()(ctx)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	err = sd.post()(ctx)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 }

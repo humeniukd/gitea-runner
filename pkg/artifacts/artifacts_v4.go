@@ -126,15 +126,15 @@ func artifactNameToID(s string) int64 {
 	return int64(h.Sum32())
 }
 
-func (c ArtifactContext) Error(status int, _ ...interface{}) {
+func (c ArtifactContext) Error(status int, _ ...any) {
 	c.Resp.WriteHeader(status)
 }
 
-func (c ArtifactContext) JSON(status int, _ ...interface{}) {
+func (c ArtifactContext) JSON(status int, _ ...any) {
 	c.Resp.WriteHeader(status)
 }
 
-func validateRunIDV4(ctx *ArtifactContext, rawRunID string) (interface{}, int64, bool) {
+func validateRunIDV4(ctx *ArtifactContext, rawRunID string) (any, int64, bool) {
 	runID, err := strconv.ParseInt(rawRunID, 10, 64)
 	if err != nil /* || task.Job.RunID != runID*/ {
 		log.Error("Error runID not match")
@@ -210,7 +210,7 @@ func (r artifactV4Routes) buildSignature(endp, expires, artifactName string, tas
 func (r artifactV4Routes) buildArtifactURL(endp, artifactName string, taskID int64) string {
 	expires := time.Now().Add(60 * time.Minute).Format("2006-01-02 15:04:05.999999999 -0700 MST")
 	uploadURL := "http://" + strings.TrimSuffix(r.AppURL, "/") + strings.TrimSuffix(r.prefix, "/") +
-		"/" + endp + "?sig=" + base64.URLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + fmt.Sprint(taskID)
+		"/" + endp + "?sig=" + base64.URLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + strconv.FormatInt(taskID, 10)
 	return uploadURL
 }
 
@@ -278,7 +278,7 @@ func (r *artifactV4Routes) createArtifact(ctx *ArtifactContext) {
 
 	artifactName := req.Name
 
-	safeRunPath := safeResolve(r.baseDir, fmt.Sprint(runID))
+	safeRunPath := safeResolve(r.baseDir, strconv.FormatInt(runID, 10))
 	safePath := safeResolve(safeRunPath, artifactName)
 	safePath = safeResolve(safePath, artifactName+".zip")
 	file, err := r.fs.OpenWritable(safePath)
@@ -305,7 +305,7 @@ func (r *artifactV4Routes) uploadArtifact(ctx *ArtifactContext) {
 	switch comp {
 	case "block", "appendBlock":
 
-		safeRunPath := safeResolve(r.baseDir, fmt.Sprint(task))
+		safeRunPath := safeResolve(r.baseDir, strconv.FormatInt(task, 10))
 		safePath := safeResolve(safeRunPath, artifactName)
 		safePath = safeResolve(safePath, artifactName+".zip")
 
@@ -365,7 +365,7 @@ func (r *artifactV4Routes) listArtifacts(ctx *ArtifactContext) {
 		return
 	}
 
-	safePath := safeResolve(r.baseDir, fmt.Sprint(runID))
+	safePath := safeResolve(r.baseDir, strconv.FormatInt(runID, 10))
 
 	entries, err := fs.ReadDir(r.rfs, safePath)
 	if err != nil {
@@ -424,7 +424,7 @@ func (r *artifactV4Routes) downloadArtifact(ctx *ArtifactContext) {
 		return
 	}
 
-	safeRunPath := safeResolve(r.baseDir, fmt.Sprint(task))
+	safeRunPath := safeResolve(r.baseDir, strconv.FormatInt(task, 10))
 	safePath := safeResolve(safeRunPath, artifactName)
 	safePath = safeResolve(safePath, artifactName+".zip")
 
@@ -443,7 +443,7 @@ func (r *artifactV4Routes) deleteArtifact(ctx *ArtifactContext) {
 	if !ok {
 		return
 	}
-	safeRunPath := safeResolve(r.baseDir, fmt.Sprint(runID))
+	safeRunPath := safeResolve(r.baseDir, strconv.FormatInt(runID, 10))
 	safePath := safeResolve(safeRunPath, req.Name)
 
 	_ = os.RemoveAll(safePath)

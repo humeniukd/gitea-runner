@@ -63,8 +63,8 @@ func (*LinuxContainerEnvironmentExtensions) JoinPathVariable(paths ...string) st
 	return strings.Join(paths, ":")
 }
 
-func (*LinuxContainerEnvironmentExtensions) GetRunnerContext(ctx context.Context) map[string]interface{} {
-	return map[string]interface{}{
+func (*LinuxContainerEnvironmentExtensions) GetRunnerContext(ctx context.Context) map[string]any {
+	return map[string]any{
 		"os":         "Linux",
 		"arch":       RunnerArch(ctx),
 		"temp":       "/tmp",

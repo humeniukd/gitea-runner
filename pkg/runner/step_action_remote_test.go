@@ -290,7 +290,7 @@ func TestStepActionRemotePre(t *testing.T) {
 
 			err := sar.pre()(ctx)
 
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 
 			sarm.AssertExpectations(t)
 			cacheMock.AssertExpectations(t)
@@ -343,7 +343,7 @@ func TestStepActionRemotePreThroughAction(t *testing.T) {
 
 			err := sar.pre()(ctx)
 
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 
 			sarm.AssertExpectations(t)
 			cacheMock.AssertExpectations(t)
@@ -397,7 +397,7 @@ func TestStepActionRemotePreThroughActionToken(t *testing.T) {
 
 			err := sar.pre()(ctx)
 
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 
 			sarm.AssertExpectations(t)
 			cacheMock.AssertExpectations(t)
@@ -611,7 +611,7 @@ func TestStepActionRemotePost(t *testing.T) {
 				}
 			}
 			// Ensure that StepResults is nil in this test
-			assert.Equal(t, sar.RunContext.StepResults["post-step"], (*model.StepResult)(nil))
+			assert.Equal(t, (*model.StepResult)(nil), sar.RunContext.StepResults["post-step"])
 			cm.AssertExpectations(t)
 		})
 	}

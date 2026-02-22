@@ -2,7 +2,7 @@ package common
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"testing"
 	"time"
 
@@ -16,11 +16,11 @@ func TestNewWorkflow(t *testing.T) {
 
 	// empty
 	emptyWorkflow := NewPipelineExecutor()
-	assert.Nil(emptyWorkflow(ctx))
+	assert.NoError(emptyWorkflow(ctx))
 
 	// error case
-	errorWorkflow := NewErrorExecutor(fmt.Errorf("test error"))
-	assert.NotNil(errorWorkflow(ctx))
+	errorWorkflow := NewErrorExecutor(errors.New("test error"))
+	assert.Error(errorWorkflow(ctx))
 
 	// multiple success case
 	runcount := 0
@@ -33,7 +33,7 @@ func TestNewWorkflow(t *testing.T) {
 			runcount++
 			return nil
 		})
-	assert.Nil(successWorkflow(ctx))
+	assert.NoError(successWorkflow(ctx))
 	assert.Equal(2, runcount)
 }
 
@@ -55,7 +55,7 @@ func TestNewConditionalExecutor(t *testing.T) {
 		return nil
 	})(ctx)
 
-	assert.Nil(err)
+	assert.NoError(err)
 	assert.Equal(0, trueCount)
 	assert.Equal(1, falseCount)
 
@@ -69,7 +69,7 @@ func TestNewConditionalExecutor(t *testing.T) {
 		return nil
 	})(ctx)
 
-	assert.Nil(err)
+	assert.NoError(err)
 	assert.Equal(1, trueCount)
 	assert.Equal(1, falseCount)
 }
@@ -99,7 +99,7 @@ func TestNewParallelExecutor(t *testing.T) {
 
 	assert.Equal(3, count, "should run all 3 executors")
 	assert.Equal(2, maxCount, "should run at most 2 executors in parallel")
-	assert.Nil(err)
+	assert.NoError(err)
 
 	// Reset to test running the executor with 0 parallelism
 	count = 0
@@ -110,7 +110,7 @@ func TestNewParallelExecutor(t *testing.T) {
 
 	assert.Equal(3, count, "should run all 3 executors")
 	assert.Equal(1, maxCount, "should run at most 1 executors in parallel")
-	assert.Nil(errSingle)
+	assert.NoError(errSingle)
 }
 
 func TestNewParallelExecutorFailed(t *testing.T) {
@@ -122,7 +122,7 @@ func TestNewParallelExecutorFailed(t *testing.T) {
 	count := 0
 	errorWorkflow := NewPipelineExecutor(func(_ context.Context) error {
 		count++
-		return fmt.Errorf("fake error")
+		return errors.New("fake error")
 	})
 	err := NewParallelExecutor(1, errorWorkflow)(ctx)
 	assert.Equal(1, count)
@@ -135,7 +135,7 @@ func TestNewParallelExecutorCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	errExpected := fmt.Errorf("fake error")
+	errExpected := errors.New("fake error")
 
 	count := 0
 	successWorkflow := NewPipelineExecutor(func(_ context.Context) error {
@@ -148,5 +148,5 @@ func TestNewParallelExecutorCanceled(t *testing.T) {
 	})
 	err := NewParallelExecutor(3, errorWorkflow, successWorkflow, successWorkflow)(ctx)
 	assert.Equal(3, count)
-	assert.Error(errExpected, err)
+	assert.ErrorIs(errExpected, err)
 }

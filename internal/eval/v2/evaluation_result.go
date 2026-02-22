@@ -93,14 +93,14 @@ func (o CaseSensitiveObject[T]) GetEnumerator() map[string]T {
 type EvaluationResult struct {
 	context     *EvaluationContext
 	level       int
-	value       interface{}
+	value       any
 	kind        ValueKind
-	raw         interface{}
+	raw         any
 	omitTracing bool
 }
 
 // NewEvaluationResult creates a new EvaluationResult.
-func NewEvaluationResult(context *EvaluationContext, level int, val interface{}, kind ValueKind, raw interface{}, omitTracing bool) *EvaluationResult {
+func NewEvaluationResult(context *EvaluationContext, level int, val any, kind ValueKind, raw any, omitTracing bool) *EvaluationResult {
 	er := &EvaluationResult{context: context, level: level, value: val, kind: kind, raw: raw, omitTracing: omitTracing}
 	if !omitTracing {
 		er.traceValue()
@@ -112,10 +112,10 @@ func NewEvaluationResult(context *EvaluationContext, level int, val interface{},
 func (er *EvaluationResult) Kind() ValueKind { return er.kind }
 
 // Raw returns the raw value that was passed to the constructor.
-func (er *EvaluationResult) Raw() interface{} { return er.raw }
+func (er *EvaluationResult) Raw() any { return er.raw }
 
 // Value returns the canonical value.
-func (er *EvaluationResult) Value() interface{} { return er.value }
+func (er *EvaluationResult) Value() any { return er.value }
 
 // IsFalsy implements the logic from the C# class.
 func (er *EvaluationResult) IsFalsy() bool {
@@ -195,7 +195,7 @@ func (er *EvaluationResult) ConvertToString() string {
 }
 
 // TryGetCollectionInterface returns the underlying collection if the value is an array or object.
-func (er *EvaluationResult) TryGetCollectionInterface() (interface{}, bool) {
+func (er *EvaluationResult) TryGetCollectionInterface() (any, bool) {
 	switch v := er.value.(type) {
 	case ReadOnlyArray[any]:
 		return v, true
@@ -207,7 +207,7 @@ func (er *EvaluationResult) TryGetCollectionInterface() (interface{}, bool) {
 }
 
 // CreateIntermediateResult creates an EvaluationResult from an arbitrary object.
-func CreateIntermediateResult(context *EvaluationContext, obj interface{}) *EvaluationResult {
+func CreateIntermediateResult(context *EvaluationContext, obj any) *EvaluationResult {
 	val, kind, raw := convertToCanonicalValue(obj)
 	return NewEvaluationResult(context, 0, val, kind, raw, true)
 }
@@ -226,7 +226,7 @@ var ExpressionConstants = struct {
 }
 
 // convertToCanonicalValue converts an arbitrary Go value to a canonical form.
-func convertToCanonicalValue(obj interface{}) (interface{}, ValueKind, interface{}) {
+func convertToCanonicalValue(obj any) (any, ValueKind, any) {
 	switch v := obj.(type) {
 	case nil:
 		return nil, ValueKindNull, nil
@@ -243,11 +243,11 @@ func convertToCanonicalValue(obj interface{}) (interface{}, ValueKind, interface
 		return f, ValueKindNumber, f
 	case string:
 		return v, ValueKindString, v
-	case []interface{}:
+	case []any:
 		return BasicArray[any](v), ValueKindArray, v
 	case ReadOnlyArray[any]:
 		return v, ValueKindArray, v
-	case map[string]interface{}:
+	case map[string]any:
 		return CaseInsensitiveObject[any](v), ValueKindObject, v
 	case ReadOnlyObject[any]:
 		return v, ValueKindObject, v
@@ -257,7 +257,7 @@ func convertToCanonicalValue(obj interface{}) (interface{}, ValueKind, interface
 	}
 }
 
-func toInt64(v interface{}) int64 {
+func toInt64(v any) int64 {
 	switch i := v.(type) {
 	case int:
 		return int64(i)
@@ -274,7 +274,7 @@ func toInt64(v interface{}) int64 {
 	}
 }
 
-func toUint64(v interface{}) uint64 {
+func toUint64(v any) uint64 {
 	switch i := v.(type) {
 	case uint:
 		return uint64(i)
@@ -291,7 +291,7 @@ func toUint64(v interface{}) uint64 {
 	}
 }
 
-func toFloat64(v interface{}) float64 {
+func toFloat64(v any) float64 {
 	switch f := v.(type) {
 	case float32:
 		return float64(f)
@@ -304,7 +304,7 @@ func toFloat64(v interface{}) float64 {
 
 // coerceTypes implements the C# CoerceTypes logic.
 // It converts values to compatible types before comparison.
-func coerceTypes(left, right interface{}) (interface{}, interface{}, ValueKind, ValueKind) {
+func coerceTypes(left, right any) (any, any, ValueKind, ValueKind) {
 	leftKind := getKind(left)
 	rightKind := getKind(right)
 
@@ -340,7 +340,7 @@ func coerceTypes(left, right interface{}) (interface{}, interface{}, ValueKind, 
 }
 
 // abstractEqual uses coerceTypes before comparing.
-func abstractEqual(left, right interface{}) bool {
+func abstractEqual(left, right any) bool {
 	left, right, leftKind, rightKind := coerceTypes(left, right)
 	if leftKind != rightKind {
 		return false
@@ -367,7 +367,7 @@ func abstractEqual(left, right interface{}) bool {
 }
 
 // abstractGreaterThan uses coerceTypes before comparing.
-func abstractGreaterThan(left, right interface{}) bool {
+func abstractGreaterThan(left, right any) bool {
 	left, right, leftKind, rightKind := coerceTypes(left, right)
 	if leftKind != rightKind {
 		return false
@@ -389,7 +389,7 @@ func abstractGreaterThan(left, right interface{}) bool {
 }
 
 // abstractLessThan uses coerceTypes before comparing.
-func abstractLessThan(left, right interface{}) bool {
+func abstractLessThan(left, right any) bool {
 	left, right, leftKind, rightKind := coerceTypes(left, right)
 	if leftKind != rightKind {
 		return false
@@ -411,7 +411,7 @@ func abstractLessThan(left, right interface{}) bool {
 }
 
 // convertToNumber converts a value to a float64 following JavaScript rules.
-func convertToNumber(v interface{}) float64 {
+func convertToNumber(v any) float64 {
 	switch val := v.(type) {
 	case nil:
 		return 0
@@ -447,7 +447,7 @@ func convertToNumber(v interface{}) float64 {
 }
 
 // getKind returns the ValueKind for a Go value.
-func getKind(v interface{}) ValueKind {
+func getKind(v any) ValueKind {
 	switch v.(type) {
 	case nil:
 		return ValueKindNull
@@ -457,9 +457,9 @@ func getKind(v interface{}) ValueKind {
 		return ValueKindNumber
 	case string:
 		return ValueKindString
-	case []interface{}:
+	case []any:
 		return ValueKindArray
-	case map[string]interface{}:
+	case map[string]any:
 		return ValueKindObject
 	default:
 		return ValueKindObject

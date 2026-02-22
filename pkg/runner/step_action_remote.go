@@ -69,7 +69,7 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 		remoteReader := func(_ context.Context) actionYamlReader {
 			return func(filename string) (io.Reader, io.Closer, error) {
 				spath := path.Join(sar.remoteAction.Path, filename)
-				for i := 0; i < maxSymlinkDepth; i++ {
+				for range maxSymlinkDepth {
 					tars, err := cache.GetTarArchive(ctx, sar.cacheDir, sar.resolvedSha, spath)
 					if err != nil {
 						return nil, nil, os.ErrNotExist

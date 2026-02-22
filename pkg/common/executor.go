@@ -19,7 +19,7 @@ func (w Warning) Error() string {
 }
 
 // Warningf create a warning
-func Warningf(format string, args ...interface{}) Warning {
+func Warningf(format string, args ...any) Warning {
 	w := Warning{
 		Message: fmt.Sprintf(format, args...),
 	}
@@ -33,7 +33,7 @@ type Executor func(ctx context.Context) error
 type Conditional func(ctx context.Context) bool
 
 // NewInfoExecutor is an executor that logs messages
-func NewInfoExecutor(format string, args ...interface{}) Executor {
+func NewInfoExecutor(format string, args ...any) Executor {
 	return func(ctx context.Context) error {
 		logger := Logger(ctx)
 		logger.Infof(format, args...)
@@ -42,7 +42,7 @@ func NewInfoExecutor(format string, args ...interface{}) Executor {
 }
 
 // NewDebugExecutor is an executor that logs messages
-func NewDebugExecutor(format string, args ...interface{}) Executor {
+func NewDebugExecutor(format string, args ...any) Executor {
 	return func(ctx context.Context) error {
 		logger := Logger(ctx)
 		logger.Debugf(format, args...)
@@ -110,14 +110,14 @@ func NewParallelExecutor(parallel int, executors ...Executor) Executor {
 			}(work, errs)
 		}
 
-		for i := 0; i < len(executors); i++ {
+		for i := range executors {
 			work <- executors[i]
 		}
 		close(work)
 
 		// Executor waits all executors to cleanup these resources.
 		var firstErr error
-		for i := 0; i < len(executors); i++ {
+		for range executors {
 			err := <-errs
 			if firstErr == nil {
 				firstErr = err
@@ -131,7 +131,7 @@ func NewParallelExecutor(parallel int, executors ...Executor) Executor {
 	}
 }
 
-func NewFieldExecutor(name string, value interface{}, exec Executor) Executor {
+func NewFieldExecutor(name string, value any, exec Executor) Executor {
 	return func(ctx context.Context) error {
 		return exec(WithLogger(ctx, Logger(ctx).WithField(name, value)))
 	}

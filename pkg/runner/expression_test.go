@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 	"testing"
 
 	"gitea.com/gitea/act_runner/pkg/exprparser"
@@ -16,7 +17,7 @@ import (
 
 func createRunContext(t *testing.T) *RunContext {
 	var yml yaml.Node
-	err := yml.Encode(map[string][]interface{}{
+	err := yml.Encode(map[string][]any{
 		"os":  {"Linux", "Windows"},
 		"foo": {"bar", "baz"},
 	})
@@ -48,7 +49,7 @@ func createRunContext(t *testing.T) *RunContext {
 				},
 			},
 		},
-		Matrix: map[string]interface{}{
+		Matrix: map[string]any{
 			"os":  "Linux",
 			"foo": "bar",
 		},
@@ -84,7 +85,7 @@ func TestEvaluateRunContext(t *testing.T) {
 
 	tables := []struct {
 		in      string
-		out     interface{}
+		out     any
 		errMesg string
 	}{
 		{" 1 ", 1, ""},
@@ -165,7 +166,7 @@ func TestEvaluateStep(t *testing.T) {
 
 	tables := []struct {
 		in      string
-		out     interface{}
+		out     any
 		errMesg string
 	}{
 		{"steps.idwithnothing.conclusion", model.StepStatusSuccess.String(), ""},
@@ -281,9 +282,11 @@ func updateTestExpressionWorkflow(t *testing.T, tables []struct {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	var envsSb284 strings.Builder
 	for _, k := range keys {
-		envs += fmt.Sprintf("  %s: %s\n", k, rc.Env[k])
+		fmt.Fprintf(&envsSb284, "  %s: %s\n", k, rc.Env[k])
 	}
+	envs += envsSb284.String()
 
 	// editorconfig-checker-disable
 	workflow := fmt.Sprintf(`
@@ -299,6 +302,7 @@ jobs:
     steps:
 `, envs)
 	// editorconfig-checker-enable
+	var workflowSb302 strings.Builder
 	for _, table := range tables {
 		expressionPattern := regexp.MustCompile(`\${{\s*(.+?)\s*}}`)
 
@@ -307,8 +311,9 @@ jobs:
 		})
 		name := fmt.Sprintf(`%s -> %s should be equal to %s`, expr, table.in, table.out)
 		echo := `run: echo "Done "`
-		workflow += fmt.Sprintf("\n      - name: %s\n        %s\n", name, echo)
+		fmt.Fprintf(&workflowSb302, "\n      - name: %s\n        %s\n", name, echo)
 	}
+	workflow += workflowSb302.String()
 
 	file, err := os.Create("../../.github/workflows/test-expressions.yml")
 	if err != nil {

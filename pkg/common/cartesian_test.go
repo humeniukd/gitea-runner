@@ -8,7 +8,7 @@ import (
 
 func TestCartesianProduct(t *testing.T) {
 	assert := assert.New(t)
-	input := map[string][]interface{}{
+	input := map[string][]any{
 		"foo": {1, 2, 3, 4},
 		"bar": {"a", "b", "c"},
 		"baz": {false, true},
@@ -25,15 +25,15 @@ func TestCartesianProduct(t *testing.T) {
 		assert.Contains(v, "baz")
 	}
 
-	input = map[string][]interface{}{
+	input = map[string][]any{
 		"foo": {1, 2, 3, 4},
 		"bar": {},
 		"baz": {false, true},
 	}
 	output = CartesianProduct(input)
-	assert.Len(output, 0)
+	assert.Empty(output)
 
-	input = map[string][]interface{}{}
+	input = map[string][]any{}
 	output = CartesianProduct(input)
-	assert.Len(output, 0)
+	assert.Empty(output)
 }

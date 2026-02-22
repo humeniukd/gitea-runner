@@ -20,7 +20,7 @@ type Node interface {
 
 type ValueNode struct {
 	Kind  TokenKind
-	Value interface{}
+	Value any
 }
 
 // FunctionNode represents a function call with arguments.

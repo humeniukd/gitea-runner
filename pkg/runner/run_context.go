@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	maps0 "maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -34,7 +35,7 @@ import (
 type RunContext struct {
 	Name                string
 	Config              *Config
-	Matrix              map[string]interface{}
+	Matrix              map[string]any
 	Run                 *model.Run
 	EventJSON           string
 	Env                 map[string]string
@@ -54,7 +55,7 @@ type RunContext struct {
 	cleanUpJobContainer common.Executor
 	caller              *caller // job calling this RunContext (reusable workflows)
 	Cancelled           bool
-	ContextData         map[string]interface{}
+	ContextData         map[string]any
 	nodeToolFullPath    string
 }
 
@@ -109,13 +110,13 @@ func (rc *RunContext) networkName() (string, bool) {
 }
 
 func getDockerDaemonSocketMountPath(daemonPath string) string {
-	if protoIndex := strings.Index(daemonPath, "://"); protoIndex != -1 {
-		scheme := daemonPath[:protoIndex]
+	if before, after, ok := strings.Cut(daemonPath, "://"); ok {
+		scheme := before
 		if strings.EqualFold(scheme, "npipe") {
 			// linux container mount on windows, use the default socket path of the VM / wsl2
 			return "/var/run/docker.sock"
 		} else if strings.EqualFold(scheme, "unix") {
-			return daemonPath[protoIndex+3:]
+			return after
 		} else if strings.IndexFunc(scheme, func(r rune) bool {
 			return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
 		}) == -1 {
@@ -244,7 +245,7 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 		}).Finally(rc.JobContainer.Remove())
 		for k, v := range rc.JobContainer.GetRunnerContext(ctx) {
 			if v, ok := v.(string); ok {
-				rc.Env[fmt.Sprintf("RUNNER_%s", strings.ToUpper(k))] = v
+				rc.Env["RUNNER_"+strings.ToUpper(k)] = v
 			}
 		}
 		for _, env := range os.Environ() {
@@ -635,7 +636,7 @@ func (rc *RunContext) waitForServiceContainer(c container.ExecutionsEnvironment)
 		if health == container.HealthHealthy {
 			return nil
 		}
-		return fmt.Errorf("service container failed to start")
+		return errors.New("service container failed to start")
 	}
 }
 
@@ -741,7 +742,7 @@ func (rc *RunContext) closeContainer() common.Executor {
 	}
 }
 
-func (rc *RunContext) matrix() map[string]interface{} {
+func (rc *RunContext) matrix() map[string]any {
 	return rc.Matrix
 }
 
@@ -891,9 +892,7 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 func mergeMaps(maps ...map[string]string) map[string]string {
 	rtnMap := make(map[string]string)
 	for _, m := range maps {
-		for k, v := range m {
-			rtnMap[k] = v
-		}
+		maps0.Copy(rtnMap, m)
 	}
 	return rtnMap
 }
@@ -945,7 +944,7 @@ func (rc *RunContext) getStepsContext() map[string]*model.StepResult {
 func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext {
 	logger := common.Logger(ctx)
 	ghc := &model.GithubContext{
-		Event:            make(map[string]interface{}),
+		Event:            make(map[string]any),
 		Workflow:         rc.Run.Workflow.Name,
 		RunAttempt:       rc.Config.Env["GITHUB_RUN_ATTEMPT"],
 		RunID:            rc.Config.Env["GITHUB_RUN_ID"],
@@ -1049,9 +1048,9 @@ func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext
 
 func (rc *RunContext) mergeGitHubContextWithContextData(ghc *model.GithubContext) {
 	if rnout, ok := rc.ContextData["github"]; ok {
-		nout, ok := rnout.(map[string]interface{})
+		nout, ok := rnout.(map[string]any)
 		if ok {
-			var out map[string]interface{}
+			var out map[string]any
 			content, _ := json.Marshal(ghc)
 			_ = json.Unmarshal(content, &out)
 			for k, v := range nout {
@@ -1092,7 +1091,7 @@ func isLocalCheckout(ghc *model.GithubContext, step *model.Step) bool {
 	return true
 }
 
-func nestedMapLookup(m map[string]interface{}, ks ...string) (rval interface{}) {
+func nestedMapLookup(m map[string]any, ks ...string) (rval any) {
 	var ok bool
 
 	if len(ks) == 0 { // degenerate input
@@ -1102,7 +1101,7 @@ func nestedMapLookup(m map[string]interface{}, ks ...string) (rval interface{}) 
 		return nil
 	} else if len(ks) == 1 { // we've reached the final key
 		return rval
-	} else if m, ok = rval.(map[string]interface{}); !ok {
+	} else if m, ok = rval.(map[string]any); !ok {
 		return nil
 	}
 	// 1+ more keys
@@ -1200,22 +1199,22 @@ func (rc *RunContext) handleCredentials(ctx context.Context) (string, string, er
 	}
 
 	if container.Credentials != nil && len(container.Credentials) != 2 {
-		err := fmt.Errorf("invalid property count for key 'credentials:'")
+		err := errors.New("invalid property count for key 'credentials:'")
 		return "", "", err
 	}
 
 	ee := rc.NewExpressionEvaluator(ctx)
 	if username = ee.Interpolate(ctx, container.Credentials["username"]); username == "" {
-		err := fmt.Errorf("failed to interpolate container.credentials.username")
+		err := errors.New("failed to interpolate container.credentials.username")
 		return "", "", err
 	}
 	if password = ee.Interpolate(ctx, container.Credentials["password"]); password == "" {
-		err := fmt.Errorf("failed to interpolate container.credentials.password")
+		err := errors.New("failed to interpolate container.credentials.password")
 		return "", "", err
 	}
 
 	if container.Credentials["username"] == "" || container.Credentials["password"] == "" {
-		err := fmt.Errorf("container.credentials cannot be empty")
+		err := errors.New("container.credentials cannot be empty")
 		return "", "", err
 	}
 
@@ -1227,18 +1226,18 @@ func (rc *RunContext) handleServiceCredentials(ctx context.Context, creds map[st
 		return
 	}
 	if len(creds) != 2 {
-		err = fmt.Errorf("invalid property count for key 'credentials:'")
+		err = errors.New("invalid property count for key 'credentials:'")
 		return
 	}
 
 	ee := rc.NewExpressionEvaluator(ctx)
 	if username = ee.Interpolate(ctx, creds["username"]); username == "" {
-		err = fmt.Errorf("failed to interpolate credentials.username")
+		err = errors.New("failed to interpolate credentials.username")
 		return
 	}
 
 	if password = ee.Interpolate(ctx, creds["password"]); password == "" {
-		err = fmt.Errorf("failed to interpolate credentials.password")
+		err = errors.New("failed to interpolate credentials.password")
 		return
 	}
 

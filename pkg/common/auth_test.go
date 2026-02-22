@@ -15,13 +15,13 @@ import (
 func TestCreateAuthorizationToken(t *testing.T) {
 	var taskID int64 = 23
 	token, err := CreateAuthorizationToken(taskID, 1, 2)
-	assert.Nil(t, err)
-	assert.NotEqual(t, "", token)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, token)
 	claims := jwt.MapClaims{}
-	_, err = jwt.ParseWithClaims(token, claims, func(_ *jwt.Token) (interface{}, error) {
+	_, err = jwt.ParseWithClaims(token, claims, func(_ *jwt.Token) (any, error) {
 		return []byte{}, nil
 	})
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	scp, ok := claims["scp"]
 	assert.True(t, ok, "Has scp claim in jwt token")
 	assert.Contains(t, scp, "Actions.Results:1:2")
@@ -41,14 +41,14 @@ func TestCreateAuthorizationToken(t *testing.T) {
 func TestParseAuthorizationToken(t *testing.T) {
 	var taskID int64 = 23
 	token, err := CreateAuthorizationToken(taskID, 1, 2)
-	assert.Nil(t, err)
-	assert.NotEqual(t, "", token)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, token)
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+token)
 	rTaskID, err := ParseAuthorizationToken(&http.Request{
 		Header: headers,
 	})
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.Equal(t, taskID, rTaskID)
 }
 
@@ -57,6 +57,6 @@ func TestParseAuthorizationTokenNoAuthHeader(t *testing.T) {
 	rTaskID, err := ParseAuthorizationToken(&http.Request{
 		Header: headers,
 	})
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.Equal(t, int64(0), rTaskID)
 }

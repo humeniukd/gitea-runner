@@ -216,7 +216,7 @@ func TestGitCloneExecutor(t *testing.T) {
 				assert.Error(t, err)
 				assert.Equal(t, tt.Err, err)
 			} else {
-				assert.Empty(t, err)
+				assert.NoError(t, err)
 			}
 		})
 	}

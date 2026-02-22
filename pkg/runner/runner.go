@@ -74,7 +74,7 @@ type Config struct {
 	Planner          model.PlannerConfig // Configuration for the workflow planner
 	Action           model.ActionConfig  // Configuration for action reading
 	MainContextNames []string            // e.g. "github", "gitea", "forgejo"
-	ContextData      map[string]interface{}
+	ContextData      map[string]any
 	EventJSON        string
 }
 
@@ -82,7 +82,7 @@ func (runnerConfig *Config) GetGitHubServerURL() string {
 	if len(runnerConfig.GitHubServerURL) > 0 {
 		return runnerConfig.GitHubServerURL
 	}
-	return fmt.Sprintf("https://%s", runnerConfig.GitHubInstance)
+	return "https://" + runnerConfig.GitHubInstance
 }
 func (runnerConfig *Config) GetGitHubAPIServerURL() string {
 	if len(runnerConfig.GitHubAPIServerURL) > 0 {
@@ -203,7 +203,7 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 					}
 				}
 
-				var matrixes []map[string]interface{}
+				var matrixes []map[string]any
 				if m, err := job.GetMatrixes(); err != nil {
 					log.Errorf("error while get job's matrix: %v", err)
 				} else {
@@ -247,10 +247,7 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 			if runner.config.Parallel != 0 {
 				return common.NewParallelExecutor(len(pipeline), pipeline...)(ctx)
 			}
-			ncpu := runtime.NumCPU()
-			if 1 > ncpu {
-				ncpu = 1
-			}
+			ncpu := max(1, runtime.NumCPU())
 			log.Debugf("Detected CPUs: %d", ncpu)
 			return common.NewParallelExecutor(ncpu, pipeline...)(ctx)
 		})
@@ -272,8 +269,8 @@ func handleFailure(plan *model.Plan) common.Executor {
 	}
 }
 
-func selectMatrixes(originalMatrixes []map[string]interface{}, targetMatrixValues map[string]map[string]bool) []map[string]interface{} {
-	matrixes := make([]map[string]interface{}, 0)
+func selectMatrixes(originalMatrixes []map[string]any, targetMatrixValues map[string]map[string]bool) []map[string]any {
+	matrixes := make([]map[string]any, 0)
 	for _, original := range originalMatrixes {
 		flag := true
 		for key, val := range original {
@@ -291,7 +288,7 @@ func selectMatrixes(originalMatrixes []map[string]interface{}, targetMatrixValue
 	return matrixes
 }
 
-func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, matrix map[string]interface{}) *RunContext {
+func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, matrix map[string]any) *RunContext {
 	rc := &RunContext{
 		Config:      runner.config,
 		Run:         run,

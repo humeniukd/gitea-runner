@@ -11,7 +11,7 @@ import (
 func TestLiterals(t *testing.T) {
 	table := []struct {
 		input    string
-		expected interface{}
+		expected any
 		name     string
 	}{
 		{"true", true, "true"},
@@ -30,7 +30,7 @@ func TestLiterals(t *testing.T) {
 	for _, tt := range table {
 		t.Run(tt.name, func(t *testing.T) {
 			output, err := NewInterpeter(env, Config{}).Evaluate(tt.input, DefaultStatusCheckNone)
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 
 			assert.Equal(t, tt.expected, output)
 		})
@@ -40,7 +40,7 @@ func TestLiterals(t *testing.T) {
 func TestOperators(t *testing.T) {
 	table := []struct {
 		input    string
-		expected interface{}
+		expected any
 		name     string
 		error    string
 	}{
@@ -69,7 +69,7 @@ func TestOperators(t *testing.T) {
 		{`true && false`, false, "and", ""},
 		{`true || false`, true, "or", ""},
 		{`fromJSON('{}') && true`, true, "and-boolean-object", ""},
-		{`fromJSON('{}') || false`, make(map[string]interface{}), "or-boolean-object", ""},
+		{`fromJSON('{}') || false`, make(map[string]any), "or-boolean-object", ""},
 		{"github.event.commits[0].author.username != github.event.commits[1].author.username", true, "property-comparison1", ""},
 		{"github.event.commits[0].author.username1 != github.event.commits[1].author.username", true, "property-comparison2", ""},
 		{"github.event.commits[0].author.username != github.event.commits[1].author.username1", true, "property-comparison3", ""},
@@ -81,15 +81,15 @@ func TestOperators(t *testing.T) {
 	env := &EvaluationEnvironment{
 		Github: &model.GithubContext{
 			Action: "push",
-			Event: map[string]interface{}{
-				"commits": []interface{}{
-					map[string]interface{}{
-						"author": map[string]interface{}{
+			Event: map[string]any{
+				"commits": []any{
+					map[string]any{
+						"author": map[string]any{
 							"username": "someone",
 						},
 					},
-					map[string]interface{}{
-						"author": map[string]interface{}{
+					map[string]any{
+						"author": map[string]any{
 							"username": "someone-else",
 						},
 					},
@@ -102,10 +102,10 @@ func TestOperators(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			output, err := NewInterpeter(env, Config{}).Evaluate(tt.input, DefaultStatusCheckNone)
 			if tt.error != "" {
-				assert.NotNil(t, err)
+				assert.Error(t, err)
 				assert.Equal(t, tt.error, err.Error())
 			} else {
-				assert.Nil(t, err)
+				assert.NoError(t, err)
 			}
 
 			assert.Equal(t, tt.expected, output)
@@ -116,7 +116,7 @@ func TestOperators(t *testing.T) {
 func TestOperatorsCompare(t *testing.T) {
 	table := []struct {
 		input    string
-		expected interface{}
+		expected any
 		name     string
 	}{
 		{"!null", true, "not-null"},
@@ -154,7 +154,7 @@ func TestOperatorsCompare(t *testing.T) {
 	for _, tt := range table {
 		t.Run(tt.name, func(t *testing.T) {
 			output, err := NewInterpeter(env, Config{}).Evaluate(tt.input, DefaultStatusCheckNone)
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 
 			assert.Equal(t, tt.expected, output)
 		})
@@ -164,7 +164,7 @@ func TestOperatorsCompare(t *testing.T) {
 func TestOperatorsBooleanEvaluation(t *testing.T) {
 	table := []struct {
 		input    string
-		expected interface{}
+		expected any
 		name     string
 	}{
 		// true &&
@@ -517,7 +517,7 @@ func TestOperatorsBooleanEvaluation(t *testing.T) {
 	for _, tt := range table {
 		t.Run(tt.name, func(t *testing.T) {
 			output, err := NewInterpeter(env, Config{}).Evaluate(tt.input, DefaultStatusCheckNone)
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 
 			// Normalize int => float64
 			if i, ok := tt.expected.(int); ok {
@@ -536,15 +536,15 @@ func TestOperatorsBooleanEvaluation(t *testing.T) {
 func TestContexts(t *testing.T) {
 	table := []struct {
 		input            string
-		expected         interface{}
+		expected         any
 		name             string
 		caseSensitiveEnv bool
-		ctxdata          map[string]interface{}
+		ctxdata          map[string]any
 	}{
 		{input: "github.action", expected: "push", name: "github-context"},
-		{input: "github.action", expected: "push", name: "github-context", ctxdata: map[string]interface{}{"github": map[string]interface{}{"ref": "refs/heads/test-data"}}},
-		{input: "github.ref", expected: "refs/heads/test-data", name: "github-context", ctxdata: map[string]interface{}{"github": map[string]interface{}{"ref": "refs/heads/test-data"}}},
-		{input: "github.custom-field", expected: "custom-value", name: "github-context", ctxdata: map[string]interface{}{"github": map[string]interface{}{"custom-field": "custom-value"}}},
+		{input: "github.action", expected: "push", name: "github-context", ctxdata: map[string]any{"github": map[string]any{"ref": "refs/heads/test-data"}}},
+		{input: "github.ref", expected: "refs/heads/test-data", name: "github-context", ctxdata: map[string]any{"github": map[string]any{"ref": "refs/heads/test-data"}}},
+		{input: "github.custom-field", expected: "custom-value", name: "github-context", ctxdata: map[string]any{"github": map[string]any{"custom-field": "custom-value"}}},
 		{input: "github.event.commits[0].message", expected: nil, name: "github-context-noexist-prop"},
 		{input: "fromjson('{\"commits\":[]}').commits[0].message", expected: nil, name: "github-context-noexist-prop"},
 		{input: "github.event.pull_request.labels.*.name", expected: nil, name: "github-context-noexist-prop"},
@@ -581,8 +581,8 @@ func TestContexts(t *testing.T) {
 		{input: "contains(needs.*.result, 'success')", expected: true, name: "needs-wildcard-context-contains-success"},
 		{input: "contains(needs.*.result, 'failure')", expected: false, name: "needs-wildcard-context-contains-failure"},
 		{input: "inputs.name", expected: "value", name: "inputs-context"},
-		{input: "vars.MY_VAR", expected: "refs/heads/test-data", name: "vars-context", ctxdata: map[string]interface{}{"vars": map[string]interface{}{"MY_VAR": "refs/heads/test-data"}}},
-		{input: "vars.MY_VAR", expected: "refs/heads/test-data", name: "vars-context", ctxdata: map[string]interface{}{"vars": map[string]interface{}{"my_var": "refs/heads/test-data"}}},
+		{input: "vars.MY_VAR", expected: "refs/heads/test-data", name: "vars-context", ctxdata: map[string]any{"vars": map[string]any{"MY_VAR": "refs/heads/test-data"}}},
+		{input: "vars.MY_VAR", expected: "refs/heads/test-data", name: "vars-context", ctxdata: map[string]any{"vars": map[string]any{"my_var": "refs/heads/test-data"}}},
 	}
 
 	env := EvaluationEnvironment{
@@ -606,7 +606,7 @@ func TestContexts(t *testing.T) {
 				Conclusion: model.StepStatusSkipped,
 			},
 		},
-		Runner: map[string]interface{}{
+		Runner: map[string]any{
 			"os":         "Linux",
 			"temp":       "/tmp",
 			"tool_cache": "/opt/hostedtoolcache",
@@ -617,10 +617,10 @@ func TestContexts(t *testing.T) {
 		Vars: map[string]string{
 			"name": "value",
 		},
-		Strategy: map[string]interface{}{
+		Strategy: map[string]any{
 			"fail-fast": true,
 		},
-		Matrix: map[string]interface{}{
+		Matrix: map[string]any{
 			"os": "Linux",
 		},
 		Needs: map[string]Needs{
@@ -637,7 +637,7 @@ func TestContexts(t *testing.T) {
 				Result: "success",
 			},
 		},
-		Inputs: map[string]interface{}{
+		Inputs: map[string]any{
 			"name": "value",
 		},
 	}
@@ -648,7 +648,7 @@ func TestContexts(t *testing.T) {
 			tenv.EnvCS = tt.caseSensitiveEnv
 			tenv.CtxData = tt.ctxdata
 			output, err := NewInterpeter(&tenv, Config{}).Evaluate(tt.input, DefaultStatusCheckNone)
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 
 			assert.Equal(t, tt.expected, output)
 		})

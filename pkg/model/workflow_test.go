@@ -87,7 +87,7 @@ jobs:
 
 	workflow, err := ReadWorkflow(strings.NewReader(yaml), WorkflowConfig{})
 	assert.NoError(t, err, "read workflow should succeed")
-	assert.Equal(t, workflow.Jobs["test"].RunsOn(), []string{"ubuntu-latest"})
+	assert.Equal(t, []string{"ubuntu-latest"}, workflow.Jobs["test"].RunsOn())
 }
 
 func TestReadWorkflow_RunsOnLabelsWithGroup(t *testing.T) {
@@ -105,7 +105,7 @@ jobs:
 
 	workflow, err := ReadWorkflow(strings.NewReader(yaml), WorkflowConfig{})
 	assert.NoError(t, err, "read workflow should succeed")
-	assert.Equal(t, workflow.Jobs["test"].RunsOn(), []string{"ubuntu-latest", "linux"})
+	assert.Equal(t, []string{"ubuntu-latest", "linux"}, workflow.Jobs["test"].RunsOn())
 }
 
 func TestReadWorkflow_StringContainer(t *testing.T) {
@@ -201,27 +201,27 @@ jobs:
 	assert.Len(t, workflow.Jobs, 6)
 
 	jobType, err := workflow.Jobs["default-job"].Type()
-	assert.Equal(t, nil, err)
+	assert.NoError(t, err)
 	assert.Equal(t, JobTypeDefault, jobType)
 
 	jobType, err = workflow.Jobs["remote-reusable-workflow-yml"].Type()
-	assert.Equal(t, nil, err)
+	assert.NoError(t, err)
 	assert.Equal(t, JobTypeReusableWorkflowRemote, jobType)
 
 	jobType, err = workflow.Jobs["remote-reusable-workflow-yaml"].Type()
-	assert.Equal(t, nil, err)
+	assert.NoError(t, err)
 	assert.Equal(t, JobTypeReusableWorkflowRemote, jobType)
 
 	jobType, err = workflow.Jobs["remote-reusable-workflow-custom-path"].Type()
-	assert.Equal(t, nil, err)
+	assert.NoError(t, err)
 	assert.Equal(t, JobTypeReusableWorkflowRemote, jobType)
 
 	jobType, err = workflow.Jobs["local-reusable-workflow-yml"].Type()
-	assert.Equal(t, nil, err)
+	assert.NoError(t, err)
 	assert.Equal(t, JobTypeReusableWorkflowLocal, jobType)
 
 	jobType, err = workflow.Jobs["local-reusable-workflow-yaml"].Type()
-	assert.Equal(t, nil, err)
+	assert.NoError(t, err)
 	assert.Equal(t, JobTypeReusableWorkflowLocal, jobType)
 }
 
@@ -246,19 +246,19 @@ jobs:
 
 	jobType, err := workflow.Jobs["remote-reusable-workflow-missing-version"].Type()
 	assert.Equal(t, JobTypeInvalid, jobType)
-	assert.NotEqual(t, nil, err)
+	assert.Error(t, err)
 
 	jobType, err = workflow.Jobs["remote-reusable-workflow-bad-extension"].Type()
 	assert.Equal(t, JobTypeInvalid, jobType)
-	assert.NotEqual(t, nil, err)
+	assert.Error(t, err)
 
 	jobType, err = workflow.Jobs["local-reusable-workflow-bad-extension"].Type()
 	assert.Equal(t, JobTypeInvalid, jobType)
-	assert.NotEqual(t, nil, err)
+	assert.Error(t, err)
 
 	jobType, err = workflow.Jobs["local-reusable-workflow-bad-path"].Type()
 	assert.Equal(t, JobTypeInvalid, jobType)
-	assert.NotEqual(t, nil, err)
+	assert.Error(t, err)
 }
 
 func TestReadWorkflow_StepsTypes(t *testing.T) {
@@ -335,71 +335,69 @@ func TestReadWorkflow_Strategy(t *testing.T) {
 	p, err := w.PlanJob("strategy-only-max-parallel")
 	assert.NoError(t, err)
 
-	assert.Equal(t, len(p.Stages), 1)
-	assert.Equal(t, len(p.Stages[0].Runs), 1)
+	assert.Len(t, p.Stages, 1)
+	assert.Len(t, p.Stages[0].Runs, 1)
 
 	wf := p.Stages[0].Runs[0].Workflow
 
 	job := wf.Jobs["strategy-only-max-parallel"]
 	matrixes, err := job.GetMatrixes()
 	assert.NoError(t, err)
-	assert.Equal(t, matrixes, []map[string]interface{}{{}})
-	assert.Equal(t, job.Matrix(), map[string][]interface{}(nil))
-	assert.Equal(t, job.Strategy.MaxParallel, 2)
-	assert.Equal(t, job.Strategy.FailFast, true)
+	assert.Equal(t, []map[string]any{{}}, matrixes)
+	assert.Equal(t, job.Matrix(), map[string][]any(nil))
+	assert.Equal(t, 2, job.Strategy.MaxParallel)
+	assert.True(t, job.Strategy.FailFast)
 
 	job = wf.Jobs["strategy-only-fail-fast"]
 	matrixes, err = job.GetMatrixes()
 	assert.NoError(t, err)
-	assert.Equal(t, matrixes, []map[string]interface{}{{}})
-	assert.Equal(t, job.Matrix(), map[string][]interface{}(nil))
-	assert.Equal(t, job.Strategy.MaxParallel, 4)
-	assert.Equal(t, job.Strategy.FailFast, false)
+	assert.Equal(t, []map[string]any{{}}, matrixes)
+	assert.Equal(t, job.Matrix(), map[string][]any(nil))
+	assert.Equal(t, 4, job.Strategy.MaxParallel)
+	assert.False(t, job.Strategy.FailFast)
 
 	job = wf.Jobs["strategy-no-matrix"]
 	matrixes, err = job.GetMatrixes()
 	assert.NoError(t, err)
-	assert.Equal(t, matrixes, []map[string]interface{}{{}})
-	assert.Equal(t, job.Matrix(), map[string][]interface{}(nil))
-	assert.Equal(t, job.Strategy.MaxParallel, 2)
-	assert.Equal(t, job.Strategy.FailFast, false)
+	assert.Equal(t, []map[string]any{{}}, matrixes)
+	assert.Equal(t, job.Matrix(), map[string][]any(nil))
+	assert.Equal(t, 2, job.Strategy.MaxParallel)
+	assert.False(t, job.Strategy.FailFast)
 
 	job = wf.Jobs["strategy-all"]
 	matrixes, err = job.GetMatrixes()
 	assert.NoError(t, err)
-	assert.Equal(t, matrixes,
-		[]map[string]interface{}{
-			{"datacenter": "site-c", "node-version": "14.x", "site": "staging", "php-version": 5.4},
-			{"datacenter": "site-c", "node-version": "16.x", "site": "staging", "php-version": 5.4},
-			{"datacenter": "site-d", "node-version": "16.x", "site": "staging", "php-version": 5.4},
-			{"datacenter": "site-a", "node-version": "10.x", "site": "prod"},
-			{"datacenter": "site-b", "node-version": "12.x", "site": "dev"},
-		},
+	assert.Equal(t, []map[string]any{
+		{"datacenter": "site-c", "node-version": "14.x", "site": "staging", "php-version": 5.4},
+		{"datacenter": "site-c", "node-version": "16.x", "site": "staging", "php-version": 5.4},
+		{"datacenter": "site-d", "node-version": "16.x", "site": "staging", "php-version": 5.4},
+		{"datacenter": "site-a", "node-version": "10.x", "site": "prod"},
+		{"datacenter": "site-b", "node-version": "12.x", "site": "dev"},
+	}, matrixes,
 	)
-	assert.Equal(t, job.Matrix(),
-		map[string][]interface{}{
-			"datacenter": {"site-c", "site-d"},
-			"exclude": {
-				map[string]interface{}{"datacenter": "site-d", "node-version": "14.x", "site": "staging"},
-			},
-			"include": {
-				map[string]interface{}{"php-version": 5.4},
-				map[string]interface{}{"datacenter": "site-a", "node-version": "10.x", "site": "prod"},
-				map[string]interface{}{"datacenter": "site-b", "node-version": "12.x", "site": "dev"},
-			},
-			"node-version": {"14.x", "16.x"},
-			"site":         {"staging"},
+	assert.Equal(t, map[string][]any{
+		"datacenter": {"site-c", "site-d"},
+		"exclude": {
+			map[string]any{"datacenter": "site-d", "node-version": "14.x", "site": "staging"},
 		},
+		"include": {
+			map[string]any{"php-version": 5.4},
+			map[string]any{"datacenter": "site-a", "node-version": "10.x", "site": "prod"},
+			map[string]any{"datacenter": "site-b", "node-version": "12.x", "site": "dev"},
+		},
+		"node-version": {"14.x", "16.x"},
+		"site":         {"staging"},
+	}, job.Matrix(),
 	)
-	assert.Equal(t, job.Strategy.MaxParallel, 2)
-	assert.Equal(t, job.Strategy.FailFast, false)
+	assert.Equal(t, 2, job.Strategy.MaxParallel)
+	assert.False(t, job.Strategy.FailFast)
 }
 
 func TestMatrixOnlyIncludes(t *testing.T) {
-	matrix := map[string][]interface{}{
-		"include": []interface{}{
-			map[string]interface{}{"a": "1", "b": "2"},
-			map[string]interface{}{"a": "3", "b": "4"},
+	matrix := map[string][]any{
+		"include": []any{
+			map[string]any{"a": "1", "b": "2"},
+			map[string]any{"a": "3", "b": "4"},
 		},
 	}
 	rN := yaml.Node{}
@@ -413,11 +411,10 @@ func TestMatrixOnlyIncludes(t *testing.T) {
 	assert.Equal(t, job.Matrix(), matrix)
 	matrixes, err := job.GetMatrixes()
 	require.NoError(t, err)
-	assert.Equal(t, matrixes,
-		[]map[string]interface{}{
-			{"a": "1", "b": "2"},
-			{"a": "3", "b": "4"},
-		},
+	assert.Equal(t, []map[string]any{
+		{"a": "1", "b": "2"},
+		{"a": "3", "b": "4"},
+	}, matrixes,
 	)
 }
 
@@ -436,7 +433,7 @@ func TestStep_ShellCommand(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.shell, func(t *testing.T) {
 			got := (&Step{Shell: tt.shell, WorkflowShell: tt.workflowShell}).ShellCommand()
-			assert.Equal(t, got, tt.want)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

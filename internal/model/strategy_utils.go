@@ -2,7 +2,7 @@ package model
 
 import (
 	"errors"
-	"fmt"
+	"maps"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -11,7 +11,7 @@ import (
 // TraceWriter is an interface for logging trace information.
 // Implementations can write to console, file, or any other sink.
 type TraceWriter interface {
-	Info(format string, args ...interface{})
+	Info(format string, args ...any)
 }
 
 // StrategyResult holds the result of expanding a strategy.
@@ -46,14 +46,14 @@ func (strategyContext *strategyContext) handleInclude() error {
 	if len(strategyContext.include) > 0 {
 		for _, incNode := range strategyContext.include {
 			if incNode.Kind != yaml.MappingNode {
-				return fmt.Errorf("include entry is not a mapping node")
+				return errors.New("include entry is not a mapping node")
 			}
 			incMap := make(map[string]yaml.Node)
 			for i := 0; i < len(incNode.Content); i += 2 {
 				keyNode := incNode.Content[i]
 				valNode := incNode.Content[i+1]
 				if keyNode.Kind != yaml.ScalarNode {
-					return fmt.Errorf("include key is not scalar")
+					return errors.New("include key is not scalar")
 				}
 				incMap[keyNode.Value] = *valNode
 			}
@@ -94,7 +94,7 @@ func (strategyContext *strategyContext) handleExclude() error {
 		for _, exNode := range strategyContext.exclude {
 			// exNode is expected to be a mapping node
 			if exNode.Kind != yaml.MappingNode {
-				return fmt.Errorf("exclude entry is not a mapping node")
+				return errors.New("exclude entry is not a mapping node")
 			}
 			// Convert mapping to map[string]yaml.Node
 			exMap := make(map[string]yaml.Node)
@@ -102,7 +102,7 @@ func (strategyContext *strategyContext) handleExclude() error {
 				keyNode := exNode.Content[i]
 				valNode := exNode.Content[i+1]
 				if keyNode.Kind != yaml.ScalarNode {
-					return fmt.Errorf("exclude key is not scalar")
+					return errors.New("exclude key is not scalar")
 				}
 				exMap[keyNode.Value] = *valNode
 			}
@@ -158,9 +158,7 @@ func ExpandStrategy(strategy *Strategy, jobTraceWriter TraceWriter) (*StrategyRe
 			for _, row := range strategyContext.flatMatrix {
 				for _, val := range values {
 					newRow := make(map[string]yaml.Node)
-					for k, v := range row {
-						newRow[k] = v
-					}
+					maps.Copy(newRow, row)
 					newRow[key] = val
 					next = append(next, newRow)
 				}

@@ -113,7 +113,7 @@ func (Format) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResu
 		return nil, err
 	}
 
-	sargs := []interface{}{}
+	sargs := []any{}
 	for _, arg := range args[1:] {
 		el, err := eval.Evaluate(arg)
 		if err != nil {

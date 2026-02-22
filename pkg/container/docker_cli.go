@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -559,7 +560,7 @@ func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*con
 			return nil, errors.Errorf("--health-retries cannot be negative")
 		}
 		if copts.healthStartPeriod < 0 {
-			return nil, fmt.Errorf("--health-start-period cannot be negative")
+			return nil, errors.New("--health-start-period cannot be negative")
 		}
 
 		healthConfig = &container.HealthConfig{
@@ -836,7 +837,7 @@ func convertToStandardNotation(ports []string) ([]string, error) {
 	for _, publish := range ports {
 		if strings.Contains(publish, "=") {
 			params := map[string]string{"protocol": "tcp"}
-			for _, param := range strings.Split(publish, ",") {
+			for param := range strings.SplitSeq(publish, ",") {
 				opt := strings.Split(param, "=")
 				if len(opt) < 2 {
 					return optsList, errors.Errorf("invalid publish opts format (should be name=value but got '%s')", param)
@@ -1066,10 +1067,8 @@ func validateLinuxPath(val string, validator func(string) bool) (string, error) 
 // validateAttach validates that the specified string is a valid attach option.
 func validateAttach(val string) (string, error) {
 	s := strings.ToLower(val)
-	for _, str := range []string{"stdin", "stdout", "stderr"} {
-		if s == str {
-			return s, nil
-		}
+	if slices.Contains([]string{"stdin", "stdout", "stderr"}, s) {
+		return s, nil
 	}
 	return val, errors.Errorf("valid streams are STDIN, STDOUT and STDERR")
 }

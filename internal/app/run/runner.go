@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -145,7 +146,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	var stepIds []string
 	for i, v := range job.Steps {
 		if v.ID == "" {
-			v.ID = fmt.Sprint(i)
+			v.ID = strconv.Itoa(i)
 		}
 		stepIds = append(stepIds, v.ID)
 	}
@@ -204,7 +205,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// 	maxLifetime = time.Until(deadline)
 	// }
 
-	actCtx := map[string]interface{}{}
+	actCtx := map[string]any{}
 	forgeCtx := task.Context.AsMap()
 	actCtx["github"] = forgeCtx
 	actCtx["gitea"] = forgeCtx

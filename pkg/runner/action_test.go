@@ -99,7 +99,7 @@ runs:
 
 			action, err := readActionImpl(context.Background(), tt.step, readFile, model.ActionConfig{})
 
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 			assert.Equal(t, tt.expected, action)
 
 			closerMock.AssertExpectations(t)
@@ -218,7 +218,7 @@ func TestActionRunner(t *testing.T) {
 
 			err := runActionImpl(tt.step)(ctx)
 
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 			cm.AssertExpectations(t)
 		})
 	}

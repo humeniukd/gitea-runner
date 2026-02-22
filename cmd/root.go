@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
@@ -176,7 +178,7 @@ func bugReport(ctx context.Context, version string) error {
 	report += sprintf("Variant:", "https://gitea.com/actions-oss/act-cli / https://github.com/actions-oss/act-cli")
 	report += sprintf("GOOS:", runtime.GOOS)
 	report += sprintf("GOARCH:", runtime.GOARCH)
-	report += sprintf("NumCPU:", fmt.Sprint(runtime.NumCPU()))
+	report += sprintf("NumCPU:", strconv.Itoa(runtime.NumCPU()))
 
 	var dockerHost string
 	var exists bool
@@ -199,15 +201,21 @@ func bugReport(ctx context.Context, version string) error {
 	}
 
 	report += sprintf("Config files:", "")
+	var reportSb202 strings.Builder
+	var reportSb205 strings.Builder
 	for _, c := range configLocations() {
 		args := readArgsFile(c, false)
 		if len(args) > 0 {
-			report += fmt.Sprintf("\t%s:\n", c)
+			fmt.Fprintf(&reportSb202, "\t%s:\n", c)
+			var reportSb206 strings.Builder
 			for _, l := range args {
-				report += fmt.Sprintf("\t\t%s\n", l)
+				fmt.Fprintf(&reportSb206, "\t\t%s\n", l)
 			}
+			reportSb205.WriteString(reportSb206.String())
 		}
 	}
+	report += reportSb205.String()
+	report += reportSb202.String()
 
 	vcs, ok := debug.ReadBuildInfo()
 	if ok && vcs != nil {
@@ -220,9 +228,11 @@ func bugReport(ctx context.Context, version string) error {
 		report += sprintf("\tMain checksum:", vcs.Main.Sum)
 
 		report += fmt.Sprintln("\tBuild settings:")
+		var reportSb223 strings.Builder
 		for _, set := range vcs.Settings {
-			report += sprintf(fmt.Sprintf("\t\t%s:", set.Key), set.Value)
+			reportSb223.WriteString(sprintf(fmt.Sprintf("\t\t%s:", set.Key), set.Value))
 		}
+		report += reportSb223.String()
 	}
 
 	info, err := container.GetHostInfo(ctx)
@@ -245,13 +255,15 @@ func bugReport(ctx context.Context, version string) error {
 	report += sprintf("\tOS version:", info.OSVersion)
 	report += sprintf("\tOS arch:", info.Architecture)
 	report += sprintf("\tOS kernel:", info.KernelVersion)
-	report += sprintf("\tOS CPU:", fmt.Sprint(info.NCPU))
+	report += sprintf("\tOS CPU:", strconv.Itoa(info.NCPU))
 	report += sprintf("\tOS memory:", fmt.Sprintf("%d MB", info.MemTotal/1024/1024))
 
 	report += fmt.Sprintln("\tSecurity options:")
+	var reportSb252 strings.Builder
 	for _, secopt := range info.SecurityOptions {
-		report += fmt.Sprintf("\t\t%s\n", secopt)
+		fmt.Fprintf(&reportSb252, "\t\t%s\n", secopt)
 	}
+	report += reportSb252.String()
 
 	fmt.Println(report)
 	return nil
@@ -261,7 +273,7 @@ func generateManPage(cmd *cobra.Command) error {
 	header := &doc.GenManHeader{
 		Title:   "act",
 		Section: "1",
-		Source:  fmt.Sprintf("act %s", cmd.Version),
+		Source:  "act " + cmd.Version,
 	}
 	buf := new(bytes.Buffer)
 	cobra.CheckErr(doc.GenMan(cmd, header, buf))
@@ -575,7 +587,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		}
 		if plan != nil {
 			if len(plan.Stages) == 0 {
-				plannerErr = fmt.Errorf("could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
+				plannerErr = errors.New("could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
 			}
 		}
 		if plan == nil && plannerErr != nil {
@@ -611,7 +623,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			log.Warnf(deprecationWarning, "privileged", "--privileged")
 		}
 		if len(input.usernsMode) > 0 {
-			log.Warnf(deprecationWarning, "userns", fmt.Sprintf("--userns=%s", input.usernsMode))
+			log.Warnf(deprecationWarning, "userns", "--userns="+input.usernsMode)
 		}
 		if len(input.containerCapAdd) > 0 {
 			log.Warnf(deprecationWarning, "container-cap-add", fmt.Sprintf("--cap-add=%s", input.containerCapAdd))
@@ -699,9 +711,9 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		var r runner.Runner
 		if eventName == "workflow_call" {
 			// Do not use the totally broken code and instead craft a fake caller
-			convertedInputs := make(map[string]interface{})
+			convertedInputs := make(map[string]any)
 			for k, v := range inputs {
-				var raw interface{}
+				var raw any
 				if err := yaml.Unmarshal([]byte(v), &raw); err != nil {
 					return fmt.Errorf("failed to unmarshal input %s: %w", k, err)
 				}

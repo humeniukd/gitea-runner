@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"maps"
 	"runtime"
 	"strings"
 
@@ -90,7 +91,7 @@ func getScriptName(rc *RunContext, step *model.Step) string {
 	for rcs := rc; rcs.Parent != nil; rcs = rcs.Parent {
 		scriptName = fmt.Sprintf("%s-composite-%s", rcs.Parent.CurrentStep, scriptName)
 	}
-	return fmt.Sprintf("workflow/%s", scriptName)
+	return "workflow/" + scriptName
 }
 
 // TODO: Currently we just ignore top level keys, BUT we should return proper error on them
@@ -186,9 +187,7 @@ func (sr *stepRun) setupShell(ctx context.Context) {
 			}
 			step.Shell = shellWithFallback[0]
 			lenv := &localEnv{env: map[string]string{}}
-			for k, v := range sr.env {
-				lenv.env[k] = v
-			}
+			maps.Copy(lenv.env, sr.env)
 			sr.getRunContext().ApplyExtraPath(ctx, &lenv.env)
 			_, err := lookpath.LookPath2(shellWithFallback[0], lenv)
 			if err != nil {

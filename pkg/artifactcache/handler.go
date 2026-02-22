@@ -75,7 +75,7 @@ func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger
 	if outboundIP != "" {
 		h.outboundIP = outboundIP
 	} else if ip := common.GetOutboundIP(); ip == nil {
-		return nil, fmt.Errorf("unable to determine outbound IP address")
+		return nil, errors.New("unable to determine outbound IP address")
 	} else {
 		h.outboundIP = ip.String()
 	}
@@ -144,7 +144,7 @@ func CreateHandler(dir, externalAddress string, logger logrus.FieldLogger) (*Han
 	if externalAddress != "" {
 		h.externalAddress = externalAddress
 	} else if ip := common.GetOutboundIP(); ip == nil {
-		return nil, nil, fmt.Errorf("unable to determine outbound IP address")
+		return nil, nil, errors.New("unable to determine outbound IP address")
 	} else {
 		h.outboundIP = ip.String()
 	}
@@ -420,7 +420,7 @@ func findCache(db *bolthold.Store, keys []string, version string) (*Cache, error
 			}
 			return cache, nil
 		}
-		prefixPattern := fmt.Sprintf("^%s", regexp.QuoteMeta(prefix))
+		prefixPattern := "^" + regexp.QuoteMeta(prefix)
 		re, err := regexp.Compile(prefixPattern)
 		if err != nil {
 			continue

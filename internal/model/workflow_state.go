@@ -96,7 +96,7 @@ func (a *On) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-func (a *On) MarshalYAML() (interface{}, error) {
+func (a *On) MarshalYAML() (any, error) {
 	return a.Data, nil
 }
 

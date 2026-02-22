@@ -407,8 +407,8 @@ func TestMatchPattern(t *testing.T) {
 			patterns, err := CompilePatterns(kase.patterns...)
 			assert.NoError(t, err)
 
-			assert.EqualValues(t, kase.skipResult, Skip(patterns, kase.inputs, &StdOutTraceWriter{}), "skipResult")
-			assert.EqualValues(t, kase.filterResult, Filter(patterns, kase.inputs, &StdOutTraceWriter{}), "filterResult")
+			assert.Equal(t, kase.skipResult, Skip(patterns, kase.inputs, &StdOutTraceWriter{}), "skipResult")
+			assert.Equal(t, kase.filterResult, Filter(patterns, kase.inputs, &StdOutTraceWriter{}), "filterResult")
 		})
 	}
 }
