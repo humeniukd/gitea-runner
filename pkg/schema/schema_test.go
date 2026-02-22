@@ -19,9 +19,7 @@ jobs:
     steps:
     - run: exit 0
 `), &node)
-	if !require.NoError(t, err) {
-		return
-	}
+	require.NoError(t, err)
 	err = (&Node{
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
@@ -40,9 +38,7 @@ jobs:
     steps:
     - run: exit 0
 `), &node)
-	if !require.NoError(t, err) {
-		return
-	}
+	require.NoError(t, err)
 	err = (&Node{
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
@@ -61,9 +57,7 @@ jobs:
     - run: exit 0
       if: success() || failure() || always()
 `), &node)
-	if !require.NoError(t, err) {
-		return
-	}
+	require.NoError(t, err)
 	err = (&Node{
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
@@ -82,9 +76,7 @@ jobs:
     - run: exit 0
       if: ${{ success() || failure() || always() }}
 `), &node)
-	if !require.NoError(t, err) {
-		return
-	}
+	require.NoError(t, err)
 	err = (&Node{
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
@@ -101,9 +93,7 @@ jobs:
     runs-on: self-hosted
     x: failure
 `), &node)
-	if !require.NoError(t, err) {
-		return
-	}
+	require.NoError(t, err)
 	err = (&Node{
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
@@ -120,9 +110,7 @@ jobs:
     runs-on: self-hosted
     Runs-on: failure
 `), &node)
-	if !require.NoError(t, err) {
-		return
-	}
+	require.NoError(t, err)
 	err = (&Node{
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
@@ -140,9 +128,7 @@ jobs:
     steps:
     - run: exit 0
 `), &node)
-	if !require.NoError(t, err) {
-		return
-	}
+	require.NoError(t, err)
 	err = (&Node{
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
@@ -209,9 +195,7 @@ jobs:
 		t.Run(test.name, func(t *testing.T) {
 			var node yaml.Node
 			err := yaml.Unmarshal([]byte(test.input), &node)
-			if !require.NoError(t, err) {
-				return
-			}
+			require.NoError(t, err)
 			err = (&Node{
 				Definition: "workflow-root-strict",
 				Schema:     GetWorkflowSchema(),
@@ -247,9 +231,7 @@ runs:
 		t.Run(test.name, func(t *testing.T) {
 			var node yaml.Node
 			err := yaml.Unmarshal([]byte(test.input), &node)
-			if !require.NoError(t, err) {
-				return
-			}
+			require.NoError(t, err)
 			err = (&Node{
 				Definition: "action-root",
 				Schema:     GetActionSchema(),

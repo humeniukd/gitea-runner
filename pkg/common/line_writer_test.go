@@ -19,7 +19,7 @@ func TestLineWriter(t *testing.T) {
 	assert := assert.New(t)
 	write := func(s string) {
 		n, err := lineWriter.Write([]byte(s))
-		require.NoError(err)
+		require.NoError(t, err)
 		assert.Equal(len(s), n, s)
 	}
 

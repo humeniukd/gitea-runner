@@ -40,7 +40,7 @@ func TestFindGitSlug(t *testing.T) {
 	for _, tt := range slugTests {
 		provider, slug, err := findGitSlug(tt.url, "github.com")
 
-		require.NoError(err)
+		require.NoError(t, err)
 		assert.Equal(tt.provider, provider)
 		assert.Equal(tt.slug, slug)
 	}
@@ -80,23 +80,23 @@ func TestFindGitRemoteURL(t *testing.T) {
 	basedir := testDir(t)
 	gitConfig()
 	err := gitCmd("init", basedir)
-	require.NoError(err)
+	require.NoError(t, err)
 	err = cleanGitHooks(basedir)
-	require.NoError(err)
+	require.NoError(t, err)
 
 	remoteURL := "https://git-codecommit.us-east-1.amazonaws.com/v1/repos/my-repo-name"
 	err = gitCmd("-C", basedir, "remote", "add", "origin", remoteURL)
-	require.NoError(err)
+	require.NoError(t, err)
 
 	u, err := findGitRemoteURL(context.Background(), basedir, "origin")
-	require.NoError(err)
+	require.NoError(t, err)
 	assert.Equal(remoteURL, u)
 
 	remoteURL = "git@github.com/AwesomeOwner/MyAwesomeRepo.git"
 	err = gitCmd("-C", basedir, "remote", "add", "upstream", remoteURL)
-	require.NoError(err)
+	require.NoError(t, err)
 	u, err = findGitRemoteURL(context.Background(), basedir, "upstream")
-	require.NoError(err)
+	require.NoError(t, err)
 	assert.Equal(remoteURL, u)
 }
 

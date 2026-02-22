@@ -205,7 +205,7 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 	planner, err := model.NewWorkflowPlanner(fullWorkflowPath, model.PlannerConfig{})
 	if j.errorMessage != "" && err != nil {
 		assert.Error(t, err, j.errorMessage)
-	} else if require.NoError(t, err, fullWorkflowPath) {
+	} else if assert.NoError(t, err, fullWorkflowPath) {
 		plan, err := planner.PlanEvent(j.eventName)
 		assert.NotEqual(t, (err == nil), (plan == nil), "PlanEvent should return either a plan or an error")
 		if err == nil && plan != nil {

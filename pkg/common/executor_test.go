@@ -17,7 +17,7 @@ func TestNewWorkflow(t *testing.T) {
 
 	// empty
 	emptyWorkflow := NewPipelineExecutor()
-	require.NoError(emptyWorkflow(ctx))
+	require.NoError(t, emptyWorkflow(ctx))
 
 	// error case
 	errorWorkflow := NewErrorExecutor(errors.New("test error"))
@@ -34,7 +34,7 @@ func TestNewWorkflow(t *testing.T) {
 			runcount++
 			return nil
 		})
-	require.NoError(successWorkflow(ctx))
+	require.NoError(t, successWorkflow(ctx))
 	assert.Equal(2, runcount)
 }
 
@@ -56,7 +56,7 @@ func TestNewConditionalExecutor(t *testing.T) {
 		return nil
 	})(ctx)
 
-	require.NoError(err)
+	require.NoError(t, err)
 	assert.Equal(0, trueCount)
 	assert.Equal(1, falseCount)
 
@@ -70,7 +70,7 @@ func TestNewConditionalExecutor(t *testing.T) {
 		return nil
 	})(ctx)
 
-	require.NoError(err)
+	require.NoError(t, err)
 	assert.Equal(1, trueCount)
 	assert.Equal(1, falseCount)
 }
@@ -100,7 +100,7 @@ func TestNewParallelExecutor(t *testing.T) {
 
 	assert.Equal(3, count, "should run all 3 executors")
 	assert.Equal(2, maxCount, "should run at most 2 executors in parallel")
-	require.NoError(err)
+	require.NoError(t, err)
 
 	// Reset to test running the executor with 0 parallelism
 	count = 0
@@ -111,7 +111,7 @@ func TestNewParallelExecutor(t *testing.T) {
 
 	assert.Equal(3, count, "should run all 3 executors")
 	assert.Equal(1, maxCount, "should run at most 1 executors in parallel")
-	require.NoError(errSingle)
+	require.NoError(t, errSingle)
 }
 
 func TestNewParallelExecutorFailed(t *testing.T) {
