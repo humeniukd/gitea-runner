@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/actions-oss/act-cli/pkg/common"
-	"github.com/actions-oss/act-cli/pkg/container"
-	"github.com/actions-oss/act-cli/pkg/tart"
+	"gitea.com/gitea/act_runner/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/container"
+	"gitea.com/gitea/act_runner/pkg/tart"
 )
 
 func (rc *RunContext) startTartEnvironment() common.Executor {

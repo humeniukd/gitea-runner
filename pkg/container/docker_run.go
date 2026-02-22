@@ -35,8 +35,8 @@ import (
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/pflag"
 
-	"github.com/actions-oss/act-cli/pkg/common"
-	"github.com/actions-oss/act-cli/pkg/filecollector"
+	"gitea.com/gitea/act_runner/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/filecollector"
 )
 
 // NewContainer creates a reference to a container

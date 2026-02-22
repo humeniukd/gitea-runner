@@ -6,7 +6,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/actions-oss/act-cli/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/common"
 	"github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/config/credentials"
 	"github.com/docker/docker/api/types/registry"

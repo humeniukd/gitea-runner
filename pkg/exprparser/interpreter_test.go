@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/actions-oss/act-cli/pkg/model"
+	"gitea.com/gitea/act_runner/pkg/model"
 	"github.com/stretchr/testify/assert"
 )
 

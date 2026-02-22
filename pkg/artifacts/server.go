@@ -15,7 +15,7 @@ import (
 
 	"github.com/julienschmidt/httprouter"
 
-	"github.com/actions-oss/act-cli/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/common"
 )
 
 type FileContainerResourceURL struct {

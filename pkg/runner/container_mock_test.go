@@ -4,8 +4,8 @@ import (
 	"context"
 	"io"
 
-	"github.com/actions-oss/act-cli/pkg/common"
-	"github.com/actions-oss/act-cli/pkg/container"
+	"gitea.com/gitea/act_runner/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/container"
 	"github.com/stretchr/testify/mock"
 )
 

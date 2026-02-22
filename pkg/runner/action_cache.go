@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/actions-oss/act-cli/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/common"
 	git "github.com/go-git/go-git/v5"
 	config "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"

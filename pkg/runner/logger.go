@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/actions-oss/act-cli/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/common"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/term"

@@ -1,6 +1,6 @@
 package exprparser
 
-import "github.com/actions-oss/act-cli/pkg/model"
+import "gitea.com/gitea/act_runner/pkg/model"
 
 func (impl *interperterImpl) getNeedsTransitive(job *model.Job) []string {
 	needs := job.Needs()

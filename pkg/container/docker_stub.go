@@ -6,8 +6,8 @@ import (
 	"context"
 	"runtime"
 
+	"gitea.com/gitea/act_runner/pkg/common"
 	"github.com/docker/docker/api/types/system"
-	"github.com/actions-oss/act-cli/pkg/common"
 	"github.com/pkg/errors"
 )
 

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/actions-oss/act-cli/pkg/common"
-	"github.com/actions-oss/act-cli/pkg/common/git"
+	"gitea.com/gitea/act_runner/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/common/git"
 )
 
 type GithubContext struct {

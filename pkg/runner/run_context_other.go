@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/actions-oss/act-cli/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/common"
 )
 
 func (rc *RunContext) startTartEnvironment() common.Executor {

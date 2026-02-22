@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	v2 "github.com/actions-oss/act-cli/internal/eval/v2"
-	"github.com/actions-oss/act-cli/pkg/schema"
+	v2 "gitea.com/gitea/act_runner/internal/eval/v2"
+	"gitea.com/gitea/act_runner/pkg/schema"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )

@@ -13,9 +13,9 @@ import (
 
 	"github.com/kballard/go-shellquote"
 
-	"github.com/actions-oss/act-cli/pkg/common"
-	"github.com/actions-oss/act-cli/pkg/container"
-	"github.com/actions-oss/act-cli/pkg/model"
+	"gitea.com/gitea/act_runner/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/container"
+	"gitea.com/gitea/act_runner/pkg/model"
 )
 
 type actionStep interface {

@@ -25,14 +25,14 @@ import (
 	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 
-	"github.com/actions-oss/act-cli/pkg/artifactcache"
-	"github.com/actions-oss/act-cli/pkg/artifacts"
-	"github.com/actions-oss/act-cli/pkg/common"
-	"github.com/actions-oss/act-cli/pkg/container"
-	"github.com/actions-oss/act-cli/pkg/gh"
-	"github.com/actions-oss/act-cli/pkg/model"
-	"github.com/actions-oss/act-cli/pkg/runner"
-	"github.com/actions-oss/act-cli/pkg/schema"
+	"gitea.com/gitea/act_runner/pkg/artifactcache"
+	"gitea.com/gitea/act_runner/pkg/artifacts"
+	"gitea.com/gitea/act_runner/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/container"
+	"gitea.com/gitea/act_runner/pkg/gh"
+	"gitea.com/gitea/act_runner/pkg/model"
+	"gitea.com/gitea/act_runner/pkg/runner"
+	"gitea.com/gitea/act_runner/pkg/schema"
 )
 
 type Flag struct {

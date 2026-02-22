@@ -5,8 +5,8 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/actions-oss/act-cli/internal/eval/functions"
-	exprparser "github.com/actions-oss/act-cli/internal/expr"
+	"gitea.com/gitea/act_runner/internal/eval/functions"
+	exprparser "gitea.com/gitea/act_runner/internal/expr"
 )
 
 type FromJSON struct {

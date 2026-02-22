@@ -14,10 +14,10 @@ import (
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	"connectrpc.com/connect"
-	"github.com/actions-oss/act-cli/pkg/artifactcache"
-	"github.com/actions-oss/act-cli/pkg/model"
-	"github.com/actions-oss/act-cli/pkg/runner"
-	"github.com/actions-oss/act-cli/pkg/schema"
+	"gitea.com/gitea/act_runner/pkg/artifactcache"
+	"gitea.com/gitea/act_runner/pkg/model"
+	"gitea.com/gitea/act_runner/pkg/runner"
+	"gitea.com/gitea/act_runner/pkg/schema"
 	"github.com/docker/docker/api/types/container"
 	log "github.com/sirupsen/logrus"
 

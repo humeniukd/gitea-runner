@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/actions-oss/act-cli/pkg/schema"
+	"gitea.com/gitea/act_runner/pkg/schema"
 	"gopkg.in/yaml.v3"
 )
 

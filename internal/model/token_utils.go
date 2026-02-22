@@ -3,7 +3,7 @@ package model
 import (
 	"strings"
 
-	v2 "github.com/actions-oss/act-cli/internal/eval/v2"
+	v2 "gitea.com/gitea/act_runner/internal/eval/v2"
 	"gopkg.in/yaml.v3"
 )
 

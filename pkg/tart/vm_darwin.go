@@ -13,7 +13,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/actions-oss/act-cli/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/common"
 	"github.com/avast/retry-go"
 	"golang.org/x/crypto/ssh"
 )

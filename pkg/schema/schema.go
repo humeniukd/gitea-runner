@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	exprparser "github.com/actions-oss/act-cli/internal/expr"
+	exprparser "gitea.com/gitea/act_runner/internal/expr"
 	"gopkg.in/yaml.v3"
 )
 

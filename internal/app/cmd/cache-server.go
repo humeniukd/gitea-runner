@@ -10,7 +10,7 @@ import (
 
 	"gitea.com/gitea/act_runner/internal/pkg/config"
 
-	"github.com/actions-oss/act-cli/pkg/artifactcache"
+	"gitea.com/gitea/act_runner/pkg/artifactcache"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )

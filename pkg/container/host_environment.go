@@ -20,9 +20,9 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"golang.org/x/term"
 
-	"github.com/actions-oss/act-cli/pkg/common"
-	"github.com/actions-oss/act-cli/pkg/filecollector"
-	"github.com/actions-oss/act-cli/pkg/lookpath"
+	"gitea.com/gitea/act_runner/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/filecollector"
+	"gitea.com/gitea/act_runner/pkg/lookpath"
 )
 
 type HostEnvironment struct {

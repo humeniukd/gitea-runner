@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/actions-oss/act-cli/pkg/model"
+	"gitea.com/gitea/act_runner/pkg/model"
 )
 
 func printList(plan *model.Plan) error {

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/actions-oss/act-cli/pkg/exprparser"
-	"github.com/actions-oss/act-cli/pkg/model"
+	"gitea.com/gitea/act_runner/pkg/exprparser"
+	"gitea.com/gitea/act_runner/pkg/model"
 	"github.com/golang-jwt/jwt/v5"
 
 	log "github.com/sirupsen/logrus"

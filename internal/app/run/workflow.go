@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
-	"github.com/actions-oss/act-cli/pkg/model"
-	"github.com/actions-oss/act-cli/pkg/schema"
+	"gitea.com/gitea/act_runner/pkg/model"
+	"gitea.com/gitea/act_runner/pkg/schema"
 	"gopkg.in/yaml.v3"
 )
 

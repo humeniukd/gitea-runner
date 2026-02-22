@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"regexp"
 
-	v2 "github.com/actions-oss/act-cli/internal/eval/v2"
-	exprparser "github.com/actions-oss/act-cli/internal/expr"
-	"github.com/actions-oss/act-cli/pkg/schema"
+	v2 "gitea.com/gitea/act_runner/internal/eval/v2"
+	exprparser "gitea.com/gitea/act_runner/internal/expr"
+	"gitea.com/gitea/act_runner/pkg/schema"
 	"gopkg.in/yaml.v3"
 )
 

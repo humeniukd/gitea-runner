@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/actions-oss/act-cli/pkg/common"
-	"github.com/actions-oss/act-cli/pkg/container"
-	"github.com/actions-oss/act-cli/pkg/exprparser"
-	"github.com/actions-oss/act-cli/pkg/model"
+	"gitea.com/gitea/act_runner/pkg/common"
+	"gitea.com/gitea/act_runner/pkg/container"
+	"gitea.com/gitea/act_runner/pkg/exprparser"
+	"gitea.com/gitea/act_runner/pkg/model"
 	"github.com/sirupsen/logrus"
 )
 

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
-	"github.com/actions-oss/act-cli/pkg/model"
+	"gitea.com/gitea/act_runner/pkg/model"
 	"github.com/stretchr/testify/require"
 	"go.yaml.in/yaml/v4"
 	"gotest.tools/v3/assert"

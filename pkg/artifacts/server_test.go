@@ -17,8 +17,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/actions-oss/act-cli/pkg/model"
-	"github.com/actions-oss/act-cli/pkg/runner"
+	"gitea.com/gitea/act_runner/pkg/model"
+	"gitea.com/gitea/act_runner/pkg/runner"
 )
 
 type writableMapFile struct {

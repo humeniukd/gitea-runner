@@ -7,9 +7,9 @@ import (
 	"reflect"
 	"strings"
 
-	eval "github.com/actions-oss/act-cli/internal/eval/v2"
-	exprparser "github.com/actions-oss/act-cli/internal/expr"
-	"github.com/actions-oss/act-cli/pkg/model"
+	eval "gitea.com/gitea/act_runner/internal/eval/v2"
+	exprparser "gitea.com/gitea/act_runner/internal/expr"
+	"gitea.com/gitea/act_runner/pkg/model"
 )
 
 type EvaluationEnvironment struct {
