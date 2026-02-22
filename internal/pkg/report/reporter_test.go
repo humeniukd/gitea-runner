@@ -324,7 +324,6 @@ func TestReporter_RunDaemonClose_Race(t *testing.T) {
 	// RunDaemon reads r.closed and reschedules itself via time.AfterFunc.
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		defer wg.Done()
 		reporter.RunDaemon()
 	})
 
