@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMatchPattern(t *testing.T) {
@@ -405,7 +406,7 @@ func TestMatchPattern(t *testing.T) {
 	for _, kase := range kases {
 		t.Run(strings.Join(kase.patterns, ","), func(t *testing.T) {
 			patterns, err := CompilePatterns(kase.patterns...)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			assert.Equal(t, kase.skipResult, Skip(patterns, kase.inputs, &StdOutTraceWriter{}), "skipResult")
 			assert.Equal(t, kase.filterResult, Filter(patterns, kase.inputs, &StdOutTraceWriter{}), "filterResult")

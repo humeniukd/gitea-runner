@@ -95,7 +95,7 @@ jobs:
 
 	var raw any
 	err = node.Content[0].Decode(&raw)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	ee.RestrictEval = true
 	ee.EvaluationContext.Variables = v2.CaseInsensitiveObject[any]{
@@ -136,6 +136,6 @@ jobs:
 		}
 	}
 	out, err := yaml.Marshal(&myw)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotEmpty(t, out)
 }

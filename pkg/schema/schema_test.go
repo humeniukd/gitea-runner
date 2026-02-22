@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
@@ -18,14 +19,14 @@ jobs:
     steps:
     - run: exit 0
 `), &node)
-	if !assert.NoError(t, err) {
+	if !require.NoError(t, err) {
 		return
 	}
 	err = (&Node{
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
 	}).UnmarshalYAML(&node)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestAdditionalFunctionsFailure(t *testing.T) {
@@ -39,7 +40,7 @@ jobs:
     steps:
     - run: exit 0
 `), &node)
-	if !assert.NoError(t, err) {
+	if !require.NoError(t, err) {
 		return
 	}
 	err = (&Node{
@@ -60,14 +61,14 @@ jobs:
     - run: exit 0
       if: success() || failure() || always()
 `), &node)
-	if !assert.NoError(t, err) {
+	if !require.NoError(t, err) {
 		return
 	}
 	err = (&Node{
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
 	}).UnmarshalYAML(&node)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestAdditionalFunctionsStepsExprSyntax(t *testing.T) {
@@ -81,14 +82,14 @@ jobs:
     - run: exit 0
       if: ${{ success() || failure() || always() }}
 `), &node)
-	if !assert.NoError(t, err) {
+	if !require.NoError(t, err) {
 		return
 	}
 	err = (&Node{
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
 	}).UnmarshalYAML(&node)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestFailure(t *testing.T) {
@@ -100,7 +101,7 @@ jobs:
     runs-on: self-hosted
     x: failure
 `), &node)
-	if !assert.NoError(t, err) {
+	if !require.NoError(t, err) {
 		return
 	}
 	err = (&Node{
@@ -119,7 +120,7 @@ jobs:
     runs-on: self-hosted
     Runs-on: failure
 `), &node)
-	if !assert.NoError(t, err) {
+	if !require.NoError(t, err) {
 		return
 	}
 	err = (&Node{
@@ -139,14 +140,14 @@ jobs:
     steps:
     - run: exit 0
 `), &node)
-	if !assert.NoError(t, err) {
+	if !require.NoError(t, err) {
 		return
 	}
 	err = (&Node{
 		Definition: "workflow-root-strict",
 		Schema:     GetWorkflowSchema(),
 	}).UnmarshalYAML(&node)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestSchemaErrors(t *testing.T) {
@@ -208,7 +209,7 @@ jobs:
 		t.Run(test.name, func(t *testing.T) {
 			var node yaml.Node
 			err := yaml.Unmarshal([]byte(test.input), &node)
-			if !assert.NoError(t, err) {
+			if !require.NoError(t, err) {
 				return
 			}
 			err = (&Node{
@@ -218,7 +219,7 @@ jobs:
 			if test.err != "" {
 				assert.ErrorContains(t, err, test.err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 		})
 	}
@@ -246,7 +247,7 @@ runs:
 		t.Run(test.name, func(t *testing.T) {
 			var node yaml.Node
 			err := yaml.Unmarshal([]byte(test.input), &node)
-			if !assert.NoError(t, err) {
+			if !require.NoError(t, err) {
 				return
 			}
 			err = (&Node{
@@ -256,7 +257,7 @@ runs:
 			if test.err != "" {
 				assert.ErrorContains(t, err, test.err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 		})
 	}

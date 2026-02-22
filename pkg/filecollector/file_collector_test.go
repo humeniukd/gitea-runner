@@ -16,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type memoryFs struct {
@@ -105,12 +106,12 @@ func TestIgnoredTrackedfile(t *testing.T) {
 		},
 	}
 	err := fc.Fs.Walk("mygitrepo", fc.CollectFiles(context.Background(), []string{}))
-	assert.NoError(t, err, "successfully collect files")
+	require.NoError(t, err, "successfully collect files")
 	tw.Close()
 	_, _ = tmpTar.Seek(0, io.SeekStart)
 	tr := tar.NewReader(tmpTar)
 	h, err := tr.Next()
-	assert.NoError(t, err, "tar must not be empty")
+	require.NoError(t, err, "tar must not be empty")
 	assert.Equal(t, ".gitignore", h.Name)
 	_, err = tr.Next()
 	assert.ErrorIs(t, err, io.EOF, "tar must only contain one element")
@@ -124,21 +125,21 @@ func TestSymlinks(t *testing.T) {
 	repo, _ := git.Init(filesystem.NewStorage(dotgit, cache.NewObjectLRUDefault()), worktree)
 	// This file shouldn't be in the tar
 	f, err := worktree.Create(".env")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	_, err = f.Write([]byte("test=val1\n"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	f.Close()
 	err = worktree.Symlink(".env", "test.env")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	w, err := repo.Worktree()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// .gitignore is in the tar after adding it to the index
 	_, err = w.Add(".env")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	_, err = w.Add("test.env")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	tmpTar, _ := fs.Create("temp.tar")
 	tw := tar.NewWriter(tmpTar)
@@ -154,7 +155,7 @@ func TestSymlinks(t *testing.T) {
 		},
 	}
 	err = fc.Fs.Walk("mygitrepo", fc.CollectFiles(context.Background(), []string{}))
-	assert.NoError(t, err, "successfully collect files")
+	require.NoError(t, err, "successfully collect files")
 	tw.Close()
 	_, _ = tmpTar.Seek(0, io.SeekStart)
 	tr := tar.NewReader(tmpTar)

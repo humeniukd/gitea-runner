@@ -6,6 +6,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type WorkflowPlanTest struct {
@@ -28,14 +29,14 @@ func TestPlanner(t *testing.T) {
 	}
 
 	workdir, err := filepath.Abs("testdata")
-	assert.NoError(t, err, workdir)
+	require.NoError(t, err, workdir)
 	for _, table := range tables {
 		fullWorkflowPath := filepath.Join(workdir, table.workflowPath)
 		_, err = NewWorkflowPlanner(fullWorkflowPath, PlannerConfig{
 			Recursive: !table.noWorkflowRecurse,
 		})
 		if table.errorMessage == "" {
-			assert.NoError(t, err, "WorkflowPlanner should exit without any error")
+			require.NoError(t, err, "WorkflowPlanner should exit without any error")
 		} else {
 			assert.EqualError(t, err, table.errorMessage)
 		}
@@ -55,6 +56,6 @@ func TestWorkflow(t *testing.T) {
 
 	// Check that a valid job id returns non-error
 	result, err := createStages(&workflow, "valid_job")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, result)
 }

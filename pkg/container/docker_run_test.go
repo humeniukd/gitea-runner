@@ -16,12 +16,13 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDocker(t *testing.T) {
 	ctx := context.Background()
 	client, err := GetDockerClient(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer client.Close()
 
 	dockerBuild := NewDockerBuildExecutor(NewDockerBuildExecutorInput{
@@ -30,7 +31,7 @@ func TestDocker(t *testing.T) {
 	})
 
 	err = dockerBuild(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	cr := &containerReference{
 		cli: client,
@@ -47,7 +48,7 @@ func TestDocker(t *testing.T) {
 
 	envExecutor := cr.extractFromImageEnv(&env)
 	err = envExecutor(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, map[string]string{
 		"PATH":            "/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin:/this/path/does/not/exists/anywhere:/this/either",
 		"RANDOM_VAR":      "WITH_VALUE",

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
@@ -17,7 +18,7 @@ test:
 	*node.Content[0].Content[1].Content[1] = yaml.Node{
 		Kind: yaml.AliasNode,
 	}
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = resolveAliases(&node)
 	assert.Error(t, err)
 }
@@ -102,12 +103,12 @@ c: *a
 				assert.Error(t, err)
 				return
 			}
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			err = resolveAliases(&node)
 			if tt.anchorErr {
 				assert.Error(t, err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 		})
 	}

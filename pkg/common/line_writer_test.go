@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLineWriter(t *testing.T) {
@@ -18,7 +19,7 @@ func TestLineWriter(t *testing.T) {
 	assert := assert.New(t)
 	write := func(s string) {
 		n, err := lineWriter.Write([]byte(s))
-		assert.NoError(err)
+		require.NoError(err)
 		assert.Equal(len(s), n, s)
 	}
 

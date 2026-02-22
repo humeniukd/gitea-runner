@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
 	"gitea.com/gitea/act_runner/pkg/common"
@@ -290,7 +291,7 @@ func TestStepActionRemotePre(t *testing.T) {
 
 			err := sar.pre()(ctx)
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			sarm.AssertExpectations(t)
 			cacheMock.AssertExpectations(t)
@@ -343,7 +344,7 @@ func TestStepActionRemotePreThroughAction(t *testing.T) {
 
 			err := sar.pre()(ctx)
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			sarm.AssertExpectations(t)
 			cacheMock.AssertExpectations(t)
@@ -397,7 +398,7 @@ func TestStepActionRemotePreThroughActionToken(t *testing.T) {
 
 			err := sar.pre()(ctx)
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			sarm.AssertExpectations(t)
 			cacheMock.AssertExpectations(t)

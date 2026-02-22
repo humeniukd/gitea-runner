@@ -19,6 +19,7 @@ import (
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 	assert "github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
 	"gitea.com/gitea/act_runner/pkg/common"
@@ -58,7 +59,7 @@ func init() {
 
 func TestNoWorkflowsFoundByPlanner(t *testing.T) {
 	planner, err := model.NewWorkflowPlanner("hashfiles", model.PlannerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	out := log.StandardLogger().Out
 	var buf bytes.Buffer
@@ -66,19 +67,19 @@ func TestNoWorkflowsFoundByPlanner(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 	plan, err := planner.PlanEvent("pull_request")
 	assert.NotNil(t, plan)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "no workflows found by planner")
 	buf.Reset()
 	plan, err = planner.PlanAll()
 	assert.NotNil(t, plan)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "no workflows found by planner")
 	log.SetOutput(out)
 }
 
 func TestGraphMissingEvent(t *testing.T) {
 	planner, err := model.NewWorkflowPlanner("testdata/issue-1595/no-event.yml", model.PlannerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	out := log.StandardLogger().Out
 	var buf bytes.Buffer
@@ -86,7 +87,7 @@ func TestGraphMissingEvent(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 
 	plan, err := planner.PlanEvent("push")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, plan)
 	assert.Empty(t, plan.Stages)
 
@@ -96,7 +97,7 @@ func TestGraphMissingEvent(t *testing.T) {
 
 func TestGraphMissingFirst(t *testing.T) {
 	planner, err := model.NewWorkflowPlanner("testdata/issue-1595/no-first.yml", model.PlannerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	plan, err := planner.PlanEvent("push")
 	assert.EqualError(t, err, "unable to build dependency graph for no first (no-first.yml)")
@@ -106,7 +107,7 @@ func TestGraphMissingFirst(t *testing.T) {
 
 func TestGraphWithMissing(t *testing.T) {
 	planner, err := model.NewWorkflowPlanner("testdata/issue-1595/missing.yml", model.PlannerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	out := log.StandardLogger().Out
 	var buf bytes.Buffer
@@ -125,7 +126,7 @@ func TestGraphWithSomeMissing(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 
 	planner, err := model.NewWorkflowPlanner("testdata/issue-1595/", model.PlannerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	out := log.StandardLogger().Out
 	var buf bytes.Buffer
@@ -143,10 +144,10 @@ func TestGraphWithSomeMissing(t *testing.T) {
 
 func TestGraphEvent(t *testing.T) {
 	planner, err := model.NewWorkflowPlanner("testdata/basic", model.PlannerConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	plan, err := planner.PlanEvent("push")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, plan)
 	assert.NotNil(t, plan.Stages)
 	assert.Len(t, plan.Stages, 3, "stages")
@@ -158,7 +159,7 @@ func TestGraphEvent(t *testing.T) {
 	assert.Equal(t, "test", plan.Stages[2].Runs[0].JobID, "jobid")
 
 	plan, err = planner.PlanEvent("release")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, plan)
 	assert.Empty(t, plan.Stages)
 }
@@ -178,7 +179,7 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 	log.SetLevel(logLevel)
 
 	workdir, err := filepath.Abs(j.workdir)
-	assert.NoError(t, err, workdir)
+	require.NoError(t, err, workdir)
 
 	fullWorkflowPath := filepath.Join(workdir, j.workflowPath)
 	runnerConfig := &Config{
@@ -199,18 +200,18 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 	}
 
 	runner, err := New(runnerConfig)
-	assert.NoError(t, err, j.workflowPath)
+	require.NoError(t, err, j.workflowPath)
 
 	planner, err := model.NewWorkflowPlanner(fullWorkflowPath, model.PlannerConfig{})
 	if j.errorMessage != "" && err != nil {
 		assert.Error(t, err, j.errorMessage)
-	} else if assert.NoError(t, err, fullWorkflowPath) {
+	} else if require.NoError(t, err, fullWorkflowPath) {
 		plan, err := planner.PlanEvent(j.eventName)
 		assert.NotEqual(t, (err == nil), (plan == nil), "PlanEvent should return either a plan or an error")
 		if err == nil && plan != nil {
 			err = runner.NewPlanExecutor(plan)(ctx)
 			if j.errorMessage == "" {
-				assert.NoError(t, err, fullWorkflowPath)
+				require.NoError(t, err, fullWorkflowPath)
 			} else {
 				assert.Error(t, err, j.errorMessage)
 			}
@@ -780,9 +781,9 @@ func TestRunEventSecrets(t *testing.T) {
 	}
 
 	env, err := godotenv.Read(filepath.Join(workdir, workflowPath, ".env"))
-	assert.NoError(t, err, "Failed to read .env")
+	require.NoError(t, err, "Failed to read .env")
 	secrets, _ := godotenv.Read(filepath.Join(workdir, workflowPath, ".secrets"))
-	assert.NoError(t, err, "Failed to read .secrets")
+	require.NoError(t, err, "Failed to read .secrets")
 
 	tjfi.runTest(context.Background(), t, &Config{Secrets: secrets, Env: env})
 }

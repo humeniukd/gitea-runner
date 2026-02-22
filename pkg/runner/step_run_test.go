@@ -6,8 +6,8 @@ import (
 	"io"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"gitea.com/gitea/act_runner/pkg/container"
 	"gitea.com/gitea/act_runner/pkg/model"
@@ -78,7 +78,7 @@ func TestStepRun(t *testing.T) {
 	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/pathcmd.txt").Return(io.NopCloser(&bytes.Buffer{}), nil)
 
 	err := sr.main()(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	cm.AssertExpectations(t)
 }
@@ -88,8 +88,8 @@ func TestStepRunPrePost(t *testing.T) {
 	sr := &stepRun{}
 
 	err := sr.pre()(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = sr.post()(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }

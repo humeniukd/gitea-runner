@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGracefulJobCancellationViaSigint(t *testing.T) {
@@ -18,8 +19,8 @@ func TestGracefulJobCancellationViaSigint(t *testing.T) {
 	assert.NotNil(t, channel)
 	cancelCtx := JobCancelContext(ctx)
 	assert.NotNil(t, cancelCtx)
-	assert.NoError(t, ctx.Err())
-	assert.NoError(t, cancelCtx.Err())
+	require.NoError(t, ctx.Err())
+	require.NoError(t, cancelCtx.Err())
 	channel <- os.Interrupt
 	select {
 	case <-time.After(1 * time.Second):
@@ -30,7 +31,7 @@ func TestGracefulJobCancellationViaSigint(t *testing.T) {
 	if assert.Error(t, cancelCtx.Err(), "context canceled") {
 		assert.Equal(t, context.Canceled, cancelCtx.Err())
 	}
-	assert.NoError(t, ctx.Err())
+	require.NoError(t, ctx.Err())
 	channel <- os.Interrupt
 	select {
 	case <-time.After(1 * time.Second):
@@ -50,8 +51,8 @@ func TestForceCancellationViaSigterm(t *testing.T) {
 	assert.NotNil(t, channel)
 	cancelCtx := JobCancelContext(ctx)
 	assert.NotNil(t, cancelCtx)
-	assert.NoError(t, ctx.Err())
-	assert.NoError(t, cancelCtx.Err())
+	require.NoError(t, ctx.Err())
+	require.NoError(t, cancelCtx.Err())
 	channel <- syscall.SIGTERM
 	select {
 	case <-time.After(1 * time.Second):
@@ -78,7 +79,7 @@ func TestCreateGracefulJobCancellationContext(t *testing.T) {
 	assert.NotNil(t, cancel)
 	cancelCtx := JobCancelContext(ctx)
 	assert.NotNil(t, cancelCtx)
-	assert.NoError(t, cancelCtx.Err())
+	require.NoError(t, cancelCtx.Err())
 }
 
 func TestCreateGracefulJobCancellationContextCancelFunc(t *testing.T) {
@@ -87,7 +88,7 @@ func TestCreateGracefulJobCancellationContextCancelFunc(t *testing.T) {
 	assert.NotNil(t, cancel)
 	cancelCtx := JobCancelContext(ctx)
 	assert.NotNil(t, cancelCtx)
-	assert.NoError(t, cancelCtx.Err())
+	require.NoError(t, cancelCtx.Err())
 	cancel()
 	if assert.Error(t, ctx.Err(), "context canceled") {
 		assert.Equal(t, context.Canceled, ctx.Err())

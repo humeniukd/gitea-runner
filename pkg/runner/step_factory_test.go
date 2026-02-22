@@ -5,6 +5,7 @@ import (
 
 	"gitea.com/gitea/act_runner/pkg/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStepFactoryNewStep(t *testing.T) {
@@ -62,7 +63,7 @@ func TestStepFactoryNewStep(t *testing.T) {
 			step, err := sf.newStep(tt.model, &RunContext{})
 
 			assert.True(t, tt.check((step)))
-			assert.NoError(t, err)
+			require.NoError(t, err)
 		})
 	}
 }

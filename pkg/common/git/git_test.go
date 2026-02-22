@@ -40,7 +40,7 @@ func TestFindGitSlug(t *testing.T) {
 	for _, tt := range slugTests {
 		provider, slug, err := findGitSlug(tt.url, "github.com")
 
-		assert.NoError(err)
+		require.NoError(err)
 		assert.Equal(tt.provider, provider)
 		assert.Equal(tt.slug, slug)
 	}
@@ -80,23 +80,23 @@ func TestFindGitRemoteURL(t *testing.T) {
 	basedir := testDir(t)
 	gitConfig()
 	err := gitCmd("init", basedir)
-	assert.NoError(err)
+	require.NoError(err)
 	err = cleanGitHooks(basedir)
-	assert.NoError(err)
+	require.NoError(err)
 
 	remoteURL := "https://git-codecommit.us-east-1.amazonaws.com/v1/repos/my-repo-name"
 	err = gitCmd("-C", basedir, "remote", "add", "origin", remoteURL)
-	assert.NoError(err)
+	require.NoError(err)
 
 	u, err := findGitRemoteURL(context.Background(), basedir, "origin")
-	assert.NoError(err)
+	require.NoError(err)
 	assert.Equal(remoteURL, u)
 
 	remoteURL = "git@github.com/AwesomeOwner/MyAwesomeRepo.git"
 	err = gitCmd("-C", basedir, "remote", "add", "upstream", remoteURL)
-	assert.NoError(err)
+	require.NoError(err)
 	u, err = findGitRemoteURL(context.Background(), basedir, "upstream")
-	assert.NoError(err)
+	require.NoError(err)
 	assert.Equal(remoteURL, u)
 }
 
@@ -216,7 +216,7 @@ func TestGitCloneExecutor(t *testing.T) {
 				assert.Error(t, err)
 				assert.Equal(t, tt.Err, err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 		})
 	}
@@ -258,7 +258,7 @@ func TestCloneIfRequired(t *testing.T) {
 			URL: "https://github.com/actions/checkout",
 			Dir: tempDir,
 		}, common.Logger(ctx))
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.NotNil(t, repo)
 	})
 

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Type assert HostEnvironment implements ExecutionsEnvironment
@@ -17,7 +18,7 @@ var _ ExecutionsEnvironment = &HostEnvironment{}
 
 func TestCopyDir(t *testing.T) {
 	dir, err := os.MkdirTemp("", "test-host-env-*")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	ctx := context.Background()
 	e := &HostEnvironment{
@@ -33,12 +34,12 @@ func TestCopyDir(t *testing.T) {
 	_ = os.MkdirAll(e.ToolCache, 0700)
 	_ = os.MkdirAll(e.ActPath, 0700)
 	err = e.CopyDir(e.Workdir, e.Path, true)(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestGetContainerArchive(t *testing.T) {
 	dir, err := os.MkdirTemp("", "test-host-env-*")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	ctx := context.Background()
 	e := &HostEnvironment{
@@ -55,16 +56,16 @@ func TestGetContainerArchive(t *testing.T) {
 	_ = os.MkdirAll(e.ActPath, 0700)
 	expectedContent := []byte("sdde/7sh")
 	err = os.WriteFile(filepath.Join(e.Path, "action.yml"), expectedContent, 0600)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	archive, err := e.GetContainerArchive(ctx, e.Path)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer archive.Close()
 	reader := tar.NewReader(archive)
 	h, err := reader.Next()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "action.yml", h.Name)
 	content, err := io.ReadAll(reader)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, expectedContent, content)
 	_, err = reader.Next()
 	assert.ErrorIs(t, err, io.EOF)

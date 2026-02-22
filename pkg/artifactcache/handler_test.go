@@ -687,7 +687,7 @@ func TestHandler_gcCache(t *testing.T) {
 			cache := &Cache{}
 			err = db.Get(v.Cache.ID, cache)
 			if v.Kept {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			} else {
 				assert.ErrorIs(t, err, bolthold.ErrNotFound)
 			}

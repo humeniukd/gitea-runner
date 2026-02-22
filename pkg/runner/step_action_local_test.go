@@ -11,6 +11,7 @@ import (
 	"gitea.com/gitea/act_runner/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
@@ -92,10 +93,10 @@ func TestStepActionLocalTest(t *testing.T) {
 	})
 
 	err := sal.pre()(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = sal.main()(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	cm.AssertExpectations(t)
 	salm.AssertExpectations(t)

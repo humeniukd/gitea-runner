@@ -16,6 +16,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	assert "github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -25,7 +26,7 @@ func TestRunContext_EvalBool(t *testing.T) {
 		"os":  {"Linux", "Windows"},
 		"foo": {"bar", "baz"},
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	rc := &RunContext{
 		Config: &Config{
@@ -310,7 +311,7 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 				err := job.RawContainer.Encode(map[string][]string{
 					"volumes": testcase.volumes,
 				})
-				assert.NoError(t, err)
+				require.NoError(t, err)
 
 				rc := &RunContext{
 					Name: "TestRCName",
@@ -345,7 +346,7 @@ func TestGetGitHubContext(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 
 	cwd, err := os.Getwd()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	rc := &RunContext{
 		Config: &Config{
@@ -401,7 +402,7 @@ func TestGetGitHubContextOverlay(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 
 	cwd, err := os.Getwd()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	rc := &RunContext{
 		Config: &Config{
@@ -511,7 +512,7 @@ func createIfTestRunContext(jobs map[string]*model.Job) *RunContext {
 func createJob(t *testing.T, input string, result string) *model.Job {
 	var job *model.Job
 	err := yaml.Unmarshal([]byte(input), &job)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	job.Result = result
 
 	return job
@@ -748,7 +749,7 @@ func TestSetRuntimeVariables(t *testing.T) {
 
 	tkn, _, err := jwt.NewParser().ParseUnverified(runtimeToken, jwt.MapClaims{})
 	assert.NotNil(t, tkn)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestSetRuntimeVariablesWithRunID(t *testing.T) {
@@ -773,7 +774,7 @@ func TestSetRuntimeVariablesWithRunID(t *testing.T) {
 	claims := jwt.MapClaims{}
 	tkn, _, err := jwt.NewParser().ParseUnverified(runtimeToken, &claims)
 	assert.NotNil(t, tkn)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	scp, ok := claims["scp"]
 	assert.True(t, ok, "scp claim exists")
 	assert.Equal(t, "Actions.Results:45:45", scp, "contains expected scp claim")

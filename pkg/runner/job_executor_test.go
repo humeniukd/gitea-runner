@@ -13,6 +13,7 @@ import (
 	"gitea.com/gitea/act_runner/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestJobExecutor(t *testing.T) {
@@ -324,7 +325,7 @@ func TestNewJobExecutor(t *testing.T) {
 
 			executor := newJobExecutor(jim, sfm, rc)
 			err := executor(ctx)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, tt.executedSteps, executorOrder)
 
 			jim.AssertExpectations(t)

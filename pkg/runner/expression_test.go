@@ -12,6 +12,7 @@ import (
 	"gitea.com/gitea/act_runner/pkg/exprparser"
 	"gitea.com/gitea/act_runner/pkg/model"
 	assert "github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -21,7 +22,7 @@ func createRunContext(t *testing.T) *RunContext {
 		"os":  {"Linux", "Windows"},
 		"foo": {"bar", "baz"},
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	return &RunContext{
 		Config: &Config{

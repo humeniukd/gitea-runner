@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestReadSecrets(t *testing.T) {
@@ -34,7 +35,7 @@ func TestListOptions(t *testing.T) {
 	err := newRunCommand(context.Background(), &Input{
 		listOptions: true,
 	})(rootCmd, []string{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestRun(t *testing.T) {
@@ -44,7 +45,7 @@ func TestRun(t *testing.T) {
 		workdir:       "../pkg/runner/testdata/",
 		workflowsPath: "./basic/push.yml",
 	})(rootCmd, []string{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestRunPush(t *testing.T) {
@@ -54,7 +55,7 @@ func TestRunPush(t *testing.T) {
 		workdir:       "../pkg/runner/testdata/",
 		workflowsPath: "./basic/push.yml",
 	})(rootCmd, []string{"push"})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestRunPushJsonLogger(t *testing.T) {
@@ -65,7 +66,7 @@ func TestRunPushJsonLogger(t *testing.T) {
 		workflowsPath: "./basic/push.yml",
 		jsonLogger:    true,
 	})(rootCmd, []string{"push"})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestFlags(t *testing.T) {
@@ -73,13 +74,13 @@ func TestFlags(t *testing.T) {
 		t.Run("TestFlag-"+f, func(t *testing.T) {
 			rootCmd := createRootCommand(context.Background(), &Input{}, "")
 			err := rootCmd.Flags().Set(f, "true")
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			err = newRunCommand(context.Background(), &Input{
 				platforms:     []string{"ubuntu-latest=node:16-buster-slim"},
 				workdir:       "../pkg/runner/testdata/",
 				workflowsPath: "./basic/push.yml",
 			})(rootCmd, []string{})
-			assert.NoError(t, err)
+			require.NoError(t, err)
 		})
 	}
 }
@@ -92,7 +93,7 @@ func TestWorkflowCall(t *testing.T) {
 		workflowsPath: "./workflow_call_inputs/workflow_call_inputs.yml",
 		inputs:        []string{"required=required input", "boolean=true"},
 	})(rootCmd, []string{"workflow_call"})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestLocalRepositories(t *testing.T) {
@@ -105,5 +106,5 @@ func TestLocalRepositories(t *testing.T) {
 		workflowsPath:   "./remote-action-composite-action-ref-partial-override/push.yml",
 		localRepository: []string{"needs/override@main=" + wd + "/actions-environment-and-context-tests"},
 	})(rootCmd, []string{"push"})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }

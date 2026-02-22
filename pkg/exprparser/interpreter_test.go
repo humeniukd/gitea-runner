@@ -6,6 +6,7 @@ import (
 
 	"gitea.com/gitea/act_runner/pkg/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLiterals(t *testing.T) {
@@ -30,7 +31,7 @@ func TestLiterals(t *testing.T) {
 	for _, tt := range table {
 		t.Run(tt.name, func(t *testing.T) {
 			output, err := NewInterpeter(env, Config{}).Evaluate(tt.input, DefaultStatusCheckNone)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			assert.Equal(t, tt.expected, output)
 		})
@@ -105,7 +106,7 @@ func TestOperators(t *testing.T) {
 				assert.Error(t, err)
 				assert.Equal(t, tt.error, err.Error())
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 
 			assert.Equal(t, tt.expected, output)
@@ -154,7 +155,7 @@ func TestOperatorsCompare(t *testing.T) {
 	for _, tt := range table {
 		t.Run(tt.name, func(t *testing.T) {
 			output, err := NewInterpeter(env, Config{}).Evaluate(tt.input, DefaultStatusCheckNone)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			assert.Equal(t, tt.expected, output)
 		})
@@ -517,7 +518,7 @@ func TestOperatorsBooleanEvaluation(t *testing.T) {
 	for _, tt := range table {
 		t.Run(tt.name, func(t *testing.T) {
 			output, err := NewInterpeter(env, Config{}).Evaluate(tt.input, DefaultStatusCheckNone)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			// Normalize int => float64
 			if i, ok := tt.expected.(int); ok {
@@ -648,7 +649,7 @@ func TestContexts(t *testing.T) {
 			tenv.EnvCS = tt.caseSensitiveEnv
 			tenv.CtxData = tt.ctxdata
 			output, err := NewInterpeter(&tenv, Config{}).Evaluate(tt.input, DefaultStatusCheckNone)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			assert.Equal(t, tt.expected, output)
 		})

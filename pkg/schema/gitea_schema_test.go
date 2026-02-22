@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGiteaSchemaFactory(t *testing.T) {
@@ -13,7 +13,7 @@ func TestGiteaSchemaFactory(t *testing.T) {
 	_ = schema
 
 	data, err := json.MarshalIndent(schema, "", "  ")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = os.WriteFile("gitea_workflow_schema.json", append(data, "\n"...), 0o600)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }

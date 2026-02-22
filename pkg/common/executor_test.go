@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewWorkflow(t *testing.T) {
@@ -16,7 +17,7 @@ func TestNewWorkflow(t *testing.T) {
 
 	// empty
 	emptyWorkflow := NewPipelineExecutor()
-	assert.NoError(emptyWorkflow(ctx))
+	require.NoError(emptyWorkflow(ctx))
 
 	// error case
 	errorWorkflow := NewErrorExecutor(errors.New("test error"))
@@ -33,7 +34,7 @@ func TestNewWorkflow(t *testing.T) {
 			runcount++
 			return nil
 		})
-	assert.NoError(successWorkflow(ctx))
+	require.NoError(successWorkflow(ctx))
 	assert.Equal(2, runcount)
 }
 
@@ -55,7 +56,7 @@ func TestNewConditionalExecutor(t *testing.T) {
 		return nil
 	})(ctx)
 
-	assert.NoError(err)
+	require.NoError(err)
 	assert.Equal(0, trueCount)
 	assert.Equal(1, falseCount)
 
@@ -69,7 +70,7 @@ func TestNewConditionalExecutor(t *testing.T) {
 		return nil
 	})(ctx)
 
-	assert.NoError(err)
+	require.NoError(err)
 	assert.Equal(1, trueCount)
 	assert.Equal(1, falseCount)
 }
@@ -99,7 +100,7 @@ func TestNewParallelExecutor(t *testing.T) {
 
 	assert.Equal(3, count, "should run all 3 executors")
 	assert.Equal(2, maxCount, "should run at most 2 executors in parallel")
-	assert.NoError(err)
+	require.NoError(err)
 
 	// Reset to test running the executor with 0 parallelism
 	count = 0
@@ -110,7 +111,7 @@ func TestNewParallelExecutor(t *testing.T) {
 
 	assert.Equal(3, count, "should run all 3 executors")
 	assert.Equal(1, maxCount, "should run at most 1 executors in parallel")
-	assert.NoError(errSingle)
+	require.NoError(errSingle)
 }
 
 func TestNewParallelExecutorFailed(t *testing.T) {

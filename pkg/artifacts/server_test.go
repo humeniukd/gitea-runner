@@ -16,6 +16,7 @@ import (
 	"github.com/julienschmidt/httprouter"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"gitea.com/gitea/act_runner/pkg/model"
 	"gitea.com/gitea/act_runner/pkg/runner"
@@ -283,7 +284,7 @@ func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 		}
 
 		workdir, err := filepath.Abs(tjfi.workdir)
-		assert.NoError(t, err, workdir)
+		require.NoError(t, err, workdir)
 		fullWorkflowPath := filepath.Join(workdir, tjfi.workflowPath)
 		runnerConfig := &runner.Config{
 			Workdir:               workdir,
@@ -299,16 +300,16 @@ func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 		}
 
 		runner, err := runner.New(runnerConfig)
-		assert.NoError(t, err, tjfi.workflowPath)
+		require.NoError(t, err, tjfi.workflowPath)
 
 		planner, err := model.NewWorkflowPlanner(fullWorkflowPath, model.PlannerConfig{})
-		assert.NoError(t, err, fullWorkflowPath)
+		require.NoError(t, err, fullWorkflowPath)
 
 		plan, err := planner.PlanEvent(tjfi.eventName)
 		if err == nil {
 			err = runner.NewPlanExecutor(plan)(ctx)
 			if tjfi.errorMessage == "" {
-				assert.NoError(t, err, fullWorkflowPath)
+				require.NoError(t, err, fullWorkflowPath)
 			} else {
 				assert.Error(t, err, tjfi.errorMessage)
 			}

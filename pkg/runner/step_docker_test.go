@@ -10,6 +10,7 @@ import (
 	"gitea.com/gitea/act_runner/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStepDockerMain(t *testing.T) {
@@ -97,7 +98,7 @@ func TestStepDockerMain(t *testing.T) {
 	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/pathcmd.txt").Return(io.NopCloser(&bytes.Buffer{}), nil)
 
 	err := sd.main()(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	assert.Equal(t, "node:14", input.Image)
 
@@ -109,8 +110,8 @@ func TestStepDockerPrePost(t *testing.T) {
 	sd := &stepDocker{}
 
 	err := sd.pre()(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = sd.post()(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }

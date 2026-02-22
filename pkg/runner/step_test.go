@@ -9,6 +9,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -152,7 +153,7 @@ func TestSetupEnv(t *testing.T) {
 	sm.On("getEnv").Return(&env)
 
 	err := setupEnv(context.Background(), sm)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// These are commit or system specific
 	delete((env), "GITHUB_REF")
@@ -198,7 +199,7 @@ func TestIsStepEnabled(t *testing.T) {
 	createTestStep := func(t *testing.T, input string) step {
 		var step *model.Step
 		err := yaml.Unmarshal([]byte(input), &step)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		return &stepRun{
 			RunContext: &RunContext{
@@ -280,7 +281,7 @@ func TestIsContinueOnError(t *testing.T) {
 	createTestStep := func(t *testing.T, input string) step {
 		var step *model.Step
 		err := yaml.Unmarshal([]byte(input), &step)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		return &stepRun{
 			RunContext: &RunContext{
@@ -365,7 +366,7 @@ func TestSymlinkJoin(t *testing.T) {
 	for _, entry := range table {
 		result, err := symlinkJoin(entry.from, entry.target, entry.root...)
 		if entry.err == "" {
-			assert.NoError(t, err)
+			require.NoError(t, err)
 		} else {
 			assert.Error(t, err, entry.err)
 		}
