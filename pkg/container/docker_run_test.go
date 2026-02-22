@@ -154,7 +154,7 @@ func TestDockerExecAbort(t *testing.T) {
 	cancel()
 
 	err := <-channel
-	assert.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, context.Canceled)
 
 	conn.AssertExpectations(t)
 	client.AssertExpectations(t)
@@ -231,7 +231,7 @@ func TestDockerCopyTarStreamErrorInCopyFiles(t *testing.T) {
 	}
 
 	err := cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
-	assert.ErrorIs(t, err, merr)
+	require.ErrorIs(t, err, merr)
 
 	conn.AssertExpectations(t)
 	client.AssertExpectations(t)
@@ -256,7 +256,7 @@ func TestDockerCopyTarStreamErrorInMkdir(t *testing.T) {
 	}
 
 	err := cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
-	assert.ErrorIs(t, err, merr)
+	require.ErrorIs(t, err, merr)
 
 	conn.AssertExpectations(t)
 	client.AssertExpectations(t)

@@ -620,7 +620,7 @@ func (rc *RunContext) waitForServiceContainer(c container.ExecutionsEnvironment)
 	return func(ctx context.Context) error {
 		sctx, cancel := context.WithTimeout(ctx, time.Minute*5)
 		defer cancel()
-		health := container.HealthStarting
+		var health container.Health
 		delay := time.Second
 		for i := 0; ; i++ {
 			health = c.GetHealth(sctx)
@@ -1119,7 +1119,7 @@ func (rc *RunContext) setMainCtxVars(env map[string]string, name string, value s
 	}
 }
 
-func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubContext, env map[string]string) map[string]string {
+func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubContext, env map[string]string) {
 	env["CI"] = "true"
 	rc.setMainCtxVars(env, "WORKFLOW", github.Workflow)
 	rc.setMainCtxVars(env, "RUN_ATTEMPT", github.RunAttempt)
@@ -1165,8 +1165,6 @@ func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubCon
 			}
 		}
 	}
-
-	return env
 }
 
 func setActionRuntimeVars(rc *RunContext, env map[string]string) {

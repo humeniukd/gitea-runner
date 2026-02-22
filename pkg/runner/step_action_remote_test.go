@@ -237,7 +237,7 @@ func TestStepActionRemote(t *testing.T) {
 				err = sar.main()(ctx)
 			}
 
-			assert.ErrorIs(t, err, tt.runError)
+			require.ErrorIs(t, err, tt.runError)
 			assert.Equal(t, sar.RunContext.StepResults["step"], tt.result)
 
 			sarm.AssertExpectations(t)

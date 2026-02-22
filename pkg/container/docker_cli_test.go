@@ -302,7 +302,7 @@ func TestParseWithMacAddress(t *testing.T) {
 		t.Fatalf("Expected an error with %v mac-address, got %v", invalidMacAddress, err)
 	}
 	config, hostConfig, _ := mustParse(t, validMacAddress)
-	fmt.Printf("MacAddress: %+v\n", hostConfig)
+	t.Logf("MacAddress: %+v\n", hostConfig)
 	assert.Equal(t, "92:d0:c6:0a:29:33", config.MacAddress) //nolint:staticcheck
 }
 

@@ -6,8 +6,8 @@ package labels
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gotest.tools/v3/assert"
 )
 
 func TestParse(t *testing.T) {
@@ -57,7 +57,7 @@ func TestParse(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.DeepEqual(t, got, tt.want)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

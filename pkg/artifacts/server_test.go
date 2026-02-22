@@ -277,7 +277,7 @@ func TestArtifactFlow(t *testing.T) {
 
 func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 	t.Run(tjfi.workflowPath, func(t *testing.T) {
-		fmt.Printf("::group::%s\n", tjfi.workflowPath)
+		t.Logf("::group::%s\n", tjfi.workflowPath)
 
 		if err := os.RemoveAll(artifactsPath); err != nil {
 			panic(err)
@@ -317,7 +317,7 @@ func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 			assert.Nil(t, plan)
 		}
 
-		fmt.Println("::endgroup::")
+		t.Log("::endgroup::")
 	})
 }
 

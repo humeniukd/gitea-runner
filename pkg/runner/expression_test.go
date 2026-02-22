@@ -189,7 +189,7 @@ func TestEvaluateStep(t *testing.T) {
 				require.NoError(t, err, table.in)
 				assertObject.Equal(table.out, out, table.in)
 			} else {
-				assertObject.Error(err, table.in)
+				require.Error(t, err, table.in)
 				assertObject.Equal(table.errMesg, err.Error(), table.in)
 			}
 		})

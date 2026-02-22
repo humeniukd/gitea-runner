@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 //nolint:gosec
@@ -69,7 +70,7 @@ func TestActionCache(t *testing.T) {
 			buf := &bytes.Buffer{}
 			// G110: Potential DoS vulnerability via decompression bomb (gosec)
 			_, err = io.Copy(buf, mytar)
-			a.NoError(err)
+			require.NoError(t, err)
 			str := buf.String()
 			a.NotEmpty(str)
 		})

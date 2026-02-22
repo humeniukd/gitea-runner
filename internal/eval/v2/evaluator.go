@@ -187,7 +187,7 @@ func (e *Evaluator) evalBinaryNodeLeft(node *exprparser.BinaryNode, left *Evalua
 			return CreateIntermediateResult(e.Context(), ret), nil
 		}
 	}
-	return nil, nil
+	return nil, errors.ErrUnsupported
 }
 
 func (e *Evaluator) evalBinaryNodeRight(node *exprparser.BinaryNode, left *EvaluationResult, right *EvaluationResult) (*EvaluationResult, error) {

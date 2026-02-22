@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -117,7 +116,7 @@ func TestGraphWithMissing(t *testing.T) {
 	plan, err := planner.PlanEvent("push")
 	assert.NotNil(t, plan)
 	assert.Empty(t, plan.Stages)
-	assert.EqualError(t, err, "unable to build dependency graph for missing (missing.yml)")
+	require.EqualError(t, err, "unable to build dependency graph for missing (missing.yml)")
 	assert.Contains(t, buf.String(), "unable to build dependency graph for missing (missing.yml)")
 	log.SetOutput(out)
 }
@@ -174,7 +173,7 @@ type TestJobFileInfo struct {
 }
 
 func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config) {
-	fmt.Printf("::group::%s\n", j.workflowPath)
+	t.Log("::group::%s\n", j.workflowPath)
 
 	log.SetLevel(logLevel)
 
@@ -218,7 +217,7 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 		}
 	}
 
-	fmt.Println("::endgroup::")
+	t.Log("::endgroup::")
 }
 
 type TestConfig struct {
@@ -739,7 +738,7 @@ func TestMaskValues(t *testing.T) {
 	assertNoSecret := func(text string, _ string) {
 		found := strings.Contains(text, "composite secret")
 		if found {
-			fmt.Printf("\nFound Secret in the given text:\n%s\n", text)
+			t.Logf("\nFound Secret in the given text:\n%s\n", text)
 		}
 		assert.NotContains(t, text, "composite secret")
 	}

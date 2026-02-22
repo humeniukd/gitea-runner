@@ -205,7 +205,7 @@ func (sr *stepRun) setupShell(ctx context.Context) {
 func (sr *stepRun) setupWorkingDirectory(ctx context.Context) {
 	rc := sr.RunContext
 	step := sr.Step
-	workingdirectory := ""
+	var workingdirectory string
 
 	if step.WorkingDirectory == "" {
 		workingdirectory = rc.Run.Job().Defaults.Run.WorkingDirectory

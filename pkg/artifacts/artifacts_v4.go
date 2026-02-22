@@ -134,14 +134,14 @@ func (c ArtifactContext) JSON(status int, _ ...any) {
 	c.Resp.WriteHeader(status)
 }
 
-func validateRunIDV4(ctx *ArtifactContext, rawRunID string) (any, int64, bool) {
+func validateRunIDV4(ctx *ArtifactContext, rawRunID string) (int64, bool) {
 	runID, err := strconv.ParseInt(rawRunID, 10, 64)
 	if err != nil /* || task.Job.RunID != runID*/ {
 		log.Error("Error runID not match")
 		ctx.Error(http.StatusBadRequest, "run-id does not match")
-		return nil, 0, false
+		return 0, false
 	}
-	return nil, runID, true
+	return runID, true
 }
 
 func RoutesV4(router *httprouter.Router, baseDir string, fsys WriteFS, rfs fs.FS) {
@@ -271,7 +271,7 @@ func (r *artifactV4Routes) createArtifact(ctx *ArtifactContext) {
 	if ok := r.parseProtbufBody(ctx, &req); !ok {
 		return
 	}
-	_, runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
+	runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
 	if !ok {
 		return
 	}
@@ -342,7 +342,7 @@ func (r *artifactV4Routes) finalizeArtifact(ctx *ArtifactContext) {
 	if ok := r.parseProtbufBody(ctx, &req); !ok {
 		return
 	}
-	_, _, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
+	_, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
 	if !ok {
 		return
 	}
@@ -360,7 +360,7 @@ func (r *artifactV4Routes) listArtifacts(ctx *ArtifactContext) {
 	if ok := r.parseProtbufBody(ctx, &req); !ok {
 		return
 	}
-	_, runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
+	runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
 	if !ok {
 		return
 	}
@@ -405,7 +405,7 @@ func (r *artifactV4Routes) getSignedArtifactURL(ctx *ArtifactContext) {
 	if ok := r.parseProtbufBody(ctx, &req); !ok {
 		return
 	}
-	_, runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
+	runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
 	if !ok {
 		return
 	}
@@ -439,7 +439,7 @@ func (r *artifactV4Routes) deleteArtifact(ctx *ArtifactContext) {
 	if ok := r.parseProtbufBody(ctx, &req); !ok {
 		return
 	}
-	_, runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
+	runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
 	if !ok {
 		return
 	}

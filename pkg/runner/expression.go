@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"path"
@@ -431,7 +432,7 @@ func rewriteSubExpression(ctx context.Context, in string, forceFormat bool) (str
 		if strStart > -1 {
 			matches := strPattern.FindStringIndex(in[pos:])
 			if matches == nil {
-				panic("unclosed string.")
+				return "", errors.New("unclosed string.")
 			}
 
 			strStart = -1

@@ -160,7 +160,7 @@ func TestRunContext_EvalBool(t *testing.T) {
 			assertObject := assert.New(t)
 			b, err := EvalBool(context.Background(), rc.ExprEval, table.in, exprparser.DefaultStatusCheckSuccess)
 			if table.wantErr {
-				assertObject.Error(err)
+				require.Error(t, err)
 			}
 
 			assertObject.Equal(table.out, b, "Expected %s to be %v, was %v", table.in, table.out, b)

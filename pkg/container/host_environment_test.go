@@ -38,8 +38,7 @@ func TestCopyDir(t *testing.T) {
 }
 
 func TestGetContainerArchive(t *testing.T) {
-	dir, err := os.MkdirTemp("", "test-host-env-*")
-	require.NoError(t, err)
+	dir := t.TempDir()
 	defer os.RemoveAll(dir)
 	ctx := context.Background()
 	e := &HostEnvironment{
@@ -55,7 +54,7 @@ func TestGetContainerArchive(t *testing.T) {
 	_ = os.MkdirAll(e.ToolCache, 0700)
 	_ = os.MkdirAll(e.ActPath, 0700)
 	expectedContent := []byte("sdde/7sh")
-	err = os.WriteFile(filepath.Join(e.Path, "action.yml"), expectedContent, 0600)
+	err := os.WriteFile(filepath.Join(e.Path, "action.yml"), expectedContent, 0600)
 	require.NoError(t, err)
 	archive, err := e.GetContainerArchive(ctx, e.Path)
 	require.NoError(t, err)

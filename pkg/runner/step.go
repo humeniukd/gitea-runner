@@ -110,10 +110,7 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 			rc.StepResults[rc.CurrentStep] = stepResult
 		}
 
-		err := setupEnv(ctx, step)
-		if err != nil {
-			return err
-		}
+		setupEnv(ctx, step)
 
 		cctx := common.JobCancelContext(ctx)
 		rc.Cancelled = cctx != nil && cctx.Err() != nil
@@ -241,7 +238,7 @@ func evaluateStepTimeout(ctx context.Context, exprEval ExpressionEvaluator, step
 	return ctx, func() {}
 }
 
-func setupEnv(ctx context.Context, step step) error {
+func setupEnv(ctx context.Context, step step) {
 	rc := step.getRunContext()
 
 	mergeEnv(ctx, step)
@@ -264,8 +261,6 @@ func setupEnv(ctx context.Context, step step) error {
 	}
 
 	common.Logger(ctx).Debugf("setupEnv => %v", *step.getEnv())
-
-	return nil
 }
 
 func mergeEnv(ctx context.Context, step step) {
