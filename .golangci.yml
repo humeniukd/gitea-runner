@@ -111,12 +111,6 @@ linters:
       - linters:
           - forbidigo
         path: cmd
-      - linters:
-          - gocritic
-        text: '(?i)commentFormatting: put a space between `//` and comment text'
-      - linters:
-          - gocritic
-        text: '(?i)exitAfterDefer:'
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
