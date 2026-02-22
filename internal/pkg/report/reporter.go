@@ -374,7 +374,7 @@ func (r *Reporter) parseResult(result any) (runnerv1.Result, bool) {
 
 var cmdRegex = regexp.MustCompile(`^::([^ :]+)( .*)?::(.*)$`)
 
-func (r *Reporter) handleCommand(originalContent, command, _, value string) *string {
+func (r *Reporter) handleCommand(originalContent, command, value string) *string {
 	if r.stopCommandEndToken != "" && command != r.stopCommandEndToken {
 		return &originalContent
 	}
@@ -420,7 +420,7 @@ func (r *Reporter) parseLogRow(entry *log.Entry) *runnerv1.LogRow {
 
 	matches := cmdRegex.FindStringSubmatch(content)
 	if matches != nil {
-		if output := r.handleCommand(content, matches[1], matches[2], matches[3]); output != nil {
+		if output := r.handleCommand(content, matches[1], matches[3]); output != nil {
 			content = *output
 		} else {
 			return nil

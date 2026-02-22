@@ -263,7 +263,7 @@ func printList(plan *model.Plan) {
 	}
 }
 
-func runExecList(_ context.Context, planner model.WorkflowPlanner, execArgs *executeArgs) error {
+func runExecList(planner model.WorkflowPlanner, execArgs *executeArgs) error {
 	// plan with filtered jobs - to be used for filtering only
 	var filterPlan *model.Plan
 
@@ -318,7 +318,7 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 		}
 
 		if execArgs.runList {
-			return runExecList(ctx, planner, execArgs)
+			return runExecList(planner, execArgs)
 		}
 
 		// plan with triggered jobs
