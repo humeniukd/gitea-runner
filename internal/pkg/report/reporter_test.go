@@ -169,7 +169,7 @@ func TestReporter_Fire(t *testing.T) {
 			return connect_go.NewResponse(&runnerv1.UpdateTaskResponse{}), nil
 		})
 		ctx, cancel := context.WithCancel(context.Background())
-		taskCtx, err := structpb.NewStruct(map[string]interface{}{})
+		taskCtx, err := structpb.NewStruct(map[string]any{})
 		require.NoError(t, err)
 		reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{
 			Context: taskCtx,
@@ -179,7 +179,7 @@ func TestReporter_Fire(t *testing.T) {
 		}()
 		reporter.ResetSteps(5)
 
-		dataStep0 := map[string]interface{}{
+		dataStep0 := map[string]any{
 			"stage":      "Main",
 			"stepNumber": 0,
 			"raw_output": true,

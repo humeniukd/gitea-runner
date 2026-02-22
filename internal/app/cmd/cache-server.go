@@ -22,7 +22,7 @@ type cacheServerArgs struct {
 	Port uint16
 }
 
-func runCacheServer(ctx context.Context, configFile *string, cacheArgs *cacheServerArgs) func(cmd *cobra.Command, args []string) error {
+func runCacheServer(_ context.Context, configFile *string, cacheArgs *cacheServerArgs) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.LoadDefault(*configFile)
 		if err != nil {
