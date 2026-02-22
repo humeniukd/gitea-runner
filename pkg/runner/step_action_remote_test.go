@@ -1,0 +1,639 @@
+package runner
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"gopkg.in/yaml.v3"
+
+	"github.com/actions-oss/act-cli/pkg/common"
+	"github.com/actions-oss/act-cli/pkg/model"
+)
+
+type stepActionRemoteMocks struct {
+	mock.Mock
+}
+
+func (sarm *stepActionRemoteMocks) readAction(_ context.Context, step *model.Step, readFile actionYamlReader, config model.ActionConfig) (*model.Action, error) {
+	args := sarm.Called(step, readFile, config)
+	return args.Get(0).(*model.Action), args.Error(1)
+}
+
+func (sarm *stepActionRemoteMocks) runAction(step actionStep) common.Executor {
+	args := sarm.Called(step)
+	return args.Get(0).(func(context.Context) error)
+}
+
+type TestRepositoryCache struct {
+	mock.Mock
+}
+
+func (l *TestRepositoryCache) Fetch(ctx context.Context, cacheDir, url, ref, token string) (string, error) {
+	args := l.Called(ctx, cacheDir, url, ref, token)
+	return args.Get(0).(string), nil
+}
+
+func (l *TestRepositoryCache) GetTarArchive(ctx context.Context, cacheDir, sha, includePrefix string) (io.ReadCloser, error) {
+	args := l.Called(ctx, cacheDir, sha, includePrefix)
+	return args.Get(0).(io.ReadCloser), nil
+}
+
+func TestStepActionRemote(t *testing.T) {
+	table := []struct {
+		name      string
+		stepModel *model.Step
+		result    *model.StepResult
+		mocks     struct {
+			env    bool
+			cloned bool
+			read   bool
+			run    bool
+		}
+		runError                  error
+		gitHubServerURL           string
+		gitHubAPIServerURL        string
+		gitHubGraphQlAPIServerURL string
+	}{
+		{
+			name: "run-successful",
+			stepModel: &model.Step{
+				ID:   "step",
+				Uses: "remote/action@v1",
+			},
+			result: &model.StepResult{
+				Conclusion: model.StepStatusSuccess,
+				Outcome:    model.StepStatusSuccess,
+				Outputs:    map[string]string{},
+			},
+			mocks: struct {
+				env    bool
+				cloned bool
+				read   bool
+				run    bool
+			}{
+				env:    true,
+				cloned: true,
+				read:   true,
+				run:    true,
+			},
+		},
+		{
+			name: "run-successful",
+			stepModel: &model.Step{
+				ID:   "step",
+				Uses: "remote/action@v1",
+			},
+			result: &model.StepResult{
+				Conclusion: model.StepStatusSuccess,
+				Outcome:    model.StepStatusSuccess,
+				Outputs:    map[string]string{},
+			},
+			mocks: struct {
+				env    bool
+				cloned bool
+				read   bool
+				run    bool
+			}{
+				env:    true,
+				cloned: true,
+				read:   true,
+				run:    true,
+			},
+			gitHubServerURL:           "http://localhost:3000",
+			gitHubAPIServerURL:        "http://localhost:3000/api/v1",
+			gitHubGraphQlAPIServerURL: "http://localhost:3000/api/graphql",
+		},
+		{
+			name: "run-skipped",
+			stepModel: &model.Step{
+				ID:   "step",
+				Uses: "remote/action@v1",
+				If:   yaml.Node{Value: "false"},
+			},
+			result: &model.StepResult{
+				Conclusion: model.StepStatusSkipped,
+				Outcome:    model.StepStatusSkipped,
+				Outputs:    map[string]string{},
+			},
+			mocks: struct {
+				env    bool
+				cloned bool
+				read   bool
+				run    bool
+			}{
+				env:    true,
+				cloned: true,
+				read:   true,
+				run:    false,
+			},
+		},
+		{
+			name: "run-error",
+			stepModel: &model.Step{
+				ID:   "step",
+				Uses: "remote/action@v1",
+			},
+			result: &model.StepResult{
+				Conclusion: model.StepStatusFailure,
+				Outcome:    model.StepStatusFailure,
+				Outputs:    map[string]string{},
+			},
+			mocks: struct {
+				env    bool
+				cloned bool
+				read   bool
+				run    bool
+			}{
+				env:    true,
+				cloned: true,
+				read:   true,
+				run:    true,
+			},
+			runError: errors.New("error"),
+		},
+	}
+
+	for _, tt := range table {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			cm := &containerMock{}
+			sarm := &stepActionRemoteMocks{}
+
+			cacheMock := &TestRepositoryCache{}
+
+			sar := &stepActionRemote{
+				RunContext: &RunContext{
+					Config: &Config{
+						GitHubInstance:            "github.com",
+						ActionCache:               cacheMock,
+						GitHubServerURL:           tt.gitHubServerURL,
+						GitHubAPIServerURL:        tt.gitHubAPIServerURL,
+						GitHubGraphQlAPIServerURL: tt.gitHubGraphQlAPIServerURL,
+						Action: model.ActionConfig{
+							Definition: "action-root",
+						},
+					},
+					Run: &model.Run{
+						JobID: "1",
+						Workflow: &model.Workflow{
+							Jobs: map[string]*model.Job{
+								"1": {},
+							},
+						},
+					},
+					StepResults:  map[string]*model.StepResult{},
+					JobContainer: cm,
+				},
+				Step:       tt.stepModel,
+				readAction: sarm.readAction,
+				runAction:  sarm.runAction,
+			}
+			sar.RunContext.ExprEval = sar.RunContext.NewExpressionEvaluator(ctx)
+
+			serverURL := "https://github.com"
+			if tt.gitHubServerURL != "" {
+				serverURL = tt.gitHubServerURL
+			}
+
+			cacheMock.Mock.On("Fetch", ctx, mock.AnythingOfType("string"), serverURL+"/remote/action", "v1", "").Return("someval")
+
+			if tt.mocks.read {
+				sarm.Mock.On("readAction", sar.Step, mock.Anything, sar.RunContext.Config.Action).Return(&model.Action{}, nil)
+			}
+			if tt.mocks.run {
+				remoteAction := newRemoteAction(sar.Step.Uses)
+				remoteAction.URL = serverURL
+				sarm.On("runAction", sar).Return(func(_ context.Context) error { return tt.runError })
+
+				cm.On("Copy", "/var/run/act", mock.AnythingOfType("[]*container.FileEntry")).Return(func(_ context.Context) error {
+					return nil
+				})
+
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/envs.txt", mock.AnythingOfType("*map[string]string")).Return(func(_ context.Context) error {
+					return nil
+				})
+
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/statecmd.txt", mock.AnythingOfType("*map[string]string")).Return(func(_ context.Context) error {
+					return nil
+				})
+
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/outputcmd.txt", mock.AnythingOfType("*map[string]string")).Return(func(_ context.Context) error {
+					return nil
+				})
+
+				cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/SUMMARY.md").Return(io.NopCloser(&bytes.Buffer{}), nil)
+				cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/pathcmd.txt").Return(io.NopCloser(&bytes.Buffer{}), nil)
+			}
+
+			err := sar.pre()(ctx)
+			if err == nil {
+				err = sar.main()(ctx)
+			}
+
+			assert.ErrorIs(t, err, tt.runError)
+			assert.Equal(t, sar.RunContext.StepResults["step"], tt.result)
+
+			sarm.AssertExpectations(t)
+			cm.AssertExpectations(t)
+			cacheMock.AssertExpectations(t)
+		})
+	}
+}
+
+func TestStepActionRemotePre(t *testing.T) {
+	table := []struct {
+		name      string
+		stepModel *model.Step
+	}{
+		{
+			name: "run-pre",
+			stepModel: &model.Step{
+				Uses: "org/repo/path@ref",
+			},
+		},
+	}
+
+	for _, tt := range table {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			cacheMock := &TestRepositoryCache{}
+			sarm := &stepActionRemoteMocks{}
+
+			sar := &stepActionRemote{
+				Step: tt.stepModel,
+				RunContext: &RunContext{
+					Config: &Config{
+						GitHubInstance: "github.com",
+						ActionCache:    cacheMock,
+					},
+					Run: &model.Run{
+						JobID: "1",
+						Workflow: &model.Workflow{
+							Jobs: map[string]*model.Job{
+								"1": {},
+							},
+						},
+					},
+				},
+				readAction: sarm.readAction,
+			}
+
+			sarm.Mock.On("readAction", sar.Step, mock.Anything, sar.RunContext.Config.Action).Return(&model.Action{}, nil)
+			cacheMock.Mock.On("Fetch", ctx, mock.AnythingOfType("string"), "https://github.com/org/repo", "ref", "").Return("someval")
+
+			err := sar.pre()(ctx)
+
+			assert.Nil(t, err)
+
+			sarm.AssertExpectations(t)
+			cacheMock.AssertExpectations(t)
+		})
+	}
+}
+
+func TestStepActionRemotePreThroughAction(t *testing.T) {
+	table := []struct {
+		name      string
+		stepModel *model.Step
+	}{
+		{
+			name: "run-pre",
+			stepModel: &model.Step{
+				Uses: "org/repo/path@ref",
+			},
+		},
+	}
+
+	for _, tt := range table {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			cacheMock := &TestRepositoryCache{}
+			sarm := &stepActionRemoteMocks{}
+
+			sar := &stepActionRemote{
+				Step: tt.stepModel,
+				RunContext: &RunContext{
+					Config: &Config{
+						GitHubInstance:                "https://enterprise.github.com",
+						ReplaceGheActionWithGithubCom: []string{"org/repo"},
+						ActionCache:                   cacheMock,
+					},
+					Run: &model.Run{
+						JobID: "1",
+						Workflow: &model.Workflow{
+							Jobs: map[string]*model.Job{
+								"1": {},
+							},
+						},
+					},
+				},
+				readAction: sarm.readAction,
+			}
+
+			sarm.Mock.On("readAction", sar.Step, mock.Anything, sar.RunContext.Config.Action).Return(&model.Action{}, nil)
+			cacheMock.Mock.On("Fetch", ctx, mock.AnythingOfType("string"), "https://github.com/org/repo", "ref", "").Return("someval")
+
+			err := sar.pre()(ctx)
+
+			assert.Nil(t, err)
+
+			sarm.AssertExpectations(t)
+			cacheMock.AssertExpectations(t)
+		})
+	}
+}
+
+func TestStepActionRemotePreThroughActionToken(t *testing.T) {
+	table := []struct {
+		name      string
+		stepModel *model.Step
+	}{
+		{
+			name: "run-pre",
+			stepModel: &model.Step{
+				Uses: "org/repo/path@ref",
+			},
+		},
+	}
+
+	for _, tt := range table {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			sarm := &stepActionRemoteMocks{}
+
+			cacheMock := &TestRepositoryCache{}
+			sar := &stepActionRemote{
+				Step: tt.stepModel,
+				RunContext: &RunContext{
+					Config: &Config{
+						GitHubInstance:                     "https://enterprise.github.com",
+						ReplaceGheActionWithGithubCom:      []string{"org/repo"},
+						ReplaceGheActionTokenWithGithubCom: "PRIVATE_ACTIONS_TOKEN_ON_GITHUB",
+						ActionCache:                        cacheMock,
+					},
+					Run: &model.Run{
+						JobID: "1",
+						Workflow: &model.Workflow{
+							Jobs: map[string]*model.Job{
+								"1": {},
+							},
+						},
+					},
+				},
+				readAction: sarm.readAction,
+			}
+
+			sarm.Mock.On("readAction", sar.Step, mock.Anything, sar.RunContext.Config.Action).Return(&model.Action{}, nil)
+			cacheMock.Mock.On("Fetch", ctx, mock.AnythingOfType("string"), "https://github.com/org/repo", "ref", "PRIVATE_ACTIONS_TOKEN_ON_GITHUB").Return("someval")
+
+			err := sar.pre()(ctx)
+
+			assert.Nil(t, err)
+
+			sarm.AssertExpectations(t)
+			cacheMock.AssertExpectations(t)
+		})
+	}
+}
+
+func TestStepActionRemotePost(t *testing.T) {
+	table := []struct {
+		name               string
+		stepModel          *model.Step
+		actionModel        *model.Action
+		initialStepResults map[string]*model.StepResult
+		IntraActionState   map[string]map[string]string
+		expectedEnv        map[string]string
+		err                error
+		mocks              struct {
+			env  bool
+			exec bool
+		}
+	}{
+		{
+			name: "main-success",
+			stepModel: &model.Step{
+				ID:   "step",
+				Uses: "remote/action@v1",
+			},
+			actionModel: &model.Action{
+				Runs: model.ActionRuns{
+					Using:  "node16",
+					Post:   "post.js",
+					PostIf: "always()",
+				},
+			},
+			initialStepResults: map[string]*model.StepResult{
+				"step": {
+					Conclusion: model.StepStatusSuccess,
+					Outcome:    model.StepStatusSuccess,
+					Outputs:    map[string]string{},
+				},
+			},
+			IntraActionState: map[string]map[string]string{
+				"step": {
+					"key": "value",
+				},
+			},
+			expectedEnv: map[string]string{
+				"STATE_key": "value",
+			},
+			mocks: struct {
+				env  bool
+				exec bool
+			}{
+				env:  true,
+				exec: true,
+			},
+		},
+		{
+			name: "main-failed",
+			stepModel: &model.Step{
+				ID:   "step",
+				Uses: "remote/action@v1",
+			},
+			actionModel: &model.Action{
+				Runs: model.ActionRuns{
+					Using:  "node16",
+					Post:   "post.js",
+					PostIf: "always()",
+				},
+			},
+			initialStepResults: map[string]*model.StepResult{
+				"step": {
+					Conclusion: model.StepStatusFailure,
+					Outcome:    model.StepStatusFailure,
+					Outputs:    map[string]string{},
+				},
+			},
+			mocks: struct {
+				env  bool
+				exec bool
+			}{
+				env:  true,
+				exec: true,
+			},
+		},
+		{
+			name: "skip-if-failed",
+			stepModel: &model.Step{
+				ID:   "step",
+				Uses: "remote/action@v1",
+			},
+			actionModel: &model.Action{
+				Runs: model.ActionRuns{
+					Using:  "node16",
+					Post:   "post.js",
+					PostIf: "success()",
+				},
+			},
+			initialStepResults: map[string]*model.StepResult{
+				"step": {
+					Conclusion: model.StepStatusFailure,
+					Outcome:    model.StepStatusFailure,
+					Outputs:    map[string]string{},
+				},
+			},
+			mocks: struct {
+				env  bool
+				exec bool
+			}{
+				env:  true,
+				exec: false,
+			},
+		},
+		{
+			name: "skip-if-main-skipped",
+			stepModel: &model.Step{
+				ID:   "step",
+				If:   yaml.Node{Value: "failure()"},
+				Uses: "remote/action@v1",
+			},
+			actionModel: &model.Action{
+				Runs: model.ActionRuns{
+					Using:  "node16",
+					Post:   "post.js",
+					PostIf: "always()",
+				},
+			},
+			initialStepResults: map[string]*model.StepResult{
+				"step": {
+					Conclusion: model.StepStatusSkipped,
+					Outcome:    model.StepStatusSkipped,
+					Outputs:    map[string]string{},
+				},
+			},
+			mocks: struct {
+				env  bool
+				exec bool
+			}{
+				env:  false,
+				exec: false,
+			},
+		},
+	}
+
+	for _, tt := range table {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			cm := &containerMock{}
+			cacheMock := &TestRepositoryCache{}
+
+			sar := &stepActionRemote{
+				env: map[string]string{},
+				RunContext: &RunContext{
+					Config: &Config{
+						GitHubInstance: "https://github.com",
+						ActionCache:    cacheMock,
+					},
+					JobContainer: cm,
+					Run: &model.Run{
+						JobID: "1",
+						Workflow: &model.Workflow{
+							Jobs: map[string]*model.Job{
+								"1": {},
+							},
+						},
+					},
+					StepResults:      tt.initialStepResults,
+					IntraActionState: tt.IntraActionState,
+					nodeToolFullPath: "node",
+				},
+				Step:         tt.stepModel,
+				action:       tt.actionModel,
+				remoteAction: newRemoteAction(tt.stepModel.Uses),
+			}
+			sar.RunContext.ExprEval = sar.RunContext.NewExpressionEvaluator(ctx)
+
+			if tt.mocks.exec {
+				cm.On("Exec", []string{"node", "/var/run/act/actions/remote-action@v1/post.js"}, sar.env, "", "").Return(func(_ context.Context) error { return tt.err })
+
+				cm.On("Copy", "/var/run/act", mock.AnythingOfType("[]*container.FileEntry")).Return(func(_ context.Context) error {
+					return nil
+				})
+
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/envs.txt", mock.AnythingOfType("*map[string]string")).Return(func(_ context.Context) error {
+					return nil
+				})
+
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/statecmd.txt", mock.AnythingOfType("*map[string]string")).Return(func(_ context.Context) error {
+					return nil
+				})
+
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/outputcmd.txt", mock.AnythingOfType("*map[string]string")).Return(func(_ context.Context) error {
+					return nil
+				})
+
+				cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/SUMMARY.md").Return(io.NopCloser(&bytes.Buffer{}), nil)
+				cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/pathcmd.txt").Return(io.NopCloser(&bytes.Buffer{}), nil)
+
+				actionArchive := io.NopCloser(&bytes.Buffer{})
+				cacheMock.On("GetTarArchive", mock.Anything, "", "", "").Return(actionArchive, nil)
+				cm.On("CopyTarStream", mock.Anything, "/var/run/act/actions/remote-action@v1/", actionArchive).Return(nil)
+			}
+
+			err := sar.post()(ctx)
+
+			assert.Equal(t, tt.err, err)
+			if tt.expectedEnv != nil {
+				for key, value := range tt.expectedEnv {
+					assert.Equal(t, value, sar.env[key])
+				}
+			}
+			// Ensure that StepResults is nil in this test
+			assert.Equal(t, sar.RunContext.StepResults["post-step"], (*model.StepResult)(nil))
+			cm.AssertExpectations(t)
+		})
+	}
+}
+
+func Test_safeFilename(t *testing.T) {
+	tests := []struct {
+		s    string
+		want string
+	}{
+		{
+			s:    "https://test.com/test/",
+			want: "https---test.com-test-",
+		},
+		{
+			s:    `<>:"/\|?*`,
+			want: "---------",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.s, func(t *testing.T) {
+			assert.Equalf(t, tt.want, safeFilename(tt.s), "safeFilename(%v)", tt.s)
+		})
+	}
+}
