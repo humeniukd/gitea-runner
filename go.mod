@@ -112,5 +112,6 @@ require (
 
 replace github.com/nektos/act => gitea.com/gitea/act v0.261.8
 
-// Remove after
+// Remove after github.com/docker/distribution is updated to support distribution/reference v0.6.0
+// (pulled in via moby/buildkit, breaks on undefined: reference.SplitHostname)
 replace github.com/distribution/reference v0.6.0 => github.com/distribution/reference v0.5.0
