@@ -469,7 +469,7 @@ func (rc *RunContext) prepareServiceContainers(ctx context.Context, logger logru
 	return networkName, createAndDeleteNetwork, nil
 }
 
-func (rc *RunContext) execJobContainer(cmd []string, env map[string]string, user, workdir string) common.Executor {
+func (rc *RunContext) execJobContainer(cmd []string, env map[string]string, user, workdir string) common.Executor { //nolint:unparam
 	return func(ctx context.Context) error {
 		return rc.JobContainer.Exec(cmd, env, user, workdir)(ctx)
 	}

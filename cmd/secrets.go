@@ -24,9 +24,9 @@ func newSecrets(secretList []string) secrets {
 		} else if env, ok := os.LookupEnv(secretPairParts[0]); ok && env != "" {
 			s[secretPairParts[0]] = env
 		} else {
-			fmt.Printf("Provide value for '%s': ", secretPairParts[0])
+			fmt.Fprintf(os.Stdout, "Provide value for '%s': ", secretPairParts[0])
 			val, err := term.ReadPassword(int(os.Stdin.Fd()))
-			fmt.Println()
+			fmt.Fprintln(os.Stdout)
 			if err != nil {
 				log.Errorf("failed to read input: %v", err)
 				os.Exit(1)

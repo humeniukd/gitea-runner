@@ -29,7 +29,7 @@ import (
 
 // runRegister registers a runner to the server
 func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string) func(*cobra.Command, []string) error {
-	return func(cmd *cobra.Command, args []string) error {
+	return func(_ *cobra.Command, _ []string) error {
 		log.SetReportCaller(false)
 		isTerm := isatty.IsTerminal(os.Stdout.Fd())
 		log.SetFormatter(&log.TextFormatter{
@@ -251,7 +251,7 @@ func registerInteractive(ctx context.Context, configFile string, regArgs *regist
 		if stage == StageWaitingForRegistration {
 			log.Infof("Registering runner, name=%s, instance=%s, labels=%v.", inputs.RunnerName, inputs.InstanceAddr, inputs.Labels)
 			if err := doRegister(ctx, cfg, inputs); err != nil {
-				return fmt.Errorf("Failed to register runner: %w", err)
+				return fmt.Errorf("failed to register runner: %w", err)
 			}
 			log.Infof("Runner registered successfully.")
 			return nil
@@ -312,7 +312,7 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
 		return err
 	}
 	if err := doRegister(ctx, cfg, inputs); err != nil {
-		return fmt.Errorf("Failed to register runner: %w", err)
+		return fmt.Errorf("failed to register runner: %w", err)
 	}
 	log.Infof("Runner registered successfully.")
 	return nil

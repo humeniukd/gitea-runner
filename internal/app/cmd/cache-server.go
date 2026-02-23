@@ -22,7 +22,7 @@ type cacheServerArgs struct {
 }
 
 func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *cobra.Command, args []string) error {
-	return func(cmd *cobra.Command, args []string) error {
+	return func(_ *cobra.Command, _ []string) error {
 		cfg, err := config.LoadDefault(*configFile)
 		if err != nil {
 			return fmt.Errorf("invalid configuration: %w", err)

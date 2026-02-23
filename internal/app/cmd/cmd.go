@@ -62,7 +62,7 @@ func Execute(ctx context.Context) {
 		Short: "Generate an example config file",
 		Args:  cobra.MaximumNArgs(0),
 		Run: func(_ *cobra.Command, _ []string) {
-			fmt.Printf("%s", config.Example)
+			fmt.Fprintf(os.Stdout, "%s", config.Example)
 		},
 	})
 

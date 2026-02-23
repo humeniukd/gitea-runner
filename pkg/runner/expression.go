@@ -253,7 +253,7 @@ func (ee expressionEvaluator) evaluateScalarYamlNode(ctx context.Context, node *
 		return nil, err
 	}
 	if !strings.Contains(in, "${{") || !strings.Contains(in, "}}") {
-		return nil, nil
+		return nil, nil //nolint:nilnil
 	}
 	expr, _ := rewriteSubExpression(ctx, in, false)
 	res, err := ee.evaluate(ctx, expr, exprparser.DefaultStatusCheckNone)
@@ -366,7 +366,7 @@ func (ee expressionEvaluator) evaluateYamlNodeInternal(ctx context.Context, node
 	case yaml.SequenceNode:
 		return ee.evaluateSequenceYamlNode(ctx, node)
 	default:
-		return nil, nil
+		return nil, nil //nolint:nilnil
 	}
 }
 
@@ -432,7 +432,7 @@ func rewriteSubExpression(ctx context.Context, in string, forceFormat bool) (str
 		if strStart > -1 {
 			matches := strPattern.FindStringIndex(in[pos:])
 			if matches == nil {
-				return "", errors.New("unclosed string.")
+				return "", errors.New("unclosed string")
 			}
 
 			strStart = -1

@@ -88,9 +88,9 @@ func (i *executeArgs) LoadSecrets() map[string]string {
 		} else if env, ok := os.LookupEnv(secretPairParts[0]); ok && env != "" {
 			s[secretPairParts[0]] = env
 		} else {
-			fmt.Printf("Provide value for '%s': ", secretPairParts[0])
+			fmt.Fprintf(os.Stdout, "Provide value for '%s': ", secretPairParts[0])
 			val, err := term.ReadPassword(int(os.Stdin.Fd()))
-			fmt.Println()
+			fmt.Fprintln(os.Stdout)
 			if err != nil {
 				log.Errorf("failed to read input: %v", err)
 				os.Exit(1)
@@ -241,7 +241,7 @@ func printList(plan *model.Plan) {
 	wfNameMaxWidth += 2
 	wfFileMaxWidth += 2
 
-	fmt.Printf("%*s%*s%*s%*s%*s%*s\n",
+	fmt.Fprintf(os.Stdout, "%*s%*s%*s%*s%*s%*s\n",
 		-stageMaxWidth, header.stage,
 		-jobIDMaxWidth, header.jobID,
 		-jobNameMaxWidth, header.jobName,
@@ -250,7 +250,7 @@ func printList(plan *model.Plan) {
 		-eventsMaxWidth, header.events,
 	)
 	for _, line := range lineInfos {
-		fmt.Printf("%*s%*s%*s%*s%*s%*s\n",
+		fmt.Fprintf(os.Stdout, "%*s%*s%*s%*s%*s%*s\n",
 			-stageMaxWidth, line.stage,
 			-jobIDMaxWidth, line.jobID,
 			-jobNameMaxWidth, line.jobName,
@@ -260,7 +260,7 @@ func printList(plan *model.Plan) {
 		)
 	}
 	if duplicateJobIDs {
-		fmt.Print("\nDetected multiple jobs with the same job name, use `-W` to specify the path to the specific workflow.\n")
+		fmt.Fprint(os.Stdout, "\nDetected multiple jobs with the same job name, use `-W` to specify the path to the specific workflow.\n")
 	}
 }
 
@@ -312,7 +312,7 @@ func runExecList(planner model.WorkflowPlanner, execArgs *executeArgs) error {
 }
 
 func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command, args []string) error {
-	return func(_ *cobra.Command, args []string) error {
+	return func(_ *cobra.Command, _ []string) error {
 		planner, err := model.NewWorkflowPlanner(execArgs.WorkflowsPath(), model.PlannerConfig{
 			Recursive: !execArgs.noWorkflowRecurse,
 			Workflow: model.WorkflowConfig{
@@ -392,7 +392,7 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 		if len(execArgs.artifactServerPath) == 0 {
 			tempDir, err := os.MkdirTemp("", "gitea-act-")
 			if err != nil {
-				fmt.Println(err)
+				fmt.Fprintln(os.Stderr, err)
 			}
 			defer os.RemoveAll(tempDir)
 
@@ -460,7 +460,7 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 		log.Debugf("artifacts server started at %s:%s", execArgs.artifactServerPath, execArgs.artifactServerPort)
 
 		ctx = common.WithDryrun(ctx, execArgs.dryrun)
-		executor := r.NewPlanExecutor(plan).Finally(func(ctx context.Context) error {
+		executor := r.NewPlanExecutor(plan).Finally(func(_ context.Context) error {
 			artifactCancel()
 			return nil
 		})

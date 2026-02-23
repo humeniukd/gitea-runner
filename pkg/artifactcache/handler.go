@@ -437,7 +437,7 @@ func findCache(db *bolthold.Store, keys []string, version string) (*Cache, error
 		}
 		return cache, nil
 	}
-	return nil, nil
+	return nil, nil //nolint:nilnil
 }
 
 func insertCache(db *bolthold.Store, cache *Cache) error {

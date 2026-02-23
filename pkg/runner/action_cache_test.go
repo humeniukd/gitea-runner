@@ -53,20 +53,17 @@ func TestActionCache(t *testing.T) {
 		},
 	}
 	for _, c := range refs {
-		t.Run(c.Name, func(_ *testing.T) {
+		t.Run(c.Name, func(t *testing.T) {
 			sha, err := cache.Fetch(ctx, c.CacheDir, c.Repo, c.Ref, "")
-			if !a.NoError(err) || !a.NotEmpty(sha) {
-				return
-			}
+			require.NoError(t, err)
+			require.NotEmpty(t, sha)
 			atar, err := cache.GetTarArchive(ctx, c.CacheDir, sha, "js")
-			if !a.NoError(err) || !a.NotEmpty(atar) {
-				return
-			}
+			require.NoError(t, err)
+			require.NotEmpty(t, atar)
 			mytar := tar.NewReader(atar)
 			th, err := mytar.Next()
-			if !a.NoError(err) || !a.NotEqual(0, th.Size) {
-				return
-			}
+			require.NoError(t, err)
+			require.NotEqual(t, 0, th.Size)
 			buf := &bytes.Buffer{}
 			// G110: Potential DoS vulnerability via decompression bomb (gosec)
 			_, err = io.Copy(buf, mytar)

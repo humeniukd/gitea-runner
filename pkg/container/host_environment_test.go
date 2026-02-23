@@ -17,9 +17,7 @@ import (
 var _ ExecutionsEnvironment = &HostEnvironment{}
 
 func TestCopyDir(t *testing.T) {
-	dir, err := os.MkdirTemp("", "test-host-env-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 	ctx := context.Background()
 	e := &HostEnvironment{
 		Path:      filepath.Join(dir, "path"),
@@ -33,7 +31,7 @@ func TestCopyDir(t *testing.T) {
 	_ = os.MkdirAll(e.TmpDir, 0700)
 	_ = os.MkdirAll(e.ToolCache, 0700)
 	_ = os.MkdirAll(e.ActPath, 0700)
-	err = e.CopyDir(e.Workdir, e.Path, true)(ctx)
+	err := e.CopyDir(e.Workdir, e.Path, true)(ctx)
 	require.NoError(t, err)
 }
 

@@ -170,8 +170,8 @@ func FindGithubRepo(ctx context.Context, file, githubInstance, remoteName string
 	if err != nil {
 		return "", err
 	}
-	_, slug, err := findGitSlug(url, githubInstance)
-	return slug, err
+	_, slug := findGitSlug(url, githubInstance)
+	return slug, nil
 }
 
 func findGitRemoteURL(_ context.Context, file, remoteName string) (string, error) {
@@ -213,23 +213,23 @@ func matchesRegex(url string, matchers ...findStringSubmatcher) []string {
 }
 
 // TODO deprecate and remove githubInstance parameter
-func findGitSlug(url string, _ /* githubInstance */ string) (string, string, error) {
+func findGitSlug(url string, _ /* githubInstance */ string) (string, string) {
 	if matches := matchesRegex(url, codeCommitHTTPRegex, codeCommitSSHRegex); matches != nil {
-		return "CodeCommit", matches[2], nil
+		return "CodeCommit", matches[2]
 	}
 
 	if matches := matchesRegex(url, githubHTTPRegex, githubSSHRegex); matches != nil {
-		return "GitHub", fmt.Sprintf("%s/%s", matches[1], matches[2]), nil
+		return "GitHub", fmt.Sprintf("%s/%s", matches[1], matches[2])
 	}
 
 	if matches := matchesRegex(url,
 		regexp.MustCompile(`^https?://(?:[^/]+)/([^/]+)/([^/]+)(?:.git)?$`),
 		regexp.MustCompile(`([^/]+)[:/]([^/]+)/([^/]+)(?:.git)?$`),
 	); matches != nil {
-		return "GitHubEnterprise", fmt.Sprintf("%s/%s", matches[1], matches[2]), nil
+		return "GitHubEnterprise", fmt.Sprintf("%s/%s", matches[1], matches[2])
 	}
 
-	return "", url, nil
+	return "", url
 }
 
 // NewGitCloneExecutorInput the input for the NewGitCloneExecutor

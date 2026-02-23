@@ -143,14 +143,14 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		return err
 	}
 	job := workflow.GetJob(jobID)
-	var stepIds []string
+	var stepIDs []string
 	for i, v := range job.Steps {
 		if v.ID == "" {
 			v.ID = strconv.Itoa(i)
 		}
-		stepIds = append(stepIds, v.ID)
+		stepIDs = append(stepIDs, v.ID)
 	}
-	reporter.SetStepIdMapping(stepIds...)
+	reporter.SetStepIdMapping(stepIDs...)
 
 	taskContext := task.Context.Fields
 

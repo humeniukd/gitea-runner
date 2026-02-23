@@ -59,6 +59,9 @@ linters:
       - common-false-positives
       - legacy
       - std-error-handling
+    rules:
+      - linters: [revive]
+        text: avoid meaningless package names
     paths:
       - report
       - third_party$

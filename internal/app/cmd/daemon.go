@@ -31,7 +31,7 @@ import (
 )
 
 func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) func(cmd *cobra.Command, args []string) error {
-	return func(cmd *cobra.Command, args []string) error {
+	return func(_ *cobra.Command, _ []string) error {
 		cfg, err := config.LoadDefault(*configFile)
 		if err != nil {
 			return fmt.Errorf("invalid configuration: %w", err)
@@ -144,10 +144,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		} else if err != nil {
 			log.WithError(err).Error("fail to invoke Declare")
 			return err
-		} else {
-			log.Infof("runner: %s, with version: %s, with labels: %v, declare successfully",
-				resp.Msg.Runner.Name, resp.Msg.Runner.Version, resp.Msg.Runner.Labels)
 		}
+		log.Infof("runner: %s, with version: %s, with labels: %v, declare successfully",
+			resp.Msg.Runner.Name, resp.Msg.Runner.Version, resp.Msg.Runner.Labels)
 
 		poller := poll.New(cfg, cli, runner)
 

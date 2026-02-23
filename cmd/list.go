@@ -2,13 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
 	"gitea.com/gitea/act_runner/pkg/model"
 )
 
-func printList(plan *model.Plan) error {
+func printList(plan *model.Plan) {
 	type lineInfoDef struct {
 		jobID   string
 		jobName string
@@ -82,7 +83,7 @@ func printList(plan *model.Plan) error {
 	wfNameMaxWidth += 2
 	wfFileMaxWidth += 2
 
-	fmt.Printf("%*s%*s%*s%*s%*s%*s\n",
+	fmt.Fprintf(os.Stdout, "%*s%*s%*s%*s%*s%*s\n",
 		-stageMaxWidth, header.stage,
 		-jobIDMaxWidth, header.jobID,
 		-jobNameMaxWidth, header.jobName,
@@ -91,7 +92,7 @@ func printList(plan *model.Plan) error {
 		-eventsMaxWidth, header.events,
 	)
 	for _, line := range lineInfos {
-		fmt.Printf("%*s%*s%*s%*s%*s%*s\n",
+		fmt.Fprintf(os.Stdout, "%*s%*s%*s%*s%*s%*s\n",
 			-stageMaxWidth, line.stage,
 			-jobIDMaxWidth, line.jobID,
 			-jobNameMaxWidth, line.jobName,
@@ -101,7 +102,6 @@ func printList(plan *model.Plan) error {
 		)
 	}
 	if duplicateJobIDs {
-		fmt.Print("\nDetected multiple jobs with the same job name, use `-W` to specify the path to the specific workflow.\n")
+		fmt.Fprint(os.Stdout, "\nDetected multiple jobs with the same job name, use `-W` to specify the path to the specific workflow.\n")
 	}
-	return nil
 }

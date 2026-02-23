@@ -7,7 +7,7 @@ import (
 	"gitea.com/gitea/act_runner/pkg/model"
 )
 
-func drawGraph(plan *model.Plan) error {
+func drawGraph(plan *model.Plan) {
 	drawings := make([]*common.Drawing, 0)
 
 	jobPen := common.NewPen(common.StyleSingleLine, 96)
@@ -34,5 +34,4 @@ func drawGraph(plan *model.Plan) error {
 	for _, d := range drawings {
 		d.Draw(os.Stdout, maxWidth)
 	}
-	return nil
 }

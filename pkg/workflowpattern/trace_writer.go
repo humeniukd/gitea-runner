@@ -1,6 +1,9 @@
 package workflowpattern
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
 type TraceWriter interface {
 	Info(string, ...any)
@@ -14,5 +17,5 @@ func (*EmptyTraceWriter) Info(string, ...any) {
 type StdOutTraceWriter struct{}
 
 func (*StdOutTraceWriter) Info(format string, args ...any) {
-	fmt.Printf(format+"\n", args...)
+	fmt.Fprintf(os.Stdout, format+"\n", args...)
 }

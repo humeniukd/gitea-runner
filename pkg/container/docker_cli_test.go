@@ -6,7 +6,7 @@
 // See DOCKER_LICENSE for the full license text.
 //
 
-//nolint:unparam,whitespace,depguard,dupl,gocritic
+//nolint:whitespace,depguard,dupl,gocritic
 package container
 
 import (

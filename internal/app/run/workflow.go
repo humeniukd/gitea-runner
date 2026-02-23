@@ -62,7 +62,7 @@ func generateWorkflow(task *runnerv1.Task) (*model.Workflow, string, error) {
 
 	// TODO GITEA
 	workflow.Jobs[jobID].RawNeeds = rawNeeds
-	workflow.Jobs[jobID].RawRunsOn.Encode("dummy")
+	_ = workflow.Jobs[jobID].RawRunsOn.Encode("dummy")
 
 	return workflow, jobID, nil
 }

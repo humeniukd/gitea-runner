@@ -99,7 +99,7 @@ func TestGraphMissingFirst(t *testing.T) {
 	require.NoError(t, err)
 
 	plan, err := planner.PlanEvent("push")
-	assert.EqualError(t, err, "unable to build dependency graph for no first (no-first.yml)")
+	require.EqualError(t, err, "unable to build dependency graph for no first (no-first.yml)")
 	assert.NotNil(t, plan)
 	assert.Empty(t, plan.Stages)
 }
@@ -173,7 +173,7 @@ type TestJobFileInfo struct {
 }
 
 func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config) {
-	t.Log("::group::%s\n", j.workflowPath)
+	t.Logf("::group::%s\n", j.workflowPath)
 
 	log.SetLevel(logLevel)
 

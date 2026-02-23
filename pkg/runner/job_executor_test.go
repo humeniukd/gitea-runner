@@ -239,7 +239,7 @@ func TestNewJobExecutor(t *testing.T) {
 
 	for _, tt := range table {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("::group::%s\n", tt.name)
+			t.Logf("::group::%s\n", tt.name)
 
 			ctx := common.WithJobErrorContainer(context.Background())
 			jim := &jobInfoMock{}

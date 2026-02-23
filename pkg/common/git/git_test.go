@@ -38,19 +38,15 @@ func TestFindGitSlug(t *testing.T) {
 	}
 
 	for _, tt := range slugTests {
-		provider, slug, err := findGitSlug(tt.url, "github.com")
+		provider, slug := findGitSlug(tt.url, "github.com")
 
-		require.NoError(t, err)
 		assert.Equal(tt.provider, provider)
 		assert.Equal(tt.slug, slug)
 	}
 }
 
 func testDir(t *testing.T) string {
-	basedir, err := os.MkdirTemp("", "act-test")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(basedir) })
-	return basedir
+	return t.TempDir()
 }
 
 func cleanGitHooks(dir string) error {

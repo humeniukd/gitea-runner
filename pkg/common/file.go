@@ -1,9 +1,10 @@
 package common
 
 import (
-	"fmt"
 	"io"
 	"os"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // CopyFile copy file
@@ -59,13 +60,13 @@ func CopyDir(source string, dest string) (err error) {
 			// create sub-directories - recursively
 			err = CopyDir(sourcefilepointer, destinationfilepointer)
 			if err != nil {
-				fmt.Println(err)
+				log.Error(err)
 			}
 		} else {
 			// perform copy
 			err = CopyFile(sourcefilepointer, destinationfilepointer)
 			if err != nil {
-				fmt.Println(err)
+				log.Error(err)
 			}
 		}
 	}

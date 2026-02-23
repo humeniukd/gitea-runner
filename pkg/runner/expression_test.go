@@ -150,7 +150,7 @@ func TestEvaluateRunContext(t *testing.T) {
 				}
 				assertObject.Equal(table.out, out, table.in)
 			} else {
-				assertObject.Error(err, table.in)
+				require.Error(t, err, table.in)
 				assertObject.Equal(table.errMesg, err.Error(), table.in)
 			}
 		})

@@ -179,7 +179,7 @@ func (ee ExpressionEvaluator) evaluateYamlNodeInternal(ctx context.Context, node
 	case yaml.SequenceNode:
 		return ee.evaluateSequenceYamlNode(ctx, node, snode)
 	default:
-		return nil, nil
+		return nil, nil //nolint:nilnil
 	}
 }
 

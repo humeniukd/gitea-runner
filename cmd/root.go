@@ -237,7 +237,7 @@ func bugReport(ctx context.Context, version string) error {
 
 	info, err := container.GetHostInfo(ctx)
 	if err != nil {
-		fmt.Println(report)
+		fmt.Fprintln(os.Stdout, report)
 		return err
 	}
 
@@ -265,11 +265,11 @@ func bugReport(ctx context.Context, version string) error {
 	}
 	report += reportSb252.String()
 
-	fmt.Println(report)
+	fmt.Fprintln(os.Stdout, report)
 	return nil
 }
 
-func generateManPage(cmd *cobra.Command) error {
+func generateManPage(cmd *cobra.Command) {
 	header := &doc.GenManHeader{
 		Title:   "act",
 		Section: "1",
@@ -277,8 +277,7 @@ func generateManPage(cmd *cobra.Command) error {
 	}
 	buf := new(bytes.Buffer)
 	cobra.CheckErr(doc.GenMan(cmd, header, buf))
-	fmt.Print(buf.String())
-	return nil
+	fmt.Fprint(os.Stdout, buf.String())
 }
 
 func listOptions(cmd *cobra.Command) error {
@@ -287,7 +286,7 @@ func listOptions(cmd *cobra.Command) error {
 		flags = append(flags, Flag{Name: f.Name, Default: f.DefValue, Description: f.Usage, Type: f.Value.Type()})
 	})
 	a, err := json.Marshal(flags)
-	fmt.Println(string(a))
+	fmt.Fprintln(os.Stdout, string(a))
 	return err
 }
 
@@ -409,7 +408,8 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			return bugReport(ctx, cmd.Version)
 		}
 		if ok, _ := cmd.Flags().GetBool("man-page"); ok {
-			return generateManPage(cmd)
+			generateManPage(cmd)
+			return nil
 		}
 		if input.listOptions {
 			return listOptions(cmd)
@@ -540,18 +540,12 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		}
 
 		if list {
-			err = printList(filterPlan)
-			if err != nil {
-				return err
-			}
+			printList(filterPlan)
 			return plannerErr
 		}
 
 		if graph {
-			err = drawGraph(filterPlan)
-			if err != nil {
-				return err
-			}
+			drawGraph(filterPlan)
 			return plannerErr
 		}
 
