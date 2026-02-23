@@ -4,13 +4,13 @@ package runner
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"gitea.com/gitea/act_runner/pkg/common"
 )
 
 func (rc *RunContext) startTartEnvironment() common.Executor {
 	return func(_ context.Context) error {
-		return fmt.Errorf("you need macOS for tart")
+		return errors.New("you need macOS for tart")
 	}
 }
