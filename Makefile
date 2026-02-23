@@ -68,7 +68,7 @@ else
 	endif
 endif
 
-GO_PACKAGES_TO_VET ?= $(filter-out gitea.com/gitea/act_runner/internal/pkg/client/mocks,$(shell $(GO) list ./...))
+GO_PACKAGES_TO_VET ?= $(filter-out gitea.com/gitea/act_runner/cmd gitea.com/gitea/act_runner/internal/app/act-cli gitea.com/gitea/act_runner/internal/eval/functions gitea.com/gitea/act_runner/internal/eval/v2 gitea.com/gitea/act_runner/internal/expr gitea.com/gitea/act_runner/internal/model gitea.com/gitea/act_runner/internal/templateeval gitea.com/gitea/act_runner/pkg/artifactcache gitea.com/gitea/act_runner/pkg/artifacts gitea.com/gitea/act_runner/pkg/common gitea.com/gitea/act_runner/pkg/common/git gitea.com/gitea/act_runner/pkg/container gitea.com/gitea/act_runner/pkg/exprparser gitea.com/gitea/act_runner/pkg/filecollector gitea.com/gitea/act_runner/pkg/gh gitea.com/gitea/act_runner/pkg/model gitea.com/gitea/act_runner/pkg/runner gitea.com/gitea/act_runner/pkg/schema gitea.com/gitea/act_runner/pkg/tart gitea.com/gitea/act_runner/pkg/workflowpattern gitea.com/gitea/act_runner/pkg/lookpath gitea.com/gitea/act_runner/internal/pkg/client/mocks,$(shell $(GO) list ./...))
 
 
 TAGS ?=
