@@ -3,6 +3,11 @@ on:
   - push
   - pull_request
 
+env:
+  DOOD: 1
+  NO_QEMU: 1
+  NO_EXTERNAL_IP: 1
+
 jobs:
   lint:
     name: check and test
