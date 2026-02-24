@@ -10,8 +10,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-type LinuxContainerEnvironmentExtensions struct {
-}
+type LinuxContainerEnvironmentExtensions struct{}
 
 // Resolves the equivalent host path inside the container
 // This is required for windows and WSL 2 to translate things like C:\Users\Myproject to /mnt/users/Myproject

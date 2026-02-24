@@ -55,8 +55,7 @@ type WriteFS interface {
 	OpenAppendable(name string) (WritableFile, error)
 }
 
-type readWriteFSImpl struct {
-}
+type readWriteFSImpl struct{}
 
 func (fwfs readWriteFSImpl) Open(name string) (fs.File, error) {
 	return os.Open(name)
@@ -74,7 +73,6 @@ func (fwfs readWriteFSImpl) OpenAppendable(name string) (WritableFile, error) {
 		return nil, err
 	}
 	file, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR, 0o644)
-
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +125,6 @@ func uploads(router *httprouter.Router, baseDir string, fsys WriteFS) {
 			}
 			return fsys.OpenWritable(safePath)
 		}()
-
 		if err != nil {
 			panic(err)
 		}

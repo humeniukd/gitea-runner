@@ -85,9 +85,7 @@ func (sd *stepDocker) runUsesContainer() common.Executor {
 	}
 }
 
-var (
-	ContainerNewContainer = container.NewContainer
-)
+var ContainerNewContainer = container.NewContainer
 
 func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd []string, entrypoint []string) container.Container {
 	rc := sd.RunContext

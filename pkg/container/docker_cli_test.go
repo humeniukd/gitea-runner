@@ -193,7 +193,6 @@ func TestParseRunWithInvalidArgs(t *testing.T) {
 
 //nolint:gocyclo
 func TestParseWithVolumes(t *testing.T) {
-
 	// A single volume
 	arr, tryit := setupPlatformVolume([]string{`/tmp`}, []string{`c:\tmp`})
 	if config, hostConfig, _ := mustParse(t, tryit); hostConfig.Binds != nil {
@@ -261,7 +260,6 @@ func TestParseWithVolumes(t *testing.T) {
 			t.Fatalf("Error parsing %s. Should have a single bind mount and no volumes", arr[0])
 		}
 	}
-
 }
 
 // setupPlatformVolume takes two arrays of volume specs - a Unix style
@@ -462,7 +460,6 @@ func TestParseDevice(t *testing.T) {
 			t.Fatalf("Expected %v, got %v", deviceMapping, hostconfig.Devices)
 		}
 	}
-
 }
 
 func TestParseNetworkConfig(t *testing.T) {
@@ -967,7 +964,6 @@ func TestConvertToStandardNotation(t *testing.T) {
 
 	for key, ports := range valid {
 		convertedPorts, err := convertToStandardNotation(ports)
-
 		if err != nil {
 			assert.NilError(t, err)
 		}

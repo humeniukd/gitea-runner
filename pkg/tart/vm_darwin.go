@@ -85,7 +85,7 @@ func (vm *VM) cloneAndConfigure(
 
 func (vm *VM) Start(ctx context.Context, config Config, _ *Env, customDirectoryMounts []string) error {
 	os.Remove(vm.tartRunOutputPath())
-	var runArgs = []string{"run"}
+	runArgs := []string{"run"}
 
 	if config.Softnet {
 		runArgs = append(runArgs, "--net-softnet")

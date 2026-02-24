@@ -172,7 +172,8 @@ func updateTestIfWorkflow(t *testing.T, tables []struct {
 	in      string
 	out     bool
 	wantErr bool
-}, rc *RunContext) {
+}, rc *RunContext,
+) {
 	var envs string
 	keys := make([]string, 0, len(rc.Env))
 	for k := range rc.Env {

@@ -100,8 +100,8 @@ func (e *Environment) start(ctx context.Context) error {
 		return err
 	}
 	var customDirectoryMounts []string
-	_ = os.MkdirAll(e.Miscpath, 0777)
-	_ = os.MkdirAll(e.ToolCache, 0777)
+	_ = os.MkdirAll(e.Miscpath, 0o777)
+	_ = os.MkdirAll(e.ToolCache, 0o777)
 	customDirectoryMounts = append(customDirectoryMounts, "act:"+e.Miscpath)
 	customDirectoryMounts = append(customDirectoryMounts, "tool_cache:"+e.ToolCache)
 	e.vm = vm
@@ -113,6 +113,7 @@ func (e *Environment) start(ctx context.Context) error {
 
 	return e.execRaw(ctx, "ln -sf '/Volumes/My Shared Files/act' /private/tmp/act && ln -sf '/Volumes/My Shared Files/tool_cache' /private/tmp/tool_cache")
 }
+
 func (e *Environment) Stop(ctx context.Context) error {
 	common.Logger(ctx).Debug("Preparing stopping VM")
 
@@ -149,6 +150,7 @@ func (e *Environment) Remove() common.Executor {
 		return e.Close()(ctx)
 	}
 }
+
 func (e *Environment) exec(ctx context.Context, command []string, _ string, env map[string]string, _, workdir string) error {
 	var wd string
 	if workdir != "" {
@@ -216,12 +218,15 @@ func (e *Environment) GetActPath() string {
 func (e *Environment) Copy(destPath string, files ...*container.FileEntry) common.Executor {
 	return e.HostEnvironment.Copy(e.ToHostPath(destPath), files...)
 }
+
 func (e *Environment) CopyTarStream(ctx context.Context, destPath string, tarStream io.Reader) error {
 	return e.HostEnvironment.CopyTarStream(ctx, e.ToHostPath(destPath), tarStream)
 }
+
 func (e *Environment) CopyDir(destPath string, srcPath string, useGitIgnore bool) common.Executor {
 	return e.HostEnvironment.CopyDir(e.ToHostPath(destPath), srcPath, useGitIgnore)
 }
+
 func (e *Environment) GetContainerArchive(ctx context.Context, srcPath string) (io.ReadCloser, error) {
 	return e.HostEnvironment.GetContainerArchive(ctx, e.ToHostPath(srcPath))
 }

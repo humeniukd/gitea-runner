@@ -84,6 +84,7 @@ func (runnerConfig *Config) GetGitHubServerURL() string {
 	}
 	return "https://" + runnerConfig.GitHubInstance
 }
+
 func (runnerConfig *Config) GetGitHubAPIServerURL() string {
 	if len(runnerConfig.GitHubAPIServerURL) > 0 {
 		return runnerConfig.GitHubAPIServerURL
@@ -93,6 +94,7 @@ func (runnerConfig *Config) GetGitHubAPIServerURL() string {
 	}
 	return fmt.Sprintf("https://%s/api/v3", runnerConfig.GitHubInstance)
 }
+
 func (runnerConfig *Config) GetGitHubGraphQlAPIServerURL() string {
 	if len(runnerConfig.GitHubGraphQlAPIServerURL) > 0 {
 		return runnerConfig.GitHubGraphQlAPIServerURL
@@ -102,6 +104,7 @@ func (runnerConfig *Config) GetGitHubGraphQlAPIServerURL() string {
 	}
 	return fmt.Sprintf("https://%s/api/graphql", runnerConfig.GitHubInstance)
 }
+
 func (runnerConfig *Config) GetGitHubInstance() string {
 	if len(runnerConfig.GitHubServerURL) > 0 {
 		regex := regexp.MustCompile("^https?://(.*)$")
@@ -234,7 +237,6 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 					stageExecutor = append(stageExecutor, func(ctx context.Context) error {
 						jobName := fmt.Sprintf("%-*s", maxJobNameLen, rc.String())
 						executor, err := rc.Executor()
-
 						if err != nil {
 							return err
 						}

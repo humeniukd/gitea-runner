@@ -40,7 +40,7 @@ type writeMapFS struct {
 }
 
 func (fsys writeMapFS) OpenWritable(name string) (WritableFile, error) {
-	var file = &writableMapFile{
+	file := &writableMapFile{
 		MapFile: fstest.MapFile{
 			Data: []byte("content2"),
 		},
@@ -51,7 +51,7 @@ func (fsys writeMapFS) OpenWritable(name string) (WritableFile, error) {
 }
 
 func (fsys writeMapFS) OpenAppendable(name string) (WritableFile, error) {
-	var file = &writableMapFile{
+	file := &writableMapFile{
 		MapFile: fstest.MapFile{
 			Data: []byte("content2"),
 		},
@@ -64,7 +64,7 @@ func (fsys writeMapFS) OpenAppendable(name string) (WritableFile, error) {
 func TestNewArtifactUploadPrepare(t *testing.T) {
 	assert := assert.New(t)
 
-	var memfs = fstest.MapFS(map[string]*fstest.MapFile{})
+	memfs := fstest.MapFS(map[string]*fstest.MapFile{})
 
 	router := httprouter.New()
 	uploads(router, "artifact/server/path", writeMapFS{memfs})
@@ -90,7 +90,7 @@ func TestNewArtifactUploadPrepare(t *testing.T) {
 func TestArtifactUploadBlob(t *testing.T) {
 	assert := assert.New(t)
 
-	var memfs = fstest.MapFS(map[string]*fstest.MapFile{})
+	memfs := fstest.MapFS(map[string]*fstest.MapFile{})
 
 	router := httprouter.New()
 	uploads(router, "artifact/server/path", writeMapFS{memfs})
@@ -117,7 +117,7 @@ func TestArtifactUploadBlob(t *testing.T) {
 func TestFinalizeArtifactUpload(t *testing.T) {
 	assert := assert.New(t)
 
-	var memfs = fstest.MapFS(map[string]*fstest.MapFile{})
+	memfs := fstest.MapFS(map[string]*fstest.MapFile{})
 
 	router := httprouter.New()
 	uploads(router, "artifact/server/path", writeMapFS{memfs})
@@ -143,7 +143,7 @@ func TestFinalizeArtifactUpload(t *testing.T) {
 func TestListArtifacts(t *testing.T) {
 	assert := assert.New(t)
 
-	var memfs = fstest.MapFS(map[string]*fstest.MapFile{
+	memfs := fstest.MapFS(map[string]*fstest.MapFile{
 		"artifact/server/path/1/file.txt": {
 			Data: []byte(""),
 		},
@@ -175,7 +175,7 @@ func TestListArtifacts(t *testing.T) {
 func TestListArtifactContainer(t *testing.T) {
 	assert := assert.New(t)
 
-	var memfs = fstest.MapFS(map[string]*fstest.MapFile{
+	memfs := fstest.MapFS(map[string]*fstest.MapFile{
 		"artifact/server/path/1/some/file": {
 			Data: []byte(""),
 		},
@@ -208,7 +208,7 @@ func TestListArtifactContainer(t *testing.T) {
 func TestDownloadArtifactFile(t *testing.T) {
 	assert := assert.New(t)
 
-	var memfs = fstest.MapFS(map[string]*fstest.MapFile{
+	memfs := fstest.MapFS(map[string]*fstest.MapFile{
 		"artifact/server/path/1/some/file": {
 			Data: []byte("content"),
 		},
@@ -348,7 +348,7 @@ func TestMkdirFsImplSafeResolve(t *testing.T) {
 func TestDownloadArtifactFileUnsafePath(t *testing.T) {
 	assert := assert.New(t)
 
-	var memfs = fstest.MapFS(map[string]*fstest.MapFile{
+	memfs := fstest.MapFS(map[string]*fstest.MapFile{
 		"artifact/server/path/some/file": {
 			Data: []byte("content"),
 		},
@@ -374,7 +374,7 @@ func TestDownloadArtifactFileUnsafePath(t *testing.T) {
 func TestArtifactUploadBlobUnsafePath(t *testing.T) {
 	assert := assert.New(t)
 
-	var memfs = fstest.MapFS(map[string]*fstest.MapFile{})
+	memfs := fstest.MapFS(map[string]*fstest.MapFile{})
 
 	router := httprouter.New()
 	uploads(router, "artifact/server/path", writeMapFS{memfs})

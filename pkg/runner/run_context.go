@@ -757,7 +757,7 @@ func (rc *RunContext) steps() []*model.Step {
 // Executor returns a pipeline executor for all the steps in the job
 func (rc *RunContext) Executor() (common.Executor, error) {
 	var executor common.Executor
-	var jobType, err = rc.Run.Job().Type()
+	jobType, err := rc.Run.Job().Type()
 
 	if exec, ok := rc.Config.CustomExecutor[jobType]; ok {
 		executor = exec(rc)

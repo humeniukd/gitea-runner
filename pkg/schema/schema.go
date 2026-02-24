@@ -171,14 +171,11 @@ type StringDefinition struct {
 	IsExpression bool   `json:"is-expression,omitempty"`
 }
 
-type NumberDefinition struct {
-}
+type NumberDefinition struct{}
 
-type BooleanDefinition struct {
-}
+type BooleanDefinition struct{}
 
-type NullDefinition struct {
-}
+type NullDefinition struct{}
 
 func GetWorkflowSchema() *Schema {
 	sh := &Schema{}
@@ -462,7 +459,7 @@ func (s *Node) checkString(node *yaml.Node, def Definition) error {
 }
 
 func (s *Node) checkOneOf(def Definition, node *yaml.Node) error {
-	var invalidProps = math.MaxInt
+	invalidProps := math.MaxInt
 	var bestMatches ValidationErrorCollection
 	for _, v := range *def.OneOf {
 		// Use helper to create child node

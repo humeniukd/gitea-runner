@@ -395,7 +395,7 @@ func TestReadWorkflow_Strategy(t *testing.T) {
 
 func TestMatrixOnlyIncludes(t *testing.T) {
 	matrix := map[string][]any{
-		"include": []any{
+		"include": {
 			map[string]any{"a": "1", "b": "2"},
 			map[string]any{"a": "3", "b": "4"},
 		},

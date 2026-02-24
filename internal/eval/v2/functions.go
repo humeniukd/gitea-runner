@@ -9,8 +9,7 @@ import (
 	exprparser "gitea.com/gitea/act_runner/internal/expr"
 )
 
-type FromJSON struct {
-}
+type FromJSON struct{}
 
 func (FromJSON) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResult, error) {
 	r, err := eval.Evaluate(args[0])
@@ -25,8 +24,7 @@ func (FromJSON) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationRe
 	return CreateIntermediateResult(eval.Context(), res), nil
 }
 
-type ToJSON struct {
-}
+type ToJSON struct{}
 
 func (ToJSON) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResult, error) {
 	r, err := eval.Evaluate(args[0])
@@ -44,8 +42,7 @@ func (ToJSON) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResu
 	return CreateIntermediateResult(eval.Context(), string(data)), nil
 }
 
-type Contains struct {
-}
+type Contains struct{}
 
 func (Contains) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResult, error) {
 	collection, err := eval.Evaluate(args[0])
@@ -72,8 +69,7 @@ func (Contains) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationRe
 	return CreateIntermediateResult(eval.Context(), strings.Contains(strings.ToLower(collection.ConvertToString()), strings.ToLower(el.ConvertToString()))), nil
 }
 
-type StartsWith struct {
-}
+type StartsWith struct{}
 
 func (StartsWith) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResult, error) {
 	collection, err := eval.Evaluate(args[0])
@@ -88,8 +84,7 @@ func (StartsWith) Evaluate(eval *Evaluator, args []exprparser.Node) (*Evaluation
 	return CreateIntermediateResult(eval.Context(), strings.HasPrefix(strings.ToLower(collection.ConvertToString()), strings.ToLower(el.ConvertToString()))), nil
 }
 
-type EndsWith struct {
-}
+type EndsWith struct{}
 
 func (EndsWith) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResult, error) {
 	collection, err := eval.Evaluate(args[0])
@@ -104,8 +99,7 @@ func (EndsWith) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationRe
 	return CreateIntermediateResult(eval.Context(), strings.HasSuffix(strings.ToLower(collection.ConvertToString()), strings.ToLower(el.ConvertToString()))), nil
 }
 
-type Format struct {
-}
+type Format struct{}
 
 func (Format) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResult, error) {
 	collection, err := eval.Evaluate(args[0])
@@ -126,8 +120,7 @@ func (Format) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResu
 	return CreateIntermediateResult(eval.Context(), ret), err
 }
 
-type Join struct {
-}
+type Join struct{}
 
 func (Join) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResult, error) {
 	collection, err := eval.Evaluate(args[0])
@@ -164,8 +157,7 @@ func (Join) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResult
 	return CreateIntermediateResult(eval.Context(), ""), nil
 }
 
-type Case struct {
-}
+type Case struct{}
 
 func (Case) Evaluate(eval *Evaluator, args []exprparser.Node) (*EvaluationResult, error) {
 	if len(args)%2 == 0 {

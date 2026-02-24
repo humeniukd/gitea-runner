@@ -54,7 +54,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		return nil
 	})
 
-	var setJobError = func(ctx context.Context, err error) error {
+	setJobError := func(ctx context.Context, err error) error {
 		if err == nil {
 			return nil
 		}
@@ -75,7 +75,6 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		}
 
 		step, err := sf.newStep(stepModel, rc)
-
 		if err != nil {
 			return common.NewErrorExecutor(err)
 		}

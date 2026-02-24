@@ -9,8 +9,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var commandPatternGA *regexp.Regexp
-var commandPatternADO *regexp.Regexp
+var (
+	commandPatternGA  *regexp.Regexp
+	commandPatternADO *regexp.Regexp
+)
 
 func init() {
 	commandPatternGA = regexp.MustCompile("^::([^ ]+)( (.+))?::([^\r\n]*)[\r\n]+$")
@@ -102,6 +104,7 @@ func (rc *RunContext) setEnv(ctx context.Context, kvPairs map[string]string, arg
 	mergeIntoMap(rc.Env, newenv)
 	mergeIntoMap(rc.GlobalEnv, newenv)
 }
+
 func (rc *RunContext) setOutput(ctx context.Context, kvPairs map[string]string, arg string) {
 	logger := common.Logger(ctx)
 	stepID := rc.CurrentStep
@@ -120,6 +123,7 @@ func (rc *RunContext) setOutput(ctx context.Context, kvPairs map[string]string, 
 	logger.WithFields(logrus.Fields{"command": "set-output", "name": outputName, "arg": arg}).Infof("  \U00002699  ::set-output:: %s=%s", outputName, arg)
 	result.Outputs[outputName] = arg
 }
+
 func (rc *RunContext) addPath(ctx context.Context, arg string) {
 	common.Logger(ctx).WithFields(logrus.Fields{"command": "add-path", "arg": arg}).Infof("  \U00002699  ::add-path:: %s", arg)
 	extraPath := []string{arg}
@@ -142,6 +146,7 @@ func parseKeyValuePairs(kvPairs string, separator string) map[string]string {
 	}
 	return rtn
 }
+
 func unescapeCommandData(arg string) string {
 	escapeMap := map[string]string{
 		"%25": "%",
@@ -153,6 +158,7 @@ func unescapeCommandData(arg string) string {
 	}
 	return arg
 }
+
 func unescapeCommandProperty(arg string) string {
 	escapeMap := map[string]string{
 		"%25": "%",
@@ -166,6 +172,7 @@ func unescapeCommandProperty(arg string) string {
 	}
 	return arg
 }
+
 func unescapeKvPairs(kvPairs map[string]string) map[string]string {
 	for k, v := range kvPairs {
 		kvPairs[k] = unescapeCommandProperty(v)

@@ -91,8 +91,10 @@ func withDefaultBranch(ctx context.Context, b string, event map[string]any) map[
 	return event
 }
 
-var findGitRef = git.FindGitRef
-var findGitRevision = git.FindGitRevision
+var (
+	findGitRef      = git.FindGitRef
+	findGitRevision = git.FindGitRevision
+)
 
 func (ghc *GithubContext) SetRef(ctx context.Context, defaultBranch string, repoPath string) {
 	logger := common.Logger(ctx)

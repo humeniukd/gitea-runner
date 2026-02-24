@@ -7,8 +7,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type EmptyTraceWriter struct {
-}
+type EmptyTraceWriter struct{}
 
 func (e *EmptyTraceWriter) Info(_ string, _ ...any) {
 }
@@ -28,7 +27,8 @@ matrix:
   - a
   - b
 `, 4, 0},
-		{`
+		{
+			`
 matrix:
   label:
   - a
@@ -37,7 +37,8 @@ matrix:
   - label: a
     x: self`, 2, 0,
 		},
-		{`
+		{
+			`
 matrix:
   label:
   - a
@@ -46,7 +47,8 @@ matrix:
   - label: c
     x: self`, 2, 1,
 		},
-		{`
+		{
+			`
 matrix:
   label:
   - a

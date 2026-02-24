@@ -216,7 +216,6 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, subpath stri
 	if len(entrypoint) == 0 {
 		if entrypointType == "pre-entrypoint" && action.Runs.PreEntrypoint != "" {
 			entrypoint, err = shellquote.Split(action.Runs.PreEntrypoint)
-
 			if err != nil {
 				return err
 			}

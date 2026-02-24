@@ -282,7 +282,6 @@ func (r *artifactV4Routes) createArtifact(ctx *ArtifactContext) {
 	safePath := safeResolve(safeRunPath, artifactName)
 	safePath = safeResolve(safePath, artifactName+".zip")
 	file, err := r.fs.OpenWritable(safePath)
-
 	if err != nil {
 		panic(err)
 	}
@@ -310,7 +309,6 @@ func (r *artifactV4Routes) uploadArtifact(ctx *ArtifactContext) {
 		safePath = safeResolve(safePath, artifactName+".zip")
 
 		file, err := r.fs.OpenAppendable(safePath)
-
 		if err != nil {
 			panic(err)
 		}

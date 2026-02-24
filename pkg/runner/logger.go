@@ -26,9 +26,11 @@ const (
 	gray    = 37
 )
 
-var colors []int
-var nextColor int
-var mux sync.Mutex
+var (
+	colors    []int
+	nextColor int
+	mux       sync.Mutex
+)
 
 func init() {
 	nextColor = 0

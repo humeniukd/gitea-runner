@@ -62,7 +62,6 @@ func FindGitRevision(ctx context.Context, file string) (shortSha string, sha str
 			EnableDotGitCommonDir: true,
 		},
 	)
-
 	if err != nil {
 		logger.WithError(err).Error("path", file, "not located inside a git repository")
 		return "", "", err
@@ -96,8 +95,8 @@ func FindGitRef(ctx context.Context, file string) (string, error) {
 	logger.Debugf("HEAD points to '%s'", ref)
 
 	// Prefer the git library to iterate over the references and find a matching tag or branch.
-	var refTag = ""
-	var refBranch = ""
+	refTag := ""
+	refBranch := ""
 	repo, err := git.PlainOpenWithOptions(
 		file,
 		&git.PlainOpenOptions{
@@ -105,7 +104,6 @@ func FindGitRef(ctx context.Context, file string) (string, error) {
 			EnableDotGitCommonDir: true,
 		},
 	)
-
 	if err != nil {
 		return "", err
 	}
@@ -144,7 +142,6 @@ func FindGitRef(ctx context.Context, file string) (string, error) {
 
 		return nil
 	})
-
 	if err != nil {
 		return "", err
 	}
