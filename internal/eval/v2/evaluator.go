@@ -162,7 +162,7 @@ func (e *Evaluator) evalBinaryNode(node *exprparser.BinaryNode) (*EvaluationResu
 	return e.evalBinaryNodeRight(node, left, right)
 }
 
-func (e *Evaluator) evalBinaryNodeLeft(node *exprparser.BinaryNode, left *EvaluationResult) (*EvaluationResult, error) {
+func (e *Evaluator) evalBinaryNodeLeft(node *exprparser.BinaryNode, left *EvaluationResult) (*EvaluationResult, error) { //nolint:unparam
 	switch node.Op {
 	case "&&":
 		if left.IsFalsy() {
@@ -187,7 +187,7 @@ func (e *Evaluator) evalBinaryNodeLeft(node *exprparser.BinaryNode, left *Evalua
 			return CreateIntermediateResult(e.Context(), ret), nil
 		}
 	}
-	return nil, errors.ErrUnsupported
+	return nil, nil //nolint:nilnil
 }
 
 func (e *Evaluator) evalBinaryNodeRight(node *exprparser.BinaryNode, left *EvaluationResult, right *EvaluationResult) (*EvaluationResult, error) {
