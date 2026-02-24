@@ -1,4 +1,5 @@
 {
+  "number": 1,
   "pull_request": {
     "head": {
       "ref": "sample-head-ref"
