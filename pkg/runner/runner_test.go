@@ -26,11 +26,12 @@ import (
 )
 
 var (
-	baseImage = "node:24-bookworm-slim"
-	platforms map[string]string
-	logLevel  = log.DebugLevel
-	workdir   = "testdata"
-	secrets   map[string]string
+	baseImage                   = "node:24-bookworm-slim"
+	platforms                   map[string]string
+	logLevel                    = log.DebugLevel
+	workdir                     = "testdata"
+	secrets                     map[string]string
+	nativeContainerArchitecture = ""
 )
 
 func init() {
@@ -41,6 +42,12 @@ func init() {
 	platforms = map[string]string{
 		"ubuntu-latest": baseImage,
 		"self-hosted":   "-self-hosted",
+	}
+
+	// Force the correct docker container architecture
+	// otherwise it may fail to start containers without qemu
+	if runtime.GOARCH == "amd64" {
+		nativeContainerArchitecture = "linux/amd64"
 	}
 
 	if l := os.Getenv("ACT_TEST_LOG_LEVEL"); l != "" {
@@ -229,7 +236,7 @@ func TestRunEvent(t *testing.T) {
 		t.Skip("skipping integration test")
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	tables := []TestJobFileInfo{
 		// Shells
@@ -237,8 +244,7 @@ func TestRunEvent(t *testing.T) {
 		// TODO: figure out why it fails
 		// {workdir, "shells/custom", "push", "", map[string]string{"ubuntu-latest": "catthehacker/ubuntu:pwsh-latest"}, }, // custom image with pwsh
 		{workdir, "shells/pwsh", "push", "", map[string]string{"ubuntu-latest": "catthehacker/ubuntu:pwsh-latest"}, secrets}, // custom image with pwsh
-		// Disabled: fails in CI with "container is not running" due to Docker lifecycle timing
-		// {workdir, "shells/bash", "push", "", platforms, secrets},
+		{workdir, "shells/bash", "push", "", platforms, secrets},
 		{workdir, "shells/python", "push", "", map[string]string{"ubuntu-latest": "node:16-buster"}, secrets}, // slim doesn't have python
 		{workdir, "shells/sh", "push", "", platforms, secrets},
 
@@ -263,9 +269,8 @@ func TestRunEvent(t *testing.T) {
 
 		// Eval
 		{workdir, "evalmatrix", "push", "", platforms, secrets},
-		// Disabled: fails in CI with 'container is not running' causing log.Fatal crash in matrix evaluation
-		// {workdir, "evalmatrixneeds", "push", "", platforms, secrets},
-		// {workdir, "evalmatrixneeds2", "push", "", platforms, secrets},
+		{workdir, "evalmatrixneeds", "push", "", platforms, secrets},
+		{workdir, "evalmatrixneeds2", "push", "", platforms, secrets},
 		{workdir, "evalmatrix-merge-map", "push", "", platforms, secrets},
 		{workdir, "evalmatrix-merge-array", "push", "", platforms, secrets},
 		// Disabled: github.repository_owner resolves inconsistently between env and step expressions in CI
@@ -352,8 +357,9 @@ func TestRunEvent(t *testing.T) {
 	for _, table := range tables {
 		t.Run(table.workflowPath, func(t *testing.T) {
 			config := &Config{
-				Secrets:  table.secrets,
-				Parallel: 8,
+				Secrets:               table.secrets,
+				Parallel:              8,
+				ContainerArchitecture: nativeContainerArchitecture,
 			}
 
 			eventFile := filepath.Join(workdir, table.workflowPath, "event.json")
@@ -419,7 +425,8 @@ func TestPullAndPostStepFailureIsJobFailure(t *testing.T) {
 			factory := &captureJobLoggerFactory{}
 
 			config := &Config{
-				Secrets: table.secrets,
+				Secrets:               table.secrets,
+				ContainerArchitecture: nativeContainerArchitecture,
 			}
 
 			eventFile := filepath.Join(workdir, table.workflowPath, "event.json")
@@ -489,7 +496,8 @@ func TestFetchFailureIsJobFailure(t *testing.T) {
 			factory := &captureJobLoggerFactory{}
 
 			config := &Config{
-				Secrets: table.secrets,
+				Secrets:               table.secrets,
+				ContainerArchitecture: nativeContainerArchitecture,
 			}
 
 			eventFile := filepath.Join(workdir, table.workflowPath, "event.json")
@@ -739,7 +747,6 @@ func (f *maskJobLoggerFactory) WithJobLogger() *log.Logger {
 }
 
 func TestMaskValues(t *testing.T) {
-	t.Skip("Disabled: fails in CI with 'container is not running' due to Docker lifecycle timing")
 	assertNoSecret := func(text string, _ string) {
 		found := strings.Contains(text, "composite secret")
 		if found {
@@ -763,7 +770,9 @@ func TestMaskValues(t *testing.T) {
 	}
 
 	logger := &maskJobLoggerFactory{}
-	tjfi.runTest(WithJobLoggerFactory(common.WithLogger(context.Background(), logger.WithJobLogger()), logger), t, &Config{})
+	tjfi.runTest(WithJobLoggerFactory(common.WithLogger(context.Background(), logger.WithJobLogger()), logger), t, &Config{
+		ContainerArchitecture: nativeContainerArchitecture,
+	})
 	output := logger.Output.String()
 
 	assertNoSecret(output, "secret value")
@@ -771,7 +780,6 @@ func TestMaskValues(t *testing.T) {
 }
 
 func TestRunEventSecrets(t *testing.T) {
-	t.Skip("Disabled: fails in CI with 'container is not running' due to Docker lifecycle timing")
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
@@ -790,11 +798,14 @@ func TestRunEventSecrets(t *testing.T) {
 	secrets, _ := godotenv.Read(filepath.Join(workdir, workflowPath, ".secrets"))
 	require.NoError(t, err, "Failed to read .secrets")
 
-	tjfi.runTest(context.Background(), t, &Config{Secrets: secrets, Env: env})
+	tjfi.runTest(context.Background(), t, &Config{
+		Secrets:               secrets,
+		Env:                   env,
+		ContainerArchitecture: nativeContainerArchitecture,
+	})
 }
 
 func TestRunActionInputs(t *testing.T) {
-	t.Skip("Disabled: fails in CI with 'container is not running' due to Docker lifecycle timing")
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
@@ -812,11 +823,13 @@ func TestRunActionInputs(t *testing.T) {
 		"SOME_INPUT": "input",
 	}
 
-	tjfi.runTest(context.Background(), t, &Config{Inputs: inputs})
+	tjfi.runTest(context.Background(), t, &Config{
+		Inputs:                inputs,
+		ContainerArchitecture: nativeContainerArchitecture,
+	})
 }
 
 func TestRunEventPullRequest(t *testing.T) {
-	t.Skip("Disabled: fails in CI with nil PR number and 'container is not running' due to Docker lifecycle timing")
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
@@ -831,11 +844,13 @@ func TestRunEventPullRequest(t *testing.T) {
 		platforms:    platforms,
 	}
 
-	tjfi.runTest(context.Background(), t, &Config{EventPath: filepath.Join(workdir, workflowPath, "event.json")})
+	tjfi.runTest(context.Background(), t, &Config{
+		EventPath:             filepath.Join(workdir, workflowPath, "event.json"),
+		ContainerArchitecture: nativeContainerArchitecture,
+	})
 }
 
 func TestRunMatrixWithUserDefinedInclusions(t *testing.T) {
-	t.Skip("Disabled: fails in CI with 'container is not running' due to Docker lifecycle timing")
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
@@ -859,5 +874,8 @@ func TestRunMatrixWithUserDefinedInclusions(t *testing.T) {
 		},
 	}
 
-	tjfi.runTest(context.Background(), t, &Config{Matrix: matrix})
+	tjfi.runTest(context.Background(), t, &Config{
+		Matrix:                matrix,
+		ContainerArchitecture: nativeContainerArchitecture,
+	})
 }
