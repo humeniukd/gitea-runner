@@ -68,7 +68,7 @@ jobs:
       - name: Run act from cli
         run: go run ./internal/app/act-cli -P ubuntu-latest=node:16-buster-slim -C ./pkg/runner/testdata/ -W ./basic/push.yml
       - name: Run act from cli without docker support
-        run: go run -tags WITHOUT_DOCKER ./internal/app/act-cli exec -i "-self-hosted" -C ./pkg/runner/testdata/ -W ./local-action-js/push.yml
+        run: go run -tags WITHOUT_DOCKER ./internal/app/act-cli -P ubuntu-latest=-self-hosted -C ./pkg/runner/testdata/ -W ./local-action-js/push.yml
 
   snapshot:
     name: snapshot
