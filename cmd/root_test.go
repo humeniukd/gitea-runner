@@ -39,6 +39,10 @@ func TestListOptions(t *testing.T) {
 }
 
 func TestRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
 	rootCmd := createRootCommand(context.Background(), &Input{}, "")
 	err := newRunCommand(context.Background(), &Input{
 		platforms:     []string{"ubuntu-latest=node:16-buster-slim"},
@@ -49,6 +53,9 @@ func TestRun(t *testing.T) {
 }
 
 func TestRunPush(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
 	rootCmd := createRootCommand(context.Background(), &Input{}, "")
 	err := newRunCommand(context.Background(), &Input{
 		platforms:     []string{"ubuntu-latest=node:16-buster-slim"},
@@ -59,6 +66,9 @@ func TestRunPush(t *testing.T) {
 }
 
 func TestRunPushJsonLogger(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
 	rootCmd := createRootCommand(context.Background(), &Input{}, "")
 	err := newRunCommand(context.Background(), &Input{
 		platforms:     []string{"ubuntu-latest=node:16-buster-slim"},
@@ -70,6 +80,9 @@ func TestRunPushJsonLogger(t *testing.T) {
 }
 
 func TestFlags(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
 	for _, f := range []string{"graph", "list", "bug-report", "man-page"} {
 		t.Run("TestFlag-"+f, func(t *testing.T) {
 			rootCmd := createRootCommand(context.Background(), &Input{}, "")
@@ -86,6 +99,9 @@ func TestFlags(t *testing.T) {
 }
 
 func TestWorkflowCall(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
 	rootCmd := createRootCommand(context.Background(), &Input{}, "")
 	err := newRunCommand(context.Background(), &Input{
 		platforms:     []string{"ubuntu-latest=node:16-buster-slim"},
@@ -97,6 +113,9 @@ func TestWorkflowCall(t *testing.T) {
 }
 
 func TestLocalRepositories(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
 	wd, _ := filepath.Abs("../pkg/runner/testdata/")
 	rootCmd := createRootCommand(context.Background(), &Input{}, "")
 	err := newRunCommand(context.Background(), &Input{

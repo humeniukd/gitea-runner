@@ -16,6 +16,10 @@ import (
 )
 
 func TestJobExecutor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
 	tables := []TestJobFileInfo{
 		{workdir, "uses-and-run-in-one-step", "push", "Invalid run/uses syntax for job:test step:Test", platforms, secrets},
 		{workdir, "uses-github-empty", "push", "Expected format {org}/{repo}[/path]@ref", platforms, secrets},
@@ -31,7 +35,9 @@ func TestJobExecutor(t *testing.T) {
 	ctx := common.WithDryrun(context.Background(), true)
 	for _, table := range tables {
 		t.Run(table.workflowPath, func(t *testing.T) {
-			table.runTest(ctx, t, &Config{})
+			table.runTest(ctx, t, &Config{
+				ContainerArchitecture: nativeContainerArchitecture,
+			})
 		})
 	}
 }

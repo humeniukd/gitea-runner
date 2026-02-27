@@ -44,6 +44,10 @@ func TestGetSocketAndHostNoSocket(t *testing.T) {
 }
 
 func TestGetSocketAndHostOnlySocket(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
 	// Arrange
 	socketURI := "/path/to/my.socket"
 	os.Unsetenv("DOCKER_HOST")
@@ -75,6 +79,10 @@ func TestGetSocketAndHostDontMount(t *testing.T) {
 }
 
 func TestGetSocketAndHostNoHostNoSocket(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
 	// Arrange
 	CommonSocketLocations = originalCommonSocketLocations
 	os.Unsetenv("DOCKER_HOST")
@@ -93,6 +101,10 @@ func TestGetSocketAndHostNoHostNoSocket(t *testing.T) {
 // > Your code breaks setting DOCKER_HOST if shouldMount is false.
 // > This happens if neither DOCKER_HOST nor --container-daemon-socket has a value, but socketLocation() returns a URI
 func TestGetSocketAndHostNoHostNoSocketDefaultLocation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
 	// Arrange
 	mySocketFile, tmpErr := os.CreateTemp(t.TempDir(), "act-*.sock")
 	mySocket := mySocketFile.Name()
@@ -115,6 +127,10 @@ func TestGetSocketAndHostNoHostNoSocketDefaultLocation(t *testing.T) {
 }
 
 func TestGetSocketAndHostNoHostInvalidSocket(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
 	// Arrange
 	os.Unsetenv("DOCKER_HOST")
 	mySocket := "/my/socket/path.sock"

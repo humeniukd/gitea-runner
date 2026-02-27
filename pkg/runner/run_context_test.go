@@ -344,6 +344,10 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 }
 
 func TestGetGitHubContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
 	log.SetLevel(log.DebugLevel)
 
 	cwd, err := os.Getwd()

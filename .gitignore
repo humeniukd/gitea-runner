@@ -1,4 +1,5 @@
 /act_runner
+/act
 .env
 .runner
 coverage.txt

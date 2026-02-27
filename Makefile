@@ -1,5 +1,6 @@
 DIST := dist
 EXECUTABLE := act_runner
+ACT_EXECUTABLE := act
 GOFMT ?= gofumpt -l
 DIST_DIRS := $(DIST)/binaries $(DIST)/release
 GO ?= go
@@ -137,7 +138,7 @@ tidy-check: tidy
 	fi
 
 test: fmt-check security-check
-	@$(GO) test -v -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
+	@$(GO) test -test.short -v -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
 
 .PHONY: vet
 vet:
@@ -148,10 +149,13 @@ vet:
 install: $(GOFILES)
 	$(GO) install -v -tags '$(TAGS)' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)'
 
-build: go-check $(EXECUTABLE)
+build: go-check $(EXECUTABLE) $(ACT_EXECUTABLE)
 
 $(EXECUTABLE): $(GOFILES)
 	$(GO) build -v -tags '$(TAGS)' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)' -o $@
+
+$(ACT_EXECUTABLE): $(GOFILES)
+	$(GO) build -v -tags '$(TAGS)' -ldflags '$(EXTLDFLAGS)-s -w $(LDFLAGS)' -o $@ ./internal/app/act-cli
 
 .PHONY: deps-backend
 deps-backend:
