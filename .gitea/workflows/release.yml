@@ -28,7 +28,7 @@ jobs:
         uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
-          args: release --clean -f ./.goreleaser.yml -f ./.goreleaser.gitea.yml
+          args: release --clean -f ./.goreleaser.act-cli.yml -f ./.goreleaser.act-cli.gitea.yml
         env:
           GITEA_TOKEN: ${{ secrets.GORELEASER_GITHUB_TOKEN || github.token }}
       - name: Winget
