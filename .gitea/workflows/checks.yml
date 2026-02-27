@@ -130,7 +130,6 @@ jobs:
         env:
           ARTIFACTS: ${{ steps.goreleaser.outputs.artifacts }}
       - name: Chocolatey
-        if: false
         uses: ./.github/actions/choco
         with:
           version: v0.0.0-pr
