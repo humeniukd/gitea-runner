@@ -199,7 +199,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 
 	workdirParent := strings.TrimLeft(r.cfg.Container.WorkdirParent, "/")
 	if r.cfg.Container.BindWorkdir {
-		// Prepend the task ID to isolate concurrent jobs from the same repo.
+		// Append the task ID to isolate concurrent jobs from the same repo.
 		workdirParent = fmt.Sprintf("%s/%d", workdirParent, task.Id)
 	}
 	workdir := filepath.FromSlash(fmt.Sprintf("/%s/%s", workdirParent, preset.Repository))
