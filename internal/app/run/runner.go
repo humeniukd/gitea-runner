@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -245,6 +246,13 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 
 	execErr := executor(ctx)
 	reporter.SetOutputs(job.Outputs)
+
+	if r.cfg.Container.BindWorkdir {
+		if err := os.RemoveAll(runnerConfig.Workdir); err != nil {
+			log.Warnf("failed to clean up workspace %s: %v", runnerConfig.Workdir, err)
+		}
+	}
+
 	return execErr
 }
 
