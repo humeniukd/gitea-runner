@@ -204,12 +204,17 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	}
 	workdir := filepath.FromSlash(fmt.Sprintf("/%s/%s", workdirParent, preset.Repository))
 
+	actionCacheDir := filepath.FromSlash(r.cfg.Host.WorkdirParent)
+
 	runnerConfig := &runner.Config{
 		// On Linux, Workdir will be like "/<parent_directory>/<owner>/<repo>"
 		// On Windows, Workdir will be like "\<parent_directory>\<owner>\<repo>"
 		Workdir:        workdir,
 		BindWorkdir:    r.cfg.Container.BindWorkdir,
-		ActionCacheDir: filepath.FromSlash(r.cfg.Host.WorkdirParent),
+		ActionCacheDir: actionCacheDir,
+		ActionCache: &runner.GoGitActionCache{
+			Path: actionCacheDir,
+		},
 
 		ReuseContainers:       false,
 		ForcePull:             r.cfg.Container.ForcePull,
