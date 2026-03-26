@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"time"
@@ -56,6 +57,7 @@ type Container struct {
 	ForceRebuild  bool          `yaml:"force_rebuild"`  // Rebuild docker image(s) even if already present
 	RequireDocker bool          `yaml:"require_docker"` // Always require a reachable docker daemon, even if not required by act_runner
 	DockerTimeout time.Duration `yaml:"docker_timeout"` // Timeout to wait for the docker daemon to be reachable, if docker is required by require_docker or act_runner
+	BindWorkdir   bool          `yaml:"bind_workdir"`   // BindWorkdir binds the workspace to the host filesystem instead of using Docker volumes. Required for DinD when jobs use docker compose with bind mounts.
 }
 
 // Host represents the configuration for the host.
@@ -96,9 +98,7 @@ func LoadDefault(file string) (*Config, error) {
 			if cfg.Runner.Envs == nil {
 				cfg.Runner.Envs = map[string]string{}
 			}
-			for k, v := range envs {
-				cfg.Runner.Envs[k] = v
-			}
+			maps.Copy(cfg.Runner.Envs, envs)
 		}
 	}
 

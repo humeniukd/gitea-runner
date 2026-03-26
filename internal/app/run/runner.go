@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -49,9 +51,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		}
 	}
 	envs := make(map[string]string, len(cfg.Runner.Envs))
-	for k, v := range cfg.Runner.Envs {
-		envs[k] = v
-	}
+	maps.Copy(envs, cfg.Runner.Envs)
 	if cfg.Cache.Enabled == nil || *cfg.Cache.Enabled {
 		if cfg.Cache.ExternalServer != "" {
 			envs["ACTIONS_CACHE_URL"] = cfg.Cache.ExternalServer
@@ -116,7 +116,7 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 // getDefaultActionsURL
 // when DEFAULT_ACTIONS_URL == "https://github.com" and GithubMirror is not blank,
 // it should be set to GithubMirror first.
-func (r *Runner) getDefaultActionsURL(ctx context.Context, task *runnerv1.Task) string {
+func (r *Runner) getDefaultActionsURL(task *runnerv1.Task) string {
 	giteaDefaultActionsURL := task.Context.Fields["gitea_default_actions_url"].GetStringValue()
 	if giteaDefaultActionsURL == "https://github.com" && r.cfg.Runner.GithubMirror != "" {
 		return r.cfg.Runner.GithubMirror
@@ -148,7 +148,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	taskContext := task.Context.Fields
 
 	log.Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
-		r.getDefaultActionsURL(ctx, task),
+		r.getDefaultActionsURL(task),
 		r.client.Address())
 
 	preset := &model.GithubContext{
@@ -175,8 +175,8 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		preset.Token = t
 	}
 
-	if actionsIdTokenRequestUrl := taskContext["actions_id_token_request_url"].GetStringValue(); actionsIdTokenRequestUrl != "" {
-		r.envs["ACTIONS_ID_TOKEN_REQUEST_URL"] = actionsIdTokenRequestUrl
+	if actionsIDTokenRequestURL := taskContext["actions_id_token_request_url"].GetStringValue(); actionsIDTokenRequestURL != "" {
+		r.envs["ACTIONS_ID_TOKEN_REQUEST_URL"] = actionsIDTokenRequestURL
 		r.envs["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = taskContext["actions_id_token_request_token"].GetStringValue()
 		task.Secrets["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = r.envs["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
 	}
@@ -198,11 +198,18 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		maxLifetime = time.Until(deadline)
 	}
 
+	workdirParent := strings.TrimLeft(r.cfg.Container.WorkdirParent, "/")
+	if r.cfg.Container.BindWorkdir {
+		// Append the task ID to isolate concurrent jobs from the same repo.
+		workdirParent = fmt.Sprintf("%s/%d", workdirParent, task.Id)
+	}
+	workdir := filepath.FromSlash(fmt.Sprintf("/%s/%s", workdirParent, preset.Repository))
+
 	runnerConfig := &runner.Config{
 		// On Linux, Workdir will be like "/<parent_directory>/<owner>/<repo>"
 		// On Windows, Workdir will be like "\<parent_directory>\<owner>\<repo>"
-		Workdir:        filepath.FromSlash(fmt.Sprintf("/%s/%s", strings.TrimLeft(r.cfg.Container.WorkdirParent, "/"), preset.Repository)),
-		BindWorkdir:    false,
+		Workdir:        workdir,
+		BindWorkdir:    r.cfg.Container.BindWorkdir,
 		ActionCacheDir: filepath.FromSlash(r.cfg.Host.WorkdirParent),
 
 		ReuseContainers:       false,
@@ -223,7 +230,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		ContainerOptions:      r.cfg.Container.Options,
 		ContainerDaemonSocket: r.cfg.Container.DockerHost,
 		Privileged:            r.cfg.Container.Privileged,
-		DefaultActionInstance: r.getDefaultActionsURL(ctx, task),
+		DefaultActionInstance: r.getDefaultActionsURL(task),
 		PlatformPicker:        r.labels.PickPlatform,
 		Vars:                  task.Vars,
 		ValidVolumes:          r.cfg.Container.ValidVolumes,
@@ -247,6 +254,15 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 
 	execErr := executor(ctx)
 	reporter.SetOutputs(job.Outputs)
+
+	if r.cfg.Container.BindWorkdir {
+		// Remove the entire task-specific directory (e.g. /workspace/<task_id>).
+		taskDir := filepath.FromSlash("/" + workdirParent)
+		if err := os.RemoveAll(taskDir); err != nil {
+			log.Warnf("failed to clean up workspace %s: %v", taskDir, err)
+		}
+	}
+
 	return execErr
 }
 
