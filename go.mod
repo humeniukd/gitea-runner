@@ -14,14 +14,13 @@ require (
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
+	go.yaml.in/yaml/v4 v4.0.0-rc.4
 	golang.org/x/term v0.40.0
 	golang.org/x/time v0.14.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 	gotest.tools/v3 v3.5.2
 )
-
-require go.yaml.in/yaml/v4 v4.0.0-rc.3
 
 require (
 	cyphar.com/go-pathrs v0.2.3 // indirect
