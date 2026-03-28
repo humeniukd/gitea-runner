@@ -109,7 +109,7 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-replace github.com/nektos/act => gitea.com/gitea/act v0.261.8
+replace github.com/nektos/act => gitea.com/gitea/act v0.261.9
 
 // Remove after github.com/docker/distribution is updated to support distribution/reference v0.6.0
 // (pulled in via moby/buildkit, breaks on undefined: reference.SplitHostname)
