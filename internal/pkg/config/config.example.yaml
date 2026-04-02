@@ -21,7 +21,7 @@ runner:
   env_file: .env
   # The timeout for a job to be finished.
   # Please note that the Gitea instance also has a timeout (3h by default) for the job.
-  # So the job could be stopped by the Gitea instance if it's timeout is shorter than this.
+  # So the job could be stopped by the Gitea instance if its timeout is shorter than this.
   timeout: 3h
   # The timeout for the runner to wait for running jobs to finish when shutting down.
   # Any running jobs that haven't finished after this timeout will be cancelled.
@@ -32,15 +32,20 @@ runner:
   fetch_timeout: 5s
   # The interval for fetching the job from the Gitea instance.
   fetch_interval: 2s
+  # The github_mirror of a runner is used to specify the mirror address of the github that pulls the action repository.
+  # It works when something like `uses: actions/checkout@v4` is used and DEFAULT_ACTIONS_URL is set to github,
+  # and github_mirror is not empty. In this case,
+  # it replaces https://github.com with the value here, which is useful for some special network environments.
+  github_mirror: ''
   # The labels of a runner are used to determine which jobs the runner can run, and how to run them.
-  # Like: "macos-arm64:host" or "ubuntu-latest:docker://gitea/runner-images:ubuntu-latest"
+  # Like: "macos-arm64:host" or "ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest"
   # Find more images provided by Gitea at https://gitea.com/gitea/runner-images .
   # If it's empty when registering, it will ask for inputting labels.
   # If it's empty when execute `daemon`, will use labels in `.runner` file.
   labels:
-    - "ubuntu-latest:docker://gitea/runner-images:ubuntu-latest"
-    - "ubuntu-22.04:docker://gitea/runner-images:ubuntu-22.04"
-    - "ubuntu-20.04:docker://gitea/runner-images:ubuntu-20.04"
+    - "ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest"
+    - "ubuntu-24.04:docker://docker.gitea.com/runner-images:ubuntu-24.04"
+    - "ubuntu-22.04:docker://docker.gitea.com/runner-images:ubuntu-22.04"
 
 cache:
   # Enable cache server to use actions/cache.
@@ -68,7 +73,7 @@ container:
   network: ""
   # Whether to use privileged mode or not when launching task containers (privileged mode is required for Docker-in-Docker).
   privileged: false
-  # And other options to be used when the container is started (eg, --add-host=my.gitea.url:host-gateway).
+  # Any other options to be used when the container is started (e.g., --add-host=my.gitea.url:host-gateway).
   options:
   # The parent directory of a job's working directory.
   # NOTE: There is no need to add the first '/' of the path as act_runner will add it automatically. 
@@ -86,7 +91,7 @@ container:
   # valid_volumes:
   #   - '**'
   valid_volumes: []
-  # overrides the docker client host with the specified one.
+  # Overrides the docker client host with the specified one.
   # If it's empty, act_runner will find an available docker host automatically.
   # If it's "-", act_runner will find an available docker host automatically, but the docker host won't be mounted to the job containers and service containers.
   # If it's not empty or "-", the specified docker host will be used. An error will be returned if it doesn't work.
@@ -95,6 +100,16 @@ container:
   force_pull: true
   # Rebuild docker image(s) even if already present
   force_rebuild: false
+  # Always require a reachable docker daemon, even if not required by act_runner
+  require_docker: false
+  # Timeout to wait for the docker daemon to be reachable, if docker is required by require_docker or act_runner
+  docker_timeout: 0s
+  # Bind the workspace to the host filesystem instead of using Docker volumes.
+  # This is required for Docker-in-Docker (DinD) setups when jobs use docker compose
+  # with bind mounts (e.g., ".:/app"), as volume-based workspaces are not accessible
+  # from the DinD daemon's filesystem. When enabled, ensure the workspace parent
+  # directory is also mounted into the runner container and listed in valid_volumes.
+  bind_workdir: false
 
 host:
   # The parent directory of a job's working directory.

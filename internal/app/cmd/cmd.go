@@ -39,6 +39,7 @@ func Execute(ctx context.Context) {
 	registerCmd.Flags().StringVar(&regArgs.Token, "token", "", "Runner token")
 	registerCmd.Flags().StringVar(&regArgs.RunnerName, "name", "", "Runner name")
 	registerCmd.Flags().StringVar(&regArgs.Labels, "labels", "", "Runner tags, comma separated")
+	registerCmd.Flags().BoolVar(&regArgs.Ephemeral, "ephemeral", false, "Configure the runner to be ephemeral and only ever be able to pick a single job (stricter than --once)")
 	rootCmd.AddCommand(registerCmd)
 
 	// ./act_runner daemon
@@ -71,7 +72,7 @@ func Execute(ctx context.Context) {
 		Use:   "cache-server",
 		Short: "Start a cache server for the cache action",
 		Args:  cobra.MaximumNArgs(0),
-		RunE:  runCacheServer(ctx, &configFile, &cacheArgs),
+		RunE:  runCacheServer(&configFile, &cacheArgs),
 	}
 	cacheCmd.Flags().StringVarP(&cacheArgs.Dir, "dir", "d", "", "Cache directory")
 	cacheCmd.Flags().StringVarP(&cacheArgs.Host, "host", "s", "", "Host of the cache server")

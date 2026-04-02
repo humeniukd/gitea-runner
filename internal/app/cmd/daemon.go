@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/mattn/go-isatty"
@@ -64,7 +66,34 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			log.Warn("no labels configured, runner may not be able to pick up jobs")
 		}
 
-		if ls.RequireDocker() {
+		if ls.RequireDocker() || cfg.Container.RequireDocker {
+			// Wait for dockerd be ready
+			if timeout := cfg.Container.DockerTimeout; timeout > 0 {
+				tctx, cancel := context.WithTimeout(ctx, timeout)
+				defer cancel()
+				keepRunning := true
+				for keepRunning {
+					dockerSocketPath, err := getDockerSocketPath(cfg.Container.DockerHost)
+					if err != nil {
+						log.Errorf("Failed to get socket path: %s", err.Error())
+					} else if err = envcheck.CheckIfDockerRunning(tctx, dockerSocketPath); errors.Is(err, context.Canceled) {
+						log.Infof("Docker wait timeout of %s expired", timeout.String())
+						break
+					} else if err != nil {
+						log.Errorf("Docker connection failed: %s", err.Error())
+					} else {
+						log.Infof("Docker is ready")
+						break
+					}
+					select {
+					case <-time.After(time.Second):
+					case <-tctx.Done():
+						log.Infof("Docker wait timeout of %s expired", timeout.String())
+						keepRunning = false
+					}
+				}
+			}
+			// Require dockerd be ready
 			dockerSocketPath, err := getDockerSocketPath(cfg.Container.DockerHost)
 			if err != nil {
 				return err
@@ -122,7 +151,7 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 
 		poller := poll.New(cfg, cli, runner)
 
-		if daemArgs.Once {
+		if daemArgs.Once || reg.Ephemeral {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
@@ -160,39 +189,46 @@ type daemonArgs struct {
 
 // initLogging setup the global logrus logger.
 func initLogging(cfg *config.Config) {
+	callPrettyfier := func(f *runtime.Frame) (string, string) {
+		// get function name
+		s := strings.Split(f.Function, ".")
+		funcname := "[" + s[len(s)-1] + "]"
+		// get file name and line number
+		_, filename := path.Split(f.File)
+		filename = "[" + filename + ":" + strconv.Itoa(f.Line) + "]"
+		return funcname, filename
+	}
+
 	isTerm := isatty.IsTerminal(os.Stdout.Fd())
 	format := &log.TextFormatter{
-		DisableColors: !isTerm,
-		FullTimestamp: true,
+		DisableColors:    !isTerm,
+		FullTimestamp:    true,
+		CallerPrettyfier: callPrettyfier,
 	}
 	log.SetFormatter(format)
 
-	if l := cfg.Log.Level; l != "" {
-		level, err := log.ParseLevel(l)
-		if err != nil {
-			log.WithError(err).
-				Errorf("invalid log level: %q", l)
-		}
+	l := cfg.Log.Level
+	if l == "" {
+		log.Infof("Log level not set, sticking to info")
+		return
+	}
 
-		// debug level
-		if level == log.DebugLevel {
-			log.SetReportCaller(true)
-			format.CallerPrettyfier = func(f *runtime.Frame) (string, string) {
-				// get function name
-				s := strings.Split(f.Function, ".")
-				funcname := "[" + s[len(s)-1] + "]"
-				// get file name and line number
-				_, filename := path.Split(f.File)
-				filename = "[" + filename + ":" + strconv.Itoa(f.Line) + "]"
-				return funcname, filename
-			}
-			log.SetFormatter(format)
-		}
+	level, err := log.ParseLevel(l)
+	if err != nil {
+		log.WithError(err).
+			Errorf("invalid log level: %q", l)
+	}
 
-		if log.GetLevel() != level {
-			log.Infof("log level changed to %v", level)
-			log.SetLevel(level)
-		}
+	// debug level
+	switch level {
+	case log.DebugLevel, log.TraceLevel:
+		log.SetReportCaller(true) // Only in debug or trace because it takes a performance toll
+		log.Infof("Log level %s requested, setting up report caller for further debugging", level)
+	}
+
+	if log.GetLevel() != level {
+		log.Infof("log level set to %v", level)
+		log.SetLevel(level)
 	}
 }
 
@@ -226,5 +262,5 @@ func getDockerSocketPath(configDockerHost string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("daemon Docker Engine socket not found and docker_host config was invalid")
+	return "", errors.New("daemon Docker Engine socket not found and docker_host config was invalid")
 }
