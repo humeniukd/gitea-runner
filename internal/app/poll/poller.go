@@ -7,13 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	"connectrpc.com/connect"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/time/rate"
 
 	"gitea.com/gitea/act_runner/internal/app/run"
 	"gitea.com/gitea/act_runner/internal/pkg/client"
@@ -33,6 +34,9 @@ type Poller struct {
 	shutdownJobs context.CancelFunc
 
 	done chan struct{}
+
+	consecutiveEmpty  atomic.Int64 // count of consecutive polls with no task available
+	consecutiveErrors atomic.Int64 // count of consecutive fetch errors
 }
 
 func New(cfg *config.Config, client client.Client, runner *run.Runner) *Poller {
@@ -58,11 +62,10 @@ func New(cfg *config.Config, client client.Client, runner *run.Runner) *Poller {
 }
 
 func (p *Poller) Poll() {
-	limiter := rate.NewLimiter(rate.Every(p.cfg.Runner.FetchInterval), 1)
 	wg := &sync.WaitGroup{}
 	for i := 0; i < p.cfg.Runner.Capacity; i++ {
 		wg.Add(1)
-		go p.poll(wg, limiter)
+		go p.poll(wg)
 	}
 	wg.Wait()
 
@@ -71,9 +74,7 @@ func (p *Poller) Poll() {
 }
 
 func (p *Poller) PollOnce() {
-	limiter := rate.NewLimiter(rate.Every(p.cfg.Runner.FetchInterval), 1)
-
-	p.pollOnce(limiter)
+	p.pollOnce()
 
 	// signal that we're done
 	close(p.done)
@@ -108,10 +109,10 @@ func (p *Poller) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (p *Poller) poll(wg *sync.WaitGroup, limiter *rate.Limiter) {
+func (p *Poller) poll(wg *sync.WaitGroup) {
 	defer wg.Done()
 	for {
-		p.pollOnce(limiter)
+		p.pollOnce()
 
 		select {
 		case <-p.pollingCtx.Done():
@@ -122,18 +123,57 @@ func (p *Poller) poll(wg *sync.WaitGroup, limiter *rate.Limiter) {
 	}
 }
 
-func (p *Poller) pollOnce(limiter *rate.Limiter) {
+// calculateInterval returns the polling interval with exponential backoff based on
+// consecutive empty or error responses. The interval starts at FetchInterval and
+// doubles with each consecutive empty/error, capped at FetchIntervalMax.
+func (p *Poller) calculateInterval() time.Duration {
+	base := p.cfg.Runner.FetchInterval
+	maxInterval := p.cfg.Runner.FetchIntervalMax
+
+	n := max(p.consecutiveEmpty.Load(), p.consecutiveErrors.Load())
+	if n <= 1 {
+		return base
+	}
+
+	// Capped exponential backoff: base * 2^(n-1), max shift=5 so multiplier <= 32
+	shift := min(n-1, 5)
+	interval := base * time.Duration(int64(1)<<shift)
+	return min(interval, maxInterval)
+}
+
+// addJitter adds +/- 20% random jitter to the given duration to avoid thundering herd.
+func addJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	// jitter range: [-20%, +20%] of d
+	jitterRange := int64(d) * 2 / 5 // 40% total range
+	if jitterRange <= 0 {
+		return d
+	}
+	jitter := rand.Int64N(jitterRange) - jitterRange/2
+	return d + time.Duration(jitter)
+}
+
+func (p *Poller) pollOnce() {
 	for {
-		if err := limiter.Wait(p.pollingCtx); err != nil {
-			if p.pollingCtx.Err() != nil {
-				log.WithError(err).Debug("limiter wait failed")
-			}
+		interval := addJitter(p.calculateInterval())
+		timer := time.NewTimer(interval)
+		select {
+		case <-timer.C:
+		case <-p.pollingCtx.Done():
+			timer.Stop()
 			return
 		}
+
 		task, ok := p.fetchTask(p.pollingCtx)
 		if !ok {
 			continue
 		}
+
+		// Got a task — reset backoff counters for fast subsequent polling.
+		p.consecutiveEmpty.Store(0)
+		p.consecutiveErrors.Store(0)
 
 		p.runTaskWithRecover(p.jobsCtx, task)
 		return
@@ -167,10 +207,15 @@ func (p *Poller) fetchTask(ctx context.Context) (*runnerv1.Task, bool) {
 	}
 	if err != nil {
 		log.WithError(err).Error("failed to fetch task")
+		p.consecutiveErrors.Add(1)
 		return nil, false
 	}
 
+	// Successful response — reset error counter.
+	p.consecutiveErrors.Store(0)
+
 	if resp == nil || resp.Msg == nil {
+		p.consecutiveEmpty.Add(1)
 		return nil, false
 	}
 
@@ -179,6 +224,7 @@ func (p *Poller) fetchTask(ctx context.Context) (*runnerv1.Task, bool) {
 	}
 
 	if resp.Msg.Task == nil {
+		p.consecutiveEmpty.Add(1)
 		return nil, false
 	}
 

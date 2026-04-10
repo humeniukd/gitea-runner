@@ -7,9 +7,7 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	connect_go "connectrpc.com/connect"
@@ -21,6 +19,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"gitea.com/gitea/act_runner/internal/pkg/client/mocks"
+	"gitea.com/gitea/act_runner/internal/pkg/config"
 )
 
 func TestReporter_parseLogRow(t *testing.T) {
@@ -175,9 +174,10 @@ func TestReporter_Fire(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		taskCtx, err := structpb.NewStruct(map[string]any{})
 		require.NoError(t, err)
+		cfg, _ := config.LoadDefault("")
 		reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{
 			Context: taskCtx,
-		})
+		}, cfg)
 		reporter.RunDaemon()
 		defer func() {
 			require.NoError(t, reporter.Close(""))
@@ -252,7 +252,8 @@ func TestReporter_EphemeralRunnerDeletion(t *testing.T) {
 	defer cancel()
 	taskCtx, err := structpb.NewStruct(map[string]any{})
 	require.NoError(t, err)
-	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx})
+	cfg, _ := config.LoadDefault("")
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx}, cfg)
 	reporter.ResetSteps(1)
 
 	// Fire a log entry to create pending data
@@ -315,23 +316,18 @@ func TestReporter_RunDaemonClose_Race(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	taskCtx, err := structpb.NewStruct(map[string]any{})
 	require.NoError(t, err)
+	cfg, _ := config.LoadDefault("")
 	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{
 		Context: taskCtx,
-	})
+	}, cfg)
 	reporter.ResetSteps(1)
 
-	// Start the daemon loop in a separate goroutine.
-	// RunDaemon reads r.closed and reschedules itself via time.AfterFunc.
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		reporter.RunDaemon()
-	})
+	// Start the daemon loop — RunDaemon spawns a goroutine internally.
+	reporter.RunDaemon()
 
-	// Close concurrently — this races with RunDaemon on r.closed.
+	// Close concurrently — this races with the daemon goroutine on r.closed.
 	require.NoError(t, reporter.Close(""))
 
-	// Cancel context so pending AfterFunc callbacks exit quickly.
+	// Cancel context so the daemon goroutine exits cleanly.
 	cancel()
-	wg.Wait()
-	time.Sleep(2 * time.Second)
 }
