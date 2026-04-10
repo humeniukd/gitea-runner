@@ -159,6 +159,18 @@ func LoadDefault(file string) (*Config, error) {
 		cfg.Runner.StateReportInterval = 5 * time.Second
 	}
 
+	// Validate and fix invalid config combinations to prevent confusing behavior.
+	if cfg.Runner.FetchIntervalMax < cfg.Runner.FetchInterval {
+		log.Warnf("fetch_interval_max (%v) is less than fetch_interval (%v), setting fetch_interval_max to fetch_interval",
+			cfg.Runner.FetchIntervalMax, cfg.Runner.FetchInterval)
+		cfg.Runner.FetchIntervalMax = cfg.Runner.FetchInterval
+	}
+	if cfg.Runner.LogReportMaxLatency < cfg.Runner.LogReportInterval {
+		log.Warnf("log_report_max_latency (%v) is less than log_report_interval (%v), setting log_report_max_latency to log_report_interval",
+			cfg.Runner.LogReportMaxLatency, cfg.Runner.LogReportInterval)
+		cfg.Runner.LogReportMaxLatency = cfg.Runner.LogReportInterval
+	}
+
 	// although `container.network_mode` will be deprecated, but we have to be compatible with it for now.
 	if cfg.Container.NetworkMode != "" && cfg.Container.Network == "" {
 		log.Warn("You are trying to use deprecated configuration item of `container.network_mode`, please use `container.network` instead.")
