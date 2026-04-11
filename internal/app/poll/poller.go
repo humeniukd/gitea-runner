@@ -157,17 +157,16 @@ func addJitter(d time.Duration) time.Duration {
 
 func (p *Poller) pollOnce() {
 	for {
-		interval := addJitter(p.calculateInterval())
-		timer := time.NewTimer(interval)
-		select {
-		case <-timer.C:
-		case <-p.pollingCtx.Done():
-			timer.Stop()
-			return
-		}
-
 		task, ok := p.fetchTask(p.pollingCtx)
 		if !ok {
+			interval := addJitter(p.calculateInterval())
+			timer := time.NewTimer(interval)
+			select {
+			case <-timer.C:
+			case <-p.pollingCtx.Done():
+				timer.Stop()
+				return
+			}
 			continue
 		}
 
