@@ -146,10 +146,10 @@ func LoadDefault(file string) (*Config, error) {
 		cfg.Runner.FetchIntervalMax = 60 * time.Second
 	}
 	if cfg.Runner.LogReportInterval <= 0 {
-		cfg.Runner.LogReportInterval = 3 * time.Second
+		cfg.Runner.LogReportInterval = 5 * time.Second
 	}
 	if cfg.Runner.LogReportMaxLatency <= 0 {
-		cfg.Runner.LogReportMaxLatency = 5 * time.Second
+		cfg.Runner.LogReportMaxLatency = 3 * time.Second
 	}
 	if cfg.Runner.LogReportBatchSize <= 0 {
 		cfg.Runner.LogReportBatchSize = 100
@@ -164,10 +164,9 @@ func LoadDefault(file string) (*Config, error) {
 			cfg.Runner.FetchIntervalMax, cfg.Runner.FetchInterval)
 		cfg.Runner.FetchIntervalMax = cfg.Runner.FetchInterval
 	}
-	if cfg.Runner.LogReportMaxLatency < cfg.Runner.LogReportInterval {
-		log.Warnf("log_report_max_latency (%v) is less than log_report_interval (%v), setting log_report_max_latency to log_report_interval",
+	if cfg.Runner.LogReportMaxLatency >= cfg.Runner.LogReportInterval {
+		log.Warnf("log_report_max_latency (%v) >= log_report_interval (%v), the max-latency timer will never fire before the periodic ticker; consider lowering log_report_max_latency",
 			cfg.Runner.LogReportMaxLatency, cfg.Runner.LogReportInterval)
-		cfg.Runner.LogReportMaxLatency = cfg.Runner.LogReportInterval
 	}
 
 	// although `container.network_mode` will be deprecated, but we have to be compatible with it for now.
