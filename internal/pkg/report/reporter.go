@@ -464,18 +464,16 @@ func (r *Reporter) ReportState(reportResult bool) error {
 		return true
 	})
 
-	r.stateMu.RLock()
-	changed := r.stateChanged
-	r.stateMu.RUnlock()
-
-	// Early return avoids the expensive proto.Clone on the common no-op path.
-	if !reportResult && !changed && len(outputs) == 0 {
+	// Consume stateChanged atomically with the snapshot; restored on error
+	// below so a concurrent Fire() during UpdateTask isn't silently lost.
+	r.stateMu.Lock()
+	if !reportResult && !r.stateChanged && len(outputs) == 0 {
+		r.stateMu.Unlock()
 		return nil
 	}
-
-	r.stateMu.RLock()
 	state := proto.Clone(r.state).(*runnerv1.TaskState)
-	r.stateMu.RUnlock()
+	r.stateChanged = false
+	r.stateMu.Unlock()
 
 	if !reportResult {
 		state.Result = runnerv1.Result_RESULT_UNSPECIFIED
@@ -486,12 +484,11 @@ func (r *Reporter) ReportState(reportResult bool) error {
 		Outputs: outputs,
 	}))
 	if err != nil {
+		r.stateMu.Lock()
+		r.stateChanged = true
+		r.stateMu.Unlock()
 		return err
 	}
-
-	r.stateMu.Lock()
-	r.stateChanged = false
-	r.stateMu.Unlock()
 
 	for _, k := range resp.Msg.SentOutputs {
 		r.outputs.Store(k, struct{}{})

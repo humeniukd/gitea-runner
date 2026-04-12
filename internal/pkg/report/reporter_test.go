@@ -442,6 +442,112 @@ func TestReporter_BatchSizeFlush(t *testing.T) {
 		"batch size threshold should have triggered immediate flush")
 }
 
+// TestReporter_StateChangedNotLostDuringReport asserts that a Fire() arriving
+// mid-UpdateTask re-dirties the flag so the change is picked up by the next report.
+func TestReporter_StateChangedNotLostDuringReport(t *testing.T) {
+	var updateTaskCalls atomic.Int64
+	inFlight := make(chan struct{})
+	release := make(chan struct{})
+
+	client := mocks.NewClient(t)
+	client.On("UpdateTask", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ *connect_go.Request[runnerv1.UpdateTaskRequest]) (*connect_go.Response[runnerv1.UpdateTaskResponse], error) {
+			n := updateTaskCalls.Add(1)
+			if n == 1 {
+				// Signal that the first UpdateTask is in flight, then block until released.
+				close(inFlight)
+				<-release
+			}
+			return connect_go.NewResponse(&runnerv1.UpdateTaskResponse{}), nil
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+	cfg, _ := config.LoadDefault("")
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx}, cfg)
+	reporter.ResetSteps(2)
+
+	// Mark stateChanged=true so the first ReportState proceeds to UpdateTask.
+	reporter.stateMu.Lock()
+	reporter.stateChanged = true
+	reporter.stateMu.Unlock()
+
+	// Kick off the first ReportState in a goroutine — it will block in UpdateTask.
+	done := make(chan error, 1)
+	go func() {
+		done <- reporter.ReportState(false)
+	}()
+
+	// Wait until UpdateTask is in flight (snapshot taken, flag consumed).
+	<-inFlight
+
+	// Concurrent Fire() modifies state — must re-flip stateChanged so the
+	// change is not lost when the in-flight ReportState finishes.
+	require.NoError(t, reporter.Fire(&log.Entry{
+		Message: "step starts",
+		Data:    log.Fields{"stage": "Main", "stepNumber": 1, "raw_output": true},
+	}))
+
+	// Release the in-flight UpdateTask and wait for it to return.
+	close(release)
+	require.NoError(t, <-done)
+
+	// stateChanged must still be true so the next ReportState picks up the
+	// concurrent Fire()'s change instead of skipping via the early-return path.
+	reporter.stateMu.RLock()
+	changed := reporter.stateChanged
+	reporter.stateMu.RUnlock()
+	assert.True(t, changed, "stateChanged must remain true after a concurrent Fire() during in-flight ReportState")
+
+	// And the next ReportState must actually send a second UpdateTask.
+	require.NoError(t, reporter.ReportState(false))
+	assert.Equal(t, int64(2), updateTaskCalls.Load(), "concurrent Fire() change must trigger a second UpdateTask, not be silently lost")
+}
+
+// TestReporter_StateChangedRestoredOnError verifies that when UpdateTask fails,
+// the dirty flag is restored so the snapshotted change isn't silently lost.
+func TestReporter_StateChangedRestoredOnError(t *testing.T) {
+	var updateTaskCalls atomic.Int64
+
+	client := mocks.NewClient(t)
+	client.On("UpdateTask", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ *connect_go.Request[runnerv1.UpdateTaskRequest]) (*connect_go.Response[runnerv1.UpdateTaskResponse], error) {
+			n := updateTaskCalls.Add(1)
+			if n == 1 {
+				return nil, errors.New("transient network error")
+			}
+			return connect_go.NewResponse(&runnerv1.UpdateTaskResponse{}), nil
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+	cfg, _ := config.LoadDefault("")
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx}, cfg)
+	reporter.ResetSteps(1)
+
+	reporter.stateMu.Lock()
+	reporter.stateChanged = true
+	reporter.stateMu.Unlock()
+
+	// First ReportState fails — flag must be restored to true.
+	require.Error(t, reporter.ReportState(false))
+
+	reporter.stateMu.RLock()
+	changed := reporter.stateChanged
+	reporter.stateMu.RUnlock()
+	assert.True(t, changed, "stateChanged must be restored to true after UpdateTask error so the change is retried")
+
+	// The next ReportState should still issue a request because the flag was restored.
+	require.NoError(t, reporter.ReportState(false))
+	assert.Equal(t, int64(2), updateTaskCalls.Load())
+}
+
 // TestReporter_StateNotifyFlush verifies that step transitions trigger
 // an immediate state flush via the stateNotify channel.
 func TestReporter_StateNotifyFlush(t *testing.T) {
