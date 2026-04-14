@@ -44,6 +44,10 @@ type Poller struct {
 type workerState struct {
 	consecutiveEmpty  int64
 	consecutiveErrors int64
+	// lastBackoff is the last interval reported to the PollBackoffSeconds gauge
+	// from this worker; used to suppress redundant no-op Set calls when the
+	// backoff plateaus (e.g. at FetchIntervalMax).
+	lastBackoff time.Duration
 }
 
 func New(cfg *config.Config, client client.Client, runner *run.Runner) *Poller {
@@ -167,9 +171,12 @@ func (p *Poller) pollOnce(s *workerState) {
 	for {
 		task, ok := p.fetchTask(p.pollingCtx, s)
 		if !ok {
-			interval := addJitter(p.calculateInterval(s))
-			metrics.PollBackoffSeconds.Set(interval.Seconds())
-			timer := time.NewTimer(interval)
+			base := p.calculateInterval(s)
+			if base != s.lastBackoff {
+				metrics.PollBackoffSeconds.Set(base.Seconds())
+				s.lastBackoff = base
+			}
+			timer := time.NewTimer(addJitter(base))
 			select {
 			case <-timer.C:
 			case <-p.pollingCtx.Done():

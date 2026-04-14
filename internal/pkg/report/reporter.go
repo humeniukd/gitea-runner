@@ -37,6 +37,11 @@ type Reporter struct {
 	logReplacer *strings.Replacer
 	oldnew      []string
 
+	// lastLogBufferRows is the last value written to the ReportLogBufferRows
+	// gauge; guarded by clientM (the same lock held around each ReportLog call)
+	// so the gauge skips no-op Set calls when the buffer size is unchanged.
+	lastLogBufferRows int
+
 	state        *runnerv1.TaskState
 	stateChanged bool
 	stateMu      sync.RWMutex
@@ -455,7 +460,10 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	r.logOffset = ack
 	remaining := len(r.logRows)
 	r.stateMu.Unlock()
-	metrics.ReportLogBufferRows.Set(float64(remaining))
+	if remaining != r.lastLogBufferRows {
+		metrics.ReportLogBufferRows.Set(float64(remaining))
+		r.lastLogBufferRows = remaining
+	}
 
 	if noMore && ack < submitted {
 		return errors.New("not all logs are submitted")

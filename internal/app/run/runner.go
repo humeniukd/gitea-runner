@@ -117,27 +117,12 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 		_ = reporter.Close(lastWords)
 
 		metrics.JobDuration.Observe(time.Since(start).Seconds())
-		metrics.JobsTotal.WithLabelValues(resultToLabel(reporter.Result())).Inc()
+		metrics.JobsTotal.WithLabelValues(metrics.ResultToStatusLabel(reporter.Result())).Inc()
 	}()
 	reporter.RunDaemon()
 	runErr = r.run(ctx, task, reporter)
 
 	return nil
-}
-
-func resultToLabel(r runnerv1.Result) string {
-	switch r {
-	case runnerv1.Result_RESULT_SUCCESS:
-		return metrics.LabelStatusSuccess
-	case runnerv1.Result_RESULT_FAILURE:
-		return metrics.LabelStatusFailure
-	case runnerv1.Result_RESULT_CANCELLED:
-		return metrics.LabelStatusCancelled
-	case runnerv1.Result_RESULT_SKIPPED:
-		return metrics.LabelStatusSkipped
-	default:
-		return metrics.LabelStatusUnknown
-	}
 }
 
 // getDefaultActionsURL

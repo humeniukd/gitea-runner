@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 )
@@ -28,7 +29,6 @@ const (
 	LabelMethodFetchTask  = "FetchTask"
 	LabelMethodUpdateLog  = "UpdateLog"
 	LabelMethodUpdateTask = "UpdateTask"
-	LabelMethodDeclare    = "Declare"
 
 	LabelStatusSuccess   = "success"
 	LabelStatusFailure   = "failure"
@@ -36,6 +36,26 @@ const (
 	LabelStatusSkipped   = "skipped"
 	LabelStatusUnknown   = "unknown"
 )
+
+// rpcDurationBuckets covers the expected latency range for short-running
+// UpdateLog / UpdateTask RPCs. FetchTask uses its own buckets (it has a 10s tail).
+var rpcDurationBuckets = []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5}
+
+// ResultToStatusLabel maps a runnerv1.Result to the "status" label value used on job metrics.
+func ResultToStatusLabel(r runnerv1.Result) string {
+	switch r {
+	case runnerv1.Result_RESULT_SUCCESS:
+		return LabelStatusSuccess
+	case runnerv1.Result_RESULT_FAILURE:
+		return LabelStatusFailure
+	case runnerv1.Result_RESULT_CANCELLED:
+		return LabelStatusCancelled
+	case runnerv1.Result_RESULT_SKIPPED:
+		return LabelStatusSkipped
+	default:
+		return LabelStatusUnknown
+	}
+}
 
 var (
 	RunnerInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -99,7 +119,7 @@ var (
 		Subsystem: "report",
 		Name:      "log_duration_seconds",
 		Help:      "Latency of UpdateLog RPCs.",
-		Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+		Buckets:   rpcDurationBuckets,
 	})
 
 	ReportStateTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -114,7 +134,7 @@ var (
 		Subsystem: "report",
 		Name:      "state_duration_seconds",
 		Help:      "Latency of UpdateTask RPCs.",
-		Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+		Buckets:   rpcDurationBuckets,
 	})
 
 	ReportLogBufferRows = prometheus.NewGauge(prometheus.GaugeOpts{
