@@ -189,7 +189,7 @@ func RegisterUptimeFunc(startTime time.Time) {
 // RegisterRunningJobsFunc registers GaugeFuncs for the running job count and
 // capacity utilisation ratio, evaluated lazily at Prometheus scrape time.
 func RegisterRunningJobsFunc(countFn func() int64, capacity int) {
-	cap := float64(capacity)
+	capF := float64(capacity)
 	Registry.MustRegister(prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Namespace: Namespace,
@@ -207,10 +207,10 @@ func RegisterRunningJobsFunc(countFn func() int64, capacity int) {
 			Help:      "Ratio of running jobs to configured capacity (0.0-1.0).",
 		},
 		func() float64 {
-			if cap <= 0 {
+			if capF <= 0 {
 				return 0
 			}
-			return float64(countFn()) / cap
+			return float64(countFn()) / capF
 		},
 	))
 }
