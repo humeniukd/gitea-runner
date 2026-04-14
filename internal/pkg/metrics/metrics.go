@@ -4,14 +4,21 @@
 package metrics
 
 import (
+	"sync"
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 )
 
-const namespace = "act_runner"
+// Namespace is the Prometheus namespace for all act_runner metrics.
+const Namespace = "act_runner"
 
 // Label value constants for Prometheus metrics.
 // Using constants prevents typos from silently creating new time-series.
+//
+// LabelResult* values are used on metrics with label key "result" (RPC outcomes).
+// LabelStatus* values are used on metrics with label key "status" (job outcomes).
 const (
 	LabelResultTask    = "task"
 	LabelResultEmpty   = "empty"
@@ -32,26 +39,26 @@ const (
 
 var (
 	RunnerInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Name:      "info",
 		Help:      "Runner metadata. Always 1. Labels carry version and name.",
 	}, []string{"version", "name"})
 
 	RunnerCapacity = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Name:      "capacity",
 		Help:      "Configured maximum concurrent jobs.",
 	})
 
 	PollFetchTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Subsystem: "poll",
 		Name:      "fetch_total",
 		Help:      "Total number of FetchTask RPCs by result (task, empty, error).",
 	}, []string{"result"})
 
 	PollFetchDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Subsystem: "poll",
 		Name:      "fetch_duration_seconds",
 		Help:      "Latency of FetchTask RPCs, excluding expected long-poll timeouts.",
@@ -59,21 +66,21 @@ var (
 	})
 
 	PollBackoffSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Subsystem: "poll",
 		Name:      "backoff_seconds",
-		Help:      "Current effective polling backoff interval.",
+		Help:      "Last observed polling backoff interval. With Capacity > 1, reflects whichever worker wrote last.",
 	})
 
 	JobsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Subsystem: "job",
 		Name:      "total",
 		Help:      "Total jobs processed by status (success, failure, cancelled, skipped, unknown).",
 	}, []string{"status"})
 
 	JobDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Subsystem: "job",
 		Name:      "duration_seconds",
 		Help:      "Duration of job execution from start to finish.",
@@ -81,14 +88,14 @@ var (
 	})
 
 	ReportLogTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Subsystem: "report",
 		Name:      "log_total",
 		Help:      "Total UpdateLog RPCs by result (success, error).",
 	}, []string{"result"})
 
 	ReportLogDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Subsystem: "report",
 		Name:      "log_duration_seconds",
 		Help:      "Latency of UpdateLog RPCs.",
@@ -96,14 +103,14 @@ var (
 	})
 
 	ReportStateTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Subsystem: "report",
 		Name:      "state_total",
 		Help:      "Total UpdateTask (state) RPCs by result (success, error).",
 	}, []string{"result"})
 
 	ReportStateDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Subsystem: "report",
 		Name:      "state_duration_seconds",
 		Help:      "Latency of UpdateTask RPCs.",
@@ -111,14 +118,14 @@ var (
 	})
 
 	ReportLogBufferRows = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Subsystem: "report",
 		Name:      "log_buffer_rows",
 		Help:      "Current number of buffered log rows awaiting send.",
 	})
 
 	ClientErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
+		Namespace: Namespace,
 		Subsystem: "client",
 		Name:      "errors_total",
 		Help:      "Total client RPC errors by method.",
@@ -128,19 +135,62 @@ var (
 // Registry is the custom Prometheus registry used by the runner.
 var Registry = prometheus.NewRegistry()
 
+var initOnce sync.Once
+
 // Init registers all static metrics and the standard Go/process collectors.
-// It must be called once before StartServer. Dynamic metrics (uptime, running
-// jobs) are registered separately via prometheus.NewGaugeFunc in daemon.go
-// because they require runtime values unavailable at package init time.
+// Safe to call multiple times; only the first call has effect.
 func Init() {
-	Registry.MustRegister(
-		collectors.NewGoCollector(),
-		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		RunnerInfo, RunnerCapacity,
-		PollFetchTotal, PollFetchDuration, PollBackoffSeconds,
-		JobsTotal, JobDuration,
-		ReportLogTotal, ReportLogDuration,
-		ReportStateTotal, ReportStateDuration, ReportLogBufferRows,
-		ClientErrors,
-	)
+	initOnce.Do(func() {
+		Registry.MustRegister(
+			collectors.NewGoCollector(),
+			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+			RunnerInfo, RunnerCapacity,
+			PollFetchTotal, PollFetchDuration, PollBackoffSeconds,
+			JobsTotal, JobDuration,
+			ReportLogTotal, ReportLogDuration,
+			ReportStateTotal, ReportStateDuration, ReportLogBufferRows,
+			ClientErrors,
+		)
+	})
+}
+
+// RegisterUptimeFunc registers a GaugeFunc that reports seconds since startTime.
+func RegisterUptimeFunc(startTime time.Time) {
+	Registry.MustRegister(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Name:      "uptime_seconds",
+			Help:      "Seconds since the runner daemon started.",
+		},
+		func() float64 { return time.Since(startTime).Seconds() },
+	))
+}
+
+// RegisterRunningJobsFunc registers GaugeFuncs for the running job count and
+// capacity utilisation ratio, evaluated lazily at Prometheus scrape time.
+func RegisterRunningJobsFunc(countFn func() int64, capacity int) {
+	cap := float64(capacity)
+	Registry.MustRegister(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "job",
+			Name:      "running",
+			Help:      "Number of jobs currently executing.",
+		},
+		func() float64 { return float64(countFn()) },
+	))
+	Registry.MustRegister(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "job",
+			Name:      "capacity_utilization_ratio",
+			Help:      "Ratio of running jobs to configured capacity (0.0-1.0).",
+		},
+		func() float64 {
+			if cap <= 0 {
+				return 0
+			}
+			return float64(countFn()) / cap
+		},
+	))
 }

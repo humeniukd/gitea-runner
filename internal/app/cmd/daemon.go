@@ -18,7 +18,6 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/mattn/go-isatty"
-	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
@@ -155,42 +154,8 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			metrics.Init()
 			metrics.RunnerInfo.WithLabelValues(ver.Version(), resp.Msg.Runner.Name).Set(1)
 			metrics.RunnerCapacity.Set(float64(cfg.Runner.Capacity))
-
-			startTime := time.Now()
-			metrics.Registry.MustRegister(prometheus.NewGaugeFunc(
-				prometheus.GaugeOpts{
-					Namespace: "act_runner",
-					Name:      "uptime_seconds",
-					Help:      "Seconds since the runner daemon started.",
-				},
-				func() float64 { return time.Since(startTime).Seconds() },
-			))
-
-			capacity := float64(cfg.Runner.Capacity)
-			metrics.Registry.MustRegister(prometheus.NewGaugeFunc(
-				prometheus.GaugeOpts{
-					Namespace: "act_runner",
-					Subsystem: "job",
-					Name:      "running",
-					Help:      "Number of jobs currently executing.",
-				},
-				func() float64 { return float64(runner.RunningCount()) },
-			))
-			metrics.Registry.MustRegister(prometheus.NewGaugeFunc(
-				prometheus.GaugeOpts{
-					Namespace: "act_runner",
-					Subsystem: "job",
-					Name:      "capacity_utilization_ratio",
-					Help:      "Ratio of running jobs to configured capacity (0.0-1.0).",
-				},
-				func() float64 {
-					if capacity <= 0 {
-						return 0
-					}
-					return float64(runner.RunningCount()) / capacity
-				},
-			))
-
+			metrics.RegisterUptimeFunc(time.Now())
+			metrics.RegisterRunningJobsFunc(runner.RunningCount, cfg.Runner.Capacity)
 			metrics.StartServer(ctx, cfg.Metrics.Addr)
 		}
 

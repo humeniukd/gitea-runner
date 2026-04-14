@@ -293,7 +293,6 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	return execErr
 }
 
-// RunningCount returns the number of jobs currently executing.
 func (r *Runner) RunningCount() int64 {
 	return r.runningCount.Load()
 }

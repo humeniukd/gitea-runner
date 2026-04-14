@@ -217,6 +217,7 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 	// not record the duration — the timeout value would swamp the histogram.
 	if errors.Is(err, context.DeadlineExceeded) {
 		s.consecutiveEmpty++
+		s.consecutiveErrors = 0 // timeout is a healthy idle response
 		metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultEmpty).Inc()
 		return nil, false
 	}
