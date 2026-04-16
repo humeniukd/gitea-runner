@@ -19,11 +19,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPoller_PerWorkerCounters verifies that each worker maintains its own
-// backoff counters. With a shared counter, N workers each seeing one empty
-// response would inflate the counter to N and trigger an unnecessarily long
-// backoff. With per-worker state, each worker only sees its own count.
-func TestPoller_PerWorkerCounters(t *testing.T) {
+// TestPoller_WorkerStateCounters verifies that workerState correctly tracks
+// consecutive empty responses independently per state instance, and that
+// fetchTask increments only the relevant counter.
+func TestPoller_WorkerStateCounters(t *testing.T) {
 	client := mocks.NewClient(t)
 	client.On("FetchTask", mock.Anything, mock.Anything).Return(
 		func(_ context.Context, _ *connect_go.Request[runnerv1.FetchTaskRequest]) (*connect_go.Response[runnerv1.FetchTaskResponse], error) {
@@ -77,8 +76,8 @@ func TestPoller_FetchErrorIncrementsErrorsOnly(t *testing.T) {
 	assert.Equal(t, int64(0), s.consecutiveEmpty)
 }
 
-// TestPoller_CalculateInterval verifies the per-worker exponential backoff
-// math is correctly driven by the worker's own counters.
+// TestPoller_CalculateInterval verifies the exponential backoff math is
+// correctly driven by the workerState counters.
 func TestPoller_CalculateInterval(t *testing.T) {
 	cfg, err := config.LoadDefault("")
 	require.NoError(t, err)
