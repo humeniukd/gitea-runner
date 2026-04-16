@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gitea.com/gitea/act_runner/internal/app/run"
 	"gitea.com/gitea/act_runner/internal/pkg/client"
 	"gitea.com/gitea/act_runner/internal/pkg/config"
 	"gitea.com/gitea/act_runner/internal/pkg/metrics"
@@ -22,9 +21,15 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// TaskRunner abstracts task execution so the poller can be tested
+// without a real runner.
+type TaskRunner interface {
+	Run(ctx context.Context, task *runnerv1.Task) error
+}
+
 type Poller struct {
 	client       client.Client
-	runner       *run.Runner
+	runner       TaskRunner
 	cfg          *config.Config
 	tasksVersion atomic.Int64 // tasksVersion used to store the version of the last task fetched from the Gitea.
 
@@ -49,7 +54,7 @@ type workerState struct {
 	lastBackoff time.Duration
 }
 
-func New(cfg *config.Config, client client.Client, runner *run.Runner) *Poller {
+func New(cfg *config.Config, client client.Client, runner TaskRunner) *Poller {
 	pollingCtx, shutdownPolling := context.WithCancel(context.Background())
 
 	jobsCtx, shutdownJobs := context.WithCancel(context.Background())
