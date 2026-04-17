@@ -89,7 +89,7 @@ linters:
     goheader:
       values:
         regexp:
-          HEADER: '((Copyright [^\n]+|All rights reserved\.)\n)*Copyright \d{4} (The (Gogs|Gitea) Authors|Gitea Authors|Gitea)\.( All rights reserved\.)?(\n(Copyright [^\n]+|All rights reserved\.))*\nSPDX-License-Identifier: [\w.-]+'
+          HEADER: 'Copyright \d{4} The Gitea Authors\. All rights reserved\.(\nCopyright [^\n]+)*\nSPDX-License-Identifier: MIT'
       template: '{{ HEADER }}'
   exclusions:
     generated: lax
