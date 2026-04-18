@@ -375,6 +375,7 @@ func (r *Reporter) SetOutputs(outputs map[string]string) {
 }
 
 func (r *Reporter) Close(lastWords string) error {
+
 	r.stateMu.Lock()
 	r.closed = true
 	if r.state.Result == runnerv1.Result_RESULT_UNSPECIFIED {
@@ -386,7 +387,14 @@ func (r *Reporter) Close(lastWords string) error {
 				v.Result = runnerv1.Result_RESULT_CANCELLED
 			}
 		}
-		r.state.Result = runnerv1.Result_RESULT_FAILURE
+		if errors.Is(r.ctx.Err(), context.Canceled) {
+			r.state.Result = runnerv1.Result_RESULT_CANCELLED
+			if lastWords == "Early termination" {
+				lastWords = "Cancelled"
+			}
+		} else {
+			r.state.Result = runnerv1.Result_RESULT_FAILURE
+		}
 		r.logRows = append(r.logRows, &runnerv1.LogRow{
 			Time:    timestamppb.Now(),
 			Content: lastWords,
@@ -411,18 +419,32 @@ func (r *Reporter) Close(lastWords string) error {
 		log.Error("No Response from RunDaemon for 60s, continue best effort")
 	}
 
+	finalCtx := r.ctx
+	var finalCancel context.CancelFunc
+	if errors.Is(r.ctx.Err(), context.Canceled) || errors.Is(r.ctx.Err(), context.DeadlineExceeded) {
+		finalCtx, finalCancel = context.WithTimeout(context.Background(), 90*time.Second)
+		defer finalCancel()
+		log.Warnf("[cancel-debug] reporter task=%d using detached finalization context because base ctx is done: %v", r.state.Id, r.ctx.Err())
+	}
+
 	// Report the job outcome even when all log upload retry attempts have been exhausted
-	return errors.Join(
+	err := errors.Join(
 		retry.Do(func() error {
-			return r.ReportLog(true)
-		}, retry.Context(r.ctx)),
+			return r.reportLogWithContext(finalCtx, true)
+		}, retry.Context(finalCtx)),
 		retry.Do(func() error {
-			return r.ReportState(true)
-		}, retry.Context(r.ctx)),
+			return r.reportStateWithContext(finalCtx, true)
+		}, retry.Context(finalCtx)),
 	)
+	log.Warnf("[cancel-debug] reporter task=%d close end err=%v finalCtxErr=%v", r.state.Id, err, finalCtx.Err())
+	return err
 }
 
 func (r *Reporter) ReportLog(noMore bool) error {
+	return r.reportLogWithContext(r.ctx, noMore)
+}
+
+func (r *Reporter) reportLogWithContext(callCtx context.Context, noMore bool) error {
 	r.clientM.Lock()
 	defer r.clientM.Unlock()
 
@@ -435,7 +457,7 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	}
 
 	start := time.Now()
-	resp, err := r.client.UpdateLog(r.ctx, connect.NewRequest(&runnerv1.UpdateLogRequest{
+	resp, err := r.client.UpdateLog(callCtx, connect.NewRequest(&runnerv1.UpdateLogRequest{
 		TaskId: r.state.Id,
 		Index:  int64(r.logOffset),
 		Rows:   rows,
@@ -475,6 +497,10 @@ func (r *Reporter) ReportLog(noMore bool) error {
 // ReportState only reports the job result if reportResult is true
 // RunDaemon never reports results even if result is set
 func (r *Reporter) ReportState(reportResult bool) error {
+	return r.reportStateWithContext(r.ctx, reportResult)
+}
+
+func (r *Reporter) reportStateWithContext(callCtx context.Context, reportResult bool) error {
 	r.clientM.Lock()
 	defer r.clientM.Unlock()
 
@@ -490,10 +516,8 @@ func (r *Reporter) ReportState(reportResult bool) error {
 	// Consume stateChanged atomically with the snapshot; restored on error
 	// below so a concurrent Fire() during UpdateTask isn't silently lost.
 	r.stateMu.Lock()
-	if !reportResult && !r.stateChanged && len(outputs) == 0 {
-		r.stateMu.Unlock()
-		return nil
-	}
+	// Always poll UpdateTask so cancellation transitions are observed promptly
+	// even when there is no local state/output change.
 	state := proto.Clone(r.state).(*runnerv1.TaskState)
 	r.stateChanged = false
 	r.stateMu.Unlock()
@@ -502,13 +526,23 @@ func (r *Reporter) ReportState(reportResult bool) error {
 		state.Result = runnerv1.Result_RESULT_UNSPECIFIED
 	}
 
+	log.Infof("[cancel-debug] reporter task=%d reportState begin reportResult=%v localResult=%s steps=%s outputs=%d ctxErr=%v",
+		state.Id,
+		reportResult,
+		state.Result.String(),
+		stepStateSummary(state.Steps),
+		len(outputs),
+		callCtx.Err(),
+	)
+
 	start := time.Now()
-	resp, err := r.client.UpdateTask(r.ctx, connect.NewRequest(&runnerv1.UpdateTaskRequest{
+	resp, err := r.client.UpdateTask(callCtx, connect.NewRequest(&runnerv1.UpdateTaskRequest{
 		State:   state,
 		Outputs: outputs,
 	}))
 	metrics.ReportStateDuration.Observe(time.Since(start).Seconds())
 	if err != nil {
+		log.Errorf("[cancel-debug] reporter task=%d reportState error after %s: %v", state.Id, time.Since(start), err)
 		metrics.ReportStateTotal.WithLabelValues(metrics.LabelResultError).Inc()
 		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodUpdateTask).Inc()
 		r.stateMu.Lock()
@@ -518,11 +552,18 @@ func (r *Reporter) ReportState(reportResult bool) error {
 	}
 	metrics.ReportStateTotal.WithLabelValues(metrics.LabelResultSuccess).Inc()
 
+	if resp.Msg.State != nil {
+		log.Infof("[cancel-debug] reporter task=%d reportState ack remoteResult=%s duration=%s", state.Id, resp.Msg.State.Result.String(), time.Since(start))
+	} else {
+		log.Warnf("[cancel-debug] reporter task=%d reportState ack with nil remote state duration=%s", state.Id, time.Since(start))
+	}
+
 	for _, k := range resp.Msg.SentOutputs {
 		r.outputs.Store(k, struct{}{})
 	}
 
 	if resp.Msg.State != nil && resp.Msg.State.Result == runnerv1.Result_RESULT_CANCELLED {
+		log.Warnf("[cancel-debug] reporter task=%d remote requested cancellation; invoking context cancel", state.Id)
 		r.cancel()
 	}
 
@@ -534,10 +575,35 @@ func (r *Reporter) ReportState(reportResult bool) error {
 		return true
 	})
 	if len(noSent) > 0 {
+		log.Warnf("[cancel-debug] reporter task=%d unsent outputs remaining: %v", state.Id, noSent)
 		return fmt.Errorf("there are still outputs that have not been sent: %v", noSent)
 	}
 
 	return nil
+}
+
+func stepStateSummary(steps []*runnerv1.StepState) string {
+	if len(steps) == 0 {
+		return "none"
+	}
+	pending := 0
+	running := 0
+	completed := 0
+	for _, s := range steps {
+		if s == nil {
+			continue
+		}
+		if s.StartedAt == nil {
+			pending++
+			continue
+		}
+		if s.Result == runnerv1.Result_RESULT_UNSPECIFIED {
+			running++
+		} else {
+			completed++
+		}
+	}
+	return fmt.Sprintf("pending=%d running=%d completed=%d total=%d", pending, running, completed, len(steps))
 }
 
 func (r *Reporter) duringSteps() bool {

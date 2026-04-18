@@ -24,7 +24,8 @@ import (
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	"connectrpc.com/connect"
-	"github.com/docker/docker/api/types/container"
+	dockercontainer "github.com/docker/docker/api/types/container"
+	godockerclient "github.com/docker/docker/client"
 	"github.com/nektos/act/pkg/artifactcache"
 	"github.com/nektos/act/pkg/common"
 	"github.com/nektos/act/pkg/model"
@@ -238,7 +239,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		EventJSON:             string(eventJSON),
 		ContainerNamePrefix:   fmt.Sprintf("GITEA-ACTIONS-TASK-%d", task.Id),
 		ContainerMaxLifetime:  maxLifetime,
-		ContainerNetworkMode:  container.NetworkMode(r.cfg.Container.Network),
+		ContainerNetworkMode:  dockercontainer.NetworkMode(r.cfg.Container.Network),
 		ContainerOptions:      r.cfg.Container.Options,
 		ContainerDaemonSocket: r.cfg.Container.DockerHost,
 		Privileged:            r.cfg.Container.Privileged,
@@ -264,7 +265,71 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		ctx = runner.WithJobLoggerFactory(ctx, NullLogger{})
 	}
 
-	execErr := executor(ctx)
+	var execErr error
+	execDone := make(chan error, 1)
+	go func() {
+		execDone <- executor(ctx)
+	}()
+
+	select {
+	case execErr = <-execDone:
+		// completed normally, post steps already ran inside executor
+
+	case <-ctx.Done():
+		// Stopping the running container to unblock the current step.
+		// The executor goroutine will then proceed to Finally(postExecutor)
+		// which runs post/cleanup steps on a fresh detached context.
+		containerPrefix := fmt.Sprintf("GITEA-ACTIONS-TASK-%d", task.Id)
+		containerPrefixLower := strings.ToLower(containerPrefix)
+		log.Infof("task %d cancelled, stopping containers with prefix %s", task.Id, containerPrefix)
+
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+		dockerCli, dockerErr := godockerclient.NewClientWithOpts(
+			godockerclient.FromEnv,
+			godockerclient.WithAPIVersionNegotiation(),
+		)
+		if dockerErr != nil {
+			log.Errorf("failed to create docker client for cancellation: %v", dockerErr)
+		} else {
+			containers, listErr := dockerCli.ContainerList(stopCtx, dockercontainer.ListOptions{All: true})
+			if listErr != nil {
+				log.Errorf("failed to list containers for cancellation: %v", listErr)
+			} else {
+				timeout := 10
+				matched := 0
+				for _, c := range containers {
+					for _, n := range c.Names {
+						containerName := strings.ToLower(strings.TrimPrefix(n, "/"))
+						if strings.HasPrefix(containerName, containerPrefixLower) {
+							matched++
+							if err := dockerCli.ContainerStop(stopCtx, c.ID, dockercontainer.StopOptions{Timeout: &timeout}); err != nil {
+								log.Errorf("failed to stop container %s: %v", c.ID[:12], err)
+								_ = dockerCli.ContainerKill(stopCtx, c.ID, "SIGKILL")
+							}
+							break
+						}
+					}
+				}
+				if matched == 0 {
+					log.Warnf("no running containers matched cancel prefix %s; task may be in host mode or prefix mismatch", containerPrefix)
+				}
+			}
+			_ = dockerCli.Close()
+		}
+		stopCancel()
+
+		// CRITICAL: do not return here; wait for executor to finish post cleanup.
+		log.Infof("task %d waiting for post/cleanup steps to complete after cancellation", task.Id)
+		select {
+		case execErr = <-execDone:
+			log.Infof("task %d executor finished after cancellation", task.Id)
+		case <-time.After(6 * time.Minute):
+			log.Errorf("task %d executor did not finish after 6 minutes, forcing exit", task.Id)
+			execErr = fmt.Errorf("executor timed out after cancellation: %w", ctx.Err())
+		}
+	}
+
 	reporter.SetOutputs(job.Outputs)
 
 	if r.cfg.Container.BindWorkdir {
