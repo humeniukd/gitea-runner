@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -27,7 +28,7 @@ func TestHandler(t *testing.T) {
 	handler, err := StartHandler(dir, "", 0, nil)
 	require.NoError(t, err)
 
-	base := fmt.Sprintf("%s%s", handler.ExternalURL(), urlBase)
+	base := fmt.Sprintf("%s%s", handler.ExternalURL(), apiPath)
 
 	defer func() {
 		t.Run("inpect db", func(t *testing.T) {
@@ -698,4 +699,47 @@ func TestHandler_gcCache(t *testing.T) {
 		})
 	}
 	require.NoError(t, db.Close())
+}
+
+func TestHandler_UnauthorizedAccess(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, nil)
+	require.NoError(t, err)
+	defer handler.Close()
+
+	noTokenBase := fmt.Sprintf("http://%s:%d%s", handler.outboundIP, handler.listener.Addr().(*net.TCPAddr).Port, apiPath)
+
+	resp, err := http.Get(noTokenBase + "/cache?keys=test&version=abc")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	resp.Body.Close()
+
+	resp, err = http.Post(noTokenBase+"/caches", "application/json", strings.NewReader("{}"))
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	resp.Body.Close()
+}
+
+func TestHandler_BindAddress(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "127.0.0.1", 0, nil)
+	require.NoError(t, err)
+	defer handler.Close()
+
+	assert.True(t, strings.HasPrefix(handler.listener.Addr().String(), "127.0.0.1:"))
+}
+
+func TestHandler_TokenPersistsAcrossRestarts(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+
+	first, err := StartHandler(dir, "127.0.0.1", 0, nil)
+	require.NoError(t, err)
+	token := first.token
+	require.NoError(t, first.Close())
+
+	second, err := StartHandler(dir, "127.0.0.1", 0, nil)
+	require.NoError(t, err)
+	defer second.Close()
+
+	assert.Equal(t, token, second.token)
 }

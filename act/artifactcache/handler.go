@@ -5,6 +5,8 @@
 package artifactcache
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +30,7 @@ import (
 )
 
 const (
-	urlBase = "/_apis/artifactcache"
+	apiPath = "/_apis/artifactcache"
 )
 
 type Handler struct {
@@ -43,6 +45,7 @@ type Handler struct {
 	gcAt  time.Time
 
 	outboundIP string
+	token      string
 }
 
 func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger) (*Handler, error) {
@@ -83,19 +86,26 @@ func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger
 		h.outboundIP = ip.String()
 	}
 
+	token, err := loadOrCreateToken(dir)
+	if err != nil {
+		return nil, err
+	}
+	h.token = token
+
 	router := httprouter.New()
-	router.GET(urlBase+"/cache", h.middleware(h.find))
-	router.POST(urlBase+"/caches", h.middleware(h.reserve))
-	router.PATCH(urlBase+"/caches/:id", h.middleware(h.upload))
-	router.POST(urlBase+"/caches/:id", h.middleware(h.commit))
-	router.GET(urlBase+"/artifacts/:id", h.middleware(h.get))
-	router.POST(urlBase+"/clean", h.middleware(h.clean))
+	base := "/" + h.token + apiPath
+	router.GET(base+"/cache", h.middleware(h.find))
+	router.POST(base+"/caches", h.middleware(h.reserve))
+	router.PATCH(base+"/caches/:id", h.middleware(h.upload))
+	router.POST(base+"/caches/:id", h.middleware(h.commit))
+	router.GET(base+"/artifacts/:id", h.middleware(h.get))
+	router.POST(base+"/clean", h.middleware(h.clean))
 
 	h.router = router
 
 	h.gcCache()
 
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port)) // listen on all interfaces
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", h.outboundIP, port))
 	if err != nil {
 		return nil, err
 	}
@@ -116,9 +126,33 @@ func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger
 
 func (h *Handler) ExternalURL() string {
 	// TODO: make the external url configurable if necessary
-	return fmt.Sprintf("http://%s:%d",
+	return fmt.Sprintf("http://%s:%d/%s",
 		h.outboundIP,
-		h.listener.Addr().(*net.TCPAddr).Port)
+		h.listener.Addr().(*net.TCPAddr).Port,
+		h.token)
+}
+
+// loadOrCreateToken returns a per-server auth token kept in dir/.token so that
+// the cache URL remains stable across restarts, which is required when
+// act_runner cache-server is pointed at via config.Cache.ExternalServer.
+func loadOrCreateToken(dir string) (string, error) {
+	path := filepath.Join(dir, ".token")
+	if data, err := os.ReadFile(path); err == nil {
+		if token := strings.TrimSpace(string(data)); token != "" {
+			return token, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("read cache token: %w", err)
+	}
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", fmt.Errorf("generate cache token: %w", err)
+	}
+	token := hex.EncodeToString(tokenBytes)
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		return "", fmt.Errorf("write cache token: %w", err)
+	}
+	return token, nil
 }
 
 func (h *Handler) Close() error {
@@ -194,7 +228,7 @@ func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Para
 	}
 	h.responseJSON(w, r, 200, map[string]any{
 		"result":          "hit",
-		"archiveLocation": fmt.Sprintf("%s%s/artifacts/%d", h.ExternalURL(), urlBase, cache.ID),
+		"archiveLocation": fmt.Sprintf("%s%s/artifacts/%d", h.ExternalURL(), apiPath, cache.ID),
 		"cacheKey":        cache.Key,
 	})
 }
