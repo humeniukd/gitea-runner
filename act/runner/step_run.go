@@ -17,6 +17,7 @@ import (
 	"gitea.com/gitea/act_runner/act/model"
 
 	"github.com/kballard/go-shellquote"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 type stepRun struct {
@@ -26,6 +27,9 @@ type stepRun struct {
 	cmdline          string
 	env              map[string]string
 	WorkingDirectory string
+	// interpolatedScript caches the result of interpolating Step.Run during
+	// setupShellCommand so the group-header printer doesn't re-evaluate it.
+	interpolatedScript string
 }
 
 func (sr *stepRun) pre() common.Executor {
@@ -39,13 +43,163 @@ func (sr *stepRun) main() common.Executor {
 	return runStepExecutor(sr, stepStageMain, common.NewPipelineExecutor(
 		sr.setupShellCommandExecutor(),
 		func(ctx context.Context) error {
-			sr.getRunContext().ApplyExtraPath(ctx, &sr.env)
-			if he, ok := sr.getRunContext().JobContainer.(*container.HostEnvironment); ok && he != nil {
+			rc := sr.getRunContext()
+			// ApplyExtraPath must run before the header is printed so that any PATH
+			// modifications from prior ::add-path:: commands are reflected in the
+			// rendered env: block.
+			rc.ApplyExtraPath(ctx, &sr.env)
+			// Match actions/runner ScriptHandler.PrintActionDetails: emit the collapsible
+			// block before execution so command output stays outside the fold.
+			if err := sr.printRunScriptActionDetails(ctx); err != nil {
+				return err
+			}
+			if he, ok := rc.JobContainer.(*container.HostEnvironment); ok && he != nil {
 				return he.ExecWithCmdLine(sr.cmd, sr.cmdline, sr.env, "", sr.WorkingDirectory)(ctx)
 			}
-			return sr.getRunContext().JobContainer.Exec(sr.cmd, sr.env, "", sr.WorkingDirectory)(ctx)
+			return rc.JobContainer.Exec(sr.cmd, sr.env, "", sr.WorkingDirectory)(ctx)
 		},
 	))
+}
+
+// printRunScriptActionDetails mirrors actions/runner ScriptHandler.PrintActionDetails for
+// script steps. The group title is the first line of the interpolated script, script lines
+// are bright cyan, and env entries are emitted in YAML declaration order.
+func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) error {
+	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+	scriptLineLogger := rawLogger.WithField(scriptLineCyanField, true)
+	logger := common.Logger(ctx)
+	script := sr.interpolatedScript
+
+	rawLogger.Infof("::group::Run %s", sr.runScriptGroupTitle(script))
+
+	normalized := strings.ReplaceAll(script, "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized != "" {
+		for line := range strings.SplitSeq(normalized, "\n") {
+			scriptLineLogger.Info(line)
+		}
+	}
+
+	rawLogger.Infof("shell: %s", sr.cmdline)
+
+	stepEnvKeys := stepDeclaredEnvKeysInOrder(sr.Step)
+	if len(stepEnvKeys) > 0 {
+		rawLogger.Infof("env:")
+		foldedEnv := sr.foldedEnvIfCaseInsensitive()
+		for _, k := range stepEnvKeys {
+			val, ok := lookupDeclaredEnvValue(k, sr.env, foldedEnv)
+			if !ok {
+				logger.Debugf("step env key %q declared but not present in merged env", k)
+			}
+			rawLogger.Infof("  %s: %s", k, val)
+		}
+	}
+
+	rawLogger.Infof("::endgroup::")
+	return nil
+}
+
+// runScriptGroupTitle returns the group-header suffix following "Run ". It matches
+// actions/runner ScriptHandler: the first non-whitespace line of the script. When the
+// script is empty, fall back to the step name or id so the header stays useful.
+func (sr *stepRun) runScriptGroupTitle(script string) string {
+	if title := firstScriptLine(script); title != "" {
+		return title
+	}
+	if sr.Step != nil {
+		if sr.Step.Name != "" {
+			return sr.Step.Name
+		}
+		if sr.Step.ID != "" {
+			return sr.Step.ID
+		}
+	}
+	return ""
+}
+
+func firstScriptLine(script string) string {
+	first := strings.TrimLeft(strings.ReplaceAll(script, "\r\n", "\n"), " \t\r\n")
+	if idx := strings.IndexAny(first, "\r\n"); idx >= 0 {
+		first = first[:idx]
+	}
+	return first
+}
+
+// stepDeclaredEnvKeysInOrder walks the raw YAML Env mapping so keys are emitted in
+// the order the workflow author wrote them. step.Environment() loses ordering because
+// it decodes into a Go map.
+//
+// YAML merge keys (`<<: *anchor`) are expanded per the YAML 1.1 merge spec: merged
+// keys appear at the position of `<<`, and local keys are not duplicated.
+func stepDeclaredEnvKeysInOrder(step *model.Step) []string {
+	if step == nil || step.Env.Kind != yaml.MappingNode {
+		return nil
+	}
+	keys := make([]string, 0)
+	seen := make(map[string]struct{})
+	collectMappingKeys(&step.Env, &keys, seen)
+	return keys
+}
+
+func collectMappingKeys(node *yaml.Node, keys *[]string, seen map[string]struct{}) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+	content := node.Content
+	for i := 0; i+1 < len(content); i += 2 {
+		k := content[i]
+		v := content[i+1]
+		if k.Kind != yaml.ScalarNode {
+			continue
+		}
+		if k.Tag == "!!merge" || k.Value == "<<" {
+			collectMergedKeys(v, keys, seen)
+			continue
+		}
+		if _, dup := seen[k.Value]; dup {
+			continue
+		}
+		seen[k.Value] = struct{}{}
+		*keys = append(*keys, k.Value)
+	}
+}
+
+func collectMergedKeys(v *yaml.Node, keys *[]string, seen map[string]struct{}) {
+	if v == nil {
+		return
+	}
+	switch v.Kind {
+	case yaml.AliasNode:
+		collectMappingKeys(v.Alias, keys, seen)
+	case yaml.MappingNode:
+		collectMappingKeys(v, keys, seen)
+	case yaml.SequenceNode:
+		for _, item := range v.Content {
+			collectMergedKeys(item, keys, seen)
+		}
+	}
+}
+
+func (sr *stepRun) foldedEnvIfCaseInsensitive() map[string]string {
+	rc := sr.getRunContext()
+	if rc == nil || rc.JobContainer == nil || !rc.JobContainer.IsEnvironmentCaseInsensitive() {
+		return nil
+	}
+
+	folded := make(map[string]string, len(sr.env))
+	for k, v := range sr.env {
+		folded[strings.ToLower(k)] = v
+	}
+	return folded
+}
+
+func lookupDeclaredEnvValue(declKey string, env, foldedEnv map[string]string) (string, bool) {
+	if foldedEnv != nil {
+		v, ok := foldedEnv[strings.ToLower(declKey)]
+		return v, ok
+	}
+	v, ok := env[declKey]
+	return v, ok
 }
 
 func (sr *stepRun) post() common.Executor {
@@ -111,6 +265,7 @@ func (sr *stepRun) setupShellCommand(ctx context.Context) (name, script string, 
 	step := sr.Step
 
 	script = sr.RunContext.NewStepExpressionEvaluator(ctx, sr).Interpolate(ctx, step.Run)
+	sr.interpolatedScript = script
 
 	scCmd := step.ShellCommand()
 
