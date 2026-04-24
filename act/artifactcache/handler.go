@@ -5,7 +5,10 @@
 package artifactcache
 
 import (
+	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,11 +16,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,7 +36,24 @@ import (
 
 const (
 	apiPath = "/_apis/artifactcache"
+
+	// artifactURLTTL bounds how long a signed artifactLocation URL stays valid.
+	// Short enough that a leaked URL is near-worthless; long enough to let the
+	// @actions/cache client download a big blob that was returned from /cache.
+	artifactURLTTL = 10 * time.Minute
 )
+
+type credKey struct{}
+
+// JobCredential ties a per-job bearer token (ACTIONS_RUNTIME_TOKEN) to the
+// repository that owns it. Every cache entry is stamped with Repo on
+// reserve/commit and checked on read/write so one repo can never observe or
+// poison another repo's cache, even from inside a container that reaches the
+// cache server over the docker bridge network.
+type JobCredential struct {
+	Repo  string
+	RunID string
+}
 
 type Handler struct {
 	dir      string
@@ -45,11 +67,21 @@ type Handler struct {
 	gcAt  time.Time
 
 	outboundIP string
-	token      string
+
+	// secret signs short-lived artifact download URLs. The @actions/cache
+	// toolkit does not send Authorization on the download request, so blob
+	// GETs authenticate via a per-URL HMAC signature with expiry rather than
+	// via the bearer token used for management endpoints.
+	secret []byte
+
+	credMu sync.RWMutex
+	creds  map[string]JobCredential
 }
 
 func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger) (*Handler, error) {
-	h := &Handler{}
+	h := &Handler{
+		creds: make(map[string]JobCredential),
+	}
 
 	if logger == nil {
 		discard := logrus.New()
@@ -86,20 +118,21 @@ func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger
 		h.outboundIP = ip.String()
 	}
 
-	token, err := loadOrCreateToken(dir)
+	secret, err := loadOrCreateSecret(dir)
 	if err != nil {
 		return nil, err
 	}
-	h.token = token
+	h.secret = secret
 
 	router := httprouter.New()
-	base := "/" + h.token + apiPath
-	router.GET(base+"/cache", h.middleware(h.find))
-	router.POST(base+"/caches", h.middleware(h.reserve))
-	router.PATCH(base+"/caches/:id", h.middleware(h.upload))
-	router.POST(base+"/caches/:id", h.middleware(h.commit))
-	router.GET(base+"/artifacts/:id", h.middleware(h.get))
-	router.POST(base+"/clean", h.middleware(h.clean))
+	router.GET(apiPath+"/cache", h.bearerAuth(h.find))
+	router.POST(apiPath+"/caches", h.bearerAuth(h.reserve))
+	router.PATCH(apiPath+"/caches/:id", h.bearerAuth(h.upload))
+	router.POST(apiPath+"/caches/:id", h.bearerAuth(h.commit))
+	router.POST(apiPath+"/clean", h.bearerAuth(h.clean))
+	// Artifact GET is signed via query-string HMAC because @actions/cache
+	// does not attach Authorization when downloading archiveLocation.
+	router.GET(apiPath+"/artifacts/:id", h.signedURLAuth(h.get))
 
 	h.router = router
 
@@ -126,33 +159,57 @@ func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger
 
 func (h *Handler) ExternalURL() string {
 	// TODO: make the external url configurable if necessary
-	return fmt.Sprintf("http://%s:%d/%s",
+	return fmt.Sprintf("http://%s:%d",
 		h.outboundIP,
-		h.listener.Addr().(*net.TCPAddr).Port,
-		h.token)
+		h.listener.Addr().(*net.TCPAddr).Port)
 }
 
-// loadOrCreateToken returns a per-server auth token kept in dir/.token so that
-// the cache URL remains stable across restarts, which is required when
-// act_runner cache-server is pointed at via config.Cache.ExternalServer.
-func loadOrCreateToken(dir string) (string, error) {
-	path := filepath.Join(dir, ".token")
+// RegisterJob makes token a valid bearer credential for cache requests from
+// the job identified by (repo, runID) and returns a function that removes it.
+// The runner calls this at job start and defers the returned func so that the
+// credential is only accepted while the job is running.
+func (h *Handler) RegisterJob(token, repo, runID string) func() {
+	if h == nil || token == "" {
+		return func() {}
+	}
+	h.credMu.Lock()
+	h.creds[token] = JobCredential{Repo: repo, RunID: runID}
+	h.credMu.Unlock()
+	return func() {
+		h.credMu.Lock()
+		delete(h.creds, token)
+		h.credMu.Unlock()
+	}
+}
+
+func (h *Handler) lookupCredential(token string) (JobCredential, bool) {
+	h.credMu.RLock()
+	cred, ok := h.creds[token]
+	h.credMu.RUnlock()
+	return cred, ok
+}
+
+// loadOrCreateSecret returns the 32-byte HMAC signing key for artifact URLs,
+// persisted in dir/.secret so signed URLs handed out before a restart stay
+// valid across the restart and so the standalone cache-server can be pointed
+// at by config.Cache.ExternalServer without the URL rotating.
+func loadOrCreateSecret(dir string) ([]byte, error) {
+	path := filepath.Join(dir, ".secret")
 	if data, err := os.ReadFile(path); err == nil {
-		if token := strings.TrimSpace(string(data)); token != "" {
-			return token, nil
+		if secret, err := hex.DecodeString(strings.TrimSpace(string(data))); err == nil && len(secret) >= 32 {
+			return secret, nil
 		}
 	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("read cache token: %w", err)
+		return nil, fmt.Errorf("read cache secret: %w", err)
 	}
-	tokenBytes := make([]byte, 16)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return "", fmt.Errorf("generate cache token: %w", err)
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return nil, fmt.Errorf("generate cache secret: %w", err)
 	}
-	token := hex.EncodeToString(tokenBytes)
-	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
-		return "", fmt.Errorf("write cache token: %w", err)
+	if err := os.WriteFile(path, []byte(hex.EncodeToString(secret)), 0o600); err != nil {
+		return nil, fmt.Errorf("write cache secret: %w", err)
 	}
-	return token, nil
+	return secret, nil
 }
 
 func (h *Handler) Close() error {
@@ -194,6 +251,7 @@ func (h *Handler) openDB() (*bolthold.Store, error) {
 
 // GET /_apis/artifactcache/cache
 func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	cred := credFromContext(r.Context())
 	keys := strings.Split(r.URL.Query().Get("keys"), ",")
 	// cache keys are case insensitive
 	for i, key := range keys {
@@ -208,7 +266,7 @@ func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Para
 	}
 	defer db.Close()
 
-	cache, err := findCache(db, keys, version)
+	cache, err := findCache(db, cred.Repo, keys, version)
 	if err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
@@ -228,13 +286,14 @@ func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Para
 	}
 	h.responseJSON(w, r, 200, map[string]any{
 		"result":          "hit",
-		"archiveLocation": fmt.Sprintf("%s%s/artifacts/%d", h.ExternalURL(), apiPath, cache.ID),
+		"archiveLocation": h.signedArtifactURL(cache.ID, time.Now().Add(artifactURLTTL)),
 		"cacheKey":        cache.Key,
 	})
 }
 
 // POST /_apis/artifactcache/caches
 func (h *Handler) reserve(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	cred := credFromContext(r.Context())
 	api := &Request{}
 	if err := json.NewDecoder(r.Body).Decode(api); err != nil {
 		h.responseJSON(w, r, 400, err)
@@ -244,6 +303,7 @@ func (h *Handler) reserve(w http.ResponseWriter, r *http.Request, _ httprouter.P
 	api.Key = strings.ToLower(api.Key)
 
 	cache := api.ToCache()
+	cache.Repo = cred.Repo
 	db, err := h.openDB()
 	if err != nil {
 		h.responseJSON(w, r, 500, err)
@@ -265,6 +325,7 @@ func (h *Handler) reserve(w http.ResponseWriter, r *http.Request, _ httprouter.P
 
 // PATCH /_apis/artifactcache/caches/:id
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	cred := credFromContext(r.Context())
 	id, err := strconv.ParseInt(params.ByName("id"), 10, 64)
 	if err != nil {
 		h.responseJSON(w, r, 400, err)
@@ -284,6 +345,11 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, params httprout
 			return
 		}
 		h.responseJSON(w, r, 500, err)
+		return
+	}
+
+	if cache.Repo != cred.Repo {
+		h.responseJSON(w, r, 403, fmt.Errorf("cache %d: forbidden", id))
 		return
 	}
 
@@ -306,6 +372,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, params httprout
 
 // POST /_apis/artifactcache/caches/:id
 func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	cred := credFromContext(r.Context())
 	id, err := strconv.ParseInt(params.ByName("id"), 10, 64)
 	if err != nil {
 		h.responseJSON(w, r, 400, err)
@@ -325,6 +392,11 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 			return
 		}
 		h.responseJSON(w, r, 500, err)
+		return
+	}
+
+	if cache.Repo != cred.Repo {
+		h.responseJSON(w, r, 403, fmt.Errorf("cache %d: forbidden", id))
 		return
 	}
 
@@ -360,6 +432,10 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 }
 
 // GET /_apis/artifactcache/artifacts/:id
+// Authenticated via signed URL (see signedURLAuth), not bearer, because the
+// @actions/cache toolkit downloads archiveLocation without Authorization.
+// Repository scoping is already enforced at find() time; the signature binds
+// the URL to the specific cache ID and an expiry.
 func (h *Handler) get(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 	id, err := strconv.ParseInt(params.ByName("id"), 10, 64)
 	if err != nil {
@@ -378,21 +454,100 @@ func (h *Handler) clean(w http.ResponseWriter, r *http.Request, _ httprouter.Par
 	h.responseJSON(w, r, 200)
 }
 
-func (h *Handler) middleware(handler httprouter.Handle) httprouter.Handle {
+// bearerAuth resolves ACTIONS_RUNTIME_TOKEN against the set of currently
+// registered jobs. A match attaches the job's JobCredential to the request
+// context; a miss returns 401 before the handler body runs.
+func (h *Handler) bearerAuth(handler httprouter.Handle) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-		h.logger.Debugf("%s %s", r.Method, r.RequestURI)
+		h.logger.Debugf("%s %s", r.Method, r.URL.Path)
+		token := bearerToken(r)
+		if token == "" {
+			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("missing bearer token"))
+			return
+		}
+		cred, ok := h.lookupCredential(token)
+		if !ok {
+			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("unknown bearer token"))
+			return
+		}
+		ctx := context.WithValue(r.Context(), credKey{}, cred)
+		handler(w, r.WithContext(ctx), params)
+		go h.gcCache()
+	}
+}
+
+func (h *Handler) signedURLAuth(handler httprouter.Handle) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+		h.logger.Debugf("%s %s", r.Method, r.URL.Path)
+		id, err := strconv.ParseInt(params.ByName("id"), 10, 64)
+		if err != nil {
+			h.responseJSON(w, r, 400, err)
+			return
+		}
+		expStr := r.URL.Query().Get("exp")
+		sig := r.URL.Query().Get("sig")
+		if expStr == "" || sig == "" {
+			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("missing signature"))
+			return
+		}
+		exp, err := strconv.ParseInt(expStr, 10, 64)
+		if err != nil {
+			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("invalid expiry"))
+			return
+		}
+		if time.Now().Unix() > exp {
+			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("signature expired"))
+			return
+		}
+		expected := h.computeSignature(id, exp)
+		if !hmac.Equal([]byte(sig), []byte(expected)) {
+			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("bad signature"))
+			return
+		}
 		handler(w, r, params)
 		go h.gcCache()
 	}
 }
 
+func bearerToken(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if len(auth) > len(prefix) && strings.EqualFold(auth[:len(prefix)], prefix) {
+		return auth[len(prefix):]
+	}
+	return ""
+}
+
+func credFromContext(ctx context.Context) JobCredential {
+	if cred, ok := ctx.Value(credKey{}).(JobCredential); ok {
+		return cred
+	}
+	return JobCredential{}
+}
+
+func (h *Handler) computeSignature(cacheID, exp int64) string {
+	mac := hmac.New(sha256.New, h.secret)
+	fmt.Fprintf(mac, "%d:%d", cacheID, exp)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func (h *Handler) signedArtifactURL(cacheID uint64, exp time.Time) string {
+	expUnix := exp.Unix()
+	sig := h.computeSignature(int64(cacheID), expUnix)
+	q := url.Values{}
+	q.Set("exp", strconv.FormatInt(expUnix, 10))
+	q.Set("sig", sig)
+	return fmt.Sprintf("%s%s/artifacts/%d?%s", h.ExternalURL(), apiPath, cacheID, q.Encode())
+}
+
 // if not found, return (nil, nil) instead of an error.
-func findCache(db *bolthold.Store, keys []string, version string) (*Cache, error) {
+func findCache(db *bolthold.Store, repo string, keys []string, version string) (*Cache, error) {
 	cache := &Cache{}
 	for _, prefix := range keys {
 		// if a key in the list matches exactly, don't return partial matches
 		if err := db.FindOne(cache,
-			bolthold.Where("Key").Eq(prefix).
+			bolthold.Where("Repo").Eq(repo).
+				And("Key").Eq(prefix).
 				And("Version").Eq(version).
 				And("Complete").Eq(true).
 				SortBy("CreatedAt").Reverse()); err == nil || !errors.Is(err, bolthold.ErrNotFound) {
@@ -407,7 +562,8 @@ func findCache(db *bolthold.Store, keys []string, version string) (*Cache, error
 			continue
 		}
 		if err := db.FindOne(cache,
-			bolthold.Where("Key").RegExp(re).
+			bolthold.Where("Repo").Eq(repo).
+				And("Key").RegExp(re).
 				And("Version").Eq(version).
 				And("Complete").Eq(true).
 				SortBy("CreatedAt").Reverse()); err != nil {
@@ -567,7 +723,7 @@ func (h *Handler) responseJSON(w http.ResponseWriter, r *http.Request, code int,
 	if len(v) == 0 || v[0] == nil {
 		data, _ = json.Marshal(struct{}{})
 	} else if err, ok := v[0].(error); ok {
-		h.logger.Errorf("%v %v: %v", r.Method, r.RequestURI, err)
+		h.logger.Errorf("%v %v: %v", r.Method, r.URL.Path, err)
 		data, _ = json.Marshal(map[string]any{
 			"error": err.Error(),
 		})

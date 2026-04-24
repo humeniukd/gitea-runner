@@ -38,9 +38,10 @@ type Runner struct {
 
 	cfg *config.Config
 
-	client client.Client
-	labels labels.Labels
-	envs   map[string]string
+	client       client.Client
+	labels       labels.Labels
+	envs         map[string]string
+	cacheHandler *artifactcache.Handler
 
 	runningTasks sync.Map
 	runningCount atomic.Int64
@@ -55,11 +56,12 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	}
 	envs := make(map[string]string, len(cfg.Runner.Envs))
 	maps.Copy(envs, cfg.Runner.Envs)
+	var cacheHandler *artifactcache.Handler
 	if cfg.Cache.Enabled == nil || *cfg.Cache.Enabled {
 		if cfg.Cache.ExternalServer != "" {
 			envs["ACTIONS_CACHE_URL"] = cfg.Cache.ExternalServer
 		} else {
-			cacheHandler, err := artifactcache.StartHandler(
+			handler, err := artifactcache.StartHandler(
 				cfg.Cache.Dir,
 				cfg.Cache.Host,
 				cfg.Cache.Port,
@@ -69,7 +71,8 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 				log.Errorf("cannot init cache server, it will be disabled: %v", err)
 				// go on
 			} else {
-				envs["ACTIONS_CACHE_URL"] = cacheHandler.ExternalURL() + "/"
+				cacheHandler = handler
+				envs["ACTIONS_CACHE_URL"] = handler.ExternalURL() + "/"
 			}
 		}
 	}
@@ -84,11 +87,12 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	envs["GITEA_ACTIONS_RUNNER_VERSION"] = ver.Version()
 
 	return &Runner{
-		name:   reg.Name,
-		cfg:    cfg,
-		client: cli,
-		labels: ls,
-		envs:   envs,
+		name:         reg.Name,
+		cfg:          cfg,
+		client:       cli,
+		labels:       ls,
+		envs:         envs,
+		cacheHandler: cacheHandler,
 	}
 }
 
@@ -199,6 +203,21 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		giteaRuntimeToken = preset.Token
 	}
 	r.envs["ACTIONS_RUNTIME_TOKEN"] = giteaRuntimeToken
+	// Mask the runtime token so it cannot be echoed in user step output; it is
+	// now also the cache server's bearer credential and leaking it would let
+	// any reader of the log impersonate this job against the cache.
+	if giteaRuntimeToken != "" {
+		task.Secrets["ACTIONS_RUNTIME_TOKEN"] = giteaRuntimeToken
+	}
+
+	// Register this job's runtime token with the local cache server so that
+	// cache requests from the job container can authenticate. The credential
+	// is removed when the task finishes, so a leaked token stops working as
+	// soon as the job ends rather than remaining valid for the runner's
+	// lifetime. Only applies to the embedded cache server; when the operator
+	// points the runner at an external cache via cfg.Cache.ExternalServer, it
+	// is that server's responsibility to authenticate requests.
+	defer r.registerCacheForTask(giteaRuntimeToken, preset.Repository, preset.RunID)()
 
 	eventJSON, err := json.Marshal(preset.Event)
 	if err != nil {
@@ -276,6 +295,19 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	}
 
 	return execErr
+}
+
+// registerCacheForTask tells the embedded cache server to accept requests
+// authenticated with the given runtime token for the duration of this task.
+// Returns a function the caller must invoke (typically via defer) to revoke
+// the credential when the task finishes. Safe to call with a nil cache
+// handler (external cache server configured) or an empty token (Gitea server
+// did not issue one) — both cases produce a no-op revoker.
+func (r *Runner) registerCacheForTask(token, repo, runID string) func() {
+	if r.cacheHandler == nil || token == "" {
+		return func() {}
+	}
+	return r.cacheHandler.RegisterJob(token, repo, runID)
 }
 
 func (r *Runner) RunningCount() int64 {

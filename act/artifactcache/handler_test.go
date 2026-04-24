@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -23,10 +22,37 @@ import (
 	"go.etcd.io/bbolt"
 )
 
+// testToken is registered with the cache server in every test that needs to
+// make authenticated requests; testClient then attaches it as the
+// Authorization: Bearer header. testRepo is the repository scope used when
+// registering it; cross-repo isolation is exercised in its own test.
+const (
+	testToken = "test-runtime-token"
+	testRepo  = "owner/repo"
+	testRunID = "42"
+)
+
+type bearerTransport struct{ token string }
+
+func (b *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r.Header.Set("Authorization", "Bearer "+b.token)
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+var testClient = &http.Client{Transport: &bearerTransport{token: testToken}}
+
+// signArtifactURL builds a signed download URL the same way the server does;
+// tests use it to reach the get handler directly without going through a
+// find/cache-hit round trip.
+func signArtifactURL(h *Handler, id int64) string {
+	return h.signedArtifactURL(uint64(id), time.Now().Add(artifactURLTTL))
+}
+
 func TestHandler(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 	handler, err := StartHandler(dir, "", 0, nil)
 	require.NoError(t, err)
+	handler.RegisterJob(testToken, testRepo, testRunID)
 
 	base := fmt.Sprintf("%s%s", handler.ExternalURL(), apiPath)
 
@@ -46,7 +72,7 @@ func TestHandler(t *testing.T) {
 			require.NoError(t, handler.Close())
 			assert.Nil(t, handler.server)
 			assert.Nil(t, handler.listener)
-			_, err := http.Post(fmt.Sprintf("%s/caches/%d", base, 1), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
+			_, err := testClient.Post(fmt.Sprintf("%s/caches/%d", base, 1), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
 			assert.Error(t, err)
 		})
 	}()
@@ -54,7 +80,7 @@ func TestHandler(t *testing.T) {
 	t.Run("get not exist", func(t *testing.T) {
 		key := strings.ToLower(t.Name())
 		version := "c19da02a2bd7e77277f1ac29ab45c09b7d46a4ee758284e26bb3045ad11d9d20"
-		resp, err := http.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, key, version)) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, key, version)) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 204, resp.StatusCode)
 	})
@@ -69,7 +95,7 @@ func TestHandler(t *testing.T) {
 	})
 
 	t.Run("clean", func(t *testing.T) {
-		resp, err := http.Post(base+"/clean", "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Post(base+"/clean", "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		assert.Equal(t, 200, resp.StatusCode)
 	})
@@ -77,7 +103,7 @@ func TestHandler(t *testing.T) {
 	t.Run("reserve with bad request", func(t *testing.T) {
 		body := []byte(`invalid json`)
 		require.NoError(t, err)
-		resp, err := http.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		assert.Equal(t, 400, resp.StatusCode)
 	})
@@ -95,7 +121,7 @@ func TestHandler(t *testing.T) {
 				Size:    100,
 			})
 			require.NoError(t, err)
-			resp, err := http.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.StatusCode)
 
@@ -109,7 +135,7 @@ func TestHandler(t *testing.T) {
 				Size:    100,
 			})
 			require.NoError(t, err)
-			resp, err := http.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.StatusCode)
 
@@ -126,7 +152,7 @@ func TestHandler(t *testing.T) {
 		require.NoError(t, err)
 		req.Header.Set("Content-Type", "application/octet-stream")
 		req.Header.Set("Content-Range", "bytes 0-99/*")
-		resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		assert.Equal(t, 400, resp.StatusCode)
 	})
@@ -137,7 +163,7 @@ func TestHandler(t *testing.T) {
 		require.NoError(t, err)
 		req.Header.Set("Content-Type", "application/octet-stream")
 		req.Header.Set("Content-Range", "bytes 0-99/*")
-		resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		assert.Equal(t, 400, resp.StatusCode)
 	})
@@ -156,7 +182,7 @@ func TestHandler(t *testing.T) {
 				Size:    100,
 			})
 			require.NoError(t, err)
-			resp, err := http.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.StatusCode)
 
@@ -172,12 +198,12 @@ func TestHandler(t *testing.T) {
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/octet-stream")
 			req.Header.Set("Content-Range", "bytes 0-99/*")
-			resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.StatusCode)
 		}
 		{
-			resp, err := http.Post(fmt.Sprintf("%s/caches/%d", base, id), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(fmt.Sprintf("%s/caches/%d", base, id), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.StatusCode)
 		}
@@ -187,7 +213,7 @@ func TestHandler(t *testing.T) {
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/octet-stream")
 			req.Header.Set("Content-Range", "bytes 0-99/*")
-			resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 400, resp.StatusCode)
 		}
@@ -207,7 +233,7 @@ func TestHandler(t *testing.T) {
 				Size:    100,
 			})
 			require.NoError(t, err)
-			resp, err := http.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.StatusCode)
 
@@ -223,7 +249,7 @@ func TestHandler(t *testing.T) {
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/octet-stream")
 			req.Header.Set("Content-Range", "bytes xx-99/*")
-			resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 400, resp.StatusCode)
 		}
@@ -231,7 +257,7 @@ func TestHandler(t *testing.T) {
 
 	t.Run("commit with bad id", func(t *testing.T) {
 		{
-			resp, err := http.Post(base+"/caches/invalid_id", "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(base+"/caches/invalid_id", "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 400, resp.StatusCode)
 		}
@@ -239,7 +265,7 @@ func TestHandler(t *testing.T) {
 
 	t.Run("commit with not exist id", func(t *testing.T) {
 		{
-			resp, err := http.Post(fmt.Sprintf("%s/caches/%d", base, 100), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(fmt.Sprintf("%s/caches/%d", base, 100), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 400, resp.StatusCode)
 		}
@@ -259,7 +285,7 @@ func TestHandler(t *testing.T) {
 				Size:    100,
 			})
 			require.NoError(t, err)
-			resp, err := http.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.StatusCode)
 
@@ -275,17 +301,17 @@ func TestHandler(t *testing.T) {
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/octet-stream")
 			req.Header.Set("Content-Range", "bytes 0-99/*")
-			resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.StatusCode)
 		}
 		{
-			resp, err := http.Post(fmt.Sprintf("%s/caches/%d", base, id), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(fmt.Sprintf("%s/caches/%d", base, id), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.StatusCode)
 		}
 		{
-			resp, err := http.Post(fmt.Sprintf("%s/caches/%d", base, id), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(fmt.Sprintf("%s/caches/%d", base, id), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 400, resp.StatusCode)
 		}
@@ -305,7 +331,7 @@ func TestHandler(t *testing.T) {
 				Size:    100,
 			})
 			require.NoError(t, err)
-			resp, err := http.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.StatusCode)
 
@@ -321,31 +347,31 @@ func TestHandler(t *testing.T) {
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/octet-stream")
 			req.Header.Set("Content-Range", "bytes 0-59/*")
-			resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 200, resp.StatusCode)
 		}
 		{
-			resp, err := http.Post(fmt.Sprintf("%s/caches/%d", base, id), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Post(fmt.Sprintf("%s/caches/%d", base, id), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			assert.Equal(t, 500, resp.StatusCode)
 		}
 	})
 
 	t.Run("get with bad id", func(t *testing.T) {
-		resp, err := http.Get(base + "/artifacts/invalid_id") //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Get(base + "/artifacts/invalid_id") //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 400, resp.StatusCode)
 	})
 
 	t.Run("get with not exist id", func(t *testing.T) {
-		resp, err := http.Get(fmt.Sprintf("%s/artifacts/%d", base, 100)) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Get(signArtifactURL(handler, 100)) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 404, resp.StatusCode)
 	})
 
 	t.Run("get with not exist id", func(t *testing.T) {
-		resp, err := http.Get(fmt.Sprintf("%s/artifacts/%d", base, 100)) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Get(signArtifactURL(handler, 100)) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 404, resp.StatusCode)
 	})
@@ -376,7 +402,7 @@ func TestHandler(t *testing.T) {
 			key + "_a",
 		}, ",")
 
-		resp, err := http.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, reqKeys, version)) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, reqKeys, version)) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 200, resp.StatusCode)
 
@@ -396,7 +422,7 @@ func TestHandler(t *testing.T) {
 		assert.Equal(t, "hit", got.Result)
 		assert.Equal(t, keys[except], got.CacheKey)
 
-		contentResp, err := http.Get(got.ArchiveLocation) //nolint:bodyclose // pre-existing issue from nektos/act
+		contentResp, err := testClient.Get(got.ArchiveLocation) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 200, contentResp.StatusCode)
 		content, err := io.ReadAll(contentResp.Body)
@@ -414,7 +440,7 @@ func TestHandler(t *testing.T) {
 
 		{
 			reqKey := key + "_aBc"
-			resp, err := http.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, reqKey, version)) //nolint:bodyclose // pre-existing issue from nektos/act
+			resp, err := testClient.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, reqKey, version)) //nolint:bodyclose // pre-existing issue from nektos/act
 			require.NoError(t, err)
 			require.Equal(t, 200, resp.StatusCode)
 			got := struct {
@@ -453,7 +479,7 @@ func TestHandler(t *testing.T) {
 			key + "_a_b",
 		}, ",")
 
-		resp, err := http.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, reqKeys, version)) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, reqKeys, version)) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 200, resp.StatusCode)
 
@@ -471,7 +497,7 @@ func TestHandler(t *testing.T) {
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 		assert.Equal(t, keys[expect], got.CacheKey)
 
-		contentResp, err := http.Get(got.ArchiveLocation) //nolint:bodyclose // pre-existing issue from nektos/act
+		contentResp, err := testClient.Get(got.ArchiveLocation) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 200, contentResp.StatusCode)
 		content, err := io.ReadAll(contentResp.Body)
@@ -505,7 +531,7 @@ func TestHandler(t *testing.T) {
 			key + "_a_b",
 		}, ",")
 
-		resp, err := http.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, reqKeys, version)) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, reqKeys, version)) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 200, resp.StatusCode)
 
@@ -524,7 +550,7 @@ func TestHandler(t *testing.T) {
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 		assert.Equal(t, keys[expect], got.CacheKey)
 
-		contentResp, err := http.Get(got.ArchiveLocation) //nolint:bodyclose // pre-existing issue from nektos/act
+		contentResp, err := testClient.Get(got.ArchiveLocation) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 200, contentResp.StatusCode)
 		content, err := io.ReadAll(contentResp.Body)
@@ -542,7 +568,7 @@ func uploadCacheNormally(t *testing.T, base, key, version string, content []byte
 			Size:    int64(len(content)),
 		})
 		require.NoError(t, err)
-		resp, err := http.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Post(base+"/caches", "application/json", bytes.NewReader(body)) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		assert.Equal(t, 200, resp.StatusCode)
 
@@ -558,18 +584,18 @@ func uploadCacheNormally(t *testing.T, base, key, version string, content []byte
 		require.NoError(t, err)
 		req.Header.Set("Content-Type", "application/octet-stream")
 		req.Header.Set("Content-Range", "bytes 0-99/*")
-		resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Do(req) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		assert.Equal(t, 200, resp.StatusCode)
 	}
 	{
-		resp, err := http.Post(fmt.Sprintf("%s/caches/%d", base, id), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Post(fmt.Sprintf("%s/caches/%d", base, id), "", nil) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		assert.Equal(t, 200, resp.StatusCode)
 	}
 	var archiveLocation string
 	{
-		resp, err := http.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, key, version)) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, key, version)) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 200, resp.StatusCode)
 		got := struct {
@@ -583,7 +609,7 @@ func uploadCacheNormally(t *testing.T, base, key, version string, content []byte
 		archiveLocation = got.ArchiveLocation
 	}
 	{
-		resp, err := http.Get(archiveLocation) //nolint:bodyclose // pre-existing issue from nektos/act
+		resp, err := testClient.Get(archiveLocation) //nolint:bodyclose // pre-existing issue from nektos/act
 		require.NoError(t, err)
 		require.Equal(t, 200, resp.StatusCode)
 		got, err := io.ReadAll(resp.Body)
@@ -701,23 +727,206 @@ func TestHandler_gcCache(t *testing.T) {
 	require.NoError(t, db.Close())
 }
 
-func TestHandler_UnauthorizedAccess(t *testing.T) {
+// TestHandler_RejectsMissingBearer covers the advisory's root cause:
+// unauthenticated access to management endpoints is now refused with 401.
+func TestHandler_RejectsMissingBearer(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 	handler, err := StartHandler(dir, "", 0, nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
-	noTokenBase := fmt.Sprintf("http://%s:%d%s", handler.outboundIP, handler.listener.Addr().(*net.TCPAddr).Port, apiPath)
+	base := handler.ExternalURL() + apiPath
 
-	resp, err := http.Get(noTokenBase + "/cache?keys=test&version=abc")
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-	resp.Body.Close()
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"find", http.MethodGet, "/cache?keys=x&version=y", ""},
+		{"reserve", http.MethodPost, "/caches", "{}"},
+		{"upload", http.MethodPatch, "/caches/1", ""},
+		{"commit", http.MethodPost, "/caches/1", ""},
+		{"clean", http.MethodPost, "/clean", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, base+tc.path, strings.NewReader(tc.body))
+			require.NoError(t, err)
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			resp.Body.Close()
+			assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		})
+	}
+}
 
-	resp, err = http.Post(noTokenBase+"/caches", "application/json", strings.NewReader("{}"))
+// TestHandler_RejectsUnknownBearer verifies that a bearer token is only
+// accepted after RegisterJob; stale/forged tokens cannot be replayed.
+func TestHandler_RejectsUnknownBearer(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, nil)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	defer handler.Close()
+
+	base := handler.ExternalURL() + apiPath
+
+	req, err := http.NewRequest(http.MethodGet, base+"/cache?keys=x&version=y", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer not-a-registered-token")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
 	resp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
+// TestHandler_UnregisterRevokes ensures that the function returned by
+// RegisterJob invalidates the credential, so a token leaked at job time stops
+// working the moment the job ends instead of living for the runner's lifetime.
+func TestHandler_UnregisterRevokes(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, nil)
+	require.NoError(t, err)
+	defer handler.Close()
+
+	unregister := handler.RegisterJob("tmp-token", testRepo, testRunID)
+
+	base := handler.ExternalURL() + apiPath
+	req, err := http.NewRequest(http.MethodGet, base+"/cache?keys=x&version=y", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer tmp-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.NotEqual(t, http.StatusUnauthorized, resp.StatusCode)
+
+	unregister()
+
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
+// TestHandler_CrossRepoIsolation addresses the intra-runner poisoning vector
+// raised in GHSA-82g9-637c-2fx2: job containers can reach the cache server
+// over the docker bridge, so IP allowlisting alone does not stop a malicious
+// PR run from another repo. A cache entry created under repoA must be
+// invisible to queries scoped to repoB.
+func TestHandler_CrossRepoIsolation(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, nil)
+	require.NoError(t, err)
+	defer handler.Close()
+	handler.RegisterJob("token-a", "owner/repoA", "1")
+	handler.RegisterJob("token-b", "owner/repoB", "2")
+
+	base := handler.ExternalURL() + apiPath
+	key := "shared-key"
+	version := "c19da02a2bd7e77277f1ac29ab45c09b7d46a4ee758284e26bb3045ad11d9d20"
+	content := []byte("repoA-payload")
+
+	clientA := &http.Client{Transport: &bearerTransport{token: "token-a"}}
+	clientB := &http.Client{Transport: &bearerTransport{token: "token-b"}}
+
+	// repoA reserves + uploads + commits.
+	reserveBody, err := json.Marshal(&Request{Key: key, Version: version, Size: int64(len(content))})
+	require.NoError(t, err)
+	resp, err := clientA.Post(base+"/caches", "application/json", bytes.NewReader(reserveBody))
+	require.NoError(t, err)
+	var reserved struct {
+		CacheID uint64 `json:"cacheId"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&reserved))
+	resp.Body.Close()
+	require.NotZero(t, reserved.CacheID)
+
+	req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/caches/%d", base, reserved.CacheID), bytes.NewReader(content))
+	require.NoError(t, err)
+	req.Header.Set("Content-Range", fmt.Sprintf("bytes 0-%d/*", len(content)-1))
+	resp, err = clientA.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp, err = clientA.Post(fmt.Sprintf("%s/caches/%d", base, reserved.CacheID), "", nil)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// repoB with a matching key and version must NOT see repoA's cache.
+	resp, err = clientB.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, key, version))
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// repoA still sees its own cache.
+	resp, err = clientA.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, key, version))
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// repoB cannot upload to repoA's reserved id either (forbidden, not 401).
+	req, err = http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/caches/%d", base, reserved.CacheID), bytes.NewReader([]byte("poison")))
+	require.NoError(t, err)
+	req.Header.Set("Content-Range", "bytes 0-5/*")
+	resp, err = clientB.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// TestHandler_ArtifactSignature verifies that archive downloads reject
+// missing / tampered / expired signatures, so a leaked archiveLocation stops
+// working after artifactURLTTL even if the bearer token is still registered.
+func TestHandler_ArtifactSignature(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, nil)
+	require.NoError(t, err)
+	defer handler.Close()
+	handler.RegisterJob(testToken, testRepo, testRunID)
+
+	base := handler.ExternalURL() + apiPath
+
+	t.Run("missing signature", func(t *testing.T) {
+		resp, err := testClient.Get(fmt.Sprintf("%s/artifacts/%d", base, 1))
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+
+	t.Run("tampered signature", func(t *testing.T) {
+		good := handler.signedArtifactURL(1, time.Now().Add(artifactURLTTL))
+		bad := good[:len(good)-4] + "dead"
+		resp, err := testClient.Get(bad)
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+
+	t.Run("expired signature", func(t *testing.T) {
+		expired := handler.signedArtifactURL(1, time.Now().Add(-time.Second))
+		resp, err := testClient.Get(expired)
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+
+	t.Run("signature from a different server", func(t *testing.T) {
+		dir2 := filepath.Join(t.TempDir(), "artifactcache2")
+		other, err := StartHandler(dir2, "", 0, nil)
+		require.NoError(t, err)
+		defer other.Close()
+		otherURL := other.signedArtifactURL(1, time.Now().Add(artifactURLTTL))
+		// Rewrite the host so the request still lands on our handler, but
+		// the signature was computed with a different secret.
+		parts := strings.SplitN(otherURL, apiPath, 2)
+		forged := base + parts[1]
+		resp, err := testClient.Get(forged)
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
 }
 
 func TestHandler_BindAddress(t *testing.T) {
@@ -729,17 +938,61 @@ func TestHandler_BindAddress(t *testing.T) {
 	assert.True(t, strings.HasPrefix(handler.listener.Addr().String(), "127.0.0.1:"))
 }
 
-func TestHandler_TokenPersistsAcrossRestarts(t *testing.T) {
+// TestHandler_SecretPersistsAcrossRestarts is the property that lets
+// act_runner cache-server be pointed at via cfg.Cache.ExternalServer: a
+// restart must not invalidate signed URLs the handler has already issued
+// (within their expiry window).
+func TestHandler_SecretPersistsAcrossRestarts(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 
 	first, err := StartHandler(dir, "127.0.0.1", 0, nil)
 	require.NoError(t, err)
-	token := first.token
+	exp := time.Now().Add(artifactURLTTL).Unix()
+	sig := first.computeSignature(42, exp)
 	require.NoError(t, first.Close())
 
 	second, err := StartHandler(dir, "127.0.0.1", 0, nil)
 	require.NoError(t, err)
 	defer second.Close()
 
-	assert.Equal(t, token, second.token)
+	assert.Equal(t, sig, second.computeSignature(42, exp))
+}
+
+// TestHandler_ArtifactSignatureDownload is a happy-path round trip that
+// ensures a real reserve/upload/commit/find/download flow still works after
+// the auth refactor.
+func TestHandler_ArtifactSignatureDownload(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, nil)
+	require.NoError(t, err)
+	defer handler.Close()
+	handler.RegisterJob(testToken, testRepo, testRunID)
+
+	base := handler.ExternalURL() + apiPath
+	key := "download-key"
+	version := "c19da02a2bd7e77277f1ac29ab45c09b7d46a4ee758284e26bb3045ad11d9d20"
+	content := []byte("hello")
+	uploadCacheNormally(t, base, key, version, content)
+
+	resp, err := testClient.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, key, version))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var hit struct {
+		ArchiveLocation string `json:"archiveLocation"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&hit))
+	resp.Body.Close()
+
+	require.Contains(t, hit.ArchiveLocation, "sig=")
+	require.Contains(t, hit.ArchiveLocation, "exp=")
+
+	// Download without any Authorization header — the signature alone must
+	// be enough, because @actions/cache downloads archiveLocation unauth'd.
+	dl, err := http.Get(hit.ArchiveLocation)
+	require.NoError(t, err)
+	body, err := io.ReadAll(dl.Body)
+	dl.Body.Close()
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, dl.StatusCode)
+	assert.Equal(t, content, body)
 }
