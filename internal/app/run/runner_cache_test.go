@@ -23,13 +23,13 @@ import (
 // revoker returned by registerCacheForTask runs, the token stops working.
 func TestRunner_registerCacheForTask(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, nil)
+	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, false, nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
 	r := &Runner{cacheHandler: handler}
 	token := "run-token-123"
-	unregister := r.registerCacheForTask(token, "owner/repo", "7")
+	unregister := r.registerCacheForTask(token, "owner/repo")
 
 	base := handler.ExternalURL() + "/_apis/artifactcache"
 	probe := func() int {
@@ -57,19 +57,19 @@ func TestRunner_registerCacheForTask(t *testing.T) {
 func TestRunner_registerCacheForTask_NoOps(t *testing.T) {
 	t.Run("nil cacheHandler", func(t *testing.T) {
 		r := &Runner{}
-		unregister := r.registerCacheForTask("tok", "owner/repo", "1")
+		unregister := r.registerCacheForTask("tok", "owner/repo")
 		require.NotNil(t, unregister)
 		unregister()
 	})
 
 	t.Run("empty token", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "artifactcache")
-		handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, nil)
+		handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, false, nil)
 		require.NoError(t, err)
 		defer handler.Close()
 
 		r := &Runner{cacheHandler: handler}
-		unregister := r.registerCacheForTask("", "owner/repo", "1")
+		unregister := r.registerCacheForTask("", "owner/repo")
 		require.NotNil(t, unregister)
 		unregister()
 	})
@@ -89,13 +89,13 @@ func TestRunner_registerCacheForTask_NoOps(t *testing.T) {
 // this test fails.
 func TestRunner_CacheFullFlow_MatchesToolkit(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, nil)
+	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, false, nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
 	r := &Runner{cacheHandler: handler}
 	token := "full-flow-token"
-	unregister := r.registerCacheForTask(token, "owner/repo", "1")
+	unregister := r.registerCacheForTask(token, "owner/repo")
 	defer unregister()
 
 	base := handler.ExternalURL() + "/_apis/artifactcache"

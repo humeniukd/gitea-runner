@@ -47,16 +47,22 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 			port = cacheArgs.Port
 		}
 
+		// openMode=true: this standalone server has no channel to learn
+		// per-job ACTIONS_RUNTIME_TOKENs from Gitea, so bearer auth is
+		// skipped and repo scoping collapses. Operators must expose it
+		// only on a trusted network.
 		cacheHandler, err := artifactcache.StartHandler(
 			dir,
 			host,
 			port,
+			true,
 			log.StandardLogger().WithField("module", "cache_request"),
 		)
 		if err != nil {
 			return err
 		}
 
+		log.Warn("cache-server runs without request authentication; expose it only on a trusted network")
 		log.Infof("cache server is listening on %v", cacheHandler.ExternalURL())
 
 		c := make(chan os.Signal, 1)

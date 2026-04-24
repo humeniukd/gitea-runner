@@ -65,6 +65,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 				cfg.Cache.Dir,
 				cfg.Cache.Host,
 				cfg.Cache.Port,
+				false,
 				log.StandardLogger().WithField("module", "cache_request"),
 			)
 			if err != nil {
@@ -217,7 +218,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// lifetime. Only applies to the embedded cache server; when the operator
 	// points the runner at an external cache via cfg.Cache.ExternalServer, it
 	// is that server's responsibility to authenticate requests.
-	defer r.registerCacheForTask(giteaRuntimeToken, preset.Repository, preset.RunID)()
+	defer r.registerCacheForTask(giteaRuntimeToken, preset.Repository)()
 
 	eventJSON, err := json.Marshal(preset.Event)
 	if err != nil {
@@ -303,11 +304,11 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 // the credential when the task finishes. Safe to call with a nil cache
 // handler (external cache server configured) or an empty token (Gitea server
 // did not issue one) — both cases produce a no-op revoker.
-func (r *Runner) registerCacheForTask(token, repo, runID string) func() {
+func (r *Runner) registerCacheForTask(token, repo string) func() {
 	if r.cacheHandler == nil || token == "" {
 		return func() {}
 	}
-	return r.cacheHandler.RegisterJob(token, repo, runID)
+	return r.cacheHandler.RegisterJob(token, repo)
 }
 
 func (r *Runner) RunningCount() int64 {

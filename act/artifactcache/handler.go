@@ -51,8 +51,17 @@ type credKey struct{}
 // poison another repo's cache, even from inside a container that reaches the
 // cache server over the docker bridge network.
 type JobCredential struct {
-	Repo  string
-	RunID string
+	Repo string
+}
+
+// credEntry holds a registered job's credential along with an active
+// registration count. RegisterJob is reference-counted so that if two tasks
+// briefly share an ACTIONS_RUNTIME_TOKEN — e.g. a runner that retries a task
+// after a crash before the old registration is revoked — the first task's
+// revoker does not cut the second task's auth out from under it.
+type credEntry struct {
+	cred JobCredential
+	refs int
 }
 
 type Handler struct {
@@ -68,6 +77,14 @@ type Handler struct {
 
 	outboundIP string
 
+	// openMode disables the bearer check for management endpoints. The
+	// standalone `act_runner cache-server` subcommand turns it on because
+	// that process has no way to learn per-job tokens from Gitea; operators
+	// must compensate by exposing it only on a trusted network. The embedded
+	// cache server keeps bearer auth on (openMode = false, the default).
+	// Set at StartHandler time and never mutated after Serve begins.
+	openMode bool
+
 	// secret signs short-lived artifact download URLs. The @actions/cache
 	// toolkit does not send Authorization on the download request, so blob
 	// GETs authenticate via a per-URL HMAC signature with expiry rather than
@@ -75,12 +92,17 @@ type Handler struct {
 	secret []byte
 
 	credMu sync.RWMutex
-	creds  map[string]JobCredential
+	creds  map[string]*credEntry
 }
 
-func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger) (*Handler, error) {
+// StartHandler opens the on-disk cache store and starts the HTTP server. If
+// openMode is true, bearer-auth is skipped and repo scoping collapses; the
+// standalone cache-server uses that because it has no way to learn per-job
+// tokens from Gitea. The embedded runner passes false.
+func StartHandler(dir, outboundIP string, port uint16, openMode bool, logger logrus.FieldLogger) (*Handler, error) {
 	h := &Handler{
-		creds: make(map[string]JobCredential),
+		creds:    make(map[string]*credEntry),
+		openMode: openMode,
 	}
 
 	if logger == nil {
@@ -165,28 +187,48 @@ func (h *Handler) ExternalURL() string {
 }
 
 // RegisterJob makes token a valid bearer credential for cache requests from
-// the job identified by (repo, runID) and returns a function that removes it.
-// The runner calls this at job start and defers the returned func so that the
-// credential is only accepted while the job is running.
-func (h *Handler) RegisterJob(token, repo, runID string) func() {
+// the given repository and returns a function that removes it. The runner
+// calls this at job start and defers the returned func so that the credential
+// is only accepted while the job is running.
+//
+// Registrations are reference-counted: if a token is already registered, the
+// existing repo is kept and the refcount is incremented. The entry is
+// removed only when every revoker returned by RegisterJob has been called.
+// This keeps a stray re-registration from silently revoking a live job.
+func (h *Handler) RegisterJob(token, repo string) func() {
 	if h == nil || token == "" {
 		return func() {}
 	}
 	h.credMu.Lock()
-	h.creds[token] = JobCredential{Repo: repo, RunID: runID}
+	if existing, ok := h.creds[token]; ok {
+		existing.refs++
+	} else {
+		h.creds[token] = &credEntry{
+			cred: JobCredential{Repo: repo},
+			refs: 1,
+		}
+	}
 	h.credMu.Unlock()
 	return func() {
 		h.credMu.Lock()
-		delete(h.creds, token)
+		if entry, ok := h.creds[token]; ok {
+			entry.refs--
+			if entry.refs <= 0 {
+				delete(h.creds, token)
+			}
+		}
 		h.credMu.Unlock()
 	}
 }
 
 func (h *Handler) lookupCredential(token string) (JobCredential, bool) {
 	h.credMu.RLock()
-	cred, ok := h.creds[token]
+	entry, ok := h.creds[token]
 	h.credMu.RUnlock()
-	return cred, ok
+	if !ok {
+		return JobCredential{}, false
+	}
+	return entry.cred, true
 }
 
 // loadOrCreateSecret returns the 32-byte HMAC signing key for artifact URLs,
@@ -456,19 +498,25 @@ func (h *Handler) clean(w http.ResponseWriter, r *http.Request, _ httprouter.Par
 
 // bearerAuth resolves ACTIONS_RUNTIME_TOKEN against the set of currently
 // registered jobs. A match attaches the job's JobCredential to the request
-// context; a miss returns 401 before the handler body runs.
+// context; a miss returns 401 before the handler body runs. In open mode
+// the check is skipped and an empty JobCredential is injected so downstream
+// repo scoping collapses to a shared cache.
 func (h *Handler) bearerAuth(handler httprouter.Handle) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 		h.logger.Debugf("%s %s", r.Method, r.URL.Path)
-		token := bearerToken(r)
-		if token == "" {
-			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("missing bearer token"))
-			return
-		}
-		cred, ok := h.lookupCredential(token)
-		if !ok {
-			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("unknown bearer token"))
-			return
+		var cred JobCredential
+		if !h.openMode {
+			token := bearerToken(r)
+			if token == "" {
+				h.responseJSON(w, r, http.StatusUnauthorized, errors.New("missing bearer token"))
+				return
+			}
+			resolved, ok := h.lookupCredential(token)
+			if !ok {
+				h.responseJSON(w, r, http.StatusUnauthorized, errors.New("unknown bearer token"))
+				return
+			}
+			cred = resolved
 		}
 		ctx := context.WithValue(r.Context(), credKey{}, cred)
 		handler(w, r.WithContext(ctx), params)
@@ -684,12 +732,16 @@ func (h *Handler) gcCache() {
 		}
 	}
 
-	// Remove the old caches with the same key and version, keep the latest one.
+	// Remove the old caches with the same key and version within the same
+	// repository, keep the latest one. Aggregation must include Repo so two
+	// repos that happen to share a (key, version) do not evict each other —
+	// otherwise per-repo scoping holds for reads but one repo can age
+	// another out after keepOld.
 	// Also keep the olds which have been used recently for a while in case of the cache is still in use.
 	if results, err := db.FindAggregate(
 		&Cache{},
 		bolthold.Where("Complete").Eq(true),
-		"Key", "Version",
+		"Repo", "Key", "Version",
 	); err != nil {
 		h.logger.Warnf("find aggregate caches: %v", err)
 	} else {

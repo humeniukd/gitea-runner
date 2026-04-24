@@ -29,7 +29,6 @@ import (
 const (
 	testToken = "test-runtime-token"
 	testRepo  = "owner/repo"
-	testRunID = "42"
 )
 
 type bearerTransport struct{ token string }
@@ -50,9 +49,9 @@ func signArtifactURL(h *Handler, id int64) string {
 
 func TestHandler(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, nil)
+	handler, err := StartHandler(dir, "", 0, false, nil)
 	require.NoError(t, err)
-	handler.RegisterJob(testToken, testRepo, testRunID)
+	handler.RegisterJob(testToken, testRepo)
 
 	base := fmt.Sprintf("%s%s", handler.ExternalURL(), apiPath)
 
@@ -620,7 +619,7 @@ func uploadCacheNormally(t *testing.T, base, key, version string, content []byte
 
 func TestHandler_gcCache(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, nil)
+	handler, err := StartHandler(dir, "", 0, false, nil)
 	require.NoError(t, err)
 
 	defer func() {
@@ -731,7 +730,7 @@ func TestHandler_gcCache(t *testing.T) {
 // unauthenticated access to management endpoints is now refused with 401.
 func TestHandler_RejectsMissingBearer(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, nil)
+	handler, err := StartHandler(dir, "", 0, false, nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -764,7 +763,7 @@ func TestHandler_RejectsMissingBearer(t *testing.T) {
 // accepted after RegisterJob; stale/forged tokens cannot be replayed.
 func TestHandler_RejectsUnknownBearer(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, nil)
+	handler, err := StartHandler(dir, "", 0, false, nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -784,11 +783,11 @@ func TestHandler_RejectsUnknownBearer(t *testing.T) {
 // working the moment the job ends instead of living for the runner's lifetime.
 func TestHandler_UnregisterRevokes(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, nil)
+	handler, err := StartHandler(dir, "", 0, false, nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
-	unregister := handler.RegisterJob("tmp-token", testRepo, testRunID)
+	unregister := handler.RegisterJob("tmp-token", testRepo)
 
 	base := handler.ExternalURL() + apiPath
 	req, err := http.NewRequest(http.MethodGet, base+"/cache?keys=x&version=y", nil)
@@ -815,11 +814,11 @@ func TestHandler_UnregisterRevokes(t *testing.T) {
 // invisible to queries scoped to repoB.
 func TestHandler_CrossRepoIsolation(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, nil)
+	handler, err := StartHandler(dir, "", 0, false, nil)
 	require.NoError(t, err)
 	defer handler.Close()
-	handler.RegisterJob("token-a", "owner/repoA", "1")
-	handler.RegisterJob("token-b", "owner/repoB", "2")
+	handler.RegisterJob("token-a", "owner/repoA")
+	handler.RegisterJob("token-b", "owner/repoB")
 
 	base := handler.ExternalURL() + apiPath
 	key := "shared-key"
@@ -881,10 +880,10 @@ func TestHandler_CrossRepoIsolation(t *testing.T) {
 // working after artifactURLTTL even if the bearer token is still registered.
 func TestHandler_ArtifactSignature(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, nil)
+	handler, err := StartHandler(dir, "", 0, false, nil)
 	require.NoError(t, err)
 	defer handler.Close()
-	handler.RegisterJob(testToken, testRepo, testRunID)
+	handler.RegisterJob(testToken, testRepo)
 
 	base := handler.ExternalURL() + apiPath
 
@@ -914,7 +913,7 @@ func TestHandler_ArtifactSignature(t *testing.T) {
 
 	t.Run("signature from a different server", func(t *testing.T) {
 		dir2 := filepath.Join(t.TempDir(), "artifactcache2")
-		other, err := StartHandler(dir2, "", 0, nil)
+		other, err := StartHandler(dir2, "", 0, false, nil)
 		require.NoError(t, err)
 		defer other.Close()
 		otherURL := other.signedArtifactURL(1, time.Now().Add(artifactURLTTL))
@@ -931,7 +930,7 @@ func TestHandler_ArtifactSignature(t *testing.T) {
 
 func TestHandler_BindAddress(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "127.0.0.1", 0, nil)
+	handler, err := StartHandler(dir, "127.0.0.1", 0, false, nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -945,13 +944,13 @@ func TestHandler_BindAddress(t *testing.T) {
 func TestHandler_SecretPersistsAcrossRestarts(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 
-	first, err := StartHandler(dir, "127.0.0.1", 0, nil)
+	first, err := StartHandler(dir, "127.0.0.1", 0, false, nil)
 	require.NoError(t, err)
 	exp := time.Now().Add(artifactURLTTL).Unix()
 	sig := first.computeSignature(42, exp)
 	require.NoError(t, first.Close())
 
-	second, err := StartHandler(dir, "127.0.0.1", 0, nil)
+	second, err := StartHandler(dir, "127.0.0.1", 0, false, nil)
 	require.NoError(t, err)
 	defer second.Close()
 
@@ -963,10 +962,10 @@ func TestHandler_SecretPersistsAcrossRestarts(t *testing.T) {
 // the auth refactor.
 func TestHandler_ArtifactSignatureDownload(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, nil)
+	handler, err := StartHandler(dir, "", 0, false, nil)
 	require.NoError(t, err)
 	defer handler.Close()
-	handler.RegisterJob(testToken, testRepo, testRunID)
+	handler.RegisterJob(testToken, testRepo)
 
 	base := handler.ExternalURL() + apiPath
 	key := "download-key"
@@ -995,4 +994,136 @@ func TestHandler_ArtifactSignatureDownload(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, dl.StatusCode)
 	assert.Equal(t, content, body)
+}
+
+// TestHandler_OpenMode_AllowsUnauthed covers the standalone cache-server
+// path: once DisableBearerAuth is called, management endpoints accept
+// requests without an Authorization header so that older runners and
+// cfg.Cache.ExternalServer configurations keep working on a trusted network.
+// Repo scoping collapses to Repo="" — reserve and find both see the same
+// empty scope, so caches are effectively shared.
+func TestHandler_OpenMode_AllowsUnauthed(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, true, nil)
+	require.NoError(t, err)
+	defer handler.Close()
+
+	base := handler.ExternalURL() + apiPath
+	key := "open-mode"
+	version := "c19da02a2bd7e77277f1ac29ab45c09b7d46a4ee758284e26bb3045ad11d9d20"
+	content := []byte("open-mode-body")
+
+	reserveBody, err := json.Marshal(&Request{Key: key, Version: version, Size: int64(len(content))})
+	require.NoError(t, err)
+	resp, err := http.Post(base+"/caches", "application/json", bytes.NewReader(reserveBody))
+	require.NoError(t, err)
+	var reserved struct {
+		CacheID uint64 `json:"cacheId"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&reserved))
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NotZero(t, reserved.CacheID)
+
+	req, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/caches/%d", base, reserved.CacheID), bytes.NewReader(content))
+	require.NoError(t, err)
+	req.Header.Set("Content-Range", fmt.Sprintf("bytes 0-%d/*", len(content)-1))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp, err = http.Post(fmt.Sprintf("%s/caches/%d", base, reserved.CacheID), "", nil)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp, err = http.Get(fmt.Sprintf("%s/cache?keys=%s&version=%s", base, key, version))
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestHandler_RegisterJob_RefCounted verifies that a duplicate RegisterJob
+// for the same token does not silently revoke the first registration on the
+// first revoker call. This matters if a runner ever re-registers a token
+// (restart mid-task, retry), which must not kill the live job's auth.
+func TestHandler_RegisterJob_RefCounted(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, false, nil)
+	require.NoError(t, err)
+	defer handler.Close()
+
+	first := handler.RegisterJob("shared", testRepo)
+	second := handler.RegisterJob("shared", testRepo)
+
+	base := handler.ExternalURL() + apiPath
+	probe := func() int {
+		req, err := http.NewRequest(http.MethodGet, base+"/cache?keys=x&version=v", nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer shared")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	require.NotEqual(t, http.StatusUnauthorized, probe())
+	first()
+	assert.NotEqual(t, http.StatusUnauthorized, probe(),
+		"token must stay valid while another registration holds the refcount")
+	second()
+	assert.Equal(t, http.StatusUnauthorized, probe(),
+		"token is revoked only after every revoker has run")
+}
+
+// TestHandler_GC_PerRepoDedup ensures duplicate-pruning does not evict
+// another repo's entry. Two repos reserve the same (key, version); after the
+// keepOld window, GC must keep the one from each repo.
+func TestHandler_GC_PerRepoDedup(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, false, nil)
+	require.NoError(t, err)
+	defer handler.Close()
+	handler.RegisterJob("tok-a", "owner/repoA")
+	handler.RegisterJob("tok-b", "owner/repoB")
+
+	key := "shared-dedup-key"
+	version := "c19da02a2bd7e77277f1ac29ab45c09b7d46a4ee758284e26bb3045ad11d9d20"
+
+	// Seed one completed cache per repo directly via the DB, bypassing the
+	// HTTP round trip so we can precisely control UsedAt.
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	now := time.Now().Unix()
+	stale := time.Now().Add(-keepOld - time.Minute).Unix()
+	a := &Cache{Repo: "owner/repoA", Key: key, Version: version, Complete: true, CreatedAt: stale, UsedAt: stale, Size: 1}
+	b := &Cache{Repo: "owner/repoB", Key: key, Version: version, Complete: true, CreatedAt: now, UsedAt: now, Size: 1}
+	require.NoError(t, insertCache(db, a))
+	require.NoError(t, insertCache(db, b))
+	// Write the backing blobs so the dedup deletion has something to remove.
+	require.NoError(t, handler.storage.Write(a.ID, 0, strings.NewReader("a")))
+	_, err = handler.storage.Commit(a.ID, 1)
+	require.NoError(t, err)
+	require.NoError(t, handler.storage.Write(b.ID, 0, strings.NewReader("b")))
+	_, err = handler.storage.Commit(b.ID, 1)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	// Force GC to run regardless of the cooldown.
+	handler.gcAt = time.Time{}
+	handler.gcCache()
+
+	db, err = handler.openDB()
+	require.NoError(t, err)
+	defer db.Close()
+	var after []Cache
+	require.NoError(t, db.Find(&after, bolthold.Where("Key").Eq(key).And("Version").Eq(version)))
+
+	repos := make(map[string]bool)
+	for _, c := range after {
+		repos[c.Repo] = true
+	}
+	assert.True(t, repos["owner/repoA"], "repoA's cache must survive dedup against repoB")
+	assert.True(t, repos["owner/repoB"], "repoB's cache must survive dedup against repoA")
 }
