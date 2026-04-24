@@ -98,8 +98,8 @@ func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) {
 }
 
 func (sr *stepRun) runScriptGroupTitle(normalizedScript string) string {
-	trimmed := strings.TrimLeft(normalizedScript, " \t\n")
-	if idx := strings.IndexByte(trimmed, '\n'); idx >= 0 {
+	trimmed := strings.TrimLeft(normalizedScript, " \t\r\n")
+	if idx := strings.IndexAny(trimmed, "\r\n"); idx >= 0 {
 		trimmed = trimmed[:idx]
 	}
 	if trimmed != "" {
@@ -123,11 +123,16 @@ func stepDeclaredEnvKeysInOrder(step *model.Step) []string {
 	}
 	content := step.Env.Content
 	keys := make([]string, 0, len(content)/2)
+	seen := make(map[string]struct{}, len(content)/2)
 	for i := 0; i+1 < len(content); i += 2 {
 		k := content[i]
 		if k.Kind != yaml.ScalarNode || k.Tag == "!!merge" || k.Value == "<<" {
 			continue
 		}
+		if _, dup := seen[k.Value]; dup {
+			continue
+		}
+		seen[k.Value] = struct{}{}
 		keys = append(keys, k.Value)
 	}
 	return keys
