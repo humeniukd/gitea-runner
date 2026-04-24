@@ -85,13 +85,13 @@ func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) error {
 	stepEnvKeys := stepDeclaredEnvKeysInOrder(sr.Step)
 	if len(stepEnvKeys) > 0 {
 		rawLogger.Infof("env:")
-		foldedEnv := sr.foldedEnvIfCaseInsensitive()
+		caseInsensitiveEnv := sr.isEnvCaseInsensitive()
 		for _, k := range stepEnvKeys {
-			val, ok := lookupDeclaredEnvValue(k, sr.env, foldedEnv)
+			val, ok := lookupDeclaredEnvValue(k, sr.env, caseInsensitiveEnv)
 			if !ok {
 				logger.Debugf("step env key %q declared but not present in merged env", k)
 			}
-			rawLogger.Infof("  %s: %s", k, val)
+			rawLogger.Infof(" %s: %s", k, val)
 		}
 	}
 
@@ -128,9 +128,6 @@ func firstScriptLine(script string) string {
 // stepDeclaredEnvKeysInOrder walks the raw YAML Env mapping so keys are emitted in
 // the order the workflow author wrote them. step.Environment() loses ordering because
 // it decodes into a Go map.
-//
-// YAML merge keys (`<<: *anchor`) are expanded per the YAML 1.1 merge spec: merged
-// keys appear at the position of `<<`, and local keys are not duplicated.
 func stepDeclaredEnvKeysInOrder(step *model.Step) []string {
 	if step == nil || step.Env.Kind != yaml.MappingNode {
 		return nil
@@ -148,12 +145,10 @@ func collectMappingKeys(node *yaml.Node, keys *[]string, seen map[string]struct{
 	content := node.Content
 	for i := 0; i+1 < len(content); i += 2 {
 		k := content[i]
-		v := content[i+1]
 		if k.Kind != yaml.ScalarNode {
 			continue
 		}
 		if k.Tag == "!!merge" || k.Value == "<<" {
-			collectMergedKeys(v, keys, seen)
 			continue
 		}
 		if _, dup := seen[k.Value]; dup {
@@ -164,39 +159,19 @@ func collectMappingKeys(node *yaml.Node, keys *[]string, seen map[string]struct{
 	}
 }
 
-func collectMergedKeys(v *yaml.Node, keys *[]string, seen map[string]struct{}) {
-	if v == nil {
-		return
-	}
-	switch v.Kind {
-	case yaml.AliasNode:
-		collectMappingKeys(v.Alias, keys, seen)
-	case yaml.MappingNode:
-		collectMappingKeys(v, keys, seen)
-	case yaml.SequenceNode:
-		for _, item := range v.Content {
-			collectMergedKeys(item, keys, seen)
-		}
-	}
-}
-
-func (sr *stepRun) foldedEnvIfCaseInsensitive() map[string]string {
+func (sr *stepRun) isEnvCaseInsensitive() bool {
 	rc := sr.getRunContext()
-	if rc == nil || rc.JobContainer == nil || !rc.JobContainer.IsEnvironmentCaseInsensitive() {
-		return nil
-	}
-
-	folded := make(map[string]string, len(sr.env))
-	for k, v := range sr.env {
-		folded[strings.ToLower(k)] = v
-	}
-	return folded
+	return rc != nil && rc.JobContainer != nil && rc.JobContainer.IsEnvironmentCaseInsensitive()
 }
 
-func lookupDeclaredEnvValue(declKey string, env, foldedEnv map[string]string) (string, bool) {
-	if foldedEnv != nil {
-		v, ok := foldedEnv[strings.ToLower(declKey)]
-		return v, ok
+func lookupDeclaredEnvValue(declKey string, env map[string]string, caseInsensitive bool) (string, bool) {
+	if caseInsensitive {
+		for k, v := range env {
+			if strings.EqualFold(k, declKey) {
+				return v, true
+			}
+		}
+		return "", false
 	}
 	v, ok := env[declKey]
 	return v, ok

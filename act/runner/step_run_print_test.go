@@ -71,13 +71,13 @@ env:
 			"TERM":         "xterm",
 		},
 	}
-	v, ok := lookupDeclaredEnvValue("GITHUB_TOKEN", sr.env, sr.foldedEnvIfCaseInsensitive())
+	v, ok := lookupDeclaredEnvValue("GITHUB_TOKEN", sr.env, sr.isEnvCaseInsensitive())
 	assert.True(t, ok)
 	assert.Equal(t, "tok", v)
-	v, ok = lookupDeclaredEnvValue("PATH", sr.env, sr.foldedEnvIfCaseInsensitive())
+	v, ok = lookupDeclaredEnvValue("PATH", sr.env, sr.isEnvCaseInsensitive())
 	assert.True(t, ok)
 	assert.Equal(t, "/custom/bin", v)
-	_, ok = lookupDeclaredEnvValue("MISSING", sr.env, sr.foldedEnvIfCaseInsensitive())
+	_, ok = lookupDeclaredEnvValue("MISSING", sr.env, sr.isEnvCaseInsensitive())
 	assert.False(t, ok)
 }
 
@@ -87,7 +87,16 @@ func TestStepDeclaredEnvKeysInOrderEmpty(t *testing.T) {
 	assert.Empty(t, keys)
 }
 
-func TestStepDeclaredEnvKeysExpandYAMLMergeKeys(t *testing.T) {
+func TestLookupDeclaredEnvValueCaseInsensitive(t *testing.T) {
+	v, ok := lookupDeclaredEnvValue("PATH", map[string]string{"Path": "/custom/bin"}, true)
+	assert.True(t, ok)
+	assert.Equal(t, "/custom/bin", v)
+
+	_, ok = lookupDeclaredEnvValue("PATH", map[string]string{"Path": "/custom/bin"}, false)
+	assert.False(t, ok)
+}
+
+func TestStepDeclaredEnvKeysIgnoreYAMLMergeKey(t *testing.T) {
 	doc := `
 common: &common
   COMMON_A: a
@@ -105,7 +114,7 @@ step:
 	require.NoError(t, yaml.Unmarshal([]byte(doc), &root))
 
 	keys := stepDeclaredEnvKeysInOrder(&root.Step)
-	assert.Equal(t, []string{"LOCAL_BEFORE", "COMMON_A", "COMMON_B", "LOCAL_AFTER"}, keys)
+	assert.Equal(t, []string{"LOCAL_BEFORE", "COMMON_B", "LOCAL_AFTER"}, keys)
 	assert.NotContains(t, keys, "<<")
 
 	resolved := root.Step.Environment()
@@ -194,8 +203,8 @@ env:
 		"[j1]   | echo two",
 		"[j1]   | shell: pwsh -command . '/var/run/act/workflow/s1.ps1'",
 		"[j1]   | env:",
-		"[j1]   |   PATH_PREFIX: /custom/bin",
-		"[j1]   |   GREETING: hello",
+		"[j1]   |  PATH_PREFIX: /custom/bin",
+		"[j1]   |  GREETING: hello",
 		"[j1]   | ::endgroup::",
 		"",
 	}, "\n")
