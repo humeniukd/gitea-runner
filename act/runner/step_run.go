@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"runtime"
+	"slices"
 	"strings"
 
 	"gitea.com/gitea/act_runner/act/common"
@@ -75,10 +76,41 @@ func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) {
 
 	rawLogger.Infof("shell: %s", sr.shellCommand)
 
-	rc := sr.getRunContext()
+	printStepEnvBlock(ctx, sr.Step, sr.env, sr.getRunContext())
+}
+
+// printRunActionHeader mirrors actions/runner's "Run <action>" header for `uses:` steps,
+// including the with: inputs and the step-level env: block. The caller is responsible
+// for emitting ::endgroup:: after the action finishes.
+func printRunActionHeader(ctx context.Context, step *model.Step, env map[string]string, rc *RunContext) {
+	if step == nil {
+		return
+	}
+	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+
+	title := step.Uses
+	if step.Name != "" {
+		title = step.Name
+	}
+	rawLogger.Infof("::group::Run %s", title)
+
+	if len(step.With) > 0 {
+		rawLogger.Infof("with:")
+		for _, k := range slices.Sorted(maps.Keys(step.With)) {
+			rawLogger.Infof("  %s: %s", k, step.With[k])
+		}
+	}
+
+	printStepEnvBlock(ctx, step, env, rc)
+}
+
+// printStepEnvBlock emits the declared-env block (YAML order, internal vars filtered)
+// shared by the run: and uses: "Run" headers.
+func printStepEnvBlock(ctx context.Context, step *model.Step, env map[string]string, rc *RunContext) {
+	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
 	caseInsensitive := rc != nil && rc.JobContainer != nil && rc.JobContainer.IsEnvironmentCaseInsensitive()
 	var visible []string
-	for _, k := range stepDeclaredEnvKeysInOrder(sr.Step) {
+	for _, k := range stepDeclaredEnvKeysInOrder(step) {
 		if !isInternalEnvKey(k, caseInsensitive) {
 			visible = append(visible, k)
 		}
@@ -87,10 +119,10 @@ func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) {
 		return
 	}
 	rawLogger.Infof("env:")
-	envLookup := sr.env
+	envLookup := env
 	if caseInsensitive {
-		envLookup = make(map[string]string, len(sr.env))
-		for k, v := range sr.env {
+		envLookup = make(map[string]string, len(env))
+		for k, v := range env {
 			envLookup[strings.ToUpper(k)] = v
 		}
 	}

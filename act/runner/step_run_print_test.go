@@ -118,6 +118,41 @@ env:
 	assert.Equal(t, want, buf.String())
 }
 
+func TestPrintRunActionHeaderGolden(t *testing.T) {
+	raw := `id: s1
+uses: actions/checkout@v4
+with:
+  fetch-depth: "0"
+  token: secret
+env:
+  CUSTOM: value
+  GITHUB_TOKEN: tok
+`
+	var step model.Step
+	require.NoError(t, yaml.Unmarshal([]byte(raw), &step))
+
+	buf := &bytes.Buffer{}
+	logger := logrus.New()
+	logger.SetOutput(buf)
+	logger.SetLevel(logrus.InfoLevel)
+	logger.SetFormatter(&jobLogFormatter{color: cyan})
+	entry := logger.WithFields(logrus.Fields{"job": "j1"})
+	ctx := common.WithLogger(context.Background(), entry)
+
+	printRunActionHeader(ctx, &step, map[string]string{"CUSTOM": "value", "GITHUB_TOKEN": "tok"}, &RunContext{})
+
+	want := strings.Join([]string{
+		"[j1]   | ::group::Run actions/checkout@v4",
+		"[j1]   | with:",
+		"[j1]   |   fetch-depth: 0",
+		"[j1]   |   token: secret",
+		"[j1]   | env:",
+		"[j1]   |   CUSTOM: value",
+		"",
+	}, "\n")
+	assert.Equal(t, want, buf.String())
+}
+
 func TestIsInternalEnvKey(t *testing.T) {
 	for _, k := range []string{"PATH", "HOME", "CI", "GITHUB_TOKEN", "GITEA_ACTIONS", "RUNNER_OS", "INPUT_FOO"} {
 		assert.True(t, isInternalEnvKey(k, false), k)
