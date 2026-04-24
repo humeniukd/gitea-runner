@@ -21,14 +21,12 @@ import (
 )
 
 type stepRun struct {
-	Step             *model.Step
-	RunContext       *RunContext
-	cmd              []string
-	cmdline          string
-	env              map[string]string
-	WorkingDirectory string
-	// interpolatedScript caches the result of interpolating Step.Run during
-	// setupShellCommand so the group-header printer doesn't re-evaluate it.
+	Step               *model.Step
+	RunContext         *RunContext
+	cmd                []string
+	cmdline            string
+	env                map[string]string
+	WorkingDirectory   string
 	interpolatedScript string
 }
 
@@ -44,15 +42,11 @@ func (sr *stepRun) main() common.Executor {
 		sr.setupShellCommandExecutor(),
 		func(ctx context.Context) error {
 			rc := sr.getRunContext()
-			// ApplyExtraPath must run before the header is printed so that any PATH
-			// modifications from prior ::add-path:: commands are reflected in the
-			// rendered env: block.
+			// Apply ::add-path:: effects before printing so PATH is accurate in the env: block.
 			rc.ApplyExtraPath(ctx, &sr.env)
-			// Match actions/runner ScriptHandler.PrintActionDetails: emit the collapsible
-			// block before execution so command output stays outside the fold.
-			if err := sr.printRunScriptActionDetails(ctx); err != nil {
-				return err
-			}
+			sr.printRunScriptActionDetails(ctx)
+			rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+			defer rawLogger.Infof("::endgroup::")
 			if he, ok := rc.JobContainer.(*container.HostEnvironment); ok && he != nil {
 				return he.ExecWithCmdLine(sr.cmd, sr.cmdline, sr.env, "", sr.WorkingDirectory)(ctx)
 			}
@@ -61,19 +55,17 @@ func (sr *stepRun) main() common.Executor {
 	))
 }
 
-// printRunScriptActionDetails mirrors actions/runner ScriptHandler.PrintActionDetails for
-// script steps. The group title is the first line of the interpolated script, script lines
-// are bright cyan, and env entries are emitted in YAML declaration order.
-func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) error {
+// printRunScriptActionDetails mirrors actions/runner ScriptHandler.PrintActionDetails
+// for script steps. The caller is responsible for emitting ::endgroup:: after step
+// execution so command output is folded into the same collapsible block.
+func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) {
 	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
 	scriptLineLogger := rawLogger.WithField(scriptLineCyanField, true)
-	logger := common.Logger(ctx)
-	script := sr.interpolatedScript
 
-	rawLogger.Infof("::group::Run %s", sr.runScriptGroupTitle(script))
+	normalized := strings.TrimRight(strings.ReplaceAll(sr.interpolatedScript, "\r\n", "\n"), "\n")
 
-	normalized := strings.ReplaceAll(script, "\r\n", "\n")
-	normalized = strings.TrimRight(normalized, "\n")
+	rawLogger.Infof("::group::Run %s", sr.runScriptGroupTitle(normalized))
+
 	if normalized != "" {
 		for line := range strings.SplitSeq(normalized, "\n") {
 			scriptLineLogger.Info(line)
@@ -83,98 +75,62 @@ func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) error {
 	rawLogger.Infof("shell: %s", sr.cmdline)
 
 	stepEnvKeys := stepDeclaredEnvKeysInOrder(sr.Step)
-	if len(stepEnvKeys) > 0 {
-		rawLogger.Infof("env:")
-		caseInsensitiveEnv := sr.isEnvCaseInsensitive()
-		for _, k := range stepEnvKeys {
-			val, ok := lookupDeclaredEnvValue(k, sr.env, caseInsensitiveEnv)
-			if !ok {
-				logger.Debugf("step env key %q declared but not present in merged env", k)
-			}
-			rawLogger.Infof(" %s: %s", k, val)
+	if len(stepEnvKeys) == 0 {
+		return
+	}
+	rawLogger.Infof("env:")
+	envLookup := sr.env
+	rc := sr.getRunContext()
+	caseInsensitive := rc != nil && rc.JobContainer != nil && rc.JobContainer.IsEnvironmentCaseInsensitive()
+	if caseInsensitive {
+		envLookup = make(map[string]string, len(sr.env))
+		for k, v := range sr.env {
+			envLookup[strings.ToUpper(k)] = v
 		}
 	}
-
-	rawLogger.Infof("::endgroup::")
-	return nil
+	for _, k := range stepEnvKeys {
+		lookupKey := k
+		if caseInsensitive {
+			lookupKey = strings.ToUpper(k)
+		}
+		rawLogger.Infof("  %s: %s", k, envLookup[lookupKey])
+	}
 }
 
-// runScriptGroupTitle returns the group-header suffix following "Run ". It matches
-// actions/runner ScriptHandler: the first non-whitespace line of the script. When the
-// script is empty, fall back to the step name or id so the header stays useful.
-func (sr *stepRun) runScriptGroupTitle(script string) string {
-	if title := firstScriptLine(script); title != "" {
-		return title
+func (sr *stepRun) runScriptGroupTitle(normalizedScript string) string {
+	trimmed := strings.TrimLeft(normalizedScript, " \t\n")
+	if idx := strings.IndexByte(trimmed, '\n'); idx >= 0 {
+		trimmed = trimmed[:idx]
+	}
+	if trimmed != "" {
+		return trimmed
 	}
 	if sr.Step != nil {
 		if sr.Step.Name != "" {
 			return sr.Step.Name
 		}
-		if sr.Step.ID != "" {
-			return sr.Step.ID
-		}
+		return sr.Step.ID
 	}
 	return ""
 }
 
-func firstScriptLine(script string) string {
-	first := strings.TrimLeft(strings.ReplaceAll(script, "\r\n", "\n"), " \t\r\n")
-	if idx := strings.IndexAny(first, "\r\n"); idx >= 0 {
-		first = first[:idx]
-	}
-	return first
-}
-
 // stepDeclaredEnvKeysInOrder walks the raw YAML Env mapping so keys are emitted in
-// the order the workflow author wrote them. step.Environment() loses ordering because
-// it decodes into a Go map.
+// the order the workflow author wrote them; step.Environment() decodes into a Go map
+// and loses ordering.
 func stepDeclaredEnvKeysInOrder(step *model.Step) []string {
 	if step == nil || step.Env.Kind != yaml.MappingNode {
 		return nil
 	}
-	keys := make([]string, 0)
-	seen := make(map[string]struct{})
-	collectMappingKeys(&step.Env, &keys, seen)
-	return keys
-}
-
-func collectMappingKeys(node *yaml.Node, keys *[]string, seen map[string]struct{}) {
-	if node == nil || node.Kind != yaml.MappingNode {
-		return
-	}
-	content := node.Content
+	content := step.Env.Content
+	keys := make([]string, 0, len(content)/2)
 	for i := 0; i+1 < len(content); i += 2 {
 		k := content[i]
-		if k.Kind != yaml.ScalarNode {
+		if k.Kind != yaml.ScalarNode || k.Tag == "!!merge" || k.Value == "<<" {
 			continue
 		}
-		if k.Tag == "!!merge" || k.Value == "<<" {
-			continue
-		}
-		if _, dup := seen[k.Value]; dup {
-			continue
-		}
-		seen[k.Value] = struct{}{}
-		*keys = append(*keys, k.Value)
+		keys = append(keys, k.Value)
 	}
-}
-
-func (sr *stepRun) isEnvCaseInsensitive() bool {
-	rc := sr.getRunContext()
-	return rc != nil && rc.JobContainer != nil && rc.JobContainer.IsEnvironmentCaseInsensitive()
-}
-
-func lookupDeclaredEnvValue(declKey string, env map[string]string, caseInsensitive bool) (string, bool) {
-	if caseInsensitive {
-		for k, v := range env {
-			if strings.EqualFold(k, declKey) {
-				return v, true
-			}
-		}
-		return "", false
-	}
-	v, ok := env[declKey]
-	return v, ok
+	return keys
 }
 
 func (sr *stepRun) post() common.Executor {

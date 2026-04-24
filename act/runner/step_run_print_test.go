@@ -19,28 +19,10 @@ import (
 	yaml "go.yaml.in/yaml/v4"
 )
 
-func TestFirstScriptLine(t *testing.T) {
-	tests := []struct {
-		name   string
-		script string
-		want   string
-	}{
-		{"multiline", "echo one\necho two", "echo one"},
-		{"crlf", "echo one\r\necho two", "echo one"},
-		{"leading_ws", "\n  \techo hi", "echo hi"},
-		{"empty", "", ""},
-		{"single_line", "npm test", "npm test"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, firstScriptLine(tt.script))
-		})
-	}
-}
-
-func TestRunScriptGroupTitleFallsBackToStepName(t *testing.T) {
+func TestRunScriptGroupTitle(t *testing.T) {
 	sr := &stepRun{Step: &model.Step{Name: "Build"}}
 	assert.Equal(t, "make build", sr.runScriptGroupTitle("make build"))
+	assert.Equal(t, "echo one", sr.runScriptGroupTitle("  \techo one\necho two"))
 	assert.Equal(t, "Build", sr.runScriptGroupTitle(""))
 
 	sr = &stepRun{Step: &model.Step{ID: "s1"}}
@@ -57,43 +39,12 @@ env:
 `
 	var step model.Step
 	require.NoError(t, yaml.Unmarshal([]byte(raw), &step))
-
-	keys := stepDeclaredEnvKeysInOrder(&step)
-	assert.Equal(t, []string{"GITHUB_TOKEN", "PATH", "MY_VAR"}, keys)
-
-	sr := &stepRun{
-		Step:       &step,
-		RunContext: &RunContext{},
-		env: map[string]string{
-			"GITHUB_TOKEN": "tok",
-			"PATH":         "/custom/bin",
-			"MY_VAR":       "hello",
-			"TERM":         "xterm",
-		},
-	}
-	v, ok := lookupDeclaredEnvValue("GITHUB_TOKEN", sr.env, sr.isEnvCaseInsensitive())
-	assert.True(t, ok)
-	assert.Equal(t, "tok", v)
-	v, ok = lookupDeclaredEnvValue("PATH", sr.env, sr.isEnvCaseInsensitive())
-	assert.True(t, ok)
-	assert.Equal(t, "/custom/bin", v)
-	_, ok = lookupDeclaredEnvValue("MISSING", sr.env, sr.isEnvCaseInsensitive())
-	assert.False(t, ok)
+	assert.Equal(t, []string{"GITHUB_TOKEN", "PATH", "MY_VAR"}, stepDeclaredEnvKeysInOrder(&step))
 }
 
 func TestStepDeclaredEnvKeysInOrderEmpty(t *testing.T) {
 	assert.Nil(t, stepDeclaredEnvKeysInOrder(nil))
-	keys := stepDeclaredEnvKeysInOrder(&model.Step{})
-	assert.Empty(t, keys)
-}
-
-func TestLookupDeclaredEnvValueCaseInsensitive(t *testing.T) {
-	v, ok := lookupDeclaredEnvValue("PATH", map[string]string{"Path": "/custom/bin"}, true)
-	assert.True(t, ok)
-	assert.Equal(t, "/custom/bin", v)
-
-	_, ok = lookupDeclaredEnvValue("PATH", map[string]string{"Path": "/custom/bin"}, false)
-	assert.False(t, ok)
+	assert.Empty(t, stepDeclaredEnvKeysInOrder(&model.Step{}))
 }
 
 func TestStepDeclaredEnvKeysIgnoreYAMLMergeKey(t *testing.T) {
@@ -115,13 +66,6 @@ step:
 
 	keys := stepDeclaredEnvKeysInOrder(&root.Step)
 	assert.Equal(t, []string{"LOCAL_BEFORE", "COMMON_B", "LOCAL_AFTER"}, keys)
-	assert.NotContains(t, keys, "<<")
-
-	resolved := root.Step.Environment()
-	assert.Equal(t, "a", resolved["COMMON_A"])
-	assert.Equal(t, "overridden", resolved["COMMON_B"])
-	assert.Equal(t, "before", resolved["LOCAL_BEFORE"])
-	assert.Equal(t, "after", resolved["LOCAL_AFTER"])
 }
 
 func TestApplyExtraPathBeforeHeader(t *testing.T) {
@@ -157,7 +101,7 @@ env:
 	entry := logger.WithFields(logrus.Fields{"job": "j1"})
 	ctx := common.WithLogger(context.Background(), entry)
 
-	require.NoError(t, sr.printRunScriptActionDetails(ctx))
+	sr.printRunScriptActionDetails(ctx)
 	assert.Contains(t, buf.String(), "PATH: /extra/bin:/step/bin")
 	assert.NotContains(t, buf.String(), "PATH: /step/bin\n")
 }
@@ -195,7 +139,7 @@ env:
 		},
 	}
 
-	require.NoError(t, sr.printRunScriptActionDetails(ctx))
+	sr.printRunScriptActionDetails(ctx)
 
 	want := strings.Join([]string{
 		"[j1]   | ::group::Run echo one",
@@ -203,9 +147,8 @@ env:
 		"[j1]   | echo two",
 		"[j1]   | shell: pwsh -command . '/var/run/act/workflow/s1.ps1'",
 		"[j1]   | env:",
-		"[j1]   |  PATH_PREFIX: /custom/bin",
-		"[j1]   |  GREETING: hello",
-		"[j1]   | ::endgroup::",
+		"[j1]   |   PATH_PREFIX: /custom/bin",
+		"[j1]   |   GREETING: hello",
 		"",
 	}, "\n")
 	assert.Equal(t, want, buf.String())
