@@ -68,44 +68,6 @@ step:
 	assert.Equal(t, []string{"LOCAL_BEFORE", "COMMON_B", "LOCAL_AFTER"}, keys)
 }
 
-func TestApplyExtraPathBeforeHeader(t *testing.T) {
-	raw := `id: s1
-run: "echo 1"
-env:
-  PATH: /step/bin
-`
-	var step model.Step
-	require.NoError(t, yaml.Unmarshal([]byte(raw), &step))
-
-	rc := &RunContext{
-		ExtraPath:    []string{"/extra/bin"},
-		JobContainer: &containerMock{},
-	}
-	env := map[string]string{"PATH": "/step/bin"}
-	rc.ApplyExtraPath(context.Background(), &env)
-	assert.Equal(t, "/extra/bin:/step/bin", env["PATH"])
-
-	sr := &stepRun{
-		Step:               &step,
-		RunContext:         rc,
-		cmdline:            "bash ...",
-		interpolatedScript: "echo 1\n",
-		env:                env,
-	}
-
-	buf := &bytes.Buffer{}
-	logger := logrus.New()
-	logger.SetOutput(buf)
-	logger.SetLevel(logrus.InfoLevel)
-	logger.SetFormatter(&jobLogFormatter{color: cyan})
-	entry := logger.WithFields(logrus.Fields{"job": "j1"})
-	ctx := common.WithLogger(context.Background(), entry)
-
-	sr.printRunScriptActionDetails(ctx)
-	assert.Contains(t, buf.String(), "PATH: /extra/bin:/step/bin")
-	assert.NotContains(t, buf.String(), "PATH: /step/bin\n")
-}
-
 func TestPrintRunScriptActionDetailsGolden(t *testing.T) {
 	raw := `id: s1
 name: Build
@@ -115,6 +77,7 @@ run: |
 shell: pwsh
 env:
   PATH_PREFIX: /custom/bin
+  GITHUB_TOKEN: tok
   GREETING: hello
 `
 	var step model.Step
@@ -131,11 +94,12 @@ env:
 	sr := &stepRun{
 		Step:               &step,
 		RunContext:         &RunContext{},
-		cmdline:            "pwsh -command . '/var/run/act/workflow/s1.ps1'",
+		shellCommand:       "pwsh -command . '{0}'",
 		interpolatedScript: "echo one\necho two\n",
 		env: map[string]string{
-			"PATH_PREFIX": "/custom/bin",
-			"GREETING":    "hello",
+			"PATH_PREFIX":  "/custom/bin",
+			"GITHUB_TOKEN": "tok",
+			"GREETING":     "hello",
 		},
 	}
 
@@ -145,13 +109,24 @@ env:
 		"[j1]   | ::group::Run echo one",
 		"[j1]   | echo one",
 		"[j1]   | echo two",
-		"[j1]   | shell: pwsh -command . '/var/run/act/workflow/s1.ps1'",
+		"[j1]   | shell: pwsh -command . '{0}'",
 		"[j1]   | env:",
 		"[j1]   |   PATH_PREFIX: /custom/bin",
 		"[j1]   |   GREETING: hello",
 		"",
 	}, "\n")
 	assert.Equal(t, want, buf.String())
+}
+
+func TestIsInternalEnvKey(t *testing.T) {
+	for _, k := range []string{"PATH", "HOME", "CI", "GITHUB_TOKEN", "GITEA_ACTIONS", "RUNNER_OS", "INPUT_FOO"} {
+		assert.True(t, isInternalEnvKey(k, false), k)
+	}
+	for _, k := range []string{"PATH_PREFIX", "MY_VAR", "GREETING", "HOMEPAGE"} {
+		assert.False(t, isInternalEnvKey(k, false), k)
+	}
+	assert.True(t, isInternalEnvKey("path", true))
+	assert.False(t, isInternalEnvKey("path", false))
 }
 
 func TestPrintColoredScriptLineCyan(t *testing.T) {

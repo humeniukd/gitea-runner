@@ -28,6 +28,7 @@ type stepRun struct {
 	env                map[string]string
 	WorkingDirectory   string
 	interpolatedScript string
+	shellCommand       string
 }
 
 func (sr *stepRun) pre() common.Executor {
@@ -72,29 +73,51 @@ func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) {
 		}
 	}
 
-	rawLogger.Infof("shell: %s", sr.cmdline)
+	rawLogger.Infof("shell: %s", sr.shellCommand)
 
-	stepEnvKeys := stepDeclaredEnvKeysInOrder(sr.Step)
-	if len(stepEnvKeys) == 0 {
+	rc := sr.getRunContext()
+	caseInsensitive := rc != nil && rc.JobContainer != nil && rc.JobContainer.IsEnvironmentCaseInsensitive()
+	var visible []string
+	for _, k := range stepDeclaredEnvKeysInOrder(sr.Step) {
+		if !isInternalEnvKey(k, caseInsensitive) {
+			visible = append(visible, k)
+		}
+	}
+	if len(visible) == 0 {
 		return
 	}
 	rawLogger.Infof("env:")
 	envLookup := sr.env
-	rc := sr.getRunContext()
-	caseInsensitive := rc != nil && rc.JobContainer != nil && rc.JobContainer.IsEnvironmentCaseInsensitive()
 	if caseInsensitive {
 		envLookup = make(map[string]string, len(sr.env))
 		for k, v := range sr.env {
 			envLookup[strings.ToUpper(k)] = v
 		}
 	}
-	for _, k := range stepEnvKeys {
+	for _, k := range visible {
 		lookupKey := k
 		if caseInsensitive {
 			lookupKey = strings.ToUpper(k)
 		}
 		rawLogger.Infof("  %s: %s", k, envLookup[lookupKey])
 	}
+}
+
+// isInternalEnvKey matches actions/runner's filtered set of vars that are hidden
+// from the "Run" header's env: block because they are injected by the runner itself.
+func isInternalEnvKey(k string, caseInsensitive bool) bool {
+	upper := k
+	if caseInsensitive {
+		upper = strings.ToUpper(k)
+	}
+	switch upper {
+	case "PATH", "HOME", "CI":
+		return true
+	}
+	return strings.HasPrefix(upper, "GITHUB_") ||
+		strings.HasPrefix(upper, "GITEA_") ||
+		strings.HasPrefix(upper, "RUNNER_") ||
+		strings.HasPrefix(upper, "INPUT_")
 }
 
 func (sr *stepRun) runScriptGroupTitle(normalizedScript string) string {
@@ -204,6 +227,7 @@ func (sr *stepRun) setupShellCommand(ctx context.Context) (name, script string, 
 	sr.interpolatedScript = script
 
 	scCmd := step.ShellCommand()
+	sr.shellCommand = scCmd
 
 	name = getScriptName(sr.RunContext, step)
 
