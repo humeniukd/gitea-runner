@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,15 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// emptyCfg returns a Config with no ExternalServer/ExternalSecret so the
-// cache-for-task helper hits the embedded-handler path rather than the
-// network-control-plane path.
 func emptyCfg() *config.Config { return &config.Config{} }
 
-// TestRunner_registerCacheForTask pins the runner → cache server contract
-// that the PR relies on: while a task is running, cache requests carrying
-// the task's ACTIONS_RUNTIME_TOKEN authenticate successfully; once the
-// revoker returned by registerCacheForTask runs, the token stops working.
 func TestRunner_registerCacheForTask(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, "", nil)
@@ -58,10 +50,6 @@ func TestRunner_registerCacheForTask(t *testing.T) {
 		"token must be rejected after the revoker runs")
 }
 
-// TestRunner_registerCacheForTask_NoOps covers the two paths where the
-// runner should not call RegisterJob at all: no embedded cache server (the
-// operator configured cfg.Cache.ExternalServer) and no runtime token (older
-// Gitea server). Both must return a safe no-op revoker rather than panic.
 func TestRunner_registerCacheForTask_NoOps(t *testing.T) {
 	t.Run("nil cacheHandler", func(t *testing.T) {
 		r := &Runner{cfg: emptyCfg()}
@@ -83,18 +71,8 @@ func TestRunner_registerCacheForTask_NoOps(t *testing.T) {
 	})
 }
 
-// TestRunner_CacheFullFlow_MatchesToolkit walks through the exact sequence
-// @actions/cache performs against the cache server, to lock in toolkit
-// compatibility:
-//
-//  1. reserve with Bearer ACTIONS_RUNTIME_TOKEN (POST /caches)
-//  2. upload chunks with Bearer + Content-Range (PATCH /caches/:id)
-//  3. commit with Bearer (POST /caches/:id)
-//  4. find with Bearer and comma-separated keys (GET /cache)
-//  5. download archiveLocation *without* Authorization (GET /artifacts/:id?...)
-//
-// If any of these behaviors changes and the toolkit stops interoperating,
-// this test fails.
+// Locks in @actions/cache's wire protocol: bearer on reserve/upload/commit
+// /find, no auth on the signed archiveLocation download.
 func TestRunner_CacheFullFlow_MatchesToolkit(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, "", nil)
@@ -175,28 +153,8 @@ func decodeJSON(resp *http.Response, v any) error {
 	return json.NewDecoder(resp.Body).Decode(v)
 }
 
-// TestRunner_ExternalCacheServer_RegisterRevoke is the high-level
-// proof for cfg.Cache.ExternalServer with cfg.Cache.ExternalSecret set.
-//
-// Setup mirrors a production deployment: one process runs `act_runner
-// cache-server` (here: a Handler with the same shared secret), another runs
-// the runner daemon configured with external_server pointing at it. The
-// runner has no embedded handler. Around each task, registerCacheForTask
-// must POST to /_internal/register with the runtime token, then revoke on
-// completion.
-//
-// What this test pins, end to end:
-//
-//   - Without the side-channel registration, the runtime token is unknown
-//     to the cache server and management requests get 401 (proves auth is
-//     active).
-//   - After registerCacheForTask, the same token is accepted and the full
-//     reserve→upload→commit→find→signed-download cycle works against the
-//     remote server.
-//   - After the deferred revoker runs, the token is rejected again (proves
-//     revoke is wired and the server side honors it).
-//
-// If any of those break, this test fails.
+// End-to-end against a remote cache-server: token unknown → 401, register →
+// reserve/upload/commit/find/download all OK, revoke → 401 again.
 func TestRunner_ExternalCacheServer_RegisterRevoke(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "remote-cache")
 	const secret = "shared-secret-for-tests"
@@ -278,33 +236,4 @@ func TestRunner_ExternalCacheServer_RegisterRevoke(t *testing.T) {
 	unregister()
 	assert.Equal(t, http.StatusUnauthorized, probe(),
 		"token must be rejected after the revoker runs")
-}
-
-// TestRunner_ExternalCacheServer_NoSecret pins the legacy compatibility path:
-// when external_server is set without external_secret, the runner does not
-// attempt registration. This guards against a regression where the runner
-// would suddenly start firing register requests at a server that does not
-// implement the control-plane (and would 404 them, polluting logs).
-func TestRunner_ExternalCacheServer_NoSecret(t *testing.T) {
-	registerCalls := 0
-	srv := newTrackingExternalServer(&registerCalls)
-	defer srv.Close()
-
-	r := &Runner{cfg: &config.Config{Cache: config.Cache{
-		ExternalServer: srv.URL,
-		// ExternalSecret intentionally empty
-	}}}
-
-	unregister := r.registerCacheForTask("any-token", "owner/repo")
-	unregister()
-	assert.Zero(t, registerCalls,
-		"runner must not call /_internal/register when external_secret is unset")
-}
-
-func newTrackingExternalServer(calls *int) *httptest.Server {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/_internal/", func(_ http.ResponseWriter, _ *http.Request) {
-		*calls++
-	})
-	return httptest.NewServer(mux)
 }

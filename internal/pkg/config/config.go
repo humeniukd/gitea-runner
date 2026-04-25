@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -135,6 +136,9 @@ func LoadDefault(file string) (*Config, error) {
 		if cfg.Cache.Dir == "" {
 			home, _ := os.UserHomeDir()
 			cfg.Cache.Dir = filepath.Join(home, ".cache", "actcache")
+		}
+		if cfg.Cache.ExternalServer != "" && cfg.Cache.ExternalSecret == "" {
+			return nil, errors.New("cache.external_server is set but cache.external_secret is empty; configure the same external_secret on this runner and the act_runner cache-server")
 		}
 	}
 	if cfg.Container.WorkdirParent == "" {

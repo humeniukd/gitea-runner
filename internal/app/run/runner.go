@@ -61,11 +61,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	var cacheHandler *artifactcache.Handler
 	if cfg.Cache.Enabled == nil || *cfg.Cache.Enabled {
 		if cfg.Cache.ExternalServer != "" {
-			if cfg.Cache.ExternalSecret == "" {
-				log.Errorf("cache.external_server is set but cache.external_secret is empty; cache will be disabled. Configure the same external_secret on the runner and the act_runner cache-server.")
-			} else {
-				envs["ACTIONS_CACHE_URL"] = cfg.Cache.ExternalServer
-			}
+			envs["ACTIONS_CACHE_URL"] = cfg.Cache.ExternalServer
 		} else {
 			handler, err := artifactcache.StartHandler(
 				cfg.Cache.Dir,
