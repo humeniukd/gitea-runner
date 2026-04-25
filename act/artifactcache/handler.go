@@ -160,7 +160,12 @@ func StartHandler(dir, outboundIP string, port uint16, openMode bool, logger log
 
 	h.gcCache()
 
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", h.outboundIP, port))
+	// Listen on all interfaces. Binding to outboundIP only would give no real
+	// security benefit (it is the LAN/internet-facing address either way) and
+	// can break Docker Desktop variants where the host's outbound IP is not
+	// routable from inside the container network. Authentication is enforced
+	// by the bearer middleware and per-repo scoping, not by reachability.
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, err
 	}

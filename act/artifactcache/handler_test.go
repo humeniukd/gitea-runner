@@ -928,15 +928,6 @@ func TestHandler_ArtifactSignature(t *testing.T) {
 	})
 }
 
-func TestHandler_BindAddress(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "127.0.0.1", 0, false, nil)
-	require.NoError(t, err)
-	defer handler.Close()
-
-	assert.True(t, strings.HasPrefix(handler.listener.Addr().String(), "127.0.0.1:"))
-}
-
 // TestHandler_SecretPersistsAcrossRestarts is the property that lets
 // act_runner cache-server be pointed at via cfg.Cache.ExternalServer: a
 // restart must not invalidate signed URLs the handler has already issued
