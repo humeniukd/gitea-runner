@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -47,18 +48,14 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 			port = cacheArgs.Port
 		}
 
-		// If cache.external_secret is set, run with bearer auth on the cache
-		// API and expose the /_internal control-plane so remote runners can
-		// pre-register their per-job ACTIONS_RUNTIME_TOKENs against this
-		// server. Otherwise stay in legacy openMode (unauthenticated, intended
-		// for trusted networks only).
 		secret := cfg.Cache.ExternalSecret
-		openMode := secret == ""
+		if secret == "" {
+			return errors.New("cache.external_secret must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
+		}
 		cacheHandler, err := artifactcache.StartHandler(
 			dir,
 			host,
 			port,
-			openMode,
 			secret,
 			log.StandardLogger().WithField("module", "cache_request"),
 		)
@@ -66,11 +63,6 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 			return err
 		}
 
-		if openMode {
-			log.Warn("cache-server runs without request authentication; expose it only on a trusted network or set cache.external_secret on both ends")
-		} else {
-			log.Info("cache-server: bearer auth + control-plane enabled via cache.external_secret")
-		}
 		log.Infof("cache server is listening on %v", cacheHandler.ExternalURL())
 
 		c := make(chan os.Signal, 1)

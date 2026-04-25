@@ -78,14 +78,6 @@ type Handler struct {
 
 	outboundIP string
 
-	// openMode disables the bearer check for management endpoints. The
-	// standalone `act_runner cache-server` subcommand turns it on because
-	// that process has no way to learn per-job tokens from Gitea; operators
-	// must compensate by exposing it only on a trusted network. The embedded
-	// cache server keeps bearer auth on (openMode = false, the default).
-	// Set at StartHandler time and never mutated after Serve begins.
-	openMode bool
-
 	// internalSecret guards /_internal/{register,revoke}. When set, a remote
 	// runner can use these endpoints to pre-register per-job
 	// ACTIONS_RUNTIME_TOKENs against this server, enabling the same
@@ -105,20 +97,14 @@ type Handler struct {
 
 // StartHandler opens the on-disk cache store and starts the HTTP server.
 //
-// openMode=true skips bearer-auth on the cache API and collapses repo scoping;
-// it exists for the legacy unauthenticated standalone cache-server.
-//
 // internalSecret, when non-empty, enables a control-plane API at
 // /_internal/{register,revoke} that lets a remote runner pre-register the
-// per-job ACTIONS_RUNTIME_TOKENs it expects this server to honor. This is
-// what makes cfg.Cache.ExternalServer work with full bearer auth + repo
-// scoping over the network. openMode and internalSecret are independent: a
-// caller may run with openMode=false and internalSecret="" (an embedded
-// in-process handler that the local runner registers tokens with directly).
-func StartHandler(dir, outboundIP string, port uint16, openMode bool, internalSecret string, logger logrus.FieldLogger) (*Handler, error) {
+// per-job ACTIONS_RUNTIME_TOKENs it expects this server to honor. The
+// embedded in-process handler leaves it empty and registers tokens via the
+// in-process RegisterJob method directly.
+func StartHandler(dir, outboundIP string, port uint16, internalSecret string, logger logrus.FieldLogger) (*Handler, error) {
 	h := &Handler{
 		creds:          make(map[string]*credEntry),
-		openMode:       openMode,
 		internalSecret: internalSecret,
 	}
 
@@ -542,25 +528,19 @@ func (h *Handler) clean(w http.ResponseWriter, r *http.Request, _ httprouter.Par
 
 // bearerAuth resolves ACTIONS_RUNTIME_TOKEN against the set of currently
 // registered jobs. A match attaches the job's JobCredential to the request
-// context; a miss returns 401 before the handler body runs. In open mode
-// the check is skipped and an empty JobCredential is injected so downstream
-// repo scoping collapses to a shared cache.
+// context; a miss returns 401 before the handler body runs.
 func (h *Handler) bearerAuth(handler httprouter.Handle) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 		h.logger.Debugf("%s %s", r.Method, r.URL.Path)
-		var cred JobCredential
-		if !h.openMode {
-			token := bearerToken(r)
-			if token == "" {
-				h.responseJSON(w, r, http.StatusUnauthorized, errors.New("missing bearer token"))
-				return
-			}
-			resolved, ok := h.lookupCredential(token)
-			if !ok {
-				h.responseJSON(w, r, http.StatusUnauthorized, errors.New("unknown bearer token"))
-				return
-			}
-			cred = resolved
+		token := bearerToken(r)
+		if token == "" {
+			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("missing bearer token"))
+			return
+		}
+		cred, ok := h.lookupCredential(token)
+		if !ok {
+			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("unknown bearer token"))
+			return
 		}
 		ctx := context.WithValue(r.Context(), credKey{}, cred)
 		handler(w, r.WithContext(ctx), params)
