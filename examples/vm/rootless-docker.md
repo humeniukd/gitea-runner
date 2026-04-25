@@ -1,12 +1,12 @@
-## Using Rootless Docker with`act_runner`
+## Using Rootless Docker with`runner`
 
-Here is a simple example of how to set up `act_runner` with rootless Docker. It has been created with Debian, but other Linux should work the same way.
+Here is a simple example of how to set up `runner` with rootless Docker. It has been created with Debian, but other Linux should work the same way.
 
 Note: This procedure needs a real login shell -- using `sudo su` or other method of accessing the account will fail some of the steps below.
 
 As `root`:
 
-- Create a user to run both `docker` and `act_runner`. In this example, we use a non-privileged account called `rootless`.
+- Create a user to run both `docker` and `runner`. In this example, we use a non-privileged account called `rootless`.
 
 ```bash
  useradd -m rootless
@@ -38,36 +38,36 @@ export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
 ```
 
 - Reboot. Ensure that the Docker process is working.
-- Create a directory for saving `act_runner` data between restarts
+- Create a directory for saving `runner` data between restarts
 
- `mkdir /home/rootless/act_runner`
+ `mkdir /home/rootless/runner`
 
 - Register the runner from the data directory
 
 ```bash
- cd /home/rootless/act_runner
- act_runner register
+ cd /home/rootless/runner
+ runner register
 ```
 
-- Generate a `act_runner` configuration file in the data directory. Edit the file to adjust for the system.
+- Generate a `runner` configuration file in the data directory. Edit the file to adjust for the system.
 
 ```bash
- act_runner generate-config >/home/rootless/act_runner/config
+ runner generate-config >/home/rootless/runner/config
 ```
 
-- Create a new user-level`systemd` unit file as `/home/rootless/.config/systemd/user/act_runner.service` with the following contents:
+- Create a new user-level`systemd` unit file as `/home/rootless/.config/systemd/user/runner.service` with the following contents:
 
 ```bash
  Description=Gitea Actions runner
- Documentation=https://gitea.com/gitea/act_runner
+ Documentation=https://gitea.com/gitea/runner
  After=docker.service
 
  [Service]
  Environment=PATH=/home/rootless/bin:/sbin:/usr/sbin:/home/rootless/bin:/home/rootless/bin:/home/rootless/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games
  Environment=DOCKER_HOST=unix:///run/user/1001/docker.sock
- ExecStart=/usr/bin/act_runner daemon -c /home/rootless/act_runner/config
+ ExecStart=/usr/bin/runner daemon -c /home/rootless/runner/config
  ExecReload=/bin/kill -s HUP $MAINPID
- WorkingDirectory=/home/rootless/act_runner
+ WorkingDirectory=/home/rootless/runner
  TimeoutSec=0
  RestartSec=2
  Restart=always
@@ -88,8 +88,8 @@ export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
 
 - Reboot
 
-After the system restarts, check that the`act_runner` is working and that the runner is connected to Gitea.
+After the system restarts, check that the`runner` is working and that the runner is connected to Gitea.
 
 ````bash
- systemctl --user status act_runner
- journalctl --user -xeu act_runner
+ systemctl --user status runner
+ journalctl --user -xeu runner

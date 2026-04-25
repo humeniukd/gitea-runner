@@ -12,8 +12,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 )
 
-// Namespace is the Prometheus namespace for all act_runner metrics.
-const Namespace = "act_runner"
+// Namespace is the Prometheus namespace for all runner metrics.
+const Namespace = "runner"
 
 // Label value constants for Prometheus metrics.
 // Using constants prevents typos from silently creating new time-series.
