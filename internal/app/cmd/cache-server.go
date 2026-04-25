@@ -47,22 +47,30 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 			port = cacheArgs.Port
 		}
 
-		// openMode=true: this standalone server has no channel to learn
-		// per-job ACTIONS_RUNTIME_TOKENs from Gitea, so bearer auth is
-		// skipped and repo scoping collapses. Operators must expose it
-		// only on a trusted network.
+		// If cache.external_secret is set, run with bearer auth on the cache
+		// API and expose the /_internal control-plane so remote runners can
+		// pre-register their per-job ACTIONS_RUNTIME_TOKENs against this
+		// server. Otherwise stay in legacy openMode (unauthenticated, intended
+		// for trusted networks only).
+		secret := cfg.Cache.ExternalSecret
+		openMode := secret == ""
 		cacheHandler, err := artifactcache.StartHandler(
 			dir,
 			host,
 			port,
-			true,
+			openMode,
+			secret,
 			log.StandardLogger().WithField("module", "cache_request"),
 		)
 		if err != nil {
 			return err
 		}
 
-		log.Warn("cache-server runs without request authentication; expose it only on a trusted network")
+		if openMode {
+			log.Warn("cache-server runs without request authentication; expose it only on a trusted network or set cache.external_secret on both ends")
+		} else {
+			log.Info("cache-server: bearer auth + control-plane enabled via cache.external_secret")
+		}
 		log.Infof("cache server is listening on %v", cacheHandler.ExternalURL())
 
 		c := make(chan os.Signal, 1)

@@ -35,7 +35,8 @@ import (
 )
 
 const (
-	apiPath = "/_apis/artifactcache"
+	apiPath      = "/_apis/artifactcache"
+	internalPath = "/_internal"
 
 	// artifactURLTTL bounds how long a signed artifactLocation URL stays valid.
 	// Short enough that a leaked URL is near-worthless; long enough to let the
@@ -85,6 +86,13 @@ type Handler struct {
 	// Set at StartHandler time and never mutated after Serve begins.
 	openMode bool
 
+	// internalSecret guards /_internal/{register,revoke}. When set, a remote
+	// runner can use these endpoints to pre-register per-job
+	// ACTIONS_RUNTIME_TOKENs against this server, enabling the same
+	// per-job auth and repo scoping as the embedded handler over the
+	// network. Empty disables the control-plane entirely.
+	internalSecret string
+
 	// secret signs short-lived artifact download URLs. The @actions/cache
 	// toolkit does not send Authorization on the download request, so blob
 	// GETs authenticate via a per-URL HMAC signature with expiry rather than
@@ -95,14 +103,23 @@ type Handler struct {
 	creds  map[string]*credEntry
 }
 
-// StartHandler opens the on-disk cache store and starts the HTTP server. If
-// openMode is true, bearer-auth is skipped and repo scoping collapses; the
-// standalone cache-server uses that because it has no way to learn per-job
-// tokens from Gitea. The embedded runner passes false.
-func StartHandler(dir, outboundIP string, port uint16, openMode bool, logger logrus.FieldLogger) (*Handler, error) {
+// StartHandler opens the on-disk cache store and starts the HTTP server.
+//
+// openMode=true skips bearer-auth on the cache API and collapses repo scoping;
+// it exists for the legacy unauthenticated standalone cache-server.
+//
+// internalSecret, when non-empty, enables a control-plane API at
+// /_internal/{register,revoke} that lets a remote runner pre-register the
+// per-job ACTIONS_RUNTIME_TOKENs it expects this server to honor. This is
+// what makes cfg.Cache.ExternalServer work with full bearer auth + repo
+// scoping over the network. openMode and internalSecret are independent: a
+// caller may run with openMode=false and internalSecret="" (an embedded
+// in-process handler that the local runner registers tokens with directly).
+func StartHandler(dir, outboundIP string, port uint16, openMode bool, internalSecret string, logger logrus.FieldLogger) (*Handler, error) {
 	h := &Handler{
-		creds:    make(map[string]*credEntry),
-		openMode: openMode,
+		creds:          make(map[string]*credEntry),
+		openMode:       openMode,
+		internalSecret: internalSecret,
 	}
 
 	if logger == nil {
@@ -155,6 +172,11 @@ func StartHandler(dir, outboundIP string, port uint16, openMode bool, logger log
 	// Artifact GET is signed via query-string HMAC because @actions/cache
 	// does not attach Authorization when downloading archiveLocation.
 	router.GET(apiPath+"/artifacts/:id", h.signedURLAuth(h.get))
+	// Control-plane: a remote runner registers/revokes per-job tokens so the
+	// cache API can authenticate them. Always wired so the routes exist; the
+	// handlers themselves 401 when internalSecret is unset.
+	router.POST(internalPath+"/register", h.internalAuth(h.internalRegister))
+	router.POST(internalPath+"/revoke", h.internalAuth(h.internalRevoke))
 
 	h.router = router
 
@@ -224,6 +246,23 @@ func (h *Handler) RegisterJob(token, repo string) func() {
 		}
 		h.credMu.Unlock()
 	}
+}
+
+// RevokeJob explicitly revokes one registration of token, mirroring one call
+// of the closure returned by RegisterJob. Used by the control-plane endpoint
+// so a remote runner can revoke without holding the closure.
+func (h *Handler) RevokeJob(token string) {
+	if h == nil || token == "" {
+		return
+	}
+	h.credMu.Lock()
+	if entry, ok := h.creds[token]; ok {
+		entry.refs--
+		if entry.refs <= 0 {
+			delete(h.creds, token)
+		}
+	}
+	h.credMu.Unlock()
 }
 
 func (h *Handler) lookupCredential(token string) (JobCredential, bool) {
@@ -560,6 +599,64 @@ func (h *Handler) signedURLAuth(handler httprouter.Handle) httprouter.Handle {
 		handler(w, r, params)
 		go h.gcCache()
 	}
+}
+
+// internalAuth gates the control-plane endpoints. The bearer must
+// constant-time-equal the configured internalSecret. If the secret is empty,
+// the control-plane is disabled and every request gets 404 — which matches
+// the upstream nektos/act behavior of "the route does not exist".
+func (h *Handler) internalAuth(handler httprouter.Handle) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+		if h.internalSecret == "" {
+			http.NotFound(w, r)
+			return
+		}
+		token := bearerToken(r)
+		if token == "" || !hmac.Equal([]byte(token), []byte(h.internalSecret)) {
+			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("internal: bad secret"))
+			return
+		}
+		handler(w, r, params)
+	}
+}
+
+type internalRegisterBody struct {
+	Token string `json:"token"`
+	Repo  string `json:"repo"`
+}
+
+type internalRevokeBody struct {
+	Token string `json:"token"`
+}
+
+// POST /_internal/register
+func (h *Handler) internalRegister(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	var body internalRegisterBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.responseJSON(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if body.Token == "" {
+		h.responseJSON(w, r, http.StatusBadRequest, errors.New("token is required"))
+		return
+	}
+	h.RegisterJob(body.Token, body.Repo)
+	h.responseJSON(w, r, http.StatusOK)
+}
+
+// POST /_internal/revoke
+func (h *Handler) internalRevoke(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	var body internalRevokeBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.responseJSON(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if body.Token == "" {
+		h.responseJSON(w, r, http.StatusBadRequest, errors.New("token is required"))
+		return
+	}
+	h.RevokeJob(body.Token)
+	h.responseJSON(w, r, http.StatusOK)
 }
 
 func bearerToken(r *http.Request) string {

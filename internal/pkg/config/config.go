@@ -47,6 +47,7 @@ type Cache struct {
 	Host           string `yaml:"host"`            // Host specifies the caching host.
 	Port           uint16 `yaml:"port"`            // Port specifies the caching port.
 	ExternalServer string `yaml:"external_server"` // ExternalServer specifies the URL of external cache server
+	ExternalSecret string `yaml:"external_secret"` // ExternalSecret is a shared secret between this runner and an external act_runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Leave empty to keep the legacy unauthenticated behavior.
 }
 
 // Container represents the configuration for the container.

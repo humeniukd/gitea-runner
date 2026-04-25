@@ -4,10 +4,12 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +68,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 				cfg.Cache.Host,
 				cfg.Cache.Port,
 				false,
+				"",
 				log.StandardLogger().WithField("module", "cache_request"),
 			)
 			if err != nil {
@@ -298,17 +301,73 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	return execErr
 }
 
-// registerCacheForTask tells the embedded cache server to accept requests
-// authenticated with the given runtime token for the duration of this task.
-// Returns a function the caller must invoke (typically via defer) to revoke
-// the credential when the task finishes. Safe to call with a nil cache
-// handler (external cache server configured) or an empty token (Gitea server
-// did not issue one) — both cases produce a no-op revoker.
+// registerCacheForTask tells the cache server to accept requests authenticated
+// with the given runtime token for the duration of this task. Returns a
+// function the caller must invoke (typically via defer) to revoke the
+// credential when the task finishes.
+//
+// Three modes:
+//   - Embedded handler: register in-process via RegisterJob.
+//   - external_server + external_secret: POST to the remote server's
+//     /_internal/register, defer a POST to /_internal/revoke. This is what
+//     enables full per-job auth and repo scoping over the network.
+//   - external_server alone (no secret): no-op revoker. The remote server is
+//     in legacy openMode and ignores the runtime token; trust is at the
+//     network layer.
+//
+// Safe with an empty token (older Gitea did not issue one).
 func (r *Runner) registerCacheForTask(token, repo string) func() {
-	if r.cacheHandler == nil || token == "" {
+	if token == "" {
 		return func() {}
 	}
-	return r.cacheHandler.RegisterJob(token, repo)
+	if r.cacheHandler != nil {
+		return r.cacheHandler.RegisterJob(token, repo)
+	}
+	if r.cfg.Cache.ExternalServer != "" && r.cfg.Cache.ExternalSecret != "" {
+		return r.registerExternalCacheJob(token, repo)
+	}
+	return func() {}
+}
+
+// registerExternalCacheJob POSTs to the remote cache-server's control-plane.
+// Failures are logged but not fatal: if registration fails, the cache will
+// 401 the job's requests — better than failing the whole task for a cache
+// outage.
+func (r *Runner) registerExternalCacheJob(token, repo string) func() {
+	base := strings.TrimRight(r.cfg.Cache.ExternalServer, "/")
+	if err := postInternalCache(base+"/_internal/register", r.cfg.Cache.ExternalSecret,
+		map[string]string{"token": token, "repo": repo}); err != nil {
+		log.Warnf("cache external_server register failed (%s): %v", base, err)
+	}
+	return func() {
+		if err := postInternalCache(base+"/_internal/revoke", r.cfg.Cache.ExternalSecret,
+			map[string]string{"token": token}); err != nil {
+			log.Warnf("cache external_server revoke failed (%s): %v", base, err)
+		}
+	}
+}
+
+func postInternalCache(url, secret string, body map[string]string) error {
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (r *Runner) RunningCount() int64 {

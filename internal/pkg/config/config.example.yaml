@@ -81,12 +81,14 @@ cache:
   # The external cache server URL. Valid only when enable is true.
   # If it's specified, act_runner will use this URL as the ACTIONS_CACHE_URL rather than start a server by itself.
   # The URL should generally end with "/".
-  #
-  # Security note: the embedded cache server authenticates requests with the per-job ACTIONS_RUNTIME_TOKEN
-  # and isolates caches by repository. An external server (including `act_runner cache-server`) has no
-  # way to learn those tokens, so it runs without request authentication and with no repo isolation.
-  # Only point this at a server reachable on a trusted network, and prefer HTTPS in front of it.
   external_server: ""
+  # Shared secret between this runner and the external `act_runner cache-server`.
+  # When both ends configure the same value, the runner pre-registers each job's
+  # ACTIONS_RUNTIME_TOKEN with the cache-server (POST /_internal/register), and
+  # the cache-server enforces bearer auth + per-repo cache isolation just like
+  # the embedded handler. Leave empty for the legacy behavior: the cache-server
+  # runs unauthenticated and must only be exposed on a trusted network.
+  external_secret: ""
 
 container:
   # Specifies the network to which the container will connect.
