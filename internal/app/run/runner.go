@@ -220,7 +220,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// lifetime. Only applies to the embedded cache server; when the operator
 	// points the runner at an external cache via cfg.Cache.ExternalServer, it
 	// is that server's responsibility to authenticate requests.
-	defer r.registerCacheForTask(giteaRuntimeToken, preset.Repository)()
+	defer r.registerCacheForTask(giteaRuntimeToken, preset.Repository, reporter)()
 
 	eventJSON, err := json.Marshal(preset.Event)
 	if err != nil {
@@ -315,7 +315,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 //     network layer.
 //
 // Safe with an empty token (older Gitea did not issue one).
-func (r *Runner) registerCacheForTask(token, repo string) func() {
+func (r *Runner) registerCacheForTask(token, repo string, reporter *report.Reporter) func() {
 	if token == "" {
 		return func() {}
 	}
@@ -323,7 +323,7 @@ func (r *Runner) registerCacheForTask(token, repo string) func() {
 		return r.cacheHandler.RegisterJob(token, repo)
 	}
 	if r.cfg.Cache.ExternalServer != "" && r.cfg.Cache.ExternalSecret != "" {
-		return r.registerExternalCacheJob(token, repo)
+		return r.registerExternalCacheJob(token, repo, reporter)
 	}
 	return func() {}
 }
@@ -331,17 +331,24 @@ func (r *Runner) registerCacheForTask(token, repo string) func() {
 // registerExternalCacheJob POSTs to the remote cache-server's control-plane.
 // Failures are logged but not fatal: if registration fails, the cache will
 // 401 the job's requests — better than failing the whole task for a cache
-// outage.
-func (r *Runner) registerExternalCacheJob(token, repo string) func() {
+// outage. The warning is mirrored to the job log so users can see why their
+// cache calls 401, instead of having to read the runner daemon's stderr.
+func (r *Runner) registerExternalCacheJob(token, repo string, reporter *report.Reporter) func() {
 	base := strings.TrimRight(r.cfg.Cache.ExternalServer, "/")
 	if err := postInternalCache(base+"/_internal/register", r.cfg.Cache.ExternalSecret,
 		map[string]string{"token": token, "repo": repo}); err != nil {
 		log.Warnf("cache external_server register failed (%s): %v", base, err)
+		if reporter != nil {
+			reporter.Logf("::warning::cache external_server register failed (%s): %v — cache requests from this job will be unauthenticated and likely return 401", base, err)
+		}
 	}
 	return func() {
 		if err := postInternalCache(base+"/_internal/revoke", r.cfg.Cache.ExternalSecret,
 			map[string]string{"token": token}); err != nil {
 			log.Warnf("cache external_server revoke failed (%s): %v", base, err)
+			if reporter != nil {
+				reporter.Logf("::warning::cache external_server revoke failed (%s): %v", base, err)
+			}
 		}
 	}
 }

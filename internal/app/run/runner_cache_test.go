@@ -29,7 +29,7 @@ func TestRunner_registerCacheForTask(t *testing.T) {
 
 	r := &Runner{cfg: emptyCfg(), cacheHandler: handler}
 	token := "run-token-123"
-	unregister := r.registerCacheForTask(token, "owner/repo")
+	unregister := r.registerCacheForTask(token, "owner/repo", nil)
 
 	base := handler.ExternalURL() + "/_apis/artifactcache"
 	probe := func() int {
@@ -53,7 +53,7 @@ func TestRunner_registerCacheForTask(t *testing.T) {
 func TestRunner_registerCacheForTask_NoOps(t *testing.T) {
 	t.Run("nil cacheHandler", func(t *testing.T) {
 		r := &Runner{cfg: emptyCfg()}
-		unregister := r.registerCacheForTask("tok", "owner/repo")
+		unregister := r.registerCacheForTask("tok", "owner/repo", nil)
 		require.NotNil(t, unregister)
 		unregister()
 	})
@@ -65,7 +65,7 @@ func TestRunner_registerCacheForTask_NoOps(t *testing.T) {
 		defer handler.Close()
 
 		r := &Runner{cfg: emptyCfg(), cacheHandler: handler}
-		unregister := r.registerCacheForTask("", "owner/repo")
+		unregister := r.registerCacheForTask("", "owner/repo", nil)
 		require.NotNil(t, unregister)
 		unregister()
 	})
@@ -81,7 +81,7 @@ func TestRunner_CacheFullFlow_MatchesToolkit(t *testing.T) {
 
 	r := &Runner{cfg: emptyCfg(), cacheHandler: handler}
 	token := "full-flow-token"
-	unregister := r.registerCacheForTask(token, "owner/repo")
+	unregister := r.registerCacheForTask(token, "owner/repo", nil)
 	defer unregister()
 
 	base := handler.ExternalURL() + "/_apis/artifactcache"
@@ -182,7 +182,7 @@ func TestRunner_ExternalCacheServer_RegisterRevoke(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, probe(),
 		"token must be unknown to the remote server before registration")
 
-	unregister := r.registerCacheForTask(token, repo)
+	unregister := r.registerCacheForTask(token, repo, nil)
 	require.NotEqual(t, http.StatusUnauthorized, probe(),
 		"token must be accepted after registerCacheForTask")
 
