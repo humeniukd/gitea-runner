@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 
 	"gitea.com/gitea/act_runner/act/exprparser"
@@ -619,4 +620,18 @@ func TestRunContextGetEnv(t *testing.T) {
 			assert.EqualValues(t, test.want, envMap[test.targetEnv]) //nolint:testifylint // pre-existing issue from nektos/act
 		})
 	}
+}
+
+func TestCreateContainerNameBoundedForLongMatrixInput(t *testing.T) {
+	longMatrixValue := strings.Repeat("os=ubuntu-latest-go=1.24-node=22-", 20)
+	name := createContainerName(
+		"gitea",
+		"WORKFLOW-super-long-workflow-name",
+		"JOB-build-matrix-"+longMatrixValue,
+	)
+
+	assert.LessOrEqual(t, len(name), 128)
+	assert.LessOrEqual(t, len(name+"-env"), 255)
+	assert.LessOrEqual(t, len(name+"-network"), 255)
+	assert.LessOrEqual(t, len(name+"-job1234567890"), 255)
 }
