@@ -429,7 +429,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			rc.pullServicesImages(rc.Config.ForcePull),
 			rc.JobContainer.Pull(rc.Config.ForcePull),
 			rc.stopJobContainer(),
-			container.NewDockerNetworkCreateExecutor(networkName).IfBool(createAndDeleteNetwork),
+			container.NewDockerNetworkCreateExecutor(networkName, rc.Config.ContainerNetworkEnableIPv6).IfBool(createAndDeleteNetwork),
 			rc.startServiceContainers(networkName),
 			rc.JobContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 			rc.JobContainer.Start(false),

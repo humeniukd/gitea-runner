@@ -61,7 +61,7 @@ func NewDockerVolumeRemoveExecutor(volume string, force bool) common.Executor {
 	}
 }
 
-func NewDockerNetworkCreateExecutor(name string) common.Executor {
+func NewDockerNetworkCreateExecutor(name string, enableIPv6 bool) common.Executor {
 	return func(ctx context.Context) error {
 		return nil
 	}

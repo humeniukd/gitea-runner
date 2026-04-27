@@ -14,7 +14,7 @@ import (
 	"github.com/docker/docker/api/types"
 )
 
-func NewDockerNetworkCreateExecutor(name string) common.Executor {
+func NewDockerNetworkCreateExecutor(name string, enableIPv6 bool) common.Executor {
 	return func(ctx context.Context) error {
 		cli, err := GetDockerClient(ctx)
 		if err != nil {
@@ -37,8 +37,9 @@ func NewDockerNetworkCreateExecutor(name string) common.Executor {
 		}
 
 		_, err = cli.NetworkCreate(ctx, name, types.NetworkCreate{
-			Driver: "bridge",
-			Scope:  "local",
+			Driver:     "bridge",
+			Scope:      "local",
+			EnableIPv6: enableIPv6,
 		})
 		if err != nil {
 			return err

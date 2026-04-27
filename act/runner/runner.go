@@ -67,6 +67,7 @@ type Config struct {
 	ReplaceGheActionTokenWithGithubCom string                       // Token of private action repo on GitHub.
 	Matrix                             map[string]map[string]bool   // Matrix config to run
 	ContainerNetworkMode               docker_container.NetworkMode // the network mode of job containers (the value of --network)
+	ContainerNetworkEnableIPv6         bool                         // enable IPv6 on automatically created container networks
 	ActionCache                        ActionCache                  // Use a custom ActionCache Implementation
 
 	PresetGitHubContext   *model.GithubContext         // the preset github context, overrides some fields like DefaultBranch, Env, Secrets etc.

@@ -88,12 +88,15 @@ container:
   # Could be host, bridge or the name of a custom network.
   # If it's empty, act_runner will create a network automatically.
   network: ""
+  # Whether to enable IPv6 on automatically created networks.
+  # This has no effect when using an existing network via container.network.
+  enable_ipv6: false
   # Whether to use privileged mode or not when launching task containers (privileged mode is required for Docker-in-Docker).
   privileged: false
   # Any other options to be used when the container is started (e.g., --add-host=my.gitea.url:host-gateway).
   options:
   # The parent directory of a job's working directory.
-  # NOTE: There is no need to add the first '/' of the path as act_runner will add it automatically. 
+  # NOTE: There is no need to add the first '/' of the path as act_runner will add it automatically.
   # If the path starts with '/', the '/' will be trimmed.
   # For example, if the parent directory is /path/to/my/dir, workdir_parent should be path/to/my/dir
   # If it's empty, /workspace will be used.
