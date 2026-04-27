@@ -646,6 +646,37 @@ func TestRunContextGetEnv(t *testing.T) {
 	}
 }
 
+func TestRunContextGetEnvKeepsExpressionEvaluatorEnvCurrent(t *testing.T) {
+	var jobEnv yaml.Node
+	err := jobEnv.Encode(map[string]string{"JOB_ONLY": "job-value"})
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+
+	rc := &RunContext{
+		Config: &Config{},
+		Env: map[string]string{
+			"RUNTIME_ONLY": "true",
+		},
+		Run: &model.Run{
+			JobID: "test",
+			Workflow: &model.Workflow{
+				Jobs: map[string]*model.Job{"test": {
+					Name: "test",
+					Env:  jobEnv,
+				}},
+			},
+		},
+	}
+
+	rc.ExprEval = rc.NewExpressionEvaluator(context.Background())
+	rc.GetEnv()
+	rc.setEnv(context.Background(), map[string]string{"name": "STEP_TIMEOUT"}, "0")
+
+	got, evalErr := rc.ExprEval.evaluate(context.Background(), "env.STEP_TIMEOUT", exprparser.DefaultStatusCheckNone)
+	assert.NoError(t, evalErr) //nolint:testifylint // pre-existing issue from nektos/act
+	assert.EqualValues(t, "0", got)
+	assert.EqualValues(t, "job-value", rc.Env["JOB_ONLY"]) //nolint:testifylint // pre-existing issue from nektos/act
+}
+
 func Test_createSimpleContainerName(t *testing.T) {
 	tests := []struct {
 		parts []string

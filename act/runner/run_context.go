@@ -87,9 +87,12 @@ func (rc *RunContext) GetEnv() map[string]string {
 	}
 
 	if rc.Env == nil {
-		rc.Env = baseEnv
-	} else {
-		rc.Env = mergeMaps(baseEnv, rc.Env)
+		rc.Env = map[string]string{}
+	}
+	for k, v := range baseEnv {
+		if _, ok := rc.Env[k]; !ok {
+			rc.Env[k] = v
+		}
 	}
 	rc.Env["ACT"] = "true"
 
