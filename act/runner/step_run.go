@@ -47,8 +47,6 @@ func (sr *stepRun) main() common.Executor {
 			// Apply ::add-path:: effects before printing so PATH is accurate in the env: block.
 			rc.ApplyExtraPath(ctx, &sr.env)
 			sr.printRunScriptActionDetails(ctx)
-			rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
-			defer rawLogger.Infof("::endgroup::")
 			if he, ok := rc.JobContainer.(*container.HostEnvironment); ok && he != nil {
 				return he.ExecWithCmdLine(sr.cmd, sr.cmdline, sr.env, "", sr.WorkingDirectory)(ctx)
 			}
@@ -58,8 +56,7 @@ func (sr *stepRun) main() common.Executor {
 }
 
 // printRunScriptActionDetails mirrors actions/runner ScriptHandler.PrintActionDetails
-// for script steps. The caller is responsible for emitting ::endgroup:: after step
-// execution so command output is folded into the same collapsible block.
+// for script steps.
 func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) {
 	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
 	scriptLineLogger := rawLogger.WithField(scriptLineCyanField, true)
@@ -77,6 +74,7 @@ func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) {
 	rawLogger.Infof("shell: %s", sr.shellCommand)
 
 	printStepEnvBlock(ctx, sr.Step, sr.env, sr.getRunContext())
+	rawLogger.Infof("::endgroup::")
 }
 
 // printRunActionHeader mirrors actions/runner's "Run <action>" header for `uses:` steps,

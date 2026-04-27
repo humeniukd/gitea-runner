@@ -113,6 +113,7 @@ env:
 		"[j1]   | env:",
 		"[j1]   |   PATH_PREFIX: /custom/bin",
 		"[j1]   |   GREETING: hello",
+		"[j1]   | ::endgroup::",
 		"",
 	}, "\n")
 	assert.Equal(t, want, buf.String())
