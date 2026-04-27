@@ -16,7 +16,7 @@ import (
 	"gitea.com/gitea/act_runner/act/common"
 	"gitea.com/gitea/act_runner/act/model"
 
-	docker_container "github.com/docker/docker/api/types/container"
+	docker_container "github.com/docker/docker/v28/api/types/container"
 	log "github.com/sirupsen/logrus"
 )
 

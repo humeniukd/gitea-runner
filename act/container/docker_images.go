@@ -10,8 +10,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
+	"github.com/docker/docker/v28/api/types"
+	"github.com/docker/docker/v28/client"
 )
 
 // ImageExistsLocally returns a boolean indicating if an image with the

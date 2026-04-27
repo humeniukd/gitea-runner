@@ -21,7 +21,7 @@ import (
 	"gitea.com/gitea/act_runner/act/model"
 	"gitea.com/gitea/act_runner/act/runner"
 
-	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/v28/api/types/container"
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"

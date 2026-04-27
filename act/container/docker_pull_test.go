@@ -8,7 +8,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/docker/cli/cli/config"
+	"github.com/docker/cli/v29/cli/config"
 	log "github.com/sirupsen/logrus"
 	assert "github.com/stretchr/testify/assert"
 )

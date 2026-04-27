@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/docker/docker/client"
+	"github.com/docker/docker/v28/client"
 )
 
 func CheckIfDockerRunning(ctx context.Context, configDockerHost string) error {

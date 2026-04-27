@@ -14,8 +14,8 @@ import (
 
 	"gitea.com/gitea/act_runner/act/common"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/pkg/archive"
+	"github.com/docker/docker/v28/api/types"
+	"github.com/docker/docker/v28/pkg/archive"
 	// github.com/docker/docker/builder/dockerignore is deprecated
 	"github.com/moby/buildkit/frontend/dockerfile/dockerignore"
 	"github.com/moby/patternmatcher"

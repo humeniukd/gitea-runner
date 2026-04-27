@@ -28,7 +28,7 @@ import (
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	"connectrpc.com/connect"
-	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/v28/api/types/container"
 	log "github.com/sirupsen/logrus"
 )
 

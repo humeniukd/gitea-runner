@@ -19,7 +19,7 @@ import (
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	"connectrpc.com/connect"
-	"github.com/avast/retry-go/v4"
+	"github.com/avast/retry-go/v5"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"

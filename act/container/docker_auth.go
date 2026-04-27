@@ -12,9 +12,9 @@ import (
 
 	"gitea.com/gitea/act_runner/act/common"
 
-	"github.com/docker/cli/cli/config"
-	"github.com/docker/cli/cli/config/credentials"
-	"github.com/docker/docker/api/types/registry"
+	"github.com/docker/cli/v29/cli/config"
+	"github.com/docker/cli/v29/cli/config/credentials"
+	"github.com/docker/docker/v28/api/types/registry"
 )
 
 func LoadDockerAuthConfig(ctx context.Context, image string) (registry.AuthConfig, error) {

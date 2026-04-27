@@ -11,8 +11,8 @@ import (
 
 	"gitea.com/gitea/act_runner/act/common"
 
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/volume"
+	"github.com/docker/docker/v28/api/types/filters"
+	"github.com/docker/docker/v28/api/types/volume"
 )
 
 func NewDockerVolumeRemoveExecutor(volumeName string, force bool) common.Executor {

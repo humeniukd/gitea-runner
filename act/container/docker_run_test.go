@@ -17,9 +17,9 @@ import (
 
 	"gitea.com/gitea/act_runner/act/common"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
+	"github.com/docker/docker/v28/api/types"
+	"github.com/docker/docker/v28/api/types/container"
+	"github.com/docker/docker/v28/client"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"

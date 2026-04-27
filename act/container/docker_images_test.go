@@ -9,8 +9,8 @@ import (
 	"io"
 	"testing"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
+	"github.com/docker/docker/v28/api/types"
+	"github.com/docker/docker/v28/client"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
