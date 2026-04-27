@@ -572,6 +572,10 @@ if: false`, ""),
 }
 
 func TestRunContextGetEnv(t *testing.T) {
+	var jobEnv yaml.Node
+	err := jobEnv.Encode(map[string]string{"JOB_ONLY": "job-value"})
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+
 	tests := []struct {
 		description string
 		rc          *RunContext
@@ -611,6 +615,26 @@ func TestRunContextGetEnv(t *testing.T) {
 			},
 			targetEnv: "OVERWRITTEN",
 			want:      "false",
+		},
+		{
+			description: "Pre-populated run context env should still include job env",
+			rc: &RunContext{
+				Config: &Config{},
+				Env: map[string]string{
+					"RUNTIME_ONLY": "true",
+				},
+				Run: &model.Run{
+					JobID: "test",
+					Workflow: &model.Workflow{
+						Jobs: map[string]*model.Job{"test": {
+							Name: "test",
+							Env:  jobEnv,
+						}},
+					},
+				},
+			},
+			targetEnv: "JOB_ONLY",
+			want:      "job-value",
 		},
 	}
 

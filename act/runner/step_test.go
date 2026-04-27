@@ -120,6 +120,10 @@ func TestSetupEnv(t *testing.T) {
 	cm := &containerMock{}
 	sm := &stepMock{}
 
+	var jobEnv yaml.Node
+	err := jobEnv.Encode(map[string]string{"JOB_KEY": "jobvalue"})
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+
 	rc := &RunContext{
 		Config: &Config{
 			Env: map[string]string{
@@ -131,9 +135,7 @@ func TestSetupEnv(t *testing.T) {
 			Workflow: &model.Workflow{
 				Jobs: map[string]*model.Job{
 					"1": {
-						Env: yaml.Node{
-							Value: "JOB_KEY: jobvalue",
-						},
+						Env: jobEnv,
 					},
 				},
 			},
@@ -155,7 +157,7 @@ func TestSetupEnv(t *testing.T) {
 	sm.On("getStepModel").Return(step)
 	sm.On("getEnv").Return(&env)
 
-	err := setupEnv(context.Background(), sm)
+	err = setupEnv(context.Background(), sm)
 	assert.Nil(t, err) //nolint:testifylint // pre-existing issue from nektos/act
 
 	// These are commit or system specific
@@ -191,6 +193,7 @@ func TestSetupEnv(t *testing.T) {
 		"GITHUB_SERVER_URL":        "https://",
 		"GITHUB_WORKFLOW":          "",
 		"INPUT_STEP_WITH":          "with-value",
+		"JOB_KEY":                  "jobvalue",
 		"RC_KEY":                   "rcvalue",
 		"RUNNER_PERFLOG":           "/dev/null",
 		"RUNNER_TRACKING_ID":       "",
