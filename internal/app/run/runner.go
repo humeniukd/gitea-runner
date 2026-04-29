@@ -48,9 +48,10 @@ type Runner struct {
 	envs         map[string]string
 	cacheHandler *artifactcache.Handler
 
-	runningTasks sync.Map
-	runningCount atomic.Int64
-	now          func() time.Time
+	runningTasks            sync.Map
+	runningCount            atomic.Int64
+	lastIdleCleanupUnixNano atomic.Int64
+	now                     func() time.Time
 }
 
 func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) *Runner {
@@ -113,6 +114,36 @@ func (r *Runner) cleanStaleTaskDirsOnStartup() {
 	workdirParent := strings.TrimLeft(r.cfg.Container.WorkdirParent, "/")
 	workdirRoot := filepath.FromSlash("/" + workdirParent)
 	r.cleanupStaleTaskDirs(workdirRoot)
+}
+
+// OnIdle performs lightweight maintenance during polling idle windows.
+func (r *Runner) OnIdle(_ context.Context) {
+	if !r.shouldRunIdleCleanup() {
+		return
+	}
+	workdirParent := strings.TrimLeft(r.cfg.Container.WorkdirParent, "/")
+	workdirRoot := filepath.FromSlash("/" + workdirParent)
+	r.cleanupStaleTaskDirs(workdirRoot)
+}
+
+func (r *Runner) shouldRunIdleCleanup() bool {
+	if !r.cfg.Container.BindWorkdir {
+		return false
+	}
+	if r.RunningCount() != 0 {
+		return false
+	}
+	now := r.now()
+	interval := r.cfg.Runner.IdleCleanupInterval
+	for {
+		last := r.lastIdleCleanupUnixNano.Load()
+		if last != 0 && now.Sub(time.Unix(0, last)) < interval {
+			return false
+		}
+		if r.lastIdleCleanupUnixNano.CompareAndSwap(last, now.UnixNano()) {
+			return true
+		}
+	}
 }
 
 func (r *Runner) cleanupStaleTaskDirs(workdirRoot string) {

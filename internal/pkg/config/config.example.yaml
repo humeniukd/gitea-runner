@@ -43,6 +43,9 @@ runner:
   # On startup, remove stale bind-workdir task directories older than this duration.
   # This helps recover from crashes or power loss that skip normal task cleanup.
   startup_cleanup_age: 24h
+  # While idle, periodically re-run stale bind-workdir cleanup.
+  # This catches leftovers that appear after startup due to delayed file unlocks.
+  idle_cleanup_interval: 10m
   # The base interval for periodic log flush to the Gitea instance.
   # Logs may be sent earlier if the buffer reaches log_report_batch_size
   # or if log_report_max_latency expires after the first buffered row.

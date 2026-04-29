@@ -125,6 +125,11 @@ type mockRunner struct {
 	totalCompleted atomic.Int64
 }
 
+type idleAwareRunner struct {
+	mockRunner
+	idleCalls atomic.Int64
+}
+
 func (m *mockRunner) Run(ctx context.Context, _ *runnerv1.Task) error {
 	atomicMax(&m.maxConcurrent, m.running.Add(1))
 	select {
@@ -134,6 +139,19 @@ func (m *mockRunner) Run(ctx context.Context, _ *runnerv1.Task) error {
 	m.running.Add(-1)
 	m.totalCompleted.Add(1)
 	return nil
+}
+
+func TestPollerRunIdleMaintenance(t *testing.T) {
+	runner := &idleAwareRunner{}
+	p := &Poller{runner: runner, jobsCtx: context.Background()}
+
+	p.runIdleMaintenance()
+
+	assert.Equal(t, int64(1), runner.idleCalls.Load())
+}
+
+func (m *idleAwareRunner) OnIdle(_ context.Context) {
+	m.idleCalls.Add(1)
 }
 
 // TestPoller_ConcurrencyLimitedByCapacity verifies that with capacity=3 and

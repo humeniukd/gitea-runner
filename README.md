@@ -132,7 +132,9 @@ Besides `GITEA_INSTANCE_URL` and `GITEA_RUNNER_REGISTRATION_TOKEN`, the image en
 
 For a fuller container-oriented walkthrough, see [examples/docker](examples/docker/README.md).
 
-When `container.bind_workdir` is enabled, stale task workspace directories can be cleaned on runner startup via `runner.startup_cleanup_age` (default: `24h`).
+When `container.bind_workdir` is enabled, stale task workspace directories can be cleaned:
+- on startup via `runner.startup_cleanup_age` (default: `24h`)
+- while idle via `runner.idle_cleanup_interval` (default: `10m`)
 
 ### Example Deployments
 

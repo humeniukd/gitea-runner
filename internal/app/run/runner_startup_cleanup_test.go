@@ -46,3 +46,43 @@ func TestRunnerCleanupStaleTaskDirs(t *testing.T) {
 	assert.DirExists(t, freshTask)
 	assert.DirExists(t, nonTask)
 }
+
+func TestRunnerShouldRunIdleCleanupThrottles(t *testing.T) {
+	now := time.Date(2026, time.April, 29, 20, 0, 0, 0, time.UTC)
+	r := &Runner{
+		cfg: &config.Config{
+			Container: config.Container{
+				BindWorkdir: true,
+			},
+			Runner: config.Runner{
+				IdleCleanupInterval: time.Hour,
+			},
+		},
+		now: func() time.Time { return now },
+	}
+
+	assert.True(t, r.shouldRunIdleCleanup())
+
+	now = now.Add(30 * time.Minute)
+	assert.False(t, r.shouldRunIdleCleanup())
+
+	now = now.Add(31 * time.Minute)
+	assert.True(t, r.shouldRunIdleCleanup())
+}
+
+func TestRunnerShouldRunIdleCleanupSkipsWhenJobRunning(t *testing.T) {
+	r := &Runner{
+		cfg: &config.Config{
+			Container: config.Container{
+				BindWorkdir: true,
+			},
+			Runner: config.Runner{
+				IdleCleanupInterval: time.Minute,
+			},
+		},
+		now: time.Now,
+	}
+	r.runningCount.Store(1)
+
+	assert.False(t, r.shouldRunIdleCleanup())
+}

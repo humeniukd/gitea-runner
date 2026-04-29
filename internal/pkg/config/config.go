@@ -34,6 +34,7 @@ type Runner struct {
 	FetchInterval       time.Duration     `yaml:"fetch_interval"`         // FetchInterval specifies the interval duration for fetching resources.
 	FetchIntervalMax    time.Duration     `yaml:"fetch_interval_max"`     // FetchIntervalMax specifies the maximum backoff interval when idle.
 	StartupCleanupAge   time.Duration     `yaml:"startup_cleanup_age"`    // StartupCleanupAge removes stale bind-workdir task directories older than this duration when the runner starts.
+	IdleCleanupInterval time.Duration     `yaml:"idle_cleanup_interval"`  // IdleCleanupInterval runs stale bind-workdir cleanup periodically while the runner is idle.
 	LogReportInterval   time.Duration     `yaml:"log_report_interval"`    // LogReportInterval specifies the base interval for periodic log flush.
 	LogReportMaxLatency time.Duration     `yaml:"log_report_max_latency"` // LogReportMaxLatency specifies the max time a log row can wait before being sent.
 	LogReportBatchSize  int               `yaml:"log_report_batch_size"`  // LogReportBatchSize triggers immediate log flush when buffer reaches this size.
@@ -160,6 +161,9 @@ func LoadDefault(file string) (*Config, error) {
 	}
 	if cfg.Runner.StartupCleanupAge <= 0 {
 		cfg.Runner.StartupCleanupAge = 24 * time.Hour
+	}
+	if cfg.Runner.IdleCleanupInterval <= 0 {
+		cfg.Runner.IdleCleanupInterval = 10 * time.Minute
 	}
 	if cfg.Runner.LogReportInterval <= 0 {
 		cfg.Runner.LogReportInterval = 5 * time.Second

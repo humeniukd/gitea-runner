@@ -45,6 +45,7 @@ func TestLoadDefault_DefaultsStartupCleanupAge(t *testing.T) {
 	cfg, err := LoadDefault("")
 	require.NoError(t, err)
 	assert.Equal(t, 24*time.Hour, cfg.Runner.StartupCleanupAge)
+	assert.Equal(t, 10*time.Minute, cfg.Runner.IdleCleanupInterval)
 }
 
 func TestLoadDefault_UsesConfiguredStartupCleanupAge(t *testing.T) {
@@ -58,4 +59,17 @@ runner:
 	cfg, err := LoadDefault(path)
 	require.NoError(t, err)
 	assert.Equal(t, 150*time.Minute, cfg.Runner.StartupCleanupAge)
+}
+
+func TestLoadDefault_UsesConfiguredIdleCleanupInterval(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+runner:
+  idle_cleanup_interval: 45m
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, 45*time.Minute, cfg.Runner.IdleCleanupInterval)
 }
