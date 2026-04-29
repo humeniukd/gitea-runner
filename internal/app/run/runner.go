@@ -7,12 +7,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,6 +50,7 @@ type Runner struct {
 
 	runningTasks sync.Map
 	runningCount atomic.Int64
+	now          func() time.Time
 }
 
 func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) *Runner {
@@ -90,13 +93,62 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	envs["GITEA_ACTIONS"] = "true"
 	envs["GITEA_ACTIONS_RUNNER_VERSION"] = ver.Version()
 
-	return &Runner{
+	runner := &Runner{
 		name:         reg.Name,
 		cfg:          cfg,
 		client:       cli,
 		labels:       ls,
 		envs:         envs,
 		cacheHandler: cacheHandler,
+		now:          time.Now,
+	}
+	runner.cleanStaleTaskDirsOnStartup()
+	return runner
+}
+
+func (r *Runner) cleanStaleTaskDirsOnStartup() {
+	if !r.cfg.Container.BindWorkdir {
+		return
+	}
+	workdirParent := strings.TrimLeft(r.cfg.Container.WorkdirParent, "/")
+	workdirRoot := filepath.FromSlash("/" + workdirParent)
+	r.cleanupStaleTaskDirs(workdirRoot)
+}
+
+func (r *Runner) cleanupStaleTaskDirs(workdirRoot string) {
+	entries, err := os.ReadDir(workdirRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		log.Warnf("failed to list task workspace root %s for stale cleanup: %v", workdirRoot, err)
+		return
+	}
+
+	cutoff := r.now().Add(-r.cfg.Runner.StartupCleanupAge)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		// Task workspaces are indexed by numeric task IDs; skip any other
+		// directories to avoid deleting operator-managed data under workdir_root.
+		if _, err := strconv.ParseUint(entry.Name(), 10, 64); err != nil {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			log.Warnf("failed to stat task workspace %s: %v", filepath.Join(workdirRoot, entry.Name()), err)
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		taskDir := filepath.Join(workdirRoot, entry.Name())
+		if err := os.RemoveAll(taskDir); err != nil {
+			log.Warnf("failed to clean stale task workspace %s: %v", taskDir, err)
+			continue
+		}
+		log.Infof("cleaned stale task workspace %s", taskDir)
 	}
 }
 

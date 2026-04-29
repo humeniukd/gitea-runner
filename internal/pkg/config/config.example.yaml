@@ -40,6 +40,9 @@ runner:
   # The runner uses exponential backoff when idle, increasing the interval up to this maximum.
   # Set to 0 or same as fetch_interval to disable backoff.
   fetch_interval_max: 5s
+  # On startup, remove stale bind-workdir task directories older than this duration.
+  # This helps recover from crashes or power loss that skip normal task cleanup.
+  startup_cleanup_age: 24h
   # The base interval for periodic log flush to the Gitea instance.
   # Logs may be sent earlier if the buffer reaches log_report_batch_size
   # or if log_report_max_latency expires after the first buffered row.
@@ -65,9 +68,9 @@ runner:
   # If it's empty when registering, it will ask for inputting labels.
   # If it's empty when execute `daemon`, will use labels in `.runner` file.
   labels:
-    - "ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest"
-    - "ubuntu-24.04:docker://docker.gitea.com/runner-images:ubuntu-24.04"
-    - "ubuntu-22.04:docker://docker.gitea.com/runner-images:ubuntu-22.04"
+  - "ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest"
+  - "ubuntu-24.04:docker://docker.gitea.com/runner-images:ubuntu-24.04"
+  - "ubuntu-22.04:docker://docker.gitea.com/runner-images:ubuntu-22.04"
 
 cache:
   # Enable cache server to use actions/cache.
@@ -101,14 +104,14 @@ container:
   # Whether to use privileged mode or not when launching task containers (privileged mode is required for Docker-in-Docker).
   privileged: false
   # Any other options to be used when the container is started (e.g., --add-host=my.gitea.url:host-gateway).
-  options:
-  # The parent directory of a job's working directory.
+  options: # The parent directory of a job's working directory.
+
   # NOTE: There is no need to add the first '/' of the path as runner will add it automatically.
   # If the path starts with '/', the '/' will be trimmed.
   # For example, if the parent directory is /path/to/my/dir, workdir_parent should be path/to/my/dir
   # If it's empty, /workspace will be used.
-  workdir_parent:
-  # Volumes (including bind mounts) can be mounted to containers. Glob syntax is supported, see https://github.com/gobwas/glob
+  workdir_parent: # Volumes (including bind mounts) can be mounted to containers. Glob syntax is supported, see https://github.com/gobwas/glob
+
   # You can specify multiple volumes. If the sequence is empty, no volumes can be mounted.
   # For example, if you only allow containers to mount the `data` volume and all the json files in `/src`, you should change the config to:
   # valid_volumes:
@@ -142,6 +145,7 @@ host:
   # The parent directory of a job's working directory.
   # If it's empty, $HOME/.cache/act/ will be used.
   workdir_parent:
+
 
 metrics:
   # Enable the Prometheus metrics endpoint.
