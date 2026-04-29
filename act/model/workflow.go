@@ -753,6 +753,11 @@ const (
 	// StepTypeReusableWorkflowRemote is all steps that have a `uses` that references a workflow file in a github repo
 	StepTypeReusableWorkflowRemote
 
+	// StepTypeUsesActionBuiltin is all steps whose `uses` is a reserved no-slash name (e.g. `uses: checkout`)
+	// resolved by the runner's built-in action registry rather than by cloning a remote action.
+	// For Gitea.
+	StepTypeUsesActionBuiltin
+
 	// StepTypeInvalid is for steps that have invalid step action
 	StepTypeInvalid
 )
@@ -773,9 +778,17 @@ func (s StepType) String() string {
 		return "local-reusable-workflow"
 	case StepTypeReusableWorkflowRemote:
 		return "remote-reusable-workflow"
+	case StepTypeUsesActionBuiltin:
+		return "builtin-action"
 	}
 	return "unknown"
 }
+
+// builtinActionNamePattern matches reserved no-slash `uses:` names that the
+// runner resolves via its built-in action registry. Kept here (rather than in
+// the runner package) so workflow parsing classifies steps without needing a
+// runtime registry. For Gitea.
+var builtinActionNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // Type returns the type of the step
 func (s *Step) Type() StepType {
@@ -796,6 +809,9 @@ func (s *Step) Type() StepType {
 		return StepTypeReusableWorkflowRemote
 	} else if strings.HasPrefix(s.Uses, "./") {
 		return StepTypeUsesActionLocal
+	} else if builtinActionNamePattern.MatchString(s.Uses) {
+		// For Gitea: reserved no-slash names resolve to a built-in action.
+		return StepTypeUsesActionBuiltin
 	}
 	return StepTypeUsesActionRemote
 }

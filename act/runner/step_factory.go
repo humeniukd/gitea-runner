@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"gitea.com/gitea/runner/act/model"
+	"gitea.com/gitea/runner/act/runner/builtin"
 )
 
 type stepFactory interface {
@@ -43,6 +44,19 @@ func (sf *stepFactoryImpl) newStep(stepModel *model.Step, rc *RunContext) (step,
 		return &stepDocker{
 			Step:       stepModel,
 			RunContext: rc,
+		}, nil
+	case model.StepTypeUsesActionBuiltin:
+		// For Gitea: reserved no-slash names dispatch to a built-in registered
+		// in the act/runner/builtin tree. See docs/builtin-actions.md.
+		a, ok := builtin.Lookup(stepModel.Uses)
+		if !ok {
+			return nil, fmt.Errorf("unknown built-in action %q (known: %v) for job:%s step:%+v",
+				stepModel.Uses, builtin.Names(), rc.Run, stepModel)
+		}
+		return &stepActionBuiltin{
+			Step:       stepModel,
+			RunContext: rc,
+			action:     a,
 		}, nil
 	}
 

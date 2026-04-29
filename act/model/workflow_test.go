@@ -385,17 +385,20 @@ jobs:
         uses: docker://nginx:latest
       - name: test5
         uses: ./local-action
+      - name: test6
+        uses: checkout
 `
 
 	workflow, err := ReadWorkflow(strings.NewReader(yaml))
 	assert.NoError(t, err, "read workflow should succeed") //nolint:testifylint // pre-existing issue from nektos/act
 	assert.Len(t, workflow.Jobs, 1)
-	assert.Len(t, workflow.Jobs["test"].Steps, 5)
-	assert.Equal(t, workflow.Jobs["test"].Steps[0].Type(), StepTypeInvalid)          //nolint:testifylint // pre-existing issue from nektos/act
-	assert.Equal(t, workflow.Jobs["test"].Steps[1].Type(), StepTypeRun)              //nolint:testifylint // pre-existing issue from nektos/act
-	assert.Equal(t, workflow.Jobs["test"].Steps[2].Type(), StepTypeUsesActionRemote) //nolint:testifylint // pre-existing issue from nektos/act
-	assert.Equal(t, workflow.Jobs["test"].Steps[3].Type(), StepTypeUsesDockerURL)    //nolint:testifylint // pre-existing issue from nektos/act
-	assert.Equal(t, workflow.Jobs["test"].Steps[4].Type(), StepTypeUsesActionLocal)  //nolint:testifylint // pre-existing issue from nektos/act
+	assert.Len(t, workflow.Jobs["test"].Steps, 6)
+	assert.Equal(t, workflow.Jobs["test"].Steps[0].Type(), StepTypeInvalid)           //nolint:testifylint // pre-existing issue from nektos/act
+	assert.Equal(t, workflow.Jobs["test"].Steps[1].Type(), StepTypeRun)               //nolint:testifylint // pre-existing issue from nektos/act
+	assert.Equal(t, workflow.Jobs["test"].Steps[2].Type(), StepTypeUsesActionRemote)  //nolint:testifylint // pre-existing issue from nektos/act
+	assert.Equal(t, workflow.Jobs["test"].Steps[3].Type(), StepTypeUsesDockerURL)     //nolint:testifylint // pre-existing issue from nektos/act
+	assert.Equal(t, workflow.Jobs["test"].Steps[4].Type(), StepTypeUsesActionLocal)   //nolint:testifylint // pre-existing issue from nektos/act
+	assert.Equal(t, workflow.Jobs["test"].Steps[5].Type(), StepTypeUsesActionBuiltin) //nolint:testifylint // pre-existing issue from nektos/act
 }
 
 // See: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idoutputs
