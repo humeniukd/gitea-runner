@@ -6,7 +6,7 @@ require (
 	code.gitea.io/actions-proto-go v0.4.1
 	connectrpc.com/connect v1.19.2
 	github.com/avast/retry-go/v4 v4.7.0
-	github.com/docker/docker v25.0.14+incompatible
+	github.com/docker/docker v25.0.15+incompatible
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-isatty v0.0.22
 	github.com/sirupsen/logrus v1.9.4
@@ -33,7 +33,7 @@ require (
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
 	github.com/moby/buildkit v0.13.2
-	github.com/moby/patternmatcher v0.6.0
+	github.com/moby/patternmatcher v0.6.1
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/opencontainers/selinux v1.13.1
 	github.com/pkg/errors v0.9.1
