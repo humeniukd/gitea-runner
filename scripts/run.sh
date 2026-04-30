@@ -41,7 +41,7 @@ if [[ ! -s "$RUNNER_STATE_FILE" ]]; then
   # the context of a single docker-compose, something similar could be done via healthchecks, but
   # this is more flexible.
   while [[ $success -eq 0 ]] && [[ $try -lt ${GITEA_MAX_REG_ATTEMPTS:-10} ]]; do
-    runner register \
+    gitea-runner register \
       --instance "${GITEA_INSTANCE_URL}" \
       --token    "${GITEA_RUNNER_REGISTRATION_TOKEN}" \
       --name     "${GITEA_RUNNER_NAME:-`hostname`}" \
@@ -57,8 +57,8 @@ if [[ ! -s "$RUNNER_STATE_FILE" ]]; then
     fi
   done
 fi
-# Prevent reading the token from the runner process
+# Prevent reading the token from the gitea-runner process
 unset GITEA_RUNNER_REGISTRATION_TOKEN
 unset GITEA_RUNNER_REGISTRATION_TOKEN_FILE
 
-exec runner daemon ${CONFIG_ARG} ${RUN_ARGS}
+exec gitea-runner daemon ${CONFIG_ARG} ${RUN_ARGS}

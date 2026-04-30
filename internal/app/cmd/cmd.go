@@ -15,9 +15,9 @@ import (
 )
 
 func Execute(ctx context.Context) {
-	// ./runner
+	// ./gitea-runner
 	rootCmd := &cobra.Command{
-		Use:          "runner",
+		Use:          "gitea-runner",
 		Short:        "Gitea Runner",
 		Version:      ver.Version(),
 		SilenceUsage: true,
@@ -25,7 +25,7 @@ func Execute(ctx context.Context) {
 	configFile := ""
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path")
 
-	// ./runner register
+	// ./gitea-runner register
 	var regArgs registerArgs
 	registerCmd := &cobra.Command{
 		Use:   "register",
@@ -41,7 +41,7 @@ func Execute(ctx context.Context) {
 	registerCmd.Flags().BoolVar(&regArgs.Ephemeral, "ephemeral", false, "Configure the runner to be ephemeral and only ever be able to pick a single job (stricter than --once)")
 	rootCmd.AddCommand(registerCmd)
 
-	// ./runner daemon
+	// ./gitea-runner daemon
 	var daemArgs daemonArgs
 	daemonCmd := &cobra.Command{
 		Use:   "daemon",
@@ -52,10 +52,10 @@ func Execute(ctx context.Context) {
 	daemonCmd.Flags().BoolVar(&daemArgs.Once, "once", false, "Run one job then exit")
 	rootCmd.AddCommand(daemonCmd)
 
-	// ./runner exec
+	// ./gitea-runner exec
 	rootCmd.AddCommand(loadExecCmd(ctx))
 
-	// ./runner config
+	// ./gitea-runner config
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "generate-config",
 		Short: "Generate an example config file",
@@ -65,7 +65,7 @@ func Execute(ctx context.Context) {
 		},
 	})
 
-	// ./runner cache-server
+	// ./gitea-runner cache-server
 	var cacheArgs cacheServerArgs
 	cacheCmd := &cobra.Command{
 		Use:   "cache-server",

@@ -1,4 +1,4 @@
-/runner
+/gitea-runner
 .env
 .runner
 coverage.txt

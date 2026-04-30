@@ -1,5 +1,5 @@
 DIST := dist
-EXECUTABLE := runner
+EXECUTABLE := gitea-runner
 DIST_DIRS := $(DIST)/binaries $(DIST)/release
 GO ?= go
 SHASUM ?= shasum -a 256

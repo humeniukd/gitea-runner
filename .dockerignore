@@ -40,7 +40,7 @@ cpu.out
 *.db
 *.log
 
-/runner
+/gitea-runner
 /debug
 
 /bin

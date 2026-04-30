@@ -1,5 +1,7 @@
 version: 2
 
+project_name: gitea-runner
+
 before:
   hooks:
     - go mod tidy
@@ -86,7 +88,7 @@ blobs:
     provider: s3
     bucket: "{{ .Env.S3_BUCKET }}"
     region: "{{ .Env.S3_REGION }}"
-    directory: "runner/{{.Version}}"
+    directory: "gitea-runner/{{.Version}}"
     extra_files:
       - glob: ./**.xz
       - glob: ./**.sha256

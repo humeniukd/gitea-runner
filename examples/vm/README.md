@@ -1,4 +1,4 @@
-## `runner` on Virtual or Physical Servers
+## `gitea-runner` on Virtual or Physical Servers
 
 Files in this directory:
 

@@ -8,7 +8,7 @@ Docker Engine Community version is required for docker mode. To install Docker C
 
 ### Download pre-built binary
 
-Visit [here](https://dl.gitea.com/runner/) and download the right version for your platform.
+Visit [here](https://dl.gitea.com/gitea-runner/) and download the right version for your platform.
 
 ### Build from source
 
@@ -34,7 +34,7 @@ ENABLED=true
 ### Register
 
 ```bash
-./runner register
+./gitea-runner register
 ```
 
 And you will be asked to input:
@@ -66,7 +66,7 @@ INFO Runner registered successfully.
 You can also register with command line arguments.
 
 ```bash
-./runner register --instance http://192.168.8.8:3000 --token <my_runner_token> --no-interactive
+./gitea-runner register --instance http://192.168.8.8:3000 --token <my_runner_token> --no-interactive
 ```
 
 If the registry succeed, it will run immediately. Next time, you could run the runner directly.
@@ -74,7 +74,7 @@ If the registry succeed, it will run immediately. Next time, you could run the r
 ### Run
 
 ```bash
-./runner daemon
+./gitea-runner daemon
 ```
 
 ### Run with docker
@@ -90,15 +90,15 @@ Mount a volume on `/data` if you want the registration file and optional config 
 The runner is configured with a YAML file. Generate a starting point (this matches what ships in the tree):
 
 ```bash
-./runner generate-config > config.yaml
+./gitea-runner generate-config > config.yaml
 ```
 
 Pass it with `-c` / `--config` on any command that loads configuration (`register`, `daemon`, `cache-server`):
 
 ```bash
-./runner -c config.yaml register
-./runner -c config.yaml daemon
-./runner -c config.yaml cache-server
+./gitea-runner -c config.yaml register
+./gitea-runner -c config.yaml daemon
+./gitea-runner -c config.yaml cache-server
 ```
 
 Every option is described in [config.example.yaml](internal/pkg/config/config.example.yaml) (the same content `generate-config` prints).
@@ -124,7 +124,7 @@ If `runner.labels` is set in the YAML file, those labels are used during `regist
 
 #### External cache (`actions/cache`)
 
-If `cache.external_server` is set, you must set `cache.external_secret` to the same value on this runner and on the standalone cache server. Run the server with `runner cache-server` using a config that defines `cache.external_secret` (and matching `cache.dir` / host / port as needed). Flags `--dir`, `--host`, and `--port` on `cache-server` override the file.
+If `cache.external_server` is set, you must set `cache.external_secret` to the same value on this runner and on the standalone cache server. Run the server with `gitea-runner cache-server` using a config that defines `cache.external_secret` (and matching `cache.dir` / host / port as needed). Flags `--dir`, `--host`, and `--port` on `cache-server` override the file.
 
 #### Official Docker image
 

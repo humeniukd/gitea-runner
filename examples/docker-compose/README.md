@@ -1,4 +1,4 @@
-### Running `runner` using `docker-compose`
+### Running `gitea-runner` using `docker-compose`
 
 ```yml
 ...
@@ -38,7 +38,7 @@
       - GITEA_RUNNER_REGISTRATION_TOKEN=<registration token>
 ```
 
-### Running `runner` using Docker-in-Docker (DIND)
+### Running `gitea-runner` using Docker-in-Docker (DIND)
 
 ```yml
 ...

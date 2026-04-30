@@ -1,7 +1,7 @@
 # Example configuration file, it's safe to copy this as the default config file without any modification.
 
 # You don't have to copy this file to your instance,
-# just run `./runner generate-config > config.yaml` to generate a config file.
+# just run `./gitea-runner generate-config > config.yaml` to generate a config file.
 
 # Logging for the runner process itself (messages printed to stderr).
 # This does not control how workflow step output is streamed to the Gitea UI;
@@ -87,8 +87,8 @@ cache:
   # The URL should generally end with "/".
   # Requires external_secret below to be set to the same value on both this runner and the cache-server.
   external_server: ""
-  # Shared secret between this runner and the external `runner cache-server`. Required when external_server
-  # (or `runner cache-server`) is in use: the runner pre-registers each job's ACTIONS_RUNTIME_TOKEN with the
+  # Shared secret between this runner and the external `gitea-runner cache-server`. Required when external_server
+  # (or `gitea-runner cache-server`) is in use: the runner pre-registers each job's ACTIONS_RUNTIME_TOKEN with the
   # cache-server, and the cache-server enforces bearer auth + per-repo cache isolation.
   external_secret: ""
 
