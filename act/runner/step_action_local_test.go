@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"gitea.com/gitea/act_runner/act/common"
-	"gitea.com/gitea/act_runner/act/model"
+	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/model"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -97,10 +97,10 @@ func TestStepActionLocalTest(t *testing.T) {
 	})
 
 	err := sal.pre()(ctx)
-	assert.Nil(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
 
 	err = sal.main()(ctx)
-	assert.Nil(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
 
 	cm.AssertExpectations(t)
 	salm.AssertExpectations(t)

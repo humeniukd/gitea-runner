@@ -23,10 +23,10 @@ import (
 	"strings"
 	"time"
 
-	"gitea.com/gitea/act_runner/act/common"
-	"gitea.com/gitea/act_runner/act/container"
-	"gitea.com/gitea/act_runner/act/exprparser"
-	"gitea.com/gitea/act_runner/act/model"
+	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/exprparser"
+	"gitea.com/gitea/runner/act/model"
 
 	"github.com/docker/go-connections/nat"
 	"github.com/opencontainers/selinux/go-selinux"
@@ -101,8 +101,7 @@ func (rc *RunContext) jobContainerName() string {
 	if rc.caller != nil {
 		nameParts = append(nameParts, "CALLED-BY-"+rc.caller.runContext.JobName)
 	}
-	// return createSimpleContainerName(rc.Config.ContainerNamePrefix, "WORKFLOW-"+rc.Run.Workflow.Name, "JOB-"+rc.Name)
-	return createSimpleContainerName(nameParts...) // For Gitea
+	return createContainerName(nameParts...) // For Gitea
 }
 
 // networkNameForGitea return the name of the network
@@ -260,7 +259,6 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 	}
 }
 
-//nolint:gocyclo // function handles many cases
 func (rc *RunContext) startJobContainer() common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
@@ -383,7 +381,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 						if createAndDeleteNetwork {
 							// clean network if it has been created by act
 							// if using service containers
-							// it means that the network to which containers are connecting is created by `act_runner`,
+							// it means that the network to which containers are connecting is created by `runner`,
 							// so, we should remove the network at last.
 							logger.Infof("Cleaning up network for job %s, and network name is: %s", rc.JobName, networkName)
 							if err := container.NewDockerNetworkRemoveExecutor(networkName)(ctx); err != nil {
@@ -769,7 +767,6 @@ func mergeMaps(maps ...map[string]string) map[string]string {
 	return rtnMap
 }
 
-// Deprecated: use createSimpleContainerName
 func createContainerName(parts ...string) string {
 	name := strings.Join(parts, "-")
 	pattern := regexp.MustCompile("[^a-zA-Z0-9]")
@@ -781,22 +778,6 @@ func createContainerName(parts ...string) string {
 	trimmedName := strings.Trim(trimToLen(name, 63), "-")
 
 	return fmt.Sprintf("%s-%x", trimmedName, hash)
-}
-
-func createSimpleContainerName(parts ...string) string {
-	pattern := regexp.MustCompile("[^a-zA-Z0-9-]")
-	name := make([]string, 0, len(parts))
-	for _, v := range parts {
-		v = pattern.ReplaceAllString(v, "-")
-		v = strings.Trim(v, "-")
-		for strings.Contains(v, "--") {
-			v = strings.ReplaceAll(v, "--", "-")
-		}
-		if v != "" {
-			name = append(name, v)
-		}
-	}
-	return strings.Join(name, "_")
 }
 
 func trimToLen(s string, l int) string {
@@ -826,7 +807,6 @@ func (rc *RunContext) getStepsContext() map[string]*model.StepResult {
 	return rc.StepResults
 }
 
-//nolint:gocyclo // function handles many cases
 func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext {
 	logger := common.Logger(ctx)
 	ghc := &model.GithubContext{

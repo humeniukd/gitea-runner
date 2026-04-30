@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"strings"
 
-	"gitea.com/gitea/act_runner/act/common"
-	"gitea.com/gitea/act_runner/act/container"
-	"gitea.com/gitea/act_runner/act/model"
+	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/model"
 
 	"github.com/kballard/go-shellquote"
 )
@@ -127,7 +127,7 @@ func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd, e
 		Image:        image,
 		Username:     rc.Config.Secrets["DOCKER_USERNAME"],
 		Password:     rc.Config.Secrets["DOCKER_PASSWORD"],
-		Name:         createSimpleContainerName(rc.jobContainerName(), "STEP-"+step.ID),
+		Name:         createContainerName(rc.jobContainerName(), "STEP-"+step.ID),
 		Env:          envList,
 		Mounts:       mounts,
 		NetworkMode:  networkMode,

@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"time"
 
-	"gitea.com/gitea/act_runner/act/common"
-	"gitea.com/gitea/act_runner/act/model"
+	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/model"
 )
 
 type jobInfo interface {
@@ -24,7 +24,6 @@ type jobInfo interface {
 	result(result string)
 }
 
-//nolint:contextcheck,gocyclo // composes many step executors
 func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executor {
 	steps := make([]common.Executor, 0)
 	preSteps := make([]common.Executor, 0)
@@ -137,7 +136,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			// if !rc.IsHostEnv(ctx) && rc.Config.ContainerNetworkMode == "" {
 			// 	// clean network in docker mode only
 			// 	// if the value of `ContainerNetworkMode` is empty string,
-			// 	// it means that the network to which containers are connecting is created by `act_runner`,
+			// 	// it means that the network to which containers are connecting is created by `runner`,
 			// 	// so, we should remove the network at last.
 			// 	networkName, _ := rc.networkName()
 			// 	logger.Infof("Cleaning up network for job %s, and network name is: %s", rc.JobName, networkName)
@@ -157,7 +156,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 	pipeline = append(pipeline, steps...)
 
 	return common.NewPipelineExecutor(info.startContainer(), common.NewPipelineExecutor(pipeline...).
-		Finally(func(ctx context.Context) error { //nolint:contextcheck // intentionally detaches from canceled parent
+		Finally(func(ctx context.Context) error {
 			var cancel context.CancelFunc
 			if ctx.Err() == context.Canceled {
 				// in case of an aborted run, we still should execute the

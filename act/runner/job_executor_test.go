@@ -12,9 +12,9 @@ import (
 	"slices"
 	"testing"
 
-	"gitea.com/gitea/act_runner/act/common"
-	"gitea.com/gitea/act_runner/act/container"
-	"gitea.com/gitea/act_runner/act/model"
+	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/model"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -331,7 +331,7 @@ func TestNewJobExecutor(t *testing.T) {
 
 			executor := newJobExecutor(jim, sfm, rc)
 			err := executor(ctx)
-			assert.Nil(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+			assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
 			assert.Equal(t, tt.executedSteps, executorOrder)
 
 			jim.AssertExpectations(t)

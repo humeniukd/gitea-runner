@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"strings"
 
-	"gitea.com/gitea/act_runner/act/common"
+	"gitea.com/gitea/runner/act/common"
 
 	log "github.com/sirupsen/logrus"
 	"go.yaml.in/yaml/v4"
@@ -440,8 +440,6 @@ func (j *Job) Matrix() map[string][]any {
 
 // GetMatrixes returns the matrix cross product
 // It skips includes and hard fails excludes for non-existing keys
-//
-//nolint:gocyclo // function handles many cases
 func (j *Job) GetMatrixes() ([]map[string]any, error) {
 	matrixes := make([]map[string]any, 0)
 	if j.Strategy != nil {
