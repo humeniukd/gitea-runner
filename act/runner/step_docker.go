@@ -116,6 +116,10 @@ func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd, e
 	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
 
 	binds, mounts := rc.GetBindsAndMounts()
+	networkMode := "container:" + rc.jobContainerName()
+	if rc.IsHostEnv(ctx) {
+		networkMode = "default"
+	}
 	stepContainer := ContainerNewContainer(&container.NewContainerInput{
 		Cmd:          cmd,
 		Entrypoint:   entrypoint,
@@ -123,10 +127,10 @@ func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd, e
 		Image:        image,
 		Username:     rc.Config.Secrets["DOCKER_USERNAME"],
 		Password:     rc.Config.Secrets["DOCKER_PASSWORD"],
-		Name:         createSimpleContainerName(rc.jobContainerName(), "STEP-"+step.ID),
+		Name:         createContainerName(rc.jobContainerName(), "STEP-"+step.ID),
 		Env:          envList,
 		Mounts:       mounts,
-		NetworkMode:  "container:" + rc.jobContainerName(),
+		NetworkMode:  networkMode,
 		Binds:        binds,
 		Stdout:       logWriter,
 		Stderr:       logWriter,

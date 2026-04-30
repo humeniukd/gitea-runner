@@ -4,11 +4,11 @@ go 1.26.0
 
 require (
 	code.gitea.io/actions-proto-go v0.4.1
-	connectrpc.com/connect v1.19.1
+	connectrpc.com/connect v1.19.2
 	github.com/avast/retry-go/v4 v4.7.0
-	github.com/docker/docker v25.0.13+incompatible
+	github.com/docker/docker v25.0.15+incompatible
 	github.com/joho/godotenv v1.5.1
-	github.com/mattn/go-isatty v0.0.20
+	github.com/mattn/go-isatty v0.0.22
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
@@ -24,7 +24,7 @@ require (
 	github.com/Masterminds/semver v1.5.0
 	github.com/creack/pty v1.1.24
 	github.com/distribution/reference v0.6.0
-	github.com/docker/cli v25.0.3+incompatible
+	github.com/docker/cli v25.0.7+incompatible
 	github.com/docker/go-connections v0.6.0
 	github.com/go-git/go-billy/v5 v5.8.0
 	github.com/go-git/go-git/v5 v5.18.0
@@ -33,7 +33,7 @@ require (
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
 	github.com/moby/buildkit v0.13.2
-	github.com/moby/patternmatcher v0.6.0
+	github.com/moby/patternmatcher v0.6.1
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/opencontainers/selinux v1.13.1
 	github.com/pkg/errors v0.9.1
@@ -114,7 +114,3 @@ require (
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
-
-// Remove after github.com/docker/distribution is updated to support distribution/reference v0.6.0
-// (pulled in via moby/buildkit, breaks on undefined: reference.SplitHostname)
-replace github.com/distribution/reference v0.6.0 => github.com/distribution/reference v0.5.0

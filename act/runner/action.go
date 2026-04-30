@@ -265,8 +265,6 @@ func removeGitIgnore(ctx context.Context, directory string) error {
 }
 
 // TODO: break out parts of function to reduce complexicity
-//
-//nolint:gocyclo // function handles many cases
 func execAsDocker(ctx context.Context, step actionStep, actionName, basedir string, localAction bool) error {
 	logger := common.Logger(ctx)
 	rc := step.getRunContext()
@@ -429,7 +427,7 @@ func newStepContainer(ctx context.Context, step step, image string, cmd, entrypo
 		Image:        image,
 		Username:     rc.Config.Secrets["DOCKER_USERNAME"],
 		Password:     rc.Config.Secrets["DOCKER_PASSWORD"],
-		Name:         createSimpleContainerName(rc.jobContainerName(), "STEP-"+stepModel.ID),
+		Name:         createContainerName(rc.jobContainerName(), "STEP-"+stepModel.ID),
 		Env:          envList,
 		Mounts:       mounts,
 		NetworkMode:  networkMode,

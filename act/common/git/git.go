@@ -32,11 +32,20 @@ var (
 	githubHTTPRegex     = regexp.MustCompile(`^https?://.*github.com.*/(.+)/(.+?)(?:.git)?$`)
 	githubSSHRegex      = regexp.MustCompile(`github.com[:/](.+)/(.+?)(?:.git)?$`)
 
-	cloneLock sync.Mutex
+	cloneLocks sync.Map // key: clone target directory; value: *sync.Mutex
 
 	ErrShortRef = errors.New("short SHA references are not supported")
 	ErrNoRepo   = errors.New("unable to find git repo")
 )
+
+// acquireCloneLock returns an unlock function after locking the per-directory mutex for dir.
+// Only concurrent operations targeting the same directory are erialized; clones into different directories run in parallel.
+func acquireCloneLock(dir string) func() {
+	v, _ := cloneLocks.LoadOrStore(dir, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
 
 type Error struct {
 	err    error
@@ -277,6 +286,7 @@ func CloneIfRequired(ctx context.Context, refName plumbing.ReferenceName, input 
 
 func gitOptions(token string) (fetchOptions git.FetchOptions, pullOptions git.PullOptions) {
 	fetchOptions.RefSpecs = []config.RefSpec{"refs/*:refs/*", "HEAD:refs/heads/HEAD"}
+	fetchOptions.Force = true
 	pullOptions.Force = true
 
 	if token != "" {
@@ -292,16 +302,13 @@ func gitOptions(token string) (fetchOptions git.FetchOptions, pullOptions git.Pu
 }
 
 // NewGitCloneExecutor creates an executor to clone git repos
-//
-//nolint:gocyclo // function handles many cases
 func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
 		logger.Infof("  \u2601  git clone '%s' # ref=%s", input.URL, input.Ref)
 		logger.Debugf("  cloning %s to %s", input.URL, input.Dir)
 
-		cloneLock.Lock()
-		defer cloneLock.Unlock()
+		defer acquireCloneLock(input.Dir)()
 
 		refName := plumbing.ReferenceName("refs/heads/" + input.Ref)
 		r, err := CloneIfRequired(ctx, refName, input, logger)
