@@ -98,9 +98,9 @@ The runner is configured with a YAML file. Generate a starting point (this match
 Pass it with `-c` / `--config` on any command that loads configuration (`register`, `daemon`, `cache-server`):
 
 ```bash
-./act_runner -c config.yaml register
-./act_runner -c config.yaml daemon
-./act_runner -c config.yaml cache-server
+./runner -c config.yaml register
+./runner -c config.yaml daemon
+./runner -c config.yaml cache-server
 ```
 
 Every option is described in [config.example.yaml](internal/pkg/config/config.example.yaml) (the same content `generate-config` prints).
@@ -126,7 +126,7 @@ If `runner.labels` is set in the YAML file, those labels are used during `regist
 
 #### External cache (`actions/cache`)
 
-If `cache.external_server` is set, you must set `cache.external_secret` to the same value on this runner and on the standalone cache server. Run the server with `act_runner cache-server` using a config that defines `cache.external_secret` (and matching `cache.dir` / host / port as needed). Flags `--dir`, `--host`, and `--port` on `cache-server` override the file.
+If `cache.external_server` is set, you must set `cache.external_secret` to the same value on this runner and on the standalone cache server. Run the server with `runner cache-server` using a config that defines `cache.external_secret` (and matching `cache.dir` / host / port as needed). Flags `--dir`, `--host`, and `--port` on `cache-server` override the file.
 
 #### Official Docker image
 
