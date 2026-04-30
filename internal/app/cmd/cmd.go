@@ -17,9 +17,8 @@ import (
 func Execute(ctx context.Context) {
 	// ./runner
 	rootCmd := &cobra.Command{
-		Use:          "runner [event name to run]\nIf no event name passed, will default to \"on: push\"",
+		Use:          "runner",
 		Short:        "Gitea Runner",
-		Args:         cobra.MaximumNArgs(1),
 		Version:      ver.Version(),
 		SilenceUsage: true,
 	}
