@@ -1,7 +1,7 @@
 kind: PersistentVolumeClaim
 apiVersion: v1
 metadata:
-  name: act-runner-vol
+  name: runner-vol
 spec:
   accessModes:
     - ReadWriteOnce
@@ -25,19 +25,19 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
-    app: act-runner
-  name: act-runner
+    app: runner
+  name: runner
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: act-runner
+      app: runner
   strategy: {}
   template:
     metadata:
       creationTimestamp: null
       labels:
-        app: act-runner
+        app: runner
     spec:
       restartPolicy: Always
       volumes:
@@ -45,7 +45,7 @@ spec:
         emptyDir: {}
       - name: runner-data
         persistentVolumeClaim:
-          claimName: act-runner-vol
+          claimName: runner-vol
       containers:
       - name: runner
         image: gitea/runner:nightly

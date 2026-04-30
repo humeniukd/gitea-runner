@@ -1,6 +1,4 @@
-# act runner
-
-Act runner is a runner for Gitea.
+# Gitea Runner
 
 ## Installation
 

@@ -18,7 +18,7 @@ func Execute(ctx context.Context) {
 	// ./runner
 	rootCmd := &cobra.Command{
 		Use:          "runner [event name to run]\nIf no event name passed, will default to \"on: push\"",
-		Short:        "Run GitHub actions locally by specifying the event name (e.g. `push`) or an action name directly.",
+		Short:        "Gitea Runner",
 		Args:         cobra.MaximumNArgs(1),
 		Version:      ver.Version(),
 		SilenceUsage: true,
