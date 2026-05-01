@@ -44,6 +44,7 @@ type Runner struct {
 	labels       labels.Labels
 	envs         map[string]string
 	cacheHandler *artifactcache.Handler
+	capabilities string
 
 	runningTasks sync.Map
 	runningCount atomic.Int64
@@ -97,6 +98,14 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		envs:         envs,
 		cacheHandler: cacheHandler,
 	}
+}
+
+func (r *Runner) SetCapabilitiesFromDeclare(resp *connect.Response[runnerv1.DeclareResponse]) {
+	if resp == nil {
+		return
+	}
+	// Capability negotiation is done via response headers to avoid a hard proto bump.
+	r.capabilities = strings.TrimSpace(resp.Header().Get("X-Gitea-Actions-Capabilities"))
 }
 
 func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
@@ -165,6 +174,19 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	reporter.ResetSteps(len(job.Steps))
 
 	taskContext := task.Context.Fields
+
+	// Build a per-task env map. r.envs is shared across concurrent tasks.
+	taskEnvs := make(map[string]string, len(r.envs)+4)
+	maps.Copy(taskEnvs, r.envs)
+	if r.capabilities != "" {
+		taskEnvs["GITEA_ACTIONS_CAPABILITIES"] = r.capabilities
+	}
+	if v := taskContext["run_id"].GetStringValue(); v != "" {
+		taskEnvs["GITEA_RUN_ID"] = v
+	}
+	if v := taskContext["job"].GetStringValue(); v != "" {
+		taskEnvs["GITEA_RUN_JOB_ID"] = v
+	}
 
 	log.Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
 		r.getDefaultActionsURL(task),
@@ -251,7 +273,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		ForceRebuild:          r.cfg.Container.ForceRebuild,
 		LogOutput:             true,
 		JSONLogger:            false,
-		Env:                   r.envs,
+		Env:                   taskEnvs,
 		Secrets:               task.Secrets,
 		GitHubInstance:        strings.TrimSuffix(r.client.Address(), "/"),
 		AutoRemove:            true,

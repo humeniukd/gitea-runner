@@ -5,13 +5,22 @@
 package runner
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/model"
+
+	"github.com/sirupsen/logrus"
 )
 
 type jobInfo interface {
@@ -119,6 +128,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			defer cancel()
 
 			logger := common.Logger(ctx)
+			tryUploadJobSummary(ctx, rc, logger)
 			// For Gitea
 			// We don't need to call `stopServiceContainers` here since it will be called by following `info.stopContainer`
 			// logger.Infof("Cleaning up services for job %s", rc.JobName)
@@ -212,6 +222,79 @@ func setJobOutputs(ctx context.Context, rc *RunContext) {
 
 		rc.caller.runContext.Run.Job().Outputs = callerOutputs
 	}
+}
+
+func tryUploadJobSummary(ctx context.Context, rc *RunContext, logger logrus.FieldLogger) {
+	if rc == nil || rc.JobContainer == nil || rc.Config == nil {
+		return
+	}
+	env := rc.GetEnv()
+	caps := strings.TrimSpace(env["GITEA_ACTIONS_CAPABILITIES"])
+	if !strings.Contains(caps, "job-summary") {
+		// Server did not advertise support. Do not attempt upload.
+		return
+	}
+	runtimeURL := strings.TrimSpace(env["ACTIONS_RUNTIME_URL"])
+	runtimeToken := strings.TrimSpace(env["ACTIONS_RUNTIME_TOKEN"])
+	runID := strings.TrimSpace(env["GITEA_RUN_ID"])
+	if runID == "" {
+		// Fallback to GitHub-compatible name; on Gitea runs this is the numeric ActionRun ID.
+		runID = strings.TrimSpace(env["GITHUB_RUN_ID"])
+	}
+	jobID := strings.TrimSpace(env["GITEA_RUN_JOB_ID"])
+	if runtimeURL == "" || runtimeToken == "" || runID == "" || jobID == "" {
+		return
+	}
+
+	summaryPath := path.Join(rc.JobContainer.GetActPath(), "workflow", "SUMMARY.md")
+	body, ok := readSingleFileFromContainerArchive(ctx, rc.JobContainer, summaryPath, 1024*1024)
+	if !ok || len(body) == 0 {
+		return
+	}
+
+	base := strings.TrimRight(runtimeURL, "/")
+	url := base + "/_apis/pipelines/workflows/" + runID + "/jobs/" + jobID + "/summary"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+runtimeToken)
+	req.Header.Set("Content-Type", "text/markdown")
+
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		// Best-effort only; do not fail job, but log because capability was advertised.
+		logger.WithError(err).Warn("job summary upload failed")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		logger.Warnf("job summary upload failed: status=%d", resp.StatusCode)
+		return
+	}
+}
+
+func readSingleFileFromContainerArchive(ctx context.Context, env container.ExecutionsEnvironment, p string, maxBytes int64) ([]byte, bool) {
+	rc, err := env.GetContainerArchive(ctx, p)
+	if err != nil {
+		return nil, false
+	}
+	defer rc.Close()
+
+	tr := tar.NewReader(rc)
+	_, err = tr.Next()
+	if err != nil {
+		return nil, false
+	}
+	b, err := io.ReadAll(io.LimitReader(tr, maxBytes+1))
+	if err != nil {
+		return nil, false
+	}
+	if int64(len(b)) > maxBytes {
+		return nil, false
+	}
+	return b, true
 }
 
 func useStepLogger(rc *RunContext, stepModel *model.Step, stage stepStage, executor common.Executor) common.Executor {
