@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -454,7 +455,7 @@ func (e *HostEnvironment) terminateRunningProcesses(ctx context.Context) {
 	for _, pid := range pids {
 		// Best-effort: forcibly terminate process tree to release file handles
 		// so that workspace cleanup can succeed on Windows.
-		cmd := exec.CommandContext(ctx, "taskkill", "/PID", fmt.Sprint(pid), "/T", "/F")
+		cmd := exec.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(pid), "/T", "/F")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			logger.Debugf("taskkill failed for pid=%d: %v output=%s", pid, err, strings.TrimSpace(string(out)))
