@@ -6,12 +6,21 @@ package container
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"gitea.com/gitea/runner/act/common"
 
 	"github.com/docker/go-connections/nat"
 )
+
+// ExitCodeError reports a non-zero process exit code from a container command.
+// Its Error() string matches the format used by GitHub Actions' runner.
+type ExitCodeError int
+
+func (e ExitCodeError) Error() string {
+	return fmt.Sprintf("Process completed with exit code %d.", int(e))
+}
 
 // NewContainerInput the input for the New function
 type NewContainerInput struct {
