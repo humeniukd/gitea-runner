@@ -346,6 +346,10 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 	}
 	err = cmd.Run()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return ExitCodeError(exitErr.ExitCode())
+		}
 		return err
 	}
 	if tty != nil {
