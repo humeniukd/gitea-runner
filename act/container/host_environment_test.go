@@ -95,7 +95,7 @@ func TestHostEnvironmentRemoveCleansWorkdir(t *testing.T) {
 	}
 	require.NoError(t, e.Remove()(ctx))
 	_, err := os.Stat(workdir)
-	assert.True(t, os.IsNotExist(err))
+	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestHostEnvironmentRemoveSkipsWorkdirWhenBindWorkdir(t *testing.T) {

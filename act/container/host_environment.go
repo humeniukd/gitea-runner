@@ -352,6 +352,8 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 	if ppty != nil {
 		go writeKeepAlive(ppty)
 	}
+	// Split Start/Wait so the PID can be registered before the process can exit;
+	// cmd.Run() would block until exit, by which time the PID may have been reused.
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -475,7 +477,8 @@ func (e *HostEnvironment) Remove() common.Executor {
 		}
 		logger := common.Logger(ctx)
 		var errs []error
-		if err := os.RemoveAll(e.Path); err != nil {
+		if err := removePathWithRetry(ctx, e.Path); err != nil {
+			logger.Warnf("failed to remove host misc state %s: %v", e.Path, err)
 			errs = append(errs, err)
 		}
 		if !e.BindWorkdir && e.Workdir != "" {
