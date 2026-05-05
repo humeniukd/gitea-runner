@@ -100,12 +100,12 @@ func LoadDefault(file string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open config file %q: %w", file, err)
 		}
+		if err := yaml.Unmarshal(content, cfg); err != nil {
+			return nil, fmt.Errorf("parse config file %q: %w", file, err)
+		}
 		definedRunnerKeys, err = definedRunnerConfigKeys(content)
 		if err != nil {
 			return nil, fmt.Errorf("parse config file %q for defaults metadata: %w", file, err)
-		}
-		if err := yaml.Unmarshal(content, cfg); err != nil {
-			return nil, fmt.Errorf("parse config file %q: %w", file, err)
 		}
 	}
 	compatibleWithOldEnvs(file != "", cfg)

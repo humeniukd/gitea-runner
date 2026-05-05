@@ -103,3 +103,17 @@ runner:
 	assert.Equal(t, -1*time.Second, cfg.Runner.WorkdirCleanupAge)
 	assert.Equal(t, -1*time.Second, cfg.Runner.IdleCleanupInterval)
 }
+
+// TestLoadDefault_MalformedYAMLReturnsParseError pins the error surfaced for
+// invalid YAML to the canonical "parse config file" message rather than the
+// "for defaults metadata" variant — i.e. the main yaml.Unmarshal runs first.
+func TestLoadDefault_MalformedYAMLReturnsParseError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("runner:\n  capacity: [unterminated\n"), 0o600))
+
+	_, err := LoadDefault(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse config file")
+	assert.NotContains(t, err.Error(), "defaults metadata")
+}

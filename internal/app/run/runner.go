@@ -107,13 +107,16 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 }
 
 // OnIdle performs lightweight maintenance during polling idle windows.
-func (r *Runner) OnIdle(_ context.Context) {
+// It runs synchronously on the poller goroutine; shouldRunIdleCleanup
+// throttles invocations to runner.idle_cleanup_interval so the impact on
+// poll cadence is bounded even when the workdir root is large.
+func (r *Runner) OnIdle(ctx context.Context) {
 	if !r.shouldRunIdleCleanup() {
 		return
 	}
 	workdirParent := strings.TrimLeft(r.cfg.Container.WorkdirParent, "/")
 	workdirRoot := filepath.FromSlash("/" + workdirParent)
-	r.cleanupStaleTaskDirs(workdirRoot)
+	r.cleanupStaleTaskDirs(ctx, workdirRoot)
 }
 
 func (r *Runner) shouldRunIdleCleanup() bool {
@@ -139,7 +142,7 @@ func (r *Runner) shouldRunIdleCleanup() bool {
 	}
 }
 
-func (r *Runner) cleanupStaleTaskDirs(workdirRoot string) {
+func (r *Runner) cleanupStaleTaskDirs(ctx context.Context, workdirRoot string) {
 	entries, err := os.ReadDir(workdirRoot)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -149,8 +152,14 @@ func (r *Runner) cleanupStaleTaskDirs(workdirRoot string) {
 		return
 	}
 
+	// A task may begin between shouldRunIdleCleanup's running-count check and
+	// the loop below. That is safe because new task dirs are created with the
+	// current mtime and therefore fall on the keep side of cutoff.
 	cutoff := r.now().Add(-r.cfg.Runner.WorkdirCleanupAge)
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return
+		}
 		if !entry.IsDir() {
 			continue
 		}
