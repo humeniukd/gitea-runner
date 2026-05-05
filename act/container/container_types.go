@@ -15,7 +15,6 @@ import (
 )
 
 // ExitCodeError reports a non-zero process exit code from a container command.
-// Its Error() string matches the format used by GitHub Actions' runner.
 type ExitCodeError int
 
 func (e ExitCodeError) Error() string {
