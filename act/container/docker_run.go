@@ -926,7 +926,7 @@ func (cr *containerReference) wait() common.Executor {
 			return nil
 		}
 
-		return fmt.Errorf("exit with `FAILURE`: %v", statusCode)
+		return ExitCodeError(statusCode)
 	}
 }
 
