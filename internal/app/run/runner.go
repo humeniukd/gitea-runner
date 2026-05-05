@@ -103,17 +103,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		cacheHandler: cacheHandler,
 		now:          time.Now,
 	}
-	runner.cleanStaleTaskDirsOnStartup()
 	return runner
-}
-
-func (r *Runner) cleanStaleTaskDirsOnStartup() {
-	if !r.cfg.Container.BindWorkdir {
-		return
-	}
-	workdirParent := strings.TrimLeft(r.cfg.Container.WorkdirParent, "/")
-	workdirRoot := filepath.FromSlash("/" + workdirParent)
-	r.cleanupStaleTaskDirs(workdirRoot)
 }
 
 // OnIdle performs lightweight maintenance during polling idle windows.
@@ -128,6 +118,9 @@ func (r *Runner) OnIdle(_ context.Context) {
 
 func (r *Runner) shouldRunIdleCleanup() bool {
 	if !r.cfg.Container.BindWorkdir {
+		return false
+	}
+	if r.cfg.Runner.WorkdirCleanupAge <= 0 || r.cfg.Runner.IdleCleanupInterval <= 0 {
 		return false
 	}
 	if r.RunningCount() != 0 {
@@ -156,7 +149,7 @@ func (r *Runner) cleanupStaleTaskDirs(workdirRoot string) {
 		return
 	}
 
-	cutoff := r.now().Add(-r.cfg.Runner.StartupCleanupAge)
+	cutoff := r.now().Add(-r.cfg.Runner.WorkdirCleanupAge)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue

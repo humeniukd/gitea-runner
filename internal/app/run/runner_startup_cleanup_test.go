@@ -23,18 +23,20 @@ func TestRunnerCleanupStaleTaskDirs(t *testing.T) {
 	oldTask := filepath.Join(workdirRoot, "1001")
 	freshTask := filepath.Join(workdirRoot, "1002")
 	nonTask := filepath.Join(workdirRoot, "shared")
-	for _, path := range []string{oldTask, freshTask, nonTask} {
+	alphaNumericTask := filepath.Join(workdirRoot, "123abc")
+	for _, path := range []string{oldTask, freshTask, nonTask, alphaNumericTask} {
 		require.NoError(t, os.MkdirAll(path, 0o700))
 	}
 
 	require.NoError(t, os.Chtimes(oldTask, now.Add(-3*time.Hour), now.Add(-3*time.Hour)))
 	require.NoError(t, os.Chtimes(freshTask, now.Add(-30*time.Minute), now.Add(-30*time.Minute)))
 	require.NoError(t, os.Chtimes(nonTask, now.Add(-5*time.Hour), now.Add(-5*time.Hour)))
+	require.NoError(t, os.Chtimes(alphaNumericTask, now.Add(-5*time.Hour), now.Add(-5*time.Hour)))
 
 	r := &Runner{
 		cfg: &config.Config{
 			Runner: config.Runner{
-				StartupCleanupAge: 2 * time.Hour,
+				WorkdirCleanupAge: 2 * time.Hour,
 			},
 		},
 		now: func() time.Time { return now },
@@ -45,6 +47,7 @@ func TestRunnerCleanupStaleTaskDirs(t *testing.T) {
 	assert.NoDirExists(t, oldTask)
 	assert.DirExists(t, freshTask)
 	assert.DirExists(t, nonTask)
+	assert.DirExists(t, alphaNumericTask)
 }
 
 func TestRunnerShouldRunIdleCleanupThrottles(t *testing.T) {
@@ -55,6 +58,7 @@ func TestRunnerShouldRunIdleCleanupThrottles(t *testing.T) {
 				BindWorkdir: true,
 			},
 			Runner: config.Runner{
+				WorkdirCleanupAge:   24 * time.Hour,
 				IdleCleanupInterval: time.Hour,
 			},
 		},
@@ -77,6 +81,7 @@ func TestRunnerShouldRunIdleCleanupSkipsWhenJobRunning(t *testing.T) {
 				BindWorkdir: true,
 			},
 			Runner: config.Runner{
+				WorkdirCleanupAge:   24 * time.Hour,
 				IdleCleanupInterval: time.Minute,
 			},
 		},
@@ -85,4 +90,56 @@ func TestRunnerShouldRunIdleCleanupSkipsWhenJobRunning(t *testing.T) {
 	r.runningCount.Store(1)
 
 	assert.False(t, r.shouldRunIdleCleanup())
+}
+
+func TestRunnerShouldRunIdleCleanupSkipsWhenBindWorkdirDisabled(t *testing.T) {
+	r := &Runner{
+		cfg: &config.Config{
+			Runner: config.Runner{
+				WorkdirCleanupAge:   24 * time.Hour,
+				IdleCleanupInterval: time.Minute,
+			},
+		},
+		now: time.Now,
+	}
+
+	assert.False(t, r.shouldRunIdleCleanup())
+}
+
+func TestRunnerShouldRunIdleCleanupSkipsWhenDisabled(t *testing.T) {
+	now := time.Date(2026, time.April, 29, 20, 0, 0, 0, time.UTC)
+
+	t.Run("cleanup age disabled", func(t *testing.T) {
+		r := &Runner{
+			cfg: &config.Config{
+				Container: config.Container{
+					BindWorkdir: true,
+				},
+				Runner: config.Runner{
+					WorkdirCleanupAge:   -1,
+					IdleCleanupInterval: time.Minute,
+				},
+			},
+			now: func() time.Time { return now },
+		}
+
+		assert.False(t, r.shouldRunIdleCleanup())
+	})
+
+	t.Run("idle interval disabled", func(t *testing.T) {
+		r := &Runner{
+			cfg: &config.Config{
+				Container: config.Container{
+					BindWorkdir: true,
+				},
+				Runner: config.Runner{
+					WorkdirCleanupAge:   24 * time.Hour,
+					IdleCleanupInterval: -1,
+				},
+			},
+			now: func() time.Time { return now },
+		}
+
+		assert.False(t, r.shouldRunIdleCleanup())
+	})
 }
