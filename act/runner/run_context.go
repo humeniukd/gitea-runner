@@ -220,11 +220,12 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 		}
 		toolCache := filepath.Join(cacheDir, "tool_cache")
 		rc.JobContainer = &container.HostEnvironment{
-			Path:      path,
-			TmpDir:    runnerTmp,
-			ToolCache: toolCache,
-			Workdir:   rc.Config.Workdir,
-			ActPath:   actPath,
+			Path:        path,
+			TmpDir:      runnerTmp,
+			ToolCache:   toolCache,
+			Workdir:     rc.Config.Workdir,
+			BindWorkdir: rc.Config.BindWorkdir,
+			ActPath:     actPath,
 			CleanUp: func() {
 				os.RemoveAll(miscpath)
 			},
@@ -729,7 +730,7 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 	jobType, jobTypeErr := job.Type()
 
 	if runJobErr != nil {
-		return false, fmt.Errorf("  \u274C  Error in if-expression: \"if: %s\" (%s)", job.If.Value, runJobErr)
+		return false, fmt.Errorf("if-expression %q evaluation failed: %s", job.If.Value, runJobErr)
 	}
 
 	if jobType == model.JobTypeInvalid {
