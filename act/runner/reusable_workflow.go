@@ -123,6 +123,11 @@ func newActionCacheReusableWorkflowExecutor(rc *RunContext, filename string, rem
 
 // cloneRemoteReusableWorkflow always invokes the clone executor — moving refs
 // (branches, tags) must be re-resolved each run, matching GitHub Actions.
+//
+// Callers must not change remoteReusableWorkflow.URL, because:
+//  1. Gitea doesn't support specifying GithubContext.ServerURL by the GITHUB_SERVER_URL env
+//  2. Gitea has already full URL with rc.Config.GitHubInstance when calling newRemoteReusableWorkflowWithPlat
+// remoteReusableWorkflow.URL = rc.getGithubContext(ctx).ServerURL
 func cloneRemoteReusableWorkflow(rc *RunContext, cloneURL, ref, targetDirectory, token string) common.Executor {
 	return func(ctx context.Context) error {
 		cloneURL = rc.NewExpressionEvaluator(ctx).Interpolate(ctx, cloneURL)
