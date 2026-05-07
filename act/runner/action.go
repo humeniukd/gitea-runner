@@ -45,6 +45,13 @@ type runAction func(step actionStep, actionDir string, remoteAction *remoteActio
 //go:embed res/trampoline.js
 var trampoline embed.FS
 
+// Indirected for tests so the docker-action build path can be exercised without
+// a real docker daemon.
+var (
+	ContainerImageExistsLocally     = container.ImageExistsLocally
+	ContainerNewDockerBuildExecutor = container.NewDockerBuildExecutor
+)
+
 func readActionImpl(ctx context.Context, step *model.Step, actionDir, actionPath string, readFile actionYamlReader, writeFile fileWriter) (*model.Action, error) {
 	logger := common.Logger(ctx)
 	allErrors := []error{}
@@ -290,12 +297,12 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir stri
 		image = strings.ToLower(image)
 		contextDir, fileName := filepath.Split(filepath.Join(basedir, action.Runs.Image))
 
-		anyArchExists, err := container.ImageExistsLocally(ctx, image, "any")
+		anyArchExists, err := ContainerImageExistsLocally(ctx, image, "any")
 		if err != nil {
 			return err
 		}
 
-		correctArchExists, err := container.ImageExistsLocally(ctx, image, rc.Config.ContainerArchitecture)
+		correctArchExists, err := ContainerImageExistsLocally(ctx, image, rc.Config.ContainerArchitecture)
 		if err != nil {
 			return err
 		}
@@ -327,13 +334,24 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir stri
 				}
 				defer buildContext.Close()
 			}
-			prepImage = container.NewDockerBuildExecutor(container.NewDockerBuildExecutorInput{
+			prepImage = ContainerNewDockerBuildExecutor(container.NewDockerBuildExecutorInput{
 				ContextDir:   contextDir,
 				Dockerfile:   fileName,
 				ImageTag:     image,
 				BuildContext: buildContext,
 				Platform:     rc.Config.ContainerArchitecture,
 			})
+			if buildContext == nil {
+				// docker_build will walk contextDir directly; it lives under
+				// <ActionCacheDir>/<UsesHash> where a peer's NewGitCloneExecutor
+				// can `git checkout --force` at any time. Hold the per-dir lock
+				// for the build so the daemon-side walk sees a stable tree.
+				inner := prepImage
+				prepImage = func(ctx context.Context) error {
+					defer git.AcquireCloneLock(contextDir)()
+					return inner(ctx)
+				}
+			}
 		} else {
 			logger.Debugf("image '%s' for architecture '%s' already exists", image, rc.Config.ContainerArchitecture)
 		}

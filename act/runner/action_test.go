@@ -8,12 +8,15 @@ import (
 	"context"
 	"io"
 	"io/fs"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/common/git"
+	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/model"
 
 	"github.com/stretchr/testify/assert"
@@ -332,4 +335,103 @@ func TestMaybeCopyToActionDirHoldsCloneLock(t *testing.T) {
 	}
 
 	cm.AssertExpectations(t)
+}
+
+// TestExecAsDockerHoldsCloneLockForRemoteUncached guards the fix for the
+// docker-action build context race: when a remote uses: docker action runs
+// without ActionCache configured, container.NewDockerBuildExecutor walks
+// contextDir directly to send the build context to the daemon. contextDir
+// lives under <ActionCacheDir>/<UsesHash> where a peer matrix job's
+// NewGitCloneExecutor can `git checkout --force` the worktree at any time;
+// the build executor must hold the per-dir clone lock for its duration.
+func TestExecAsDockerHoldsCloneLockForRemoteUncached(t *testing.T) {
+	basedir := t.TempDir()
+	contextDir, _ := filepath.Split(filepath.Join(basedir, "Dockerfile"))
+
+	unlockOnce := sync.OnceFunc(git.AcquireCloneLock(contextDir))
+	defer unlockOnce()
+
+	innerEntered := make(chan struct{})
+	releaseInner := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(releaseInner) })
+	defer releaseOnce()
+
+	origImageExists := ContainerImageExistsLocally
+	ContainerImageExistsLocally = func(_ context.Context, _, _ string) (bool, error) {
+		return false, nil
+	}
+	defer func() { ContainerImageExistsLocally = origImageExists }()
+
+	origBuildExec := ContainerNewDockerBuildExecutor
+	ContainerNewDockerBuildExecutor = func(_ container.NewDockerBuildExecutorInput) common.Executor {
+		return func(_ context.Context) error {
+			close(innerEntered)
+			<-releaseInner
+			return nil
+		}
+	}
+	defer func() { ContainerNewDockerBuildExecutor = origBuildExec }()
+
+	cm := &containerMock{}
+	cm.On("Pull", false).Return(func(ctx context.Context) error { return ctx.Err() }).Maybe()
+	cm.On("Remove").Return(func(ctx context.Context) error { return nil }).Maybe()
+	cm.On("Create", []string(nil), []string(nil)).Return(func(ctx context.Context) error { return nil }).Maybe()
+	cm.On("Start", true).Return(func(ctx context.Context) error { return nil }).Maybe()
+	cm.On("Close").Return(func(ctx context.Context) error { return nil }).Maybe()
+
+	step := &stepActionRemote{
+		Step: &model.Step{ID: "1", Uses: "remote/action@v1", With: map[string]string{}},
+		RunContext: &RunContext{
+			Config: &Config{},
+			Run: &model.Run{
+				JobID: "1",
+				Workflow: &model.Workflow{
+					Name: "wf",
+					Jobs: map[string]*model.Job{"1": {}},
+				},
+			},
+			JobContainer: cm,
+		},
+		action: &model.Action{Runs: model.ActionRuns{Using: "docker", Image: "Dockerfile"}},
+		env:    map[string]string{},
+	}
+
+	origNewContainer := ContainerNewContainer
+	ContainerNewContainer = func(_ *container.NewContainerInput) container.ExecutionsEnvironment {
+		return cm
+	}
+	defer func() { ContainerNewContainer = origNewContainer }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- execAsDocker(ctx, step, "test-action", basedir, false) }()
+
+	select {
+	case <-innerEntered:
+		t.Fatal("inner build executor ran before clone lock was released; wrap not held")
+	case err := <-done:
+		t.Fatalf("execAsDocker returned before inner was entered: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	unlockOnce()
+
+	select {
+	case <-innerEntered:
+	case err := <-done:
+		t.Fatalf("execAsDocker returned without entering inner: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("inner build executor not entered within 1s after clone lock released")
+	}
+
+	cancel()
+	releaseOnce()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("execAsDocker did not return after inner was released and ctx was canceled")
+	}
 }
