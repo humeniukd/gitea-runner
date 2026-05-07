@@ -5,6 +5,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,40 +77,50 @@ func TestReusableWorkflowCachedBranchRefRefreshes(t *testing.T) {
 
 func TestNewReusableWorkflowExecutorHoldsCloneLock(t *testing.T) {
 	workflowDir := t.TempDir()
-	const workflowFile = "reusable.yml"
-	require.NoError(t, os.WriteFile(filepath.Join(workflowDir, workflowFile), []byte(
-		"name: reusable\non:\n  workflow_call:\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n",
-	), 0o644))
 
 	unlockOnce := sync.OnceFunc(git.AcquireCloneLock(workflowDir))
 	defer unlockOnce()
 
+	plannerCalled := make(chan struct{})
+	stop := errors.New("stop after planner")
+
+	origPlanner := modelNewWorkflowPlanner
+	modelNewWorkflowPlanner = func(string, bool) (model.WorkflowPlanner, error) {
+		close(plannerCalled)
+		return nil, stop
+	}
+	defer func() { modelNewWorkflowPlanner = origPlanner }()
+
 	rc := &RunContext{
 		Config: &Config{},
-		Run: &model.Run{
-			JobID: "build",
-			Workflow: &model.Workflow{
-				Jobs: map[string]*model.Job{"build": {}},
-			},
-		},
+		Run:    &model.Run{Workflow: &model.Workflow{Jobs: map[string]*model.Job{}}},
 	}
-	exec := newReusableWorkflowExecutor(rc, workflowDir, workflowFile)
+	exec := newReusableWorkflowExecutor(rc, workflowDir, "reusable.yml")
 
 	done := make(chan error, 1)
 	go func() { done <- exec(context.Background()) }()
 
 	select {
+	case <-plannerCalled:
+		t.Fatal("planner ran while clone lock was held")
 	case err := <-done:
-		t.Fatalf("executor returned without taking the clone lock: %v", err)
+		t.Fatalf("executor returned before planner was reached: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
 	unlockOnce()
 
 	select {
-	case <-done:
+	case <-plannerCalled:
 	case <-time.After(time.Second):
-		t.Fatal("executor did not return after clone lock was released")
+		t.Fatal("planner not called after lock was released")
+	}
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, stop)
+	case <-time.After(time.Second):
+		t.Fatal("executor did not return after planner ran")
 	}
 }
 
