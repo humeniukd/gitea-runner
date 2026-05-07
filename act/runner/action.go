@@ -45,8 +45,6 @@ type runAction func(step actionStep, actionDir string, remoteAction *remoteActio
 //go:embed res/trampoline.js
 var trampoline embed.FS
 
-// Indirected for tests so the docker-action build path can be exercised without
-// a real docker daemon.
 var (
 	ContainerImageExistsLocally     = container.ImageExistsLocally
 	ContainerNewDockerBuildExecutor = container.NewDockerBuildExecutor
@@ -156,9 +154,6 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir, actio
 		return rc.JobContainer.CopyTarStream(ctx, containerActionDirCopy, ta)
 	}
 
-	// actionDir is shared across concurrent jobs that resolve the same `uses:`,
-	// so a peer's NewGitCloneExecutor can run `git checkout --force` here at any
-	// time. Hold the per-dir lock so the tar walk sees a stable worktree.
 	defer git.AcquireCloneLock(actionDir)()
 
 	if err := removeGitIgnore(ctx, actionDir); err != nil {
@@ -210,7 +205,7 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 			if remoteAction == nil {
 				location = containerActionDir
 			}
-			return execAsDocker(ctx, step, actionName, location, remoteAction == nil)
+			return execAsDocker(ctx, step, actionName, actionDir, location, remoteAction == nil)
 		case x.IsComposite():
 			if err := maybeCopyToActionDir(ctx, step, actionDir, actionPath, containerActionDir); err != nil {
 				return err
@@ -278,7 +273,7 @@ func removeGitIgnore(ctx context.Context, directory string) error {
 }
 
 // TODO: break out parts of function to reduce complexicity
-func execAsDocker(ctx context.Context, step actionStep, actionName, basedir string, localAction bool) error {
+func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, basedir string, localAction bool) error {
 	logger := common.Logger(ctx)
 	rc := step.getRunContext()
 	action := step.getActionModel()
@@ -342,13 +337,9 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir stri
 				Platform:     rc.Config.ContainerArchitecture,
 			})
 			if buildContext == nil {
-				// docker_build will walk contextDir directly; it lives under
-				// <ActionCacheDir>/<UsesHash> where a peer's NewGitCloneExecutor
-				// can `git checkout --force` at any time. Hold the per-dir lock
-				// for the build so the daemon-side walk sees a stable tree.
 				inner := prepImage
 				prepImage = func(ctx context.Context) error {
-					defer git.AcquireCloneLock(contextDir)()
+					defer git.AcquireCloneLock(actionDir)()
 					return inner(ctx)
 				}
 			}

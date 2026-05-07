@@ -74,11 +74,6 @@ func TestReusableWorkflowCachedBranchRefRefreshes(t *testing.T) {
 	require.Equal(t, tmpl("v2"), string(got), "cached workflow file must reflect the updated branch tip")
 }
 
-// TestNewReusableWorkflowExecutorHoldsCloneLock guards the fix for the action-cache
-// race in newReusableWorkflowExecutor: model.NewWorkflowPlanner reads the workflow
-// yaml from <ActionCacheDir>/<safeFilename(uses)>, which a peer matrix job's
-// cloneRemoteReusableWorkflow can `git checkout --force` mid-parse if the lock
-// is not held during the read.
 func TestNewReusableWorkflowExecutorHoldsCloneLock(t *testing.T) {
 	workflowDir := t.TempDir()
 	const workflowFile = "reusable.yml"

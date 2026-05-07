@@ -8,7 +8,6 @@ import (
 	"context"
 	"io"
 	"io/fs"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -259,12 +258,6 @@ func TestActionRunner(t *testing.T) {
 	}
 }
 
-// TestMaybeCopyToActionDirHoldsCloneLock guards the fix for the action-cache
-// race: while maybeCopyToActionDir tarballs the on-disk action cache into a
-// job container, a peer matrix job's NewGitCloneExecutor must not be allowed
-// to run `git checkout --force` on the same actionDir, otherwise files like
-// dist/index.js can briefly disappear and the action's main entrypoint fails
-// with "Cannot find module .../dist/index.js".
 func TestMaybeCopyToActionDirHoldsCloneLock(t *testing.T) {
 	ctx := context.Background()
 
@@ -272,7 +265,7 @@ func TestMaybeCopyToActionDirHoldsCloneLock(t *testing.T) {
 
 	releaseCopy := make(chan struct{})
 	release := sync.OnceFunc(func() { close(releaseCopy) })
-	defer release() // unblock the CopyDir goroutine on any early t.Fatal
+	defer release()
 
 	copyEntered := make(chan struct{})
 
@@ -313,7 +306,7 @@ func TestMaybeCopyToActionDirHoldsCloneLock(t *testing.T) {
 
 	select {
 	case <-peerAcquired:
-		t.Fatal("peer AcquireCloneLock returned while maybeCopyToActionDir was tarring the action cache; clone lock not held during copy")
+		t.Fatal("peer AcquireCloneLock returned while CopyDir was running")
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -331,24 +324,16 @@ func TestMaybeCopyToActionDirHoldsCloneLock(t *testing.T) {
 	select {
 	case <-peerAcquired:
 	case <-time.After(time.Second):
-		t.Fatal("peer AcquireCloneLock did not proceed after maybeCopyToActionDir released the lock")
+		t.Fatal("peer AcquireCloneLock did not proceed after lock released")
 	}
 
 	cm.AssertExpectations(t)
 }
 
-// TestExecAsDockerHoldsCloneLockForRemoteUncached guards the fix for the
-// docker-action build context race: when a remote uses: docker action runs
-// without ActionCache configured, container.NewDockerBuildExecutor walks
-// contextDir directly to send the build context to the daemon. contextDir
-// lives under <ActionCacheDir>/<UsesHash> where a peer matrix job's
-// NewGitCloneExecutor can `git checkout --force` the worktree at any time;
-// the build executor must hold the per-dir clone lock for its duration.
 func TestExecAsDockerHoldsCloneLockForRemoteUncached(t *testing.T) {
-	basedir := t.TempDir()
-	contextDir, _ := filepath.Split(filepath.Join(basedir, "Dockerfile"))
+	actionDir := t.TempDir()
 
-	unlockOnce := sync.OnceFunc(git.AcquireCloneLock(contextDir))
+	unlockOnce := sync.OnceFunc(git.AcquireCloneLock(actionDir))
 	defer unlockOnce()
 
 	innerEntered := make(chan struct{})
@@ -406,11 +391,11 @@ func TestExecAsDockerHoldsCloneLockForRemoteUncached(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- execAsDocker(ctx, step, "test-action", basedir, false) }()
+	go func() { done <- execAsDocker(ctx, step, "test-action", actionDir, actionDir, false) }()
 
 	select {
 	case <-innerEntered:
-		t.Fatal("inner build executor ran before clone lock was released; wrap not held")
+		t.Fatal("inner build executor ran before clone lock was released")
 	case err := <-done:
 		t.Fatalf("execAsDocker returned before inner was entered: %v", err)
 	case <-time.After(50 * time.Millisecond):
@@ -423,7 +408,7 @@ func TestExecAsDockerHoldsCloneLockForRemoteUncached(t *testing.T) {
 	case err := <-done:
 		t.Fatalf("execAsDocker returned without entering inner: %v", err)
 	case <-time.After(time.Second):
-		t.Fatal("inner build executor not entered within 1s after clone lock released")
+		t.Fatal("inner build executor not entered after lock released")
 	}
 
 	cancel()
