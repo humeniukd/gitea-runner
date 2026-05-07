@@ -9,8 +9,11 @@ import (
 	"io"
 	"io/fs"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"gitea.com/gitea/runner/act/common/git"
 	"gitea.com/gitea/runner/act/model"
 
 	"github.com/stretchr/testify/assert"
@@ -251,4 +254,82 @@ func TestActionRunner(t *testing.T) {
 			cm.AssertExpectations(t)
 		})
 	}
+}
+
+// TestMaybeCopyToActionDirHoldsCloneLock guards the fix for the action-cache
+// race: while maybeCopyToActionDir tarballs the on-disk action cache into a
+// job container, a peer matrix job's NewGitCloneExecutor must not be allowed
+// to run `git checkout --force` on the same actionDir, otherwise files like
+// dist/index.js can briefly disappear and the action's main entrypoint fails
+// with "Cannot find module .../dist/index.js".
+func TestMaybeCopyToActionDirHoldsCloneLock(t *testing.T) {
+	ctx := context.Background()
+
+	actionDir := t.TempDir()
+
+	releaseCopy := make(chan struct{})
+	release := sync.OnceFunc(func() { close(releaseCopy) })
+	defer release() // unblock the CopyDir goroutine on any early t.Fatal
+
+	copyEntered := make(chan struct{})
+
+	cm := &containerMock{}
+	cm.On("CopyDir", "/var/run/act/actions/", actionDir+"/", false).Return(func(ctx context.Context) error {
+		close(copyEntered)
+		<-releaseCopy
+		return nil
+	})
+
+	step := &stepActionRemote{
+		Step: &model.Step{Uses: "remote/action@v1"},
+		RunContext: &RunContext{
+			Config:       &Config{},
+			JobContainer: cm,
+		},
+	}
+
+	copyDone := make(chan error, 1)
+	go func() {
+		copyDone <- maybeCopyToActionDir(ctx, step, actionDir, "", "/var/run/act/actions/")
+	}()
+
+	select {
+	case <-copyEntered:
+	case err := <-copyDone:
+		t.Fatalf("maybeCopyToActionDir returned before CopyDir was entered: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("CopyDir was not entered within 1 second")
+	}
+
+	peerAcquired := make(chan struct{})
+	go func() {
+		unlock := git.AcquireCloneLock(actionDir)
+		close(peerAcquired)
+		unlock()
+	}()
+
+	select {
+	case <-peerAcquired:
+		t.Fatal("peer AcquireCloneLock returned while maybeCopyToActionDir was tarring the action cache; clone lock not held during copy")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+
+	select {
+	case err := <-copyDone:
+		if err != nil {
+			t.Fatalf("maybeCopyToActionDir returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("maybeCopyToActionDir did not return after CopyDir was unblocked")
+	}
+
+	select {
+	case <-peerAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("peer AcquireCloneLock did not proceed after maybeCopyToActionDir released the lock")
+	}
+
+	cm.AssertExpectations(t)
 }

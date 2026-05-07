@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/common/git"
 	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/model"
 
@@ -147,6 +148,11 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir, actio
 		defer ta.Close()
 		return rc.JobContainer.CopyTarStream(ctx, containerActionDirCopy, ta)
 	}
+
+	// actionDir is shared across concurrent jobs that resolve the same `uses:`,
+	// so a peer's NewGitCloneExecutor can run `git checkout --force` here at any
+	// time. Hold the per-dir lock so the tar walk sees a stable worktree.
+	defer git.AcquireCloneLock(actionDir)()
 
 	if err := removeGitIgnore(ctx, actionDir); err != nil {
 		return err
