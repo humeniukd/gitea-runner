@@ -76,7 +76,14 @@ func (cc *CopyCollector) WriteFile(fpath string, fi fs.FileInfo, linkName string
 	if f == nil {
 		return os.Symlink(linkName, fdestpath)
 	}
-	df, err := os.OpenFile(fdestpath, os.O_CREATE|os.O_WRONLY, fi.Mode())
+	// If the destination exists with restrictive permissions (e.g. git pack
+	// files at mode 0444), opening it with O_WRONLY fails on Windows and
+	// macOS. Strip the read-only bit and remove it so we start clean.
+	if _, statErr := os.Lstat(fdestpath); statErr == nil {
+		_ = os.Chmod(fdestpath, 0o600)
+		_ = os.Remove(fdestpath)
+	}
+	df, err := os.OpenFile(fdestpath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fi.Mode())
 	if err != nil {
 		return err
 	}
