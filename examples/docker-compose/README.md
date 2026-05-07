@@ -41,7 +41,7 @@
 ### Running `gitea-runner` using Docker-in-Docker (DIND)
 
 - `privileged` has to be set to `true` because in-container Docker daemon requires a lot of kernel capabilities and file system mounts like `procfs` and `sysfs`
-- `secuity_opt` requires `apparmor` profile to be set to `rootlesskit` because the kernel might otherwise block user namespace changes that Docker daemon requires for startup
+- `security_opt` requires `apparmor` profile to be set to `rootlesskit` because the kernel might otherwise block user namespace changes that Docker daemon requires for startup
 
 ```yml
 ...
@@ -52,7 +52,7 @@
     security_opt:
       - apparmor=rootlesskit
     depends_on:
-      - gitea
+      gitea:
         condition: service_healthy
         restart: true
     volumes:
