@@ -279,7 +279,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			return fmt.Errorf("failed to handle credentials: %s", err)
 		}
 
-		logger.Infof("\U0001f680  Start image=%s", image)
+		logger.Infof("Start image=%s", image)
 		name := rc.jobContainerName()
 		// For gitea, to support --volumes-from <container_name_or_id> in options.
 		// We need to set the container name to the environment variable.
@@ -753,7 +753,7 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 	img := rc.platformImage(ctx)
 	if img == "" {
 		for _, platformName := range rc.runsOnPlatformNames(ctx) {
-			l.Infof("\U0001F6A7  Skipping unsupported platform -- Try running with `-P %+v=...`", platformName)
+			l.Infof("Skipping unsupported platform -- Try running with `-P %+v=...`", platformName)
 		}
 		return false, nil
 	}
