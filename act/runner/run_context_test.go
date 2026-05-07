@@ -647,10 +647,13 @@ func TestPrintStartJobContainerGroupGolden(t *testing.T) {
 	entry := logger.WithFields(log.Fields{"job": "j1"})
 	ctx := common.WithLogger(context.Background(), entry)
 
-	printStartJobContainerGroup(ctx)()
+	printStartJobContainerGroup(ctx, "node:20", "GITEA-WORKFLOW-build-JOB-test", "gitea-runner-network")()
 
 	want := strings.Join([]string{
 		"[j1]   | ::group::Starting job container",
+		"[j1]   | image: node:20",
+		"[j1]   | name: GITEA-WORKFLOW-build-JOB-test",
+		"[j1]   | network: gitea-runner-network",
 		"[j1]   | ::endgroup::",
 		"",
 	}, "\n")

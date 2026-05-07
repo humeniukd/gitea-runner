@@ -261,11 +261,16 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 }
 
 // printStartJobContainerGroup mirrors actions/runner's "Starting job container"
-// section: it emits the ::group:: header and returns a closer that emits
-// ::endgroup::. Callers should defer the returned closer.
-func printStartJobContainerGroup(ctx context.Context) func() {
+// section: it emits the ::group:: header followed by a summary of the image,
+// container name, and network, and returns a closer that emits ::endgroup::.
+// Callers should defer the returned closer. The summary lines are emitted as
+// raw output so they land in the same log stream as the group markers.
+func printStartJobContainerGroup(ctx context.Context, image, name, network string) func() {
 	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
 	rawLogger.Infof("::group::Starting job container")
+	rawLogger.Infof("image: %s", image)
+	rawLogger.Infof("name: %s", name)
+	rawLogger.Infof("network: %s", network)
 	return func() {
 		rawLogger.Infof("::endgroup::")
 	}
@@ -290,7 +295,6 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			return fmt.Errorf("failed to handle credentials: %s", err)
 		}
 
-		defer printStartJobContainerGroup(ctx)()
 		name := rc.jobContainerName()
 		// For gitea, to support --volumes-from <container_name_or_id> in options.
 		// We need to set the container name to the environment variable.
@@ -435,6 +439,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			return errors.New("Failed to create job container")
 		}
 
+		defer printStartJobContainerGroup(ctx, image, name, networkName)()
 		return common.NewPipelineExecutor(
 			rc.pullServicesImages(rc.Config.ForcePull),
 			rc.JobContainer.Pull(rc.Config.ForcePull),
