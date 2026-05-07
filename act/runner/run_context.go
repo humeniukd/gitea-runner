@@ -279,7 +279,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			return fmt.Errorf("failed to handle credentials: %s", err)
 		}
 
-		logger.Infof("Start image=%s", image)
+		logger.Infof("Starting container with image=%s", image)
 		name := rc.jobContainerName()
 		// For gitea, to support --volumes-from <container_name_or_id> in options.
 		// We need to set the container name to the environment variable.
