@@ -193,7 +193,7 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 func (rc *RunContext) startHostEnvironment() common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
-		rawLogger := logger.WithField("raw_output", true)
+		rawLogger := logger.WithField(rawOutputField, true)
 		logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
 			if rc.Config.LogOutput {
 				rawLogger.Infof("%s", s)
@@ -261,10 +261,7 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 }
 
 // printStartJobContainerGroup mirrors actions/runner's "Starting job container"
-// section: it emits the ::group:: header followed by a summary of the image,
-// container name, and network, and returns a closer that emits ::endgroup::.
-// Callers should defer the returned closer. The summary lines are emitted as
-// raw output so they land in the same log stream as the group markers.
+// section: emit the group header and summary, return a closer for ::endgroup::.
 func printStartJobContainerGroup(ctx context.Context, image, name, network string) func() {
 	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
 	rawLogger.Infof("::group::Starting job container")
@@ -280,7 +277,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
 		image := rc.platformImage(ctx)
-		rawLogger := logger.WithField("raw_output", true)
+		rawLogger := logger.WithField(rawOutputField, true)
 		logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
 			if rc.Config.LogOutput {
 				rawLogger.Infof("%s", s)
