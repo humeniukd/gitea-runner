@@ -6,7 +6,7 @@ require (
 	code.gitea.io/actions-proto-go v0.4.1
 	connectrpc.com/connect v1.19.2
 	github.com/avast/retry-go/v4 v4.7.0
-	github.com/docker/docker v25.0.15+incompatible
+	github.com/docker/docker v28.5.2+incompatible
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-isatty v0.0.22
 	github.com/sirupsen/logrus v1.9.4
@@ -22,10 +22,11 @@ require (
 
 require (
 	github.com/Masterminds/semver v1.5.0
+	github.com/containerd/errdefs v0.3.0
 	github.com/creack/pty v1.1.24
 	github.com/distribution/reference v0.6.0
-	github.com/docker/cli v25.0.7+incompatible
-	github.com/docker/go-connections v0.6.0
+	github.com/docker/cli v28.5.2+incompatible
+	github.com/docker/go-connections v0.7.0
 	github.com/go-git/go-billy/v5 v5.9.0
 	github.com/go-git/go-git/v5 v5.19.0
 	github.com/gobwas/glob v0.2.3
@@ -33,6 +34,7 @@ require (
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
 	github.com/moby/buildkit v0.13.2
+	github.com/moby/go-archive v0.1.0
 	github.com/moby/patternmatcher v0.6.1
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/opencontainers/selinux v1.14.0
@@ -47,7 +49,6 @@ require (
 require (
 	cyphar.com/go-pathrs v0.2.3 // indirect
 	dario.cat/mergo v1.0.2 // indirect
-	github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -55,11 +56,11 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
-	github.com/containerd/containerd v1.7.29 // indirect
+	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/docker/docker-credential-helpers v0.9.5 // indirect
+	github.com/docker/docker-credential-helpers v0.9.6 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/fatih/color v1.19.0 // indirect
@@ -67,7 +68,7 @@ require (
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
@@ -79,7 +80,8 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-runewidth v0.0.21 // indirect
 	github.com/mattn/go-shellwords v1.0.12 // indirect
-	github.com/mitchellh/mapstructure v1.1.2 // indirect
+	github.com/moby/docker-image-spec v1.3.1 // indirect
+	github.com/moby/sys/atomicwriter v0.1.0 // indirect
 	github.com/moby/sys/sequential v0.6.0 // indirect
 	github.com/moby/sys/user v0.4.0 // indirect
 	github.com/moby/sys/userns v0.1.0 // indirect
@@ -109,8 +111,6 @@ require (
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
-	google.golang.org/grpc v1.67.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20240814211410-ddb44dafa142 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
-	gopkg.in/yaml.v2 v2.4.0 // indirect
 )

@@ -16,7 +16,7 @@ import (
 	"gitea.com/gitea/runner/act/common"
 
 	"github.com/distribution/reference"
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/registry"
 )
 
@@ -78,8 +78,8 @@ func NewDockerPullExecutor(input NewDockerPullExecutorInput) common.Executor {
 	}
 }
 
-func getImagePullOptions(ctx context.Context, input NewDockerPullExecutorInput) (types.ImagePullOptions, error) {
-	imagePullOptions := types.ImagePullOptions{
+func getImagePullOptions(ctx context.Context, input NewDockerPullExecutorInput) (image.PullOptions, error) {
+	imagePullOptions := image.PullOptions{
 		Platform: input.Platform,
 	}
 	logger := common.Logger(ctx)
@@ -119,8 +119,8 @@ func getImagePullOptions(ctx context.Context, input NewDockerPullExecutorInput) 
 	return imagePullOptions, nil
 }
 
-func cleanImage(ctx context.Context, image string) string {
-	ref, err := reference.ParseAnyReference(image)
+func cleanImage(ctx context.Context, imageName string) string {
+	ref, err := reference.ParseAnyReference(imageName)
 	if err != nil {
 		common.Logger(ctx).Error(err)
 		return ""

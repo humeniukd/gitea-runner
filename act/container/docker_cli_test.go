@@ -377,10 +377,10 @@ func TestParseWithExpose(t *testing.T) {
 	invalids := map[string]string{
 		":":                   "invalid port format for --expose: :",
 		"8080:9090":           "invalid port format for --expose: 8080:9090",
-		"NaN/tcp":             `invalid range format for --expose: NaN/tcp, error: strconv.ParseUint: parsing "NaN": invalid syntax`,
-		"NaN-NaN/tcp":         `invalid range format for --expose: NaN-NaN/tcp, error: strconv.ParseUint: parsing "NaN": invalid syntax`,
-		"8080-NaN/tcp":        `invalid range format for --expose: 8080-NaN/tcp, error: strconv.ParseUint: parsing "NaN": invalid syntax`,
-		"1234567890-8080/tcp": `invalid range format for --expose: 1234567890-8080/tcp, error: strconv.ParseUint: parsing "1234567890": value out of range`,
+		"NaN/tcp":             `invalid range format for --expose: NaN/tcp, error: invalid start port 'NaN': invalid syntax`,
+		"NaN-NaN/tcp":         `invalid range format for --expose: NaN-NaN/tcp, error: invalid start port 'NaN': invalid syntax`,
+		"8080-NaN/tcp":        `invalid range format for --expose: 8080-NaN/tcp, error: invalid end port 'NaN': invalid syntax`,
+		"1234567890-8080/tcp": `invalid range format for --expose: 1234567890-8080/tcp, error: invalid start port '1234567890': value out of range (0–65535)`,
 	}
 	valids := map[string][]nat.Port{
 		"8080/tcp":      {"8080/tcp"},
@@ -795,7 +795,7 @@ func TestParseEnvfileVariablesWithBOMUnicode(t *testing.T) {
 	}
 
 	// UTF16 with BOM
-	e := "contains invalid utf8 bytes at line"
+	e := "invalid utf8 bytes at line"
 	if _, _, _, err := parseRun([]string{"--env-file=testdata/utf16.env", "img", "cmd"}); err == nil || !strings.Contains(err.Error(), e) {
 		t.Fatalf("Expected an error with message '%s', got %v", e, err)
 	}

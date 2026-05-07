@@ -9,7 +9,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -44,7 +44,7 @@ func TestImageExistsLocally(t *testing.T) {
 
 	// Chose alpine latest because it's so small
 	// maybe we should build an image instead so that tests aren't reliable on dockerhub
-	readerDefault, err := cli.ImagePull(ctx, "node:24-bookworm-slim", types.ImagePullOptions{
+	readerDefault, err := cli.ImagePull(ctx, "node:24-bookworm-slim", image.PullOptions{
 		Platform: "linux/amd64",
 	})
 	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
@@ -57,7 +57,7 @@ func TestImageExistsLocally(t *testing.T) {
 	assert.True(t, imageDefaultArchExists)
 
 	// Validate if another architecture platform can be pulled
-	readerArm64, err := cli.ImagePull(ctx, "node:24-bookworm-slim", types.ImagePullOptions{
+	readerArm64, err := cli.ImagePull(ctx, "node:24-bookworm-slim", image.PullOptions{
 		Platform: "linux/arm64",
 	})
 	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
