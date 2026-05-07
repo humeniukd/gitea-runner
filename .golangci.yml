@@ -102,6 +102,14 @@ linters:
       - linters:
           - forbidigo
         path: cmd
+      # vendored files from docker/cli — keep upstream style
+      - path: act/container/docker_cli(_test)?\.go
+        linters:
+          - dupl
+          - gocyclo
+          - nolintlint
+          - perfsprint
+          - revive
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
@@ -121,5 +129,8 @@ formatters:
       extra-rules: true
   exclusions:
     generated: lax
+    paths:
+      - act/container/docker_cli\.go
+      - act/container/docker_cli_test\.go
 run:
   timeout: 10m

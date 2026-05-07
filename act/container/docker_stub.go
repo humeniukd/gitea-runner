@@ -12,7 +12,7 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 
-	"github.com/docker/docker/api/types/system"
+	"github.com/moby/moby/api/types/system"
 	"github.com/pkg/errors"
 )
 

@@ -11,7 +11,7 @@ import (
 	"fmt"
 
 	cerrdefs "github.com/containerd/errdefs"
-	"github.com/docker/docker/api/types/image"
+	"github.com/moby/moby/client"
 )
 
 // ImageExistsLocally returns a boolean indicating if an image with the
@@ -53,7 +53,7 @@ func RemoveImage(ctx context.Context, imageName string, force, pruneChildren boo
 		return false, err
 	}
 
-	if _, err = cli.ImageRemove(ctx, inspectImage.ID, image.RemoveOptions{
+	if _, err = cli.ImageRemove(ctx, inspectImage.ID, client.ImageRemoveOptions{
 		Force:         force,
 		PruneChildren: pruneChildren,
 	}); err != nil {
