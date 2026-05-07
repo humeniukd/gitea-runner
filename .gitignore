@@ -11,4 +11,3 @@ coverage.txt
 __debug_bin
 # gorelease binary folder
 dist
-.claude/
