@@ -142,9 +142,16 @@ func cloneRemoteReusableWorkflow(rc *RunContext, cloneURL, ref, targetDirectory,
 	}
 }
 
+var modelNewWorkflowPlanner = model.NewWorkflowPlanner
+
 func newReusableWorkflowExecutor(rc *RunContext, directory, workflow string) common.Executor {
 	return func(ctx context.Context) error {
-		planner, err := model.NewWorkflowPlanner(path.Join(directory, workflow), true)
+		// Scoped to the yaml read so concurrent invocations don't serialize
+		// on the whole job run.
+		planner, err := func() (model.WorkflowPlanner, error) {
+			defer git.AcquireCloneLock(directory)()
+			return modelNewWorkflowPlanner(path.Join(directory, workflow), true)
+		}()
 		if err != nil {
 			return err
 		}
@@ -278,7 +285,7 @@ func setReusedWorkflowCallerResult(rc *RunContext, runner Runner) common.Executo
 				rc.caller.setReusedWorkflowJobResult(rc.JobName, reusedWorkflowJobResult)
 			} else {
 				rc.result(reusedWorkflowJobResult)
-				logger.WithField("jobResult", reusedWorkflowJobResult).Infof("\U0001F3C1  Job %s", reusedWorkflowJobResultMessage)
+				logger.WithField("jobResult", reusedWorkflowJobResult).Infof("Job %s", reusedWorkflowJobResultMessage)
 			}
 		}
 
