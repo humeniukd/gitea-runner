@@ -337,9 +337,7 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 				Platform:     rc.Config.ContainerArchitecture,
 			})
 			if buildContext == nil {
-				// Lock spans the whole daemon-side build because the daemon walks
-				// contextDir lazily as it drains the tar; releasing earlier would
-				// re-open the race. Same-action concurrent builds serialize.
+				// Held across the whole build: the daemon drains contextDir lazily.
 				inner := prepImage
 				prepImage = func(ctx context.Context) error {
 					defer git.AcquireCloneLock(actionDir)()

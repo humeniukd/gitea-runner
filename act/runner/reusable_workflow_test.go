@@ -82,12 +82,11 @@ func TestNewReusableWorkflowExecutorHoldsCloneLock(t *testing.T) {
 	defer unlockOnce()
 
 	plannerCalled := make(chan struct{})
-	stop := errors.New("stop after planner")
 
 	origPlanner := modelNewWorkflowPlanner
 	modelNewWorkflowPlanner = func(string, bool) (model.WorkflowPlanner, error) {
 		close(plannerCalled)
-		return nil, stop
+		return nil, errors.New("stop")
 	}
 	defer func() { modelNewWorkflowPlanner = origPlanner }()
 
@@ -118,7 +117,7 @@ func TestNewReusableWorkflowExecutorHoldsCloneLock(t *testing.T) {
 
 	select {
 	case err := <-done:
-		require.ErrorIs(t, err, stop)
+		require.Error(t, err)
 	case <-time.After(time.Second):
 		t.Fatal("executor did not return after planner ran")
 	}

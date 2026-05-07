@@ -357,13 +357,6 @@ func TestExecAsDockerHoldsCloneLockForRemoteUncached(t *testing.T) {
 	}
 	defer func() { ContainerNewDockerBuildExecutor = origBuildExec }()
 
-	cm := &containerMock{}
-	cm.On("Pull", false).Return(func(ctx context.Context) error { return ctx.Err() }).Maybe()
-	cm.On("Remove").Return(func(ctx context.Context) error { return nil }).Maybe()
-	cm.On("Create", []string(nil), []string(nil)).Return(func(ctx context.Context) error { return nil }).Maybe()
-	cm.On("Start", true).Return(func(ctx context.Context) error { return nil }).Maybe()
-	cm.On("Close").Return(func(ctx context.Context) error { return nil }).Maybe()
-
 	step := &stepActionRemote{
 		Step: &model.Step{ID: "1", Uses: "remote/action@v1", With: map[string]string{}},
 		RunContext: &RunContext{
@@ -375,17 +368,11 @@ func TestExecAsDockerHoldsCloneLockForRemoteUncached(t *testing.T) {
 					Jobs: map[string]*model.Job{"1": {}},
 				},
 			},
-			JobContainer: cm,
+			JobContainer: &containerMock{},
 		},
 		action: &model.Action{Runs: model.ActionRuns{Using: "docker", Image: "Dockerfile"}},
 		env:    map[string]string{},
 	}
-
-	origNewContainer := ContainerNewContainer
-	ContainerNewContainer = func(_ *container.NewContainerInput) container.ExecutionsEnvironment {
-		return cm
-	}
-	defer func() { ContainerNewContainer = origNewContainer }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -146,9 +146,8 @@ var modelNewWorkflowPlanner = model.NewWorkflowPlanner
 
 func newReusableWorkflowExecutor(rc *RunContext, directory, workflow string) common.Executor {
 	return func(ctx context.Context) error {
-		// Scoped so the lock is held only for the yaml read; concurrent
-		// invocations of the same reusable workflow then don't serialize on the
-		// whole job run.
+		// Scoped to the yaml read so concurrent invocations don't serialize
+		// on the whole job run.
 		planner, err := func() (model.WorkflowPlanner, error) {
 			defer git.AcquireCloneLock(directory)()
 			return modelNewWorkflowPlanner(path.Join(directory, workflow), true)
