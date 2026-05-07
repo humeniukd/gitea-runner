@@ -260,6 +260,17 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 	}
 }
 
+// printStartJobContainerGroup mirrors actions/runner's "Starting job container"
+// section: it emits the ::group:: header and returns a closer that emits
+// ::endgroup::. Callers should defer the returned closer.
+func printStartJobContainerGroup(ctx context.Context) func() {
+	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+	rawLogger.Infof("::group::Starting job container")
+	return func() {
+		rawLogger.Infof("::endgroup::")
+	}
+}
+
 func (rc *RunContext) startJobContainer() common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
@@ -279,8 +290,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			return fmt.Errorf("failed to handle credentials: %s", err)
 		}
 
-		rawLogger.Infof("::group::Starting job container")
-		defer rawLogger.Infof("::endgroup::")
+		defer printStartJobContainerGroup(ctx)()
 		name := rc.jobContainerName()
 		// For gitea, to support --volumes-from <container_name_or_id> in options.
 		// We need to set the container name to the environment variable.
