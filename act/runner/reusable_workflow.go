@@ -144,7 +144,13 @@ func cloneRemoteReusableWorkflow(rc *RunContext, cloneURL, ref, targetDirectory,
 
 func newReusableWorkflowExecutor(rc *RunContext, directory, workflow string) common.Executor {
 	return func(ctx context.Context) error {
+		// directory is the shared <ActionCacheDir>/<safeFilename(uses)>; a peer's
+		// cloneRemoteReusableWorkflow can `git checkout --force` it at any time.
+		// Hold the per-dir lock only for the yaml read so concurrent invocations
+		// of the same reusable workflow don't serialize on the whole job run.
+		unlock := git.AcquireCloneLock(directory)
 		planner, err := model.NewWorkflowPlanner(path.Join(directory, workflow), true)
+		unlock()
 		if err != nil {
 			return err
 		}
