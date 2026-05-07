@@ -15,10 +15,10 @@ import (
 	"gitea.com/gitea/runner/act/common"
 
 	"github.com/docker/docker/api/types/build"
-	"github.com/moby/buildkit/frontend/dockerfile/dockerignore"
 	"github.com/moby/go-archive"
 	"github.com/moby/go-archive/compression"
 	"github.com/moby/patternmatcher"
+	"github.com/moby/patternmatcher/ignorefile"
 )
 
 // NewDockerBuildExecutor function to create a run executor for the container
@@ -87,7 +87,7 @@ func createBuildContext(ctx context.Context, contextDir, relDockerfile string) (
 
 	var excludes []string
 	if err == nil {
-		excludes, err = dockerignore.ReadAll(f) //nolint:staticcheck // pre-existing issue from nektos/act
+		excludes, err = ignorefile.ReadAll(f)
 		if err != nil {
 			return nil, err
 		}
