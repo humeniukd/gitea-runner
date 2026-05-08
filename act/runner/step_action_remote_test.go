@@ -20,6 +20,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -432,6 +433,197 @@ func TestStepActionRemotePreThroughActionToken(t *testing.T) {
 			sarm.AssertExpectations(t)
 		})
 	}
+}
+
+func TestStepActionRemoteDefaultActionsUseAnonymousClone(t *testing.T) {
+	ctx := context.Background()
+
+	var actualToken string
+	sarm := &stepActionRemoteMocks{}
+
+	origStepAtionRemoteNewCloneExecutor := stepActionRemoteNewCloneExecutor
+	stepActionRemoteNewCloneExecutor = func(input git.NewGitCloneExecutorInput) common.Executor {
+		return func(ctx context.Context) error {
+			actualToken = input.Token
+			return nil
+		}
+	}
+	defer func() {
+		stepActionRemoteNewCloneExecutor = origStepAtionRemoteNewCloneExecutor
+	}()
+
+	sar := &stepActionRemote{
+		Step: &model.Step{
+			Uses: "actions/checkout@v4",
+		},
+		RunContext: &RunContext{
+			Config: &Config{
+				GitHubInstance:        "https://gitea.example.com",
+				DefaultActionInstance: "https://gitea.example.com",
+				ActionCacheDir:        t.TempDir(),
+				NoSkipCheckout:        true,
+				Secrets: map[string]string{
+					"GITEA_TOKEN": "repo-scoped-token",
+				},
+			},
+			Run: &model.Run{
+				JobID: "1",
+				Workflow: &model.Workflow{
+					Jobs: map[string]*model.Job{
+						"1": {},
+					},
+				},
+			},
+		},
+		readAction: sarm.readAction,
+	}
+
+	sarm.On("readAction", sar.Step, mock.Anything, "", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
+
+	err := sar.pre()(ctx)
+
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+	assert.Empty(t, actualToken)
+	sarm.AssertExpectations(t)
+}
+
+type fetchTokenCache struct {
+	token string
+	err   error
+}
+
+func (f *fetchTokenCache) Fetch(_ context.Context, _, _, _, token string) (string, error) {
+	f.token = token
+	return "", f.err
+}
+
+func (f *fetchTokenCache) GetTarArchive(context.Context, string, string, string) (io.ReadCloser, error) {
+	return nil, errors.New("unexpected GetTarArchive call")
+}
+
+func TestStepActionRemoteDefaultActionsUseAnonymousActionCacheFetch(t *testing.T) {
+	ctx := context.Background()
+	fetchErr := errors.New("stop after fetch")
+	cache := &fetchTokenCache{err: fetchErr}
+
+	sar := &stepActionRemote{
+		Step: &model.Step{
+			Uses: "actions/cache@v4",
+		},
+		RunContext: &RunContext{
+			Config: &Config{
+				GitHubInstance:        "https://gitea.example.com",
+				DefaultActionInstance: "https://gitea.example.com",
+				ActionCacheDir:        t.TempDir(),
+				ActionCache:           cache,
+				Secrets: map[string]string{
+					"GITEA_TOKEN": "repo-scoped-token",
+				},
+			},
+			Run: &model.Run{
+				JobID: "1",
+				Workflow: &model.Workflow{
+					Jobs: map[string]*model.Job{
+						"1": {},
+					},
+				},
+			},
+		},
+	}
+
+	err := sar.pre()(ctx)
+
+	require.ErrorIs(t, err, fetchErr)
+	assert.Empty(t, cache.token)
+}
+
+func TestStepActionRemoteReplacedActionCacheFetchUsesReplacementToken(t *testing.T) {
+	ctx := context.Background()
+	fetchErr := errors.New("stop after fetch")
+	cache := &fetchTokenCache{err: fetchErr}
+
+	sar := &stepActionRemote{
+		Step: &model.Step{
+			Uses: "org/repo/path@ref",
+		},
+		RunContext: &RunContext{
+			Config: &Config{
+				GitHubInstance:                     "https://enterprise.github.com",
+				DefaultActionInstance:              "https://enterprise.github.com",
+				ReplaceGheActionWithGithubCom:      []string{"org/repo"},
+				ReplaceGheActionTokenWithGithubCom: "github-com-replacement-token",
+				ActionCacheDir:                     t.TempDir(),
+				ActionCache:                        cache,
+				Secrets: map[string]string{
+					"GITEA_TOKEN": "enterprise-token",
+				},
+			},
+			Run: &model.Run{
+				JobID: "1",
+				Workflow: &model.Workflow{
+					Jobs: map[string]*model.Job{
+						"1": {},
+					},
+				},
+			},
+		},
+	}
+
+	err := sar.pre()(ctx)
+
+	require.ErrorIs(t, err, fetchErr)
+	assert.Equal(t, "github-com-replacement-token", cache.token)
+}
+
+func TestStepActionRemoteSameInstanceActionUsesToken(t *testing.T) {
+	ctx := context.Background()
+
+	var actualToken string
+	sarm := &stepActionRemoteMocks{}
+
+	origStepAtionRemoteNewCloneExecutor := stepActionRemoteNewCloneExecutor
+	stepActionRemoteNewCloneExecutor = func(input git.NewGitCloneExecutorInput) common.Executor {
+		return func(ctx context.Context) error {
+			actualToken = input.Token
+			return nil
+		}
+	}
+	defer func() {
+		stepActionRemoteNewCloneExecutor = origStepAtionRemoteNewCloneExecutor
+	}()
+
+	sar := &stepActionRemote{
+		Step: &model.Step{
+			Uses: "https://gitea.example.com/private/action@v1",
+		},
+		RunContext: &RunContext{
+			Config: &Config{
+				GitHubInstance:        "https://gitea.example.com",
+				DefaultActionInstance: "https://gitea.example.com",
+				ActionCacheDir:        t.TempDir(),
+				Secrets: map[string]string{
+					"GITEA_TOKEN": "repo-scoped-token",
+				},
+			},
+			Run: &model.Run{
+				JobID: "1",
+				Workflow: &model.Workflow{
+					Jobs: map[string]*model.Job{
+						"1": {},
+					},
+				},
+			},
+		},
+		readAction: sarm.readAction,
+	}
+
+	sarm.On("readAction", sar.Step, mock.Anything, "", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
+
+	err := sar.pre()(ctx)
+
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+	assert.Equal(t, "repo-scoped-token", actualToken)
+	sarm.AssertExpectations(t)
 }
 
 func TestStepActionRemotePost(t *testing.T) {

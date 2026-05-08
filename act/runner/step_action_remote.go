@@ -63,10 +63,12 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			return nil
 		}
 
+		var replacedActionToken string
 		for _, action := range sar.RunContext.Config.ReplaceGheActionWithGithubCom {
 			if strings.EqualFold(fmt.Sprintf("%s/%s", sar.remoteAction.Org, sar.remoteAction.Repo), action) {
 				sar.remoteAction.URL = "https://github.com"
 				github.Token = sar.RunContext.Config.ReplaceGheActionTokenWithGithubCom
+				replacedActionToken = github.Token
 			}
 		}
 		if sar.RunContext.Config.ActionCache != nil {
@@ -74,9 +76,13 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 
 			var err error
 			sar.cacheDir = fmt.Sprintf("%s/%s", sar.remoteAction.Org, sar.remoteAction.Repo)
-			repoURL := sar.remoteAction.URL + "/" + sar.cacheDir
+			repoURL := sar.remoteAction.CloneURL(sar.RunContext.Config.DefaultActionInstance)
 			repoRef := sar.remoteAction.Ref
-			sar.resolvedSha, err = cache.Fetch(ctx, sar.cacheDir, repoURL, repoRef, github.Token)
+			token := getRemoteActionCloneToken(sar.getRunContext().Config, sar.remoteAction, github.Token)
+			if replacedActionToken != "" {
+				token = replacedActionToken
+			}
+			sar.resolvedSha, err = cache.Fetch(ctx, sar.cacheDir, repoURL, repoRef, token)
 			if err != nil {
 				return fmt.Errorf("failed to fetch \"%s\" version \"%s\": %w", repoURL, repoRef, err)
 			}
@@ -113,7 +119,10 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 		}
 
 		actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), sar.Step.UsesHash())
-		token := getGitCloneToken(sar.getRunContext().Config, sar.remoteAction.CloneURL(sar.RunContext.Config.DefaultActionInstance))
+		token := getRemoteActionCloneToken(sar.getRunContext().Config, sar.remoteAction, github.Token)
+		if replacedActionToken != "" {
+			token = replacedActionToken
+		}
 		gitClone := stepActionRemoteNewCloneExecutor(git.NewGitCloneExecutorInput{
 			URL:         sar.remoteAction.CloneURL(sar.RunContext.Config.DefaultActionInstance),
 			Ref:         sar.remoteAction.Ref,
@@ -278,6 +287,24 @@ func (sar *stepActionRemote) cloneSkipTLS() bool {
 	}
 	// Return true if the URL of the remote action is the same as the URL of the Gitea instance
 	return sar.remoteAction.URL == sar.RunContext.Config.GitHubInstance
+}
+
+func getRemoteActionCloneToken(conf *Config, action *remoteAction, token string) string {
+	if conf == nil || action == nil {
+		return ""
+	}
+	if action.URL == "" && strings.EqualFold(action.Org, "actions") {
+		return ""
+	}
+
+	cloneURL := action.CloneURL(conf.DefaultActionInstance)
+	if !shouldCloneURLUseToken(conf.GitHubInstance, cloneURL) {
+		return ""
+	}
+	if token != "" {
+		return token
+	}
+	return conf.GetToken()
 }
 
 type remoteAction struct {
