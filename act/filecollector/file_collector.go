@@ -73,15 +73,14 @@ func (cc *CopyCollector) WriteFile(fpath string, fi fs.FileInfo, linkName string
 	if err := os.MkdirAll(filepath.Dir(fdestpath), 0o777); err != nil {
 		return err
 	}
+	// Remove any existing destination so we can overwrite read-only files
+	// (e.g. git pack files at mode 0444 trip EACCES on macOS and "Access is
+	// denied" on Windows when reopened with O_WRONLY) and so os.Symlink does
+	// not fail with EEXIST. os.Remove clears the Windows read-only attribute
+	// internally; on Unix unlink only needs write permission on the parent.
+	_ = os.Remove(fdestpath)
 	if f == nil {
 		return os.Symlink(linkName, fdestpath)
-	}
-	// If the destination exists with restrictive permissions (e.g. git pack
-	// files at mode 0444), opening it with O_WRONLY fails on Windows and
-	// macOS. Strip the read-only bit and remove it so we start clean.
-	if _, statErr := os.Lstat(fdestpath); statErr == nil {
-		_ = os.Chmod(fdestpath, 0o600)
-		_ = os.Remove(fdestpath)
 	}
 	df, err := os.OpenFile(fdestpath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fi.Mode())
 	if err != nil {
