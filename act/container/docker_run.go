@@ -240,9 +240,11 @@ func GetDockerClient(ctx context.Context) (cli client.APIClient, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to docker daemon: %w", err)
 	}
+	// Best-effort API version negotiation, matching the old client.NegotiateAPIVersion
+	// behaviour. Ping failures here are non-fatal: the connection is exercised again on
+	// the first real call, and the client falls back to the daemon's default API version.
 	if _, err := cli.Ping(ctx, client.PingOptions{NegotiateAPIVersion: true}); err != nil {
-		cli.Close()
-		return nil, fmt.Errorf("failed to ping docker daemon: %w", err)
+		common.Logger(ctx).Debugf("docker daemon ping during version negotiation failed, continuing: %v", err)
 	}
 
 	return cli, nil
@@ -489,15 +491,9 @@ func (cr *containerReference) create(capAdd, capDrop []string) common.Executor {
 
 		var platSpecs *specs.Platform
 		if supportsContainerImagePlatform(ctx, cr.cli) && cr.input.Platform != "" {
-			desiredPlatform := strings.SplitN(cr.input.Platform, `/`, 2)
-
-			if len(desiredPlatform) != 2 {
-				return fmt.Errorf("incorrect container platform option '%s'", cr.input.Platform)
-			}
-
-			platSpecs = &specs.Platform{
-				Architecture: desiredPlatform[1],
-				OS:           desiredPlatform[0],
+			platSpecs, err = parsePlatform(cr.input.Platform)
+			if err != nil {
+				return err
 			}
 		}
 

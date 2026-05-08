@@ -50,7 +50,11 @@ func NewDockerBuildExecutor(input NewDockerBuildExecutorInput) common.Executor {
 			AuthConfigs: LoadDockerAuthConfigs(ctx),
 			Dockerfile:  input.Dockerfile,
 		}
-		if platform := parsePlatform(input.Platform); platform != nil {
+		platform, err := parsePlatform(input.Platform)
+		if err != nil {
+			return err
+		}
+		if platform != nil {
 			options.Platforms = []specs.Platform{*platform}
 		}
 		var buildContext io.ReadCloser

@@ -80,7 +80,11 @@ func NewDockerPullExecutor(input NewDockerPullExecutorInput) common.Executor {
 
 func getImagePullOptions(ctx context.Context, input NewDockerPullExecutorInput) (client.ImagePullOptions, error) {
 	imagePullOptions := client.ImagePullOptions{}
-	if platform := parsePlatform(input.Platform); platform != nil {
+	platform, err := parsePlatform(input.Platform)
+	if err != nil {
+		return imagePullOptions, err
+	}
+	if platform != nil {
 		imagePullOptions.Platforms = []specs.Platform{*platform}
 	}
 	logger := common.Logger(ctx)
