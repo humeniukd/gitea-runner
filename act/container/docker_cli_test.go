@@ -197,9 +197,7 @@ func TestParseRunWithInvalidArgs(t *testing.T) {
 	}
 }
 
-//nolint:gocyclo
-func TestParseWithVolumes(t *testing.T) {
-
+func TestParseWithVolumes(t *testing.T) { //nolint:gocyclo // verbatim copy from docker/cli tests
 	// A single volume
 	arr, tryit := setupPlatformVolume([]string{`/tmp`}, []string{`c:\tmp`})
 	if config, hostConfig, _ := mustParse(t, tryit); hostConfig.Binds != nil {
@@ -267,14 +265,13 @@ func TestParseWithVolumes(t *testing.T) {
 			t.Fatalf("Error parsing %s. Should have a single bind mount and no volumes", arr[0])
 		}
 	}
-
 }
 
 // setupPlatformVolume takes two arrays of volume specs - a Unix style
 // spec and a Windows style spec. Depending on the platform being unit tested,
 // it returns one of them, along with a volume string that would be passed
 // on the docker CLI (e.g. -v /bar -v /foo).
-func setupPlatformVolume(u []string, w []string) ([]string, string) {
+func setupPlatformVolume(u, w []string) ([]string, string) {
 	var a []string
 	if runtime.GOOS == "windows" {
 		a = w
@@ -377,7 +374,7 @@ func TestParseHostname(t *testing.T) {
 	hostnameWithDomain := "--hostname=hostname.domainname"
 	hostnameWithDomainTld := "--hostname=hostname.domainname.tld"
 	for hostname, expectedHostname := range validHostnames {
-		if config, _, _ := mustParse(t, fmt.Sprintf("--hostname=%s", hostname)); config.Hostname != expectedHostname {
+		if config, _, _ := mustParse(t, "--hostname="+hostname); config.Hostname != expectedHostname {
 			t.Fatalf("Expected the config to have 'hostname' as %q, got %q", expectedHostname, config.Hostname)
 		}
 	}
@@ -499,7 +496,6 @@ func TestParseDevice(t *testing.T) {
 			t.Fatalf("Expected %v, got %v", deviceMapping, hostconfig.Devices)
 		}
 	}
-
 }
 
 func TestParseNetworkConfig(t *testing.T) {
@@ -673,7 +669,7 @@ func TestParseModes(t *testing.T) {
 	}
 
 	// uts ko
-	_, _, _, err = parseRun([]string{"--uts=container:", "img", "cmd"}) //nolint:dogsled
+	_, _, _, err = parseRun([]string{"--uts=container:", "img", "cmd"}) //nolint:dogsled // verbatim copy from docker/cli tests
 	assert.ErrorContains(t, err, "--uts: invalid UTS mode")
 
 	// uts ok
@@ -717,7 +713,7 @@ func TestParseRestartPolicy(t *testing.T) {
 		},
 	}
 	for restart, expectedError := range invalids {
-		if _, _, _, err := parseRun([]string{fmt.Sprintf("--restart=%s", restart), "img", "cmd"}); err == nil || err.Error() != expectedError {
+		if _, _, _, err := parseRun([]string{"--restart=" + restart, "img", "cmd"}); err == nil || err.Error() != expectedError {
 			t.Fatalf("Expected an error with message '%v' for %v, got %v", expectedError, restart, err)
 		}
 	}
@@ -733,7 +729,7 @@ func TestParseRestartPolicy(t *testing.T) {
 }
 
 func TestParseRestartPolicyAutoRemove(t *testing.T) {
-	_, _, _, err := parseRun([]string{"--rm", "--restart=always", "img", "cmd"}) //nolint:dogsled
+	_, _, _, err := parseRun([]string{"--rm", "--restart=always", "img", "cmd"}) //nolint:dogsled // verbatim copy from docker/cli tests
 	if err == nil {
 		t.Fatal("Expected error for conflicting --restart and --rm, but got none")
 	}
@@ -793,7 +789,7 @@ func TestParseLoggingOpts(t *testing.T) {
 	}
 }
 
-func TestParseEnvfileVariables(t *testing.T) {
+func TestParseEnvfileVariables(t *testing.T) { //nolint:dupl // verbatim copy from docker/cli tests
 	e := "open nonexistent: no such file or directory"
 	if runtime.GOOS == "windows" {
 		e = "open nonexistent: The system cannot find the file specified."
@@ -846,7 +842,7 @@ func TestParseEnvfileVariablesWithBOMUnicode(t *testing.T) {
 	}
 }
 
-func TestParseLabelfileVariables(t *testing.T) {
+func TestParseLabelfileVariables(t *testing.T) { //nolint:dupl // verbatim copy from docker/cli tests
 	e := "open nonexistent: no such file or directory"
 	if runtime.GOOS == "windows" {
 		e = "open nonexistent: The system cannot find the file specified."
@@ -1005,7 +1001,6 @@ func TestConvertToStandardNotation(t *testing.T) {
 
 	for key, ports := range valid {
 		convertedPorts, err := convertToStandardNotation(ports)
-
 		if err != nil {
 			assert.NilError(t, err)
 		}

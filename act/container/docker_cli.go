@@ -11,7 +11,7 @@
 // See DOCKER_LICENSE for the full license text.
 //
 
-//nolint:errcheck,depguard,unused // verbatim copy from docker/cli with minimal changes
+//nolint:errcheck // verbatim copy from docker/cli with minimal changes
 package container
 
 import (
@@ -25,11 +25,10 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
-
-	"regexp"
 
 	"github.com/docker/cli/opts"
 	"github.com/docker/go-connections/nat"
@@ -348,9 +347,7 @@ type containerConfig struct {
 // parse parses the args for the specified command and generates a Config,
 // a HostConfig and returns them with the specified command.
 // If the specified args are not valid, it will return an error.
-//
-//nolint:gocyclo
-func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*containerConfig, error) {
+func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*containerConfig, error) { //nolint:gocyclo // verbatim copy from docker/cli
 	var (
 		attachStdin  = copts.attach.Get("stdin")
 		attachStdout = copts.attach.Get("stdout")
@@ -818,7 +815,7 @@ func parseNetworkOpts(copts *containerOptions) (map[string]*network.EndpointSett
 	return endpoints, nil
 }
 
-func applyContainerOptions(n *opts.NetworkAttachmentOpts, copts *containerOptions) error { //nolint:gocyclo
+func applyContainerOptions(n *opts.NetworkAttachmentOpts, copts *containerOptions) error { //nolint:gocyclo // verbatim copy from docker/cli
 	// TODO should we error if _any_ advanced option is used? (i.e. forbid to combine advanced notation with the "old" flags (`--network-alias`, `--link`, `--ip`, `--ip6`)?
 	if len(n.Aliases) > 0 && copts.aliases.Len() > 0 {
 		return invalidParameter(errors.New("conflicting options: cannot specify both --network-alias and per-network alias"))
@@ -1083,7 +1080,7 @@ func validDeviceMode(mode string) bool {
 }
 
 // validateDevice validates a path for devices
-func validateDevice(val string, serverOS string) (string, error) {
+func validateDevice(val, serverOS string) (string, error) {
 	switch serverOS {
 	case "linux":
 		return validateLinuxPath(val, validDeviceMode)
