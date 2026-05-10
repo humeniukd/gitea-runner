@@ -420,7 +420,8 @@ func (r *Reporter) Close(lastWords string) error {
 	// so a final empty request never runs TransferLogs and dbfs_data leaks.
 	// Inject a sentinel row after the daemon has exited so it can't be flushed
 	// before ReportLog(true).
-	// TODO: Remove after https://github.com/go-gitea/gitea/pull/37631 is in all supported branches.
+	// TODO: Remove after https://github.com/go-gitea/gitea/pull/37631 is in all
+	// supported branches, e.g. v1.28+.
 	r.stateMu.Lock()
 	if len(r.logRows) == 0 {
 		r.logRows = append(r.logRows, &runnerv1.LogRow{
