@@ -13,12 +13,21 @@ import (
 
 	"github.com/distribution/reference"
 	"github.com/docker/cli/cli/config"
+	"github.com/docker/cli/cli/config/credentials"
 	"github.com/moby/moby/api/types/registry"
 )
 
 func LoadDockerAuthConfig(ctx context.Context, image string) (registry.AuthConfig, error) {
 	logger := common.Logger(ctx)
-	cfg := config.LoadDefaultConfigFile(nil)
+	// config.LoadDefaultConfigFile panics on nil io.Writer when the config
+	// file is malformed; use config.Load to route errors through the logger.
+	cfg, err := config.Load(config.Dir())
+	if err != nil {
+		logger.Warnf("Could not load docker config: %v", err)
+	}
+	if !cfg.ContainsAuth() {
+		cfg.CredentialsStore = credentials.DetectDefaultStore(cfg.CredentialsStore)
+	}
 
 	registryKey := registryAuthConfigKey("docker.io")
 	if image != "" {
@@ -48,7 +57,13 @@ func LoadDockerAuthConfig(ctx context.Context, image string) (registry.AuthConfi
 
 func LoadDockerAuthConfigs(ctx context.Context) map[string]registry.AuthConfig {
 	logger := common.Logger(ctx)
-	cfg := config.LoadDefaultConfigFile(nil)
+	cfg, err := config.Load(config.Dir())
+	if err != nil {
+		logger.Warnf("Could not load docker config: %v", err)
+	}
+	if !cfg.ContainsAuth() {
+		cfg.CredentialsStore = credentials.DetectDefaultStore(cfg.CredentialsStore)
+	}
 
 	creds, err := cfg.GetAllCredentials()
 	if err != nil {
