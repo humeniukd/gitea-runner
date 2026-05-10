@@ -601,6 +601,8 @@ func TestReporter_StateNotifyFlush(t *testing.T) {
 // Regression test for https://gitea.com/gitea/runner/issues/950: Close() must
 // always send a final UpdateLog with NoMore=true carrying at least one row,
 // otherwise the server's len(Rows)==0 short-circuit skips TransferLogs.
+// TODO: Remove after https://github.com/go-gitea/gitea/pull/37631 is in all
+// supported branches, e.g. v1.28+.
 func TestReporter_CloseAlwaysSendsRowsWithNoMore(t *testing.T) {
 	var lastReq atomic.Pointer[runnerv1.UpdateLogRequest]
 	var noMoreCalls atomic.Int64
