@@ -230,7 +230,6 @@ func GetDockerClient(ctx context.Context) (cli client.APIClient, err error) {
 			return nil, err
 		}
 		cli, err = client.New(
-			client.FromEnv,
 			client.WithHost(helper.Host),
 			client.WithDialContext(helper.Dialer),
 		)
@@ -244,7 +243,7 @@ func GetDockerClient(ctx context.Context) (cli client.APIClient, err error) {
 	// behaviour. Ping failures here are non-fatal: the connection is exercised again on
 	// the first real call, and the client falls back to the daemon's default API version.
 	if _, err := cli.Ping(ctx, client.PingOptions{NegotiateAPIVersion: true}); err != nil {
-		common.Logger(ctx).Debugf("docker daemon ping during version negotiation failed, continuing: %v", err)
+		common.Logger(ctx).Warnf("docker daemon ping during version negotiation failed, continuing: %v", err)
 	}
 
 	return cli, nil

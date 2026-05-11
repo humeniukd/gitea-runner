@@ -23,7 +23,7 @@ func parsePlatform(platform string) (*specs.Platform, error) {
 	}
 
 	parts := strings.Split(platform, "/")
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" {
 		return nil, fmt.Errorf("invalid platform %q: expected os/arch[/variant]", platform)
 	}
 
@@ -31,7 +31,7 @@ func parsePlatform(platform string) (*specs.Platform, error) {
 		OS:           strings.ToLower(parts[0]),
 		Architecture: strings.ToLower(parts[1]),
 	}
-	if len(parts) > 2 {
+	if len(parts) == 3 {
 		spec.Variant = strings.ToLower(parts[2])
 	}
 

@@ -44,13 +44,6 @@ func TestParsePlatform(t *testing.T) {
 		assert.Equal(t, "v8", got.Variant)
 	})
 
-	t.Run("segments past variant are dropped", func(t *testing.T) {
-		got, err := parsePlatform("linux/arm/v7/extra")
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		assert.Equal(t, "v7", got.Variant)
-	})
-
 	for _, bad := range []string{
 		"amd64",
 		"linux",
@@ -58,6 +51,7 @@ func TestParsePlatform(t *testing.T) {
 		"/amd64",
 		"/",
 		"//",
+		"linux/arm/v7/extra",
 	} {
 		t.Run("rejects "+bad, func(t *testing.T) {
 			got, err := parsePlatform(bad)

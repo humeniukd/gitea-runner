@@ -24,6 +24,7 @@ func LoadDockerAuthConfig(ctx context.Context, image string) (registry.AuthConfi
 	cfg, err := config.Load(config.Dir())
 	if err != nil {
 		logger.Warnf("Could not load docker config: %v", err)
+		return registry.AuthConfig{}, err
 	}
 	if !cfg.ContainsAuth() {
 		cfg.CredentialsStore = credentials.DetectDefaultStore(cfg.CredentialsStore)
@@ -31,18 +32,17 @@ func LoadDockerAuthConfig(ctx context.Context, image string) (registry.AuthConfi
 
 	registryKey := registryAuthConfigKey("docker.io")
 	if image != "" {
-		registryRef, err := reference.ParseNormalizedNamed(image)
-		if err != nil {
-			logger.Warnf("Could not normalize image reference: %v", err)
-			return registry.AuthConfig{}, nil
+		if registryRef, refErr := reference.ParseNormalizedNamed(image); refErr != nil {
+			logger.Warnf("Could not normalize image reference: %v", refErr)
+		} else {
+			registryKey = registryAuthConfigKey(reference.Domain(registryRef))
 		}
-		registryKey = registryAuthConfigKey(reference.Domain(registryRef))
 	}
 
 	authConfig, err := cfg.GetAuthConfig(registryKey)
 	if err != nil {
 		logger.Warnf("Could not get auth config from docker config: %v", err)
-		return registry.AuthConfig{}, nil
+		return registry.AuthConfig{}, err
 	}
 
 	return registry.AuthConfig{
@@ -60,6 +60,7 @@ func LoadDockerAuthConfigs(ctx context.Context) map[string]registry.AuthConfig {
 	cfg, err := config.Load(config.Dir())
 	if err != nil {
 		logger.Warnf("Could not load docker config: %v", err)
+		return nil
 	}
 	if !cfg.ContainsAuth() {
 		cfg.CredentialsStore = credentials.DetectDefaultStore(cfg.CredentialsStore)
