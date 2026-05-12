@@ -219,6 +219,8 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 }
 
 func (r *Runner) cloneEnvs() map[string]string {
+	// +3 reserves space for the per-task keys injected by run():
+	// ACTIONS_ID_TOKEN_REQUEST_URL, ACTIONS_ID_TOKEN_REQUEST_TOKEN, ACTIONS_RUNTIME_TOKEN.
 	envs := make(map[string]string, len(r.envs)+3)
 	maps.Copy(envs, r.envs)
 	return envs
