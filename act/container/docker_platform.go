@@ -23,7 +23,7 @@ func parsePlatform(platform string) (*specs.Platform, error) {
 	}
 
 	parts := strings.Split(platform, "/")
-	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" {
+	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" || (len(parts) == 3 && parts[2] == "") {
 		return nil, fmt.Errorf("invalid platform %q: expected os/arch[/variant]", platform)
 	}
 

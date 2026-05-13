@@ -51,6 +51,7 @@ func TestParsePlatform(t *testing.T) {
 		"/amd64",
 		"/",
 		"//",
+		"linux/arm/",
 		"linux/arm/v7/extra",
 	} {
 		t.Run("rejects "+bad, func(t *testing.T) {
