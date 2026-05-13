@@ -45,14 +45,7 @@ func LoadDockerAuthConfig(ctx context.Context, image string) (registry.AuthConfi
 		return registry.AuthConfig{}, err
 	}
 
-	return registry.AuthConfig{
-		Username:      authConfig.Username,
-		Password:      authConfig.Password,
-		Auth:          authConfig.Auth,
-		ServerAddress: authConfig.ServerAddress,
-		IdentityToken: authConfig.IdentityToken,
-		RegistryToken: authConfig.RegistryToken,
-	}, nil
+	return registry.AuthConfig(authConfig), nil
 }
 
 func LoadDockerAuthConfigs(ctx context.Context) map[string]registry.AuthConfig {
@@ -73,14 +66,7 @@ func LoadDockerAuthConfigs(ctx context.Context) map[string]registry.AuthConfig {
 	}
 	authConfigs := make(map[string]registry.AuthConfig, len(creds))
 	for k, v := range creds {
-		authConfigs[k] = registry.AuthConfig{
-			Username:      v.Username,
-			Password:      v.Password,
-			Auth:          v.Auth,
-			ServerAddress: v.ServerAddress,
-			IdentityToken: v.IdentityToken,
-			RegistryToken: v.RegistryToken,
-		}
+		authConfigs[k] = registry.AuthConfig(v)
 	}
 
 	return authConfigs
