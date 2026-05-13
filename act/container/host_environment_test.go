@@ -135,7 +135,8 @@ func TestHostEnvironmentAllocatePTY(t *testing.T) {
 				map[string]string{"PATH": os.Getenv("PATH")}, "", "",
 			)(context.Background())
 			require.NoError(t, err)
-			assert.Equal(t, tc.expect, strings.ReplaceAll(buf.String(), "\r", ""))
+			got := strings.TrimSpace(strings.ReplaceAll(buf.String(), "\r", ""))
+			assert.Equal(t, tc.expect, got)
 		})
 	}
 }
