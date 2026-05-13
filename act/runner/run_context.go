@@ -229,7 +229,8 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 			CleanUp: func() {
 				os.RemoveAll(miscpath)
 			},
-			StdOut: logWriter,
+			StdOut:      logWriter,
+			AllocatePTY: rc.Config.AllocatePTY,
 		}
 		rc.cleanUpJobContainer = rc.JobContainer.Remove()
 		for k, v := range rc.JobContainer.GetRunnerContext(ctx) {

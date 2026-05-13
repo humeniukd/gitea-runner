@@ -72,6 +72,7 @@ type Container struct {
 // Host represents the configuration for the host.
 type Host struct {
 	WorkdirParent string `yaml:"workdir_parent"` // WorkdirParent specifies the parent directory for the host's working directory.
+	AllocatePTY   bool   `yaml:"allocate_pty"`   // AllocatePTY allocates a pseudo-TTY for each step's process. Default is false, matching GitHub's actions/runner. Enable only for jobs that need an interactive terminal; tools like docker build emit redrawing progress frames into the captured log when a TTY is present.
 }
 
 // Metrics represents the configuration for the Prometheus metrics endpoint.
