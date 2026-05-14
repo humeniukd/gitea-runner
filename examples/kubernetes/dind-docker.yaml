@@ -52,7 +52,7 @@ spec:
           privileged: true
         volumeMounts:
         - name: docker-socket
-          mountPath: /var/run/
+          mountPath: /var/run
         startupProbe:
           exec:
             command:
@@ -81,4 +81,4 @@ spec:
         - name: runner-data
           mountPath: /data
         - name: docker-socket
-          mountPath: /var/run/
+          mountPath: /var/run
