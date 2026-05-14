@@ -97,6 +97,7 @@ cache:
   # (or `gitea-runner cache-server`) is in use: the runner pre-registers each job's ACTIONS_RUNTIME_TOKEN with the
   # cache-server, and the cache-server enforces bearer auth + per-repo cache isolation.
   external_secret: ""
+  offline_mode: false
 
 container:
   # Specifies the network to which the container will connect.
