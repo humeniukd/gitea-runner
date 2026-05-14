@@ -347,7 +347,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		Workdir:        workdir,
 		BindWorkdir:    r.cfg.Container.BindWorkdir,
 		ActionCacheDir: filepath.FromSlash(r.cfg.Host.WorkdirParent),
-    ActionOfflineMode: r.cfg.Cache.OfflineMode,
+		ActionOfflineMode: r.cfg.Cache.OfflineMode,
 
 		ReuseContainers:       false,
 		ForcePull:             r.cfg.Container.ForcePull,
