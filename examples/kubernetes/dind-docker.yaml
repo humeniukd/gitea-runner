@@ -55,16 +55,10 @@ spec:
           mountPath: /var/run
         startupProbe:
           exec:
-            command:
-            - /usr/bin/test
-            - -S
-            - /var/run/docker.sock
+            command: ["/usr/bin/test", "-S", "/var/run/docker.sock"]
         livenessProbe:
           exec:
-            command:
-            - /usr/bin/test
-            - -S
-            - /var/run/docker.sock
+            command: ["/usr/bin/test", "-S", "/var/run/docker.sock"]
         restartPolicy: Always
       containers:
       - name: runner
