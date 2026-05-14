@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -12,7 +13,7 @@ import (
 
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // Log represents the configuration for logging.
@@ -22,17 +23,24 @@ type Log struct {
 
 // Runner represents the configuration for the runner.
 type Runner struct {
-	File            string            `yaml:"file"`             // File specifies the file path for the runner.
-	Capacity        int               `yaml:"capacity"`         // Capacity specifies the capacity of the runner.
-	Envs            map[string]string `yaml:"envs"`             // Envs stores environment variables for the runner.
-	EnvFile         string            `yaml:"env_file"`         // EnvFile specifies the path to the file containing environment variables for the runner.
-	Timeout         time.Duration     `yaml:"timeout"`          // Timeout specifies the duration for runner timeout.
-	ShutdownTimeout time.Duration     `yaml:"shutdown_timeout"` // ShutdownTimeout specifies the duration to wait for running jobs to complete during a shutdown of the runner.
-	Insecure        bool              `yaml:"insecure"`         // Insecure indicates whether the runner operates in an insecure mode.
-	FetchTimeout    time.Duration     `yaml:"fetch_timeout"`    // FetchTimeout specifies the timeout duration for fetching resources.
-	FetchInterval   time.Duration     `yaml:"fetch_interval"`   // FetchInterval specifies the interval duration for fetching resources.
-	Labels          []string          `yaml:"labels"`           // Labels specify the labels of the runner. Labels are declared on each startup
-	GithubMirror    string            `yaml:"github_mirror"`    // GithubMirror defines what mirrors should be used when using github
+	File                string            `yaml:"file"`                   // File specifies the file path for the runner.
+	Capacity            int               `yaml:"capacity"`               // Capacity specifies the capacity of the runner.
+	Envs                map[string]string `yaml:"envs"`                   // Envs stores environment variables for the runner.
+	EnvFile             string            `yaml:"env_file"`               // EnvFile specifies the path to the file containing environment variables for the runner.
+	Timeout             time.Duration     `yaml:"timeout"`                // Timeout specifies the duration for runner timeout.
+	ShutdownTimeout     time.Duration     `yaml:"shutdown_timeout"`       // ShutdownTimeout specifies the duration to wait for running jobs to complete during a shutdown of the runner.
+	Insecure            bool              `yaml:"insecure"`               // Insecure indicates whether the runner operates in an insecure mode.
+	FetchTimeout        time.Duration     `yaml:"fetch_timeout"`          // FetchTimeout specifies the timeout duration for fetching resources.
+	FetchInterval       time.Duration     `yaml:"fetch_interval"`         // FetchInterval specifies the interval duration for fetching resources.
+	FetchIntervalMax    time.Duration     `yaml:"fetch_interval_max"`     // FetchIntervalMax specifies the maximum backoff interval when idle.
+	WorkdirCleanupAge   time.Duration     `yaml:"workdir_cleanup_age"`    // WorkdirCleanupAge removes stale bind-workdir task directories older than this duration during idle cleanup.
+	IdleCleanupInterval time.Duration     `yaml:"idle_cleanup_interval"`  // IdleCleanupInterval runs stale bind-workdir cleanup periodically while the runner is idle. Set to 0 to disable cleanup cadence.
+	LogReportInterval   time.Duration     `yaml:"log_report_interval"`    // LogReportInterval specifies the base interval for periodic log flush.
+	LogReportMaxLatency time.Duration     `yaml:"log_report_max_latency"` // LogReportMaxLatency specifies the max time a log row can wait before being sent.
+	LogReportBatchSize  int               `yaml:"log_report_batch_size"`  // LogReportBatchSize triggers immediate log flush when buffer reaches this size.
+	StateReportInterval time.Duration     `yaml:"state_report_interval"`  // StateReportInterval specifies the interval for state reporting.
+	Labels              []string          `yaml:"labels"`                 // Labels specify the labels of the runner. Labels are declared on each startup
+	GithubMirror        string            `yaml:"github_mirror"`          // GithubMirror defines what mirrors should be used when using github
 }
 
 // Cache represents the configuration for caching.
@@ -42,6 +50,7 @@ type Cache struct {
 	Host           string `yaml:"host"`            // Host specifies the caching host.
 	Port           uint16 `yaml:"port"`            // Port specifies the caching port.
 	ExternalServer string `yaml:"external_server"` // ExternalServer specifies the URL of external cache server
+	ExternalSecret string `yaml:"external_secret"` // ExternalSecret is a shared secret between this runner and an external gitea-runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Leave empty to keep the legacy unauthenticated behavior.
 }
 
 // Container represents the configuration for the container.
@@ -55,14 +64,20 @@ type Container struct {
 	DockerHost    string        `yaml:"docker_host"`    // DockerHost specifies the Docker host. It overrides the value specified in environment variable DOCKER_HOST.
 	ForcePull     bool          `yaml:"force_pull"`     // Pull docker image(s) even if already present
 	ForceRebuild  bool          `yaml:"force_rebuild"`  // Rebuild docker image(s) even if already present
-	RequireDocker bool          `yaml:"require_docker"` // Always require a reachable docker daemon, even if not required by act_runner
-	DockerTimeout time.Duration `yaml:"docker_timeout"` // Timeout to wait for the docker daemon to be reachable, if docker is required by require_docker or act_runner
+	RequireDocker bool          `yaml:"require_docker"` // Always require a reachable docker daemon, even if not required by runner
+	DockerTimeout time.Duration `yaml:"docker_timeout"` // Timeout to wait for the docker daemon to be reachable, if docker is required by require_docker or runner
 	BindWorkdir   bool          `yaml:"bind_workdir"`   // BindWorkdir binds the workspace to the host filesystem instead of using Docker volumes. Required for DinD when jobs use docker compose with bind mounts.
 }
 
 // Host represents the configuration for the host.
 type Host struct {
 	WorkdirParent string `yaml:"workdir_parent"` // WorkdirParent specifies the parent directory for the host's working directory.
+}
+
+// Metrics represents the configuration for the Prometheus metrics endpoint.
+type Metrics struct {
+	Enabled bool   `yaml:"enabled"` // Enabled indicates whether the metrics endpoint is exposed.
+	Addr    string `yaml:"addr"`    // Addr specifies the listen address for the metrics HTTP server (e.g., ":9101").
 }
 
 // Config represents the overall configuration.
@@ -72,12 +87,14 @@ type Config struct {
 	Cache     Cache     `yaml:"cache"`     // Cache represents the configuration for caching.
 	Container Container `yaml:"container"` // Container represents the configuration for the container.
 	Host      Host      `yaml:"host"`      // Host represents the configuration for the host.
+	Metrics   Metrics   `yaml:"metrics"`   // Metrics represents the configuration for the Prometheus metrics endpoint.
 }
 
 // LoadDefault returns the default configuration.
 // If file is not empty, it will be used to load the configuration.
 func LoadDefault(file string) (*Config, error) {
 	cfg := &Config{}
+	definedRunnerKeys := map[string]bool{}
 	if file != "" {
 		content, err := os.ReadFile(file)
 		if err != nil {
@@ -85,6 +102,10 @@ func LoadDefault(file string) (*Config, error) {
 		}
 		if err := yaml.Unmarshal(content, cfg); err != nil {
 			return nil, fmt.Errorf("parse config file %q: %w", file, err)
+		}
+		definedRunnerKeys, err = definedRunnerConfigKeys(content)
+		if err != nil {
+			return nil, fmt.Errorf("parse config file %q for defaults metadata: %w", file, err)
 		}
 	}
 	compatibleWithOldEnvs(file != "", cfg)
@@ -123,6 +144,9 @@ func LoadDefault(file string) (*Config, error) {
 			home, _ := os.UserHomeDir()
 			cfg.Cache.Dir = filepath.Join(home, ".cache", "actcache")
 		}
+		if cfg.Cache.ExternalServer != "" && cfg.Cache.ExternalSecret == "" {
+			return nil, errors.New("cache.external_server is set but cache.external_secret is empty; configure the same external_secret on this runner and the gitea-runner cache-server")
+		}
 	}
 	if cfg.Container.WorkdirParent == "" {
 		cfg.Container.WorkdirParent = "workspace"
@@ -137,6 +161,41 @@ func LoadDefault(file string) (*Config, error) {
 	if cfg.Runner.FetchInterval <= 0 {
 		cfg.Runner.FetchInterval = 2 * time.Second
 	}
+	if cfg.Runner.FetchIntervalMax <= 0 {
+		cfg.Runner.FetchIntervalMax = 5 * time.Second
+	}
+	if cfg.Runner.WorkdirCleanupAge == 0 && !definedRunnerKeys["workdir_cleanup_age"] {
+		cfg.Runner.WorkdirCleanupAge = 24 * time.Hour
+	}
+	if cfg.Runner.IdleCleanupInterval == 0 && !definedRunnerKeys["idle_cleanup_interval"] {
+		cfg.Runner.IdleCleanupInterval = 10 * time.Minute
+	}
+	if cfg.Runner.LogReportInterval <= 0 {
+		cfg.Runner.LogReportInterval = 5 * time.Second
+	}
+	if cfg.Runner.LogReportMaxLatency <= 0 {
+		cfg.Runner.LogReportMaxLatency = 3 * time.Second
+	}
+	if cfg.Runner.LogReportBatchSize <= 0 {
+		cfg.Runner.LogReportBatchSize = 100
+	}
+	if cfg.Runner.StateReportInterval <= 0 {
+		cfg.Runner.StateReportInterval = 5 * time.Second
+	}
+	if cfg.Metrics.Addr == "" {
+		cfg.Metrics.Addr = "127.0.0.1:9101"
+	}
+
+	// Validate and fix invalid config combinations to prevent confusing behavior.
+	if cfg.Runner.FetchIntervalMax < cfg.Runner.FetchInterval {
+		log.Warnf("fetch_interval_max (%v) is less than fetch_interval (%v), setting fetch_interval_max to fetch_interval",
+			cfg.Runner.FetchIntervalMax, cfg.Runner.FetchInterval)
+		cfg.Runner.FetchIntervalMax = cfg.Runner.FetchInterval
+	}
+	if cfg.Runner.LogReportMaxLatency >= cfg.Runner.LogReportInterval {
+		log.Warnf("log_report_max_latency (%v) >= log_report_interval (%v), the max-latency timer will never fire before the periodic ticker; consider lowering log_report_max_latency",
+			cfg.Runner.LogReportMaxLatency, cfg.Runner.LogReportInterval)
+	}
 
 	// although `container.network_mode` will be deprecated, but we have to be compatible with it for now.
 	if cfg.Container.NetworkMode != "" && cfg.Container.Network == "" {
@@ -144,7 +203,7 @@ func LoadDefault(file string) (*Config, error) {
 		if cfg.Container.NetworkMode == "bridge" {
 			// Previously, if the value of `container.network_mode` is `bridge`, we will create a new network for job.
 			// But “bridge” is easily confused with the bridge network created by Docker by default.
-			// So we set the value of `container.network` to empty string to make `act_runner` automatically create a new network for job.
+			// So we set the value of `container.network` to empty string to make `runner` automatically create a new network for job.
 			cfg.Container.Network = ""
 		} else {
 			cfg.Container.Network = cfg.Container.NetworkMode
@@ -152,4 +211,31 @@ func LoadDefault(file string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func definedRunnerConfigKeys(content []byte) (map[string]bool, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(content, &root); err != nil {
+		return nil, err
+	}
+
+	defined := map[string]bool{}
+	if len(root.Content) == 0 {
+		return defined, nil
+	}
+
+	doc := root.Content[0]
+	for i := 0; i+1 < len(doc.Content); i += 2 {
+		key := doc.Content[i]
+		value := doc.Content[i+1]
+		if key.Value != "runner" || value.Kind != yaml.MappingNode {
+			continue
+		}
+		for j := 0; j+1 < len(value.Content); j += 2 {
+			defined[value.Content[j].Value] = true
+		}
+		break
+	}
+
+	return defined, nil
 }

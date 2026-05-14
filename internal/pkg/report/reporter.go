@@ -10,7 +10,12 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"gitea.com/gitea/runner/internal/pkg/client"
+	"gitea.com/gitea/runner/internal/pkg/config"
+	"gitea.com/gitea/runner/internal/pkg/metrics"
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	"connectrpc.com/connect"
@@ -18,8 +23,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
-
-	"gitea.com/gitea/act_runner/internal/pkg/client"
 )
 
 type Reporter struct {
@@ -35,16 +38,36 @@ type Reporter struct {
 	logReplacer *strings.Replacer
 	oldnew      []string
 
-	state   *runnerv1.TaskState
-	stateMu sync.RWMutex
-	outputs sync.Map
-	daemon  chan struct{}
+	// lastLogBufferRows is the last value written to the ReportLogBufferRows
+	// gauge; guarded by clientM (the same lock held around each ReportLog call)
+	// so the gauge skips no-op Set calls when the buffer size is unchanged.
+	lastLogBufferRows int
+
+	state        *runnerv1.TaskState
+	stateChanged bool
+	stateMu      sync.RWMutex
+	outputs      sync.Map
+	daemon       chan struct{}
+
+	// Unix-nanos of the last successful UpdateTask. Atomic so the heartbeat
+	// guard in ReportState reads it without contending stateMu.
+	lastReportedAtNanos atomic.Int64
+
+	// Adaptive batching control
+	logReportInterval   time.Duration
+	logReportMaxLatency time.Duration
+	logBatchSize        int
+	stateReportInterval time.Duration
+
+	// Event notification channels (non-blocking, buffered 1)
+	logNotify   chan struct{} // signal: new log rows arrived
+	stateNotify chan struct{} // signal: step transition (start/stop)
 
 	debugOutputEnabled  bool
 	stopCommandEndToken string
 }
 
-func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.Client, task *runnerv1.Task) *Reporter {
+func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.Client, task *runnerv1.Task, cfg *config.Config) *Reporter {
 	var oldnew []string
 	if v := task.Context.Fields["token"].GetStringValue(); v != "" {
 		oldnew = append(oldnew, v, "***")
@@ -57,11 +80,17 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 	}
 
 	rv := &Reporter{
-		ctx:         ctx,
-		cancel:      cancel,
-		client:      client,
-		oldnew:      oldnew,
-		logReplacer: strings.NewReplacer(oldnew...),
+		ctx:                 ctx,
+		cancel:              cancel,
+		client:              client,
+		oldnew:              oldnew,
+		logReplacer:         strings.NewReplacer(oldnew...),
+		logReportInterval:   cfg.Runner.LogReportInterval,
+		logReportMaxLatency: cfg.Runner.LogReportMaxLatency,
+		logBatchSize:        cfg.Runner.LogReportBatchSize,
+		stateReportInterval: cfg.Runner.StateReportInterval,
+		logNotify:           make(chan struct{}, 1),
+		stateNotify:         make(chan struct{}, 1),
 		state: &runnerv1.TaskState{
 			Id: task.Id,
 		},
@@ -73,6 +102,13 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 	}
 
 	return rv
+}
+
+// Result returns the final job result. Safe to call after Close() returns.
+func (r *Reporter) Result() runnerv1.Result {
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	return r.state.Result
 }
 
 func (r *Reporter) ResetSteps(l int) {
@@ -108,11 +144,42 @@ func isJobStepEntry(entry *log.Entry) bool {
 	return true
 }
 
-func (r *Reporter) Fire(entry *log.Entry) error {
-	r.stateMu.Lock()
-	defer r.stateMu.Unlock()
+// notifyLog sends a non-blocking signal that new log rows are available.
+func (r *Reporter) notifyLog() {
+	select {
+	case r.logNotify <- struct{}{}:
+	default:
+	}
+}
 
-	log.WithFields(entry.Data).Trace(entry.Message)
+// notifyState sends a non-blocking signal that a UX-critical state change occurred (step start/stop, job result).
+func (r *Reporter) notifyState() {
+	select {
+	case r.stateNotify <- struct{}{}:
+	default:
+	}
+}
+
+// unlockAndNotify releases stateMu and sends channel notifications.
+// Must be called with stateMu held.
+func (r *Reporter) unlockAndNotify(urgentState bool) {
+	r.stateMu.Unlock()
+	r.notifyLog()
+	if urgentState {
+		r.notifyState()
+	}
+}
+
+func (r *Reporter) Fire(entry *log.Entry) error {
+	urgentState := false
+
+	r.stateMu.Lock()
+
+	r.stateChanged = true
+
+	if log.IsLevelEnabled(log.TraceLevel) {
+		log.WithFields(entry.Data).Trace(entry.Message)
+	}
 
 	timestamp := entry.Time
 	if r.state.StartedAt == nil {
@@ -135,11 +202,13 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 						}
 					}
 				}
+				urgentState = true
 			}
 		}
 		if !r.duringSteps() {
 			r.logRows = appendIfNotNil(r.logRows, r.parseLogRow(entry))
 		}
+		r.unlockAndNotify(urgentState)
 		return nil
 	}
 
@@ -153,11 +222,13 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 		if !r.duringSteps() {
 			r.logRows = appendIfNotNil(r.logRows, r.parseLogRow(entry))
 		}
+		r.unlockAndNotify(false)
 		return nil
 	}
 
 	if step.StartedAt == nil {
 		step.StartedAt = timestamppb.New(timestamp)
+		urgentState = true
 	}
 
 	// Force reporting log errors as raw output to prevent silent failures
@@ -185,26 +256,91 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 			}
 			step.Result = stepResult
 			step.StoppedAt = timestamppb.New(timestamp)
+			urgentState = true
 		}
 	}
 
+	r.unlockAndNotify(urgentState)
 	return nil
 }
 
 func (r *Reporter) RunDaemon() {
-	r.stateMu.RLock()
-	closed := r.closed
-	r.stateMu.RUnlock()
-	if closed || r.ctx.Err() != nil {
-		// Acknowledge close
-		close(r.daemon)
-		return
+	go r.runDaemonLoop()
+}
+
+func (r *Reporter) stopLatencyTimer(active *bool, timer *time.Timer) {
+	if *active {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		*active = false
 	}
+}
 
-	_ = r.ReportLog(false)
-	_ = r.ReportState(false)
+func (r *Reporter) runDaemonLoop() {
+	logTicker := time.NewTicker(r.logReportInterval)
+	stateTicker := time.NewTicker(r.stateReportInterval)
 
-	time.AfterFunc(time.Second, r.RunDaemon)
+	// maxLatencyTimer ensures the first buffered log row is sent within logReportMaxLatency.
+	// Start inactive — it is armed when the first log row arrives in an empty buffer.
+	maxLatencyTimer := time.NewTimer(0)
+	if !maxLatencyTimer.Stop() {
+		<-maxLatencyTimer.C
+	}
+	maxLatencyActive := false
+
+	defer logTicker.Stop()
+	defer stateTicker.Stop()
+	defer maxLatencyTimer.Stop()
+
+	for {
+		select {
+		case <-logTicker.C:
+			_ = r.ReportLog(false)
+			r.stopLatencyTimer(&maxLatencyActive, maxLatencyTimer)
+
+		case <-stateTicker.C:
+			_ = r.ReportState(false)
+
+		case <-r.logNotify:
+			r.stateMu.RLock()
+			n := len(r.logRows)
+			r.stateMu.RUnlock()
+
+			if n >= r.logBatchSize {
+				_ = r.ReportLog(false)
+				r.stopLatencyTimer(&maxLatencyActive, maxLatencyTimer)
+			} else if !maxLatencyActive && n > 0 {
+				maxLatencyTimer.Reset(r.logReportMaxLatency)
+				maxLatencyActive = true
+			}
+
+		case <-r.stateNotify:
+			// Step transition or job result — flush both immediately for frontend UX.
+			_ = r.ReportLog(false)
+			_ = r.ReportState(false)
+			r.stopLatencyTimer(&maxLatencyActive, maxLatencyTimer)
+
+		case <-maxLatencyTimer.C:
+			maxLatencyActive = false
+			_ = r.ReportLog(false)
+
+		case <-r.ctx.Done():
+			close(r.daemon)
+			return
+		}
+
+		r.stateMu.RLock()
+		closed := r.closed
+		r.stateMu.RUnlock()
+		if closed {
+			close(r.daemon)
+			return
+		}
+	}
 }
 
 func (r *Reporter) Logf(format string, a ...any) {
@@ -268,6 +404,10 @@ func (r *Reporter) Close(lastWords string) error {
 		})
 	}
 	r.stateMu.Unlock()
+
+	// Wake up the daemon loop so it detects closed promptly.
+	r.notifyLog()
+
 	// Wait for Acknowledge
 	select {
 	case <-r.daemon:
@@ -275,6 +415,21 @@ func (r *Reporter) Close(lastWords string) error {
 		close(r.daemon)
 		log.Error("No Response from RunDaemon for 60s, continue best effort")
 	}
+
+	// Gitea's UpdateLog short-circuits on len(Rows)==0 before honoring NoMore,
+	// so a final empty request never runs TransferLogs and dbfs_data leaks.
+	// Inject a sentinel row after the daemon has exited so it can't be flushed
+	// before ReportLog(true).
+	// TODO: Remove after https://github.com/go-gitea/gitea/pull/37631 is in all
+	// supported branches, e.g. v1.28+.
+	r.stateMu.Lock()
+	if len(r.logRows) == 0 {
+		r.logRows = append(r.logRows, &runnerv1.LogRow{
+			Time:    timestamppb.Now(),
+			Content: "",
+		})
+	}
+	r.stateMu.Unlock()
 
 	// Report the job outcome even when all log upload retry attempts have been exhausted
 	return errors.Join(
@@ -295,15 +450,24 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	rows := r.logRows
 	r.stateMu.RUnlock()
 
+	if !noMore && len(rows) == 0 {
+		return nil
+	}
+
+	start := time.Now()
 	resp, err := r.client.UpdateLog(r.ctx, connect.NewRequest(&runnerv1.UpdateLogRequest{
 		TaskId: r.state.Id,
 		Index:  int64(r.logOffset),
 		Rows:   rows,
 		NoMore: noMore,
 	}))
+	metrics.ReportLogDuration.Observe(time.Since(start).Seconds())
 	if err != nil {
+		metrics.ReportLogTotal.WithLabelValues(metrics.LabelResultError).Inc()
+		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodUpdateLog).Inc()
 		return err
 	}
+	metrics.ReportLogTotal.WithLabelValues(metrics.LabelResultSuccess).Inc()
 
 	ack := int(resp.Msg.AckIndex)
 	if ack < r.logOffset {
@@ -314,7 +478,12 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	r.logRows = r.logRows[ack-r.logOffset:]
 	submitted := r.logOffset + len(rows)
 	r.logOffset = ack
+	remaining := len(r.logRows)
 	r.stateMu.Unlock()
+	if remaining != r.lastLogBufferRows {
+		metrics.ReportLogBufferRows.Set(float64(remaining))
+		r.lastLogBufferRows = remaining
+	}
 
 	if noMore && ack < submitted {
 		return errors.New("not all logs are submitted")
@@ -329,15 +498,7 @@ func (r *Reporter) ReportState(reportResult bool) error {
 	r.clientM.Lock()
 	defer r.clientM.Unlock()
 
-	r.stateMu.RLock()
-	state := proto.Clone(r.state).(*runnerv1.TaskState)
-	r.stateMu.RUnlock()
-
-	// Only report result from Close to reliable sent logs
-	if !reportResult {
-		state.Result = runnerv1.Result_RESULT_UNSPECIFIED
-	}
-
+	// Build the outputs map first (single Range pass instead of two).
 	outputs := make(map[string]string)
 	r.outputs.Range(func(k, v any) bool {
 		if val, ok := v.(string); ok {
@@ -346,13 +507,41 @@ func (r *Reporter) ReportState(reportResult bool) error {
 		return true
 	})
 
+	// Consume stateChanged atomically with the snapshot; restored on error
+	// below so a concurrent Fire() during UpdateTask isn't silently lost.
+	// Heartbeat at stateReportInterval even when nothing changed, so the server
+	// doesn't time out long-running silent jobs as orphaned (#826).
+	last := r.lastReportedAtNanos.Load()
+	withinHeartbeatInterval := last != 0 && time.Since(time.Unix(0, last)) < r.stateReportInterval
+	r.stateMu.Lock()
+	if !reportResult && !r.stateChanged && len(outputs) == 0 && withinHeartbeatInterval {
+		r.stateMu.Unlock()
+		return nil
+	}
+	state := proto.Clone(r.state).(*runnerv1.TaskState)
+	r.stateChanged = false
+	r.stateMu.Unlock()
+
+	if !reportResult {
+		state.Result = runnerv1.Result_RESULT_UNSPECIFIED
+	}
+
+	start := time.Now()
 	resp, err := r.client.UpdateTask(r.ctx, connect.NewRequest(&runnerv1.UpdateTaskRequest{
 		State:   state,
 		Outputs: outputs,
 	}))
+	metrics.ReportStateDuration.Observe(time.Since(start).Seconds())
 	if err != nil {
+		metrics.ReportStateTotal.WithLabelValues(metrics.LabelResultError).Inc()
+		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodUpdateTask).Inc()
+		r.stateMu.Lock()
+		r.stateChanged = true
+		r.stateMu.Unlock()
 		return err
 	}
+	metrics.ReportStateTotal.WithLabelValues(metrics.LabelResultSuccess).Inc()
+	r.lastReportedAtNanos.Store(time.Now().UnixNano())
 
 	for _, k := range resp.Msg.SentOutputs {
 		r.outputs.Store(k, struct{}{})

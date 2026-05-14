@@ -1,8 +1,7 @@
-/act_runner
+/gitea-runner
 .env
 .runner
 coverage.txt
-/gitea-vet
 /config.yaml
 
 # Jetbrains

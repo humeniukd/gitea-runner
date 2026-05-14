@@ -1,0 +1,71 @@
+// Copyright 2022 The Gitea Authors. All rights reserved.
+// Copyright 2020 The nektos/act Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+package container
+
+import (
+	"context"
+	"io"
+	"testing"
+
+	"github.com/moby/moby/client"
+	specs "github.com/opencontainers/image-spec/specs-go/v1"
+	log "github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+)
+
+func init() {
+	log.SetLevel(log.DebugLevel)
+}
+
+func TestImageExistsLocally(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+	ctx := context.Background()
+	// to help make this test reliable and not flaky, we need to have
+	// an image that will exist, and onew that won't exist
+
+	// Test if image exists with specific tag
+	invalidImageTag, err := ImageExistsLocally(ctx, "library/alpine:this-random-tag-will-never-exist", "linux/amd64")
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+	assert.False(t, invalidImageTag)
+
+	// Test if image exists with specific architecture (image platform)
+	invalidImagePlatform, err := ImageExistsLocally(ctx, "alpine:latest", "windows/amd64")
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+	assert.False(t, invalidImagePlatform)
+
+	// pull an image
+	cli, err := client.New(client.FromEnv)
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+	defer cli.Close()
+
+	// Chose alpine latest because it's so small
+	// maybe we should build an image instead so that tests aren't reliable on dockerhub
+	readerDefault, err := cli.ImagePull(ctx, "node:24-bookworm-slim", client.ImagePullOptions{
+		Platforms: []specs.Platform{{OS: "linux", Architecture: "amd64"}},
+	})
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+	defer readerDefault.Close()
+	_, err = io.ReadAll(readerDefault)
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+
+	imageDefaultArchExists, err := ImageExistsLocally(ctx, "node:24-bookworm-slim", "linux/amd64")
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+	assert.True(t, imageDefaultArchExists)
+
+	// Validate if another architecture platform can be pulled
+	readerArm64, err := cli.ImagePull(ctx, "node:24-bookworm-slim", client.ImagePullOptions{
+		Platforms: []specs.Platform{{OS: "linux", Architecture: "arm64"}},
+	})
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+	defer readerArm64.Close()
+	_, err = io.ReadAll(readerArm64)
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+
+	imageArm64Exists, err := ImageExistsLocally(ctx, "node:24-bookworm-slim", "linux/arm64")
+	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+	assert.True(t, imageArm64Exists)
+}
