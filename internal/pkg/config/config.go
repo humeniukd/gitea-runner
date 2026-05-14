@@ -51,7 +51,7 @@ type Cache struct {
 	Port           uint16 `yaml:"port"`            // Port specifies the caching port.
 	ExternalServer string `yaml:"external_server"` // ExternalServer specifies the URL of external cache server
 	ExternalSecret string `yaml:"external_secret"` // ExternalSecret is a shared secret between this runner and an external gitea-runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Leave empty to keep the legacy unauthenticated behavior.
-	OfflineMode    bool   `yaml:"offline_mode"`
+	OfflineMode    bool   `yaml:"offline_mode"`    // OfflineMode disables pulling action when a local cache entry exists
 }
 
 // Container represents the configuration for the container.
