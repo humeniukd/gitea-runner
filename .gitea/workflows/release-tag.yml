@@ -73,7 +73,7 @@ jobs:
 
       - name: "Docker meta"
         id: docker_meta
-        uses: https://github.com/docker/metadata-action@v6
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.DOCKER_ORG }}/runner
