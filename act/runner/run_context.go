@@ -372,6 +372,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 				NetworkAliases: []string{serviceID},
 				ExposedPorts:   exposedPorts,
 				PortBindings:   portBindings,
+				AllocatePTY:    rc.Config.AllocatePTY,
 			})
 			rc.ServiceContainers = append(rc.ServiceContainers, c)
 		}
@@ -432,6 +433,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			Options:        rc.options(ctx),
 			AutoRemove:     rc.Config.AutoRemove,
 			ValidVolumes:   rc.Config.ValidVolumes,
+			AllocatePTY:    rc.Config.AllocatePTY,
 		})
 		if rc.JobContainer == nil {
 			return errors.New("Failed to create job container")

@@ -41,7 +41,6 @@ import (
 	"github.com/kballard/go-shellquote"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/pflag"
-	"golang.org/x/term"
 )
 
 // NewContainer creates a reference to a container
@@ -438,7 +437,6 @@ func (cr *containerReference) create(capAdd, capDrop []string) common.Executor {
 			return nil
 		}
 		logger := common.Logger(ctx)
-		isTerminal := term.IsTerminal(int(os.Stdout.Fd()))
 		input := cr.input
 
 		config := &container.Config{
@@ -446,7 +444,7 @@ func (cr *containerReference) create(capAdd, capDrop []string) common.Executor {
 			WorkingDir:   input.WorkingDir,
 			Env:          input.Env,
 			ExposedPorts: input.ExposedPorts,
-			Tty:          isTerminal,
+			Tty:          input.AllocatePTY,
 		}
 		// For Gitea, reduce log noise
 		// logger.Debugf("Common container.Config ==> %+v", config)
@@ -584,7 +582,7 @@ func (cr *containerReference) exec(cmd []string, env map[string]string, user, wo
 		}
 
 		logger.Debugf("Exec command '%s'", cmd)
-		isTerminal := term.IsTerminal(int(os.Stdout.Fd()))
+		isTerminal := cr.input.AllocatePTY
 		envList := make([]string, 0)
 		for k, v := range env {
 			envList = append(envList, fmt.Sprintf("%s=%s", k, v))
@@ -867,7 +865,7 @@ func (cr *containerReference) attach() common.Executor {
 		if err != nil {
 			return fmt.Errorf("failed to attach to container: %w", err)
 		}
-		isTerminal := term.IsTerminal(int(os.Stdout.Fd()))
+		isTerminal := cr.input.AllocatePTY
 
 		var outWriter io.Writer
 		outWriter = cr.input.Stdout
