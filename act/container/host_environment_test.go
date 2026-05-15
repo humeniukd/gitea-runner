@@ -100,7 +100,7 @@ func TestHostEnvironmentExecExitCode(t *testing.T) {
 	assert.Equal(t, "Process completed with exit code 3.", err.Error())
 }
 
-func TestHostEnvironmentRemoveCleansWorkdir(t *testing.T) {
+func TestHostEnvironmentRemovePreservesWorkdirByDefault(t *testing.T) {
 	logger := logrus.New()
 	ctx := common.WithLogger(context.Background(), logrus.NewEntry(logger))
 	base := t.TempDir()
@@ -121,10 +121,10 @@ func TestHostEnvironmentRemoveCleansWorkdir(t *testing.T) {
 	}
 	require.NoError(t, e.Remove()(ctx))
 	_, err := os.Stat(workdir)
-	assert.ErrorIs(t, err, os.ErrNotExist)
+	require.NoError(t, err)
 }
 
-func TestHostEnvironmentRemoveSkipsWorkdirWhenBindWorkdir(t *testing.T) {
+func TestHostEnvironmentRemoveCleansWorkdirWhenOwned(t *testing.T) {
 	logger := logrus.New()
 	ctx := common.WithLogger(context.Background(), logrus.NewEntry(logger))
 	base := t.TempDir()
@@ -135,9 +135,9 @@ func TestHostEnvironmentRemoveSkipsWorkdirWhenBindWorkdir(t *testing.T) {
 	require.NoError(t, os.MkdirAll(workdir, 0o700))
 
 	e := &HostEnvironment{
-		Path:        path,
-		Workdir:     workdir,
-		BindWorkdir: true,
+		Path:         path,
+		Workdir:      workdir,
+		CleanWorkdir: true,
 		CleanUp: func() {
 			_ = os.RemoveAll(miscRoot)
 		},
@@ -145,5 +145,5 @@ func TestHostEnvironmentRemoveSkipsWorkdirWhenBindWorkdir(t *testing.T) {
 	}
 	require.NoError(t, e.Remove()(ctx))
 	_, err := os.Stat(workdir)
-	require.NoError(t, err)
+	assert.ErrorIs(t, err, os.ErrNotExist)
 }

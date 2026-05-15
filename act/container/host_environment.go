@@ -36,6 +36,10 @@ type HostEnvironment struct {
 	TmpDir    string
 	ToolCache string
 	Workdir   string
+	// CleanWorkdir is true when the caller owns Workdir and wants host teardown
+	// to remove it. Local host-mode execution points Workdir at the user's
+	// checkout, so it must leave this false.
+	CleanWorkdir bool
 	// BindWorkdir is true when the app runner mounts the workspace on the host and
 	// deletes the task directory after the job; host teardown must not remove Workdir.
 	BindWorkdir bool
@@ -485,7 +489,7 @@ func (e *HostEnvironment) Remove() common.Executor {
 			logger.Warnf("failed to remove host misc state %s: %v", e.Path, err)
 			errs = append(errs, err)
 		}
-		if !e.BindWorkdir && e.Workdir != "" {
+		if e.CleanWorkdir && e.Workdir != "" {
 			if err := removePathWithRetry(ctx, e.Workdir); err != nil {
 				logger.Warnf("failed to remove host workspace %s: %v", e.Workdir, err)
 				errs = append(errs, err)
