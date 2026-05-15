@@ -237,7 +237,8 @@ func GetDockerClient(ctx context.Context) (cli client.APIClient, err error) {
 	return cli, nil
 }
 
-func GetHostInfo(ctx context.Context) (info types.Info, err error) { //nolint:staticcheck // pre-existing issue from nektos/act
+//nolint:staticcheck // pre-existing issue from nektos/act
+func GetHostInfo(ctx context.Context) (info types.Info, err error) {
 	var cli client.APIClient
 	cli, err = GetDockerClient(ctx)
 	if err != nil {
@@ -307,7 +308,8 @@ func (cr *containerReference) find() common.Executor {
 		if cr.id != "" {
 			return nil
 		}
-		containers, err := cr.cli.ContainerList(ctx, types.ContainerListOptions{ //nolint:staticcheck // pre-existing issue from nektos/act
+		//nolint:staticcheck // pre-existing issue from nektos/act
+		containers, err := cr.cli.ContainerList(ctx, types.ContainerListOptions{
 			All: true,
 		})
 		if err != nil {
@@ -335,7 +337,8 @@ func (cr *containerReference) remove() common.Executor {
 		}
 
 		logger := common.Logger(ctx)
-		err := cr.cli.ContainerRemove(ctx, cr.id, types.ContainerRemoveOptions{ //nolint:staticcheck // pre-existing issue from nektos/act
+		//nolint:staticcheck // pre-existing issue from nektos/act
+		err := cr.cli.ContainerRemove(ctx, cr.id, types.ContainerRemoveOptions{
 			RemoveVolumes: true,
 			Force:         true,
 		})
@@ -859,7 +862,8 @@ func (cr *containerReference) copyContent(dstPath string, files ...*FileEntry) c
 
 func (cr *containerReference) attach() common.Executor {
 	return func(ctx context.Context) error {
-		out, err := cr.cli.ContainerAttach(ctx, cr.id, types.ContainerAttachOptions{ //nolint:staticcheck // pre-existing issue from nektos/act
+		//nolint:staticcheck // pre-existing issue from nektos/act
+		out, err := cr.cli.ContainerAttach(ctx, cr.id, types.ContainerAttachOptions{
 			Stream: true,
 			Stdout: true,
 			Stderr: true,
@@ -897,7 +901,8 @@ func (cr *containerReference) start() common.Executor {
 		logger := common.Logger(ctx)
 		logger.Debugf("Starting container: %v", cr.id)
 
-		if err := cr.cli.ContainerStart(ctx, cr.id, types.ContainerStartOptions{}); err != nil { //nolint:staticcheck // pre-existing issue from nektos/act
+		//nolint:staticcheck // pre-existing issue from nektos/act
+		if err := cr.cli.ContainerStart(ctx, cr.id, types.ContainerStartOptions{}); err != nil {
 			return fmt.Errorf("failed to start container: %w", err)
 		}
 
