@@ -91,6 +91,17 @@ func (c Config) GetToken() string {
 	return token
 }
 
+// DefaultActionURL returns the host used for implicit remote actions.
+func (c Config) DefaultActionURL() string {
+	if c.DefaultActionInstance != "" {
+		return c.DefaultActionInstance
+	}
+	if c.GitHubInstance != "" {
+		return c.GitHubInstance
+	}
+	return "github.com"
+}
+
 type caller struct {
 	runContext *RunContext
 
