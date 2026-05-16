@@ -16,7 +16,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
@@ -34,9 +37,16 @@ type HostEnvironment struct {
 	TmpDir    string
 	ToolCache string
 	Workdir   string
-	ActPath   string
-	CleanUp   func()
-	StdOut    io.Writer
+	// BindWorkdir is true when the app runner mounts the workspace on the host and
+	// deletes the task directory after the job; host teardown must not remove Workdir.
+	BindWorkdir bool
+	ActPath     string
+	CleanUp     func()
+	StdOut      io.Writer
+	AllocatePTY bool // allocate a pseudo-TTY for each step's process
+
+	mu          sync.Mutex
+	runningPIDs map[int]struct{}
 }
 
 func (e *HostEnvironment) Create(_, _ []string) common.Executor {
@@ -192,12 +202,12 @@ func (e *HostEnvironment) Start(_ bool) common.Executor {
 
 type ptyWriter struct {
 	Out       io.Writer
-	AutoStop  bool
+	AutoStop  atomic.Bool
 	dirtyLine bool
 }
 
 func (w *ptyWriter) Write(buf []byte) (int, error) {
-	if w.AutoStop && len(buf) > 0 && buf[len(buf)-1] == 4 {
+	if w.AutoStop.Load() && len(buf) > 0 && buf[len(buf)-1] == 4 {
 		n, err := w.Out.Write(buf[:len(buf)-1])
 		if err != nil {
 			return n, err
@@ -327,36 +337,54 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 			tty.Close()
 		}
 	}()
-	if true /* allocate Terminal */ {
+	if e.AllocatePTY {
 		var err error
 		ppty, tty, err = setupPty(cmd, cmdline)
 		if err != nil {
 			common.Logger(ctx).Debugf("Failed to setup Pty %v\n", err.Error())
 		}
 	}
-	writer := &ptyWriter{Out: e.StdOut}
-	logctx, finishLog := context.WithCancel(context.Background())
+	var writer *ptyWriter
+	var logctx context.Context
 	if ppty != nil {
+		writer = &ptyWriter{Out: e.StdOut}
+		var finishLog context.CancelFunc
+		logctx, finishLog = context.WithCancel(context.Background())
 		go copyPtyOutput(writer, ppty, finishLog)
-	} else {
-		finishLog()
-	}
-	if ppty != nil {
 		go writeKeepAlive(ppty)
 	}
-	err = cmd.Run()
+	// Split Start/Wait so the PID can be registered before the process can exit;
+	// cmd.Run() would block until exit, by which time the PID may have been reused.
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if cmd.Process != nil {
+		e.mu.Lock()
+		if e.runningPIDs == nil {
+			e.runningPIDs = map[int]struct{}{}
+		}
+		e.runningPIDs[cmd.Process.Pid] = struct{}{}
+		e.mu.Unlock()
+		defer func(pid int) {
+			e.mu.Lock()
+			delete(e.runningPIDs, pid)
+			e.mu.Unlock()
+		}(cmd.Process.Pid)
+	}
+	err = cmd.Wait()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return ExitCodeError(exitErr.ExitCode())
+		}
 		return err
 	}
 	if tty != nil {
-		writer.AutoStop = true
+		writer.AutoStop.Store(true)
 		if _, err := tty.WriteString("\x04"); err != nil {
 			common.Logger(ctx).Debug("Failed to write EOT")
 		}
-	}
-	<-logctx.Done()
-
-	if ppty != nil {
+		<-logctx.Done()
 		ppty.Close()
 		ppty = nil
 	}
@@ -385,12 +413,83 @@ func (e *HostEnvironment) UpdateFromEnv(srcPath string, env *map[string]string) 
 	return parseEnvFile(e, srcPath, env)
 }
 
+func removePathWithRetry(ctx context.Context, path string) error {
+	if path == "" {
+		return nil
+	}
+	attempts := 1
+	delay := time.Duration(0)
+	if runtime.GOOS == "windows" {
+		attempts = 5
+		delay = 200 * time.Millisecond
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		lastErr = os.RemoveAll(path)
+		if lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
+}
+
+func (e *HostEnvironment) terminateRunningProcesses(ctx context.Context) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	e.mu.Lock()
+	pids := make([]int, 0, len(e.runningPIDs))
+	for pid := range e.runningPIDs {
+		pids = append(pids, pid)
+	}
+	e.mu.Unlock()
+
+	if len(pids) == 0 {
+		return
+	}
+
+	logger := common.Logger(ctx)
+	for _, pid := range pids {
+		// Best-effort: forcibly terminate process tree to release file handles
+		// so that workspace cleanup can succeed on Windows.
+		cmd := exec.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(pid), "/T", "/F")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			logger.Debugf("taskkill failed for pid=%d: %v output=%s", pid, err, strings.TrimSpace(string(out)))
+		}
+	}
+}
+
 func (e *HostEnvironment) Remove() common.Executor {
 	return func(ctx context.Context) error {
+		// Ensure any lingering child processes are ended before attempting
+		// to remove the workspace (Windows file locks otherwise prevent cleanup).
+		e.terminateRunningProcesses(ctx)
+
+		// Only removes per-job misc state. Must not remove the cache/toolcache root.
 		if e.CleanUp != nil {
 			e.CleanUp()
 		}
-		return os.RemoveAll(e.Path)
+		logger := common.Logger(ctx)
+		var errs []error
+		if err := removePathWithRetry(ctx, e.Path); err != nil {
+			logger.Warnf("failed to remove host misc state %s: %v", e.Path, err)
+			errs = append(errs, err)
+		}
+		if !e.BindWorkdir && e.Workdir != "" {
+			if err := removePathWithRetry(ctx, e.Workdir); err != nil {
+				logger.Warnf("failed to remove host workspace %s: %v", e.Workdir, err)
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
 	}
 }
 

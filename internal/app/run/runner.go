@@ -7,11 +7,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,7 +33,7 @@ import (
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	"connectrpc.com/connect"
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/api/types/container"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -46,8 +49,10 @@ type Runner struct {
 	cacheHandler *artifactcache.Handler
 	capabilities string
 
-	runningTasks sync.Map
-	runningCount atomic.Int64
+	runningTasks            sync.Map
+	runningCount            atomic.Int64
+	lastIdleCleanupUnixNano atomic.Int64
+	now                     func() time.Time
 }
 
 func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) *Runner {
@@ -90,13 +95,94 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	envs["GITEA_ACTIONS"] = "true"
 	envs["GITEA_ACTIONS_RUNNER_VERSION"] = ver.Version()
 
-	return &Runner{
+	runner := &Runner{
 		name:         reg.Name,
 		cfg:          cfg,
 		client:       cli,
 		labels:       ls,
 		envs:         envs,
 		cacheHandler: cacheHandler,
+		now:          time.Now,
+	}
+	return runner
+}
+
+// OnIdle performs lightweight maintenance during polling idle windows.
+// It runs synchronously on the poller goroutine; shouldRunIdleCleanup
+// throttles invocations to runner.idle_cleanup_interval so the impact on
+// poll cadence is bounded even when the workdir root is large.
+func (r *Runner) OnIdle(ctx context.Context) {
+	if !r.shouldRunIdleCleanup() {
+		return
+	}
+	workdirParent := strings.TrimLeft(r.cfg.Container.WorkdirParent, "/")
+	workdirRoot := filepath.FromSlash("/" + workdirParent)
+	r.cleanupStaleTaskDirs(ctx, workdirRoot)
+}
+
+func (r *Runner) shouldRunIdleCleanup() bool {
+	if !r.cfg.Container.BindWorkdir {
+		return false
+	}
+	if r.cfg.Runner.WorkdirCleanupAge <= 0 || r.cfg.Runner.IdleCleanupInterval <= 0 {
+		return false
+	}
+	if r.RunningCount() != 0 {
+		return false
+	}
+	now := r.now()
+	interval := r.cfg.Runner.IdleCleanupInterval
+	for {
+		last := r.lastIdleCleanupUnixNano.Load()
+		if last != 0 && now.Sub(time.Unix(0, last)) < interval {
+			return false
+		}
+		if r.lastIdleCleanupUnixNano.CompareAndSwap(last, now.UnixNano()) {
+			return true
+		}
+	}
+}
+
+func (r *Runner) cleanupStaleTaskDirs(ctx context.Context, workdirRoot string) {
+	entries, err := os.ReadDir(workdirRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		log.Warnf("failed to list task workspace root %s for stale cleanup: %v", workdirRoot, err)
+		return
+	}
+
+	// A task may begin between shouldRunIdleCleanup's running-count check and
+	// the loop below. That is safe because new task dirs are created with the
+	// current mtime and therefore fall on the keep side of cutoff.
+	cutoff := r.now().Add(-r.cfg.Runner.WorkdirCleanupAge)
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		// Task workspaces are indexed by numeric task IDs; skip any other
+		// directories to avoid deleting operator-managed data under workdir_root.
+		if _, err := strconv.ParseUint(entry.Name(), 10, 64); err != nil {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			log.Warnf("failed to stat task workspace %s: %v", filepath.Join(workdirRoot, entry.Name()), err)
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		taskDir := filepath.Join(workdirRoot, entry.Name())
+		if err := os.RemoveAll(taskDir); err != nil {
+			log.Warnf("failed to clean stale task workspace %s: %v", taskDir, err)
+			continue
+		}
+		log.Infof("cleaned stale task workspace %s", taskDir)
 	}
 }
 
@@ -141,6 +227,13 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 	return nil
 }
 
+func (r *Runner) cloneEnvs() map[string]string {
+	// Reserve space for the per-task keys injected by run().
+	envs := make(map[string]string, len(r.envs)+6)
+	maps.Copy(envs, r.envs)
+	return envs
+}
+
 // getDefaultActionsURL
 // when DEFAULT_ACTIONS_URL == "https://github.com" and GithubMirror is not blank,
 // it should be set to GithubMirror first.
@@ -174,18 +267,16 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	reporter.ResetSteps(len(job.Steps))
 
 	taskContext := task.Context.Fields
+	envs := r.cloneEnvs()
 
-	// Build a per-task env map. r.envs is shared across concurrent tasks.
-	taskEnvs := make(map[string]string, len(r.envs)+4)
-	maps.Copy(taskEnvs, r.envs)
 	if r.capabilities != "" {
-		taskEnvs["GITEA_ACTIONS_CAPABILITIES"] = r.capabilities
+		envs["GITEA_ACTIONS_CAPABILITIES"] = r.capabilities
 	}
 	if v := taskContext["run_id"].GetStringValue(); v != "" {
-		taskEnvs["GITEA_RUN_ID"] = v
+		envs["GITEA_RUN_ID"] = v
 	}
 	if v := taskContext["job"].GetStringValue(); v != "" {
-		taskEnvs["GITEA_RUN_JOB_ID"] = v
+		envs["GITEA_RUN_JOB_ID"] = v
 	}
 
 	log.Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
@@ -217,9 +308,9 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	}
 
 	if actionsIDTokenRequestURL := taskContext["actions_id_token_request_url"].GetStringValue(); actionsIDTokenRequestURL != "" {
-		r.envs["ACTIONS_ID_TOKEN_REQUEST_URL"] = actionsIDTokenRequestURL
-		r.envs["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = taskContext["actions_id_token_request_token"].GetStringValue()
-		task.Secrets["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = r.envs["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+		envs["ACTIONS_ID_TOKEN_REQUEST_URL"] = actionsIDTokenRequestURL
+		envs["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = taskContext["actions_id_token_request_token"].GetStringValue()
+		task.Secrets["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = envs["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
 	}
 
 	giteaRuntimeToken := taskContext["gitea_runtime_token"].GetStringValue()
@@ -227,7 +318,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		// use task token to action api token for previous Gitea Server Versions
 		giteaRuntimeToken = preset.Token
 	}
-	r.envs["ACTIONS_RUNTIME_TOKEN"] = giteaRuntimeToken
+	envs["ACTIONS_RUNTIME_TOKEN"] = giteaRuntimeToken
 	// Mask the runtime token so it cannot be echoed in user step output; it is
 	// now also the cache server's bearer credential and leaking it would let
 	// any reader of the log impersonate this job against the cache.
@@ -260,6 +351,13 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		workdirParent = fmt.Sprintf("%s/%d", workdirParent, task.Id)
 	}
 	workdir := filepath.FromSlash(fmt.Sprintf("/%s/%s", workdirParent, preset.Repository))
+	if runtime.GOOS == "windows" {
+		if abs, err := filepath.Abs(workdir); err == nil {
+			workdir = abs
+		}
+	}
+	// Without bind_workdir, the workspace path omits the task id; concurrent host-mode jobs
+	// for the same repository would share this directory and can race with per-job cleanup.
 
 	runnerConfig := &runner.Config{
 		// On Linux, Workdir will be like "/<parent_directory>/<owner>/<repo>"
@@ -267,13 +365,14 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		Workdir:        workdir,
 		BindWorkdir:    r.cfg.Container.BindWorkdir,
 		ActionCacheDir: filepath.FromSlash(r.cfg.Host.WorkdirParent),
+		AllocatePTY:    r.cfg.Runner.AllocatePTY,
 
 		ReuseContainers:       false,
 		ForcePull:             r.cfg.Container.ForcePull,
 		ForceRebuild:          r.cfg.Container.ForceRebuild,
 		LogOutput:             true,
 		JSONLogger:            false,
-		Env:                   taskEnvs,
+		Env:                   envs,
 		Secrets:               task.Secrets,
 		GitHubInstance:        strings.TrimSuffix(r.client.Address(), "/"),
 		AutoRemove:            true,

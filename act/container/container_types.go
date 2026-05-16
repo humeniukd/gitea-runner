@@ -6,12 +6,20 @@ package container
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"gitea.com/gitea/runner/act/common"
 
 	"github.com/docker/go-connections/nat"
 )
+
+// ExitCodeError reports a non-zero process exit code from a container command.
+type ExitCodeError int
+
+func (e ExitCodeError) Error() string {
+	return fmt.Sprintf("Process completed with exit code %d.", int(e))
+}
 
 // NewContainerInput the input for the New function
 type NewContainerInput struct {
@@ -39,6 +47,7 @@ type NewContainerInput struct {
 	// Gitea specific
 	AutoRemove   bool
 	ValidVolumes []string
+	AllocatePTY  bool // allocate a pseudo-TTY for the container's exec processes
 }
 
 // FileEntry is a file to copy to a container
