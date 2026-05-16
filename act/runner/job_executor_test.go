@@ -5,10 +5,14 @@
 package runner
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"testing"
 
@@ -16,8 +20,10 @@ import (
 	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/model"
 
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestJobExecutor(t *testing.T) {
@@ -340,4 +346,159 @@ func TestNewJobExecutor(t *testing.T) {
 			fmt.Println("::endgroup::") //nolint:forbidigo // pre-existing issue from nektos/act
 		})
 	}
+}
+
+func TestHasJobSummaryCapability(t *testing.T) {
+	assert.True(t, hasJobSummaryCapability("cache,job-summary artifacts"))
+	assert.True(t, hasJobSummaryCapability("cache,\njob-summary\tartifacts"))
+	assert.False(t, hasJobSummaryCapability("not-job-summary,job-summary-v2"))
+}
+
+func TestTryUploadJobSummaryRetriesTransientFailure(t *testing.T) {
+	oldDelay := jobSummaryUploadRetryDelay
+	jobSummaryUploadRetryDelay = 0
+	defer func() {
+		jobSummaryUploadRetryDelay = oldDelay
+	}()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		assert.Equal(t, http.MethodPut, r.Method)
+		assert.Equal(t, "/_apis/pipelines/workflows/12/jobs/34/summary", r.URL.Path)
+		assert.Equal(t, "Bearer runtime-token", r.Header.Get("Authorization"))
+		assert.Equal(t, "text/markdown; charset=utf-8", r.Header.Get("Content-Type"))
+		body, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("# summary"), body)
+		if requests == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	cm := &containerMock{}
+	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/SUMMARY.md").Return(
+		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "SUMMARY.md", body: "# summary"}))),
+		nil,
+	).Once()
+
+	rc := &RunContext{
+		Config:       &Config{},
+		JobContainer: cm,
+		Env: map[string]string{
+			"GITEA_ACTIONS_CAPABILITIES": "cache, job-summary",
+			"ACTIONS_RUNTIME_URL":        server.URL,
+			"ACTIONS_RUNTIME_TOKEN":      "runtime-token",
+			"GITEA_RUN_ID":               "12",
+			"GITEA_RUN_JOB_ID":           "34",
+		},
+	}
+
+	tryUploadJobSummary(ctx, rc)
+
+	assert.Equal(t, 2, requests)
+	cm.AssertExpectations(t)
+}
+
+func TestTryUploadJobSummaryRequiresExactCapability(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	rc := &RunContext{
+		Config:       &Config{},
+		JobContainer: &containerMock{},
+		Env: map[string]string{
+			"GITEA_ACTIONS_CAPABILITIES": "not-job-summary,job-summary-v2",
+			"ACTIONS_RUNTIME_URL":        server.URL,
+			"ACTIONS_RUNTIME_TOKEN":      "runtime-token",
+			"GITEA_RUN_ID":               "12",
+			"GITEA_RUN_JOB_ID":           "34",
+		},
+	}
+
+	tryUploadJobSummary(context.Background(), rc)
+
+	assert.Equal(t, 0, requests)
+}
+
+func TestReadSingleFileFromContainerArchiveFindsMatchingRegularFile(t *testing.T) {
+	ctx := context.Background()
+	cm := &containerMock{}
+	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/SUMMARY.md").Return(
+		io.NopCloser(bytes.NewReader(tarArchive(t,
+			tarEntry{name: "workflow", typeflag: tar.TypeDir},
+			tarEntry{name: "other.md", body: "wrong"},
+			tarEntry{name: "SUMMARY.md", body: "right"},
+		))),
+		nil,
+	).Once()
+
+	body, ok := readSingleFileFromContainerArchive(ctx, cm, "/var/run/act/workflow/SUMMARY.md", 1024)
+
+	assert.True(t, ok)
+	assert.Equal(t, []byte("right"), body)
+	cm.AssertExpectations(t)
+}
+
+func TestReadSingleFileFromContainerArchiveWarnsWhenTooLarge(t *testing.T) {
+	logger, hook := logrustest.NewNullLogger()
+	ctx := common.WithLogger(context.Background(), logger)
+	cm := &containerMock{}
+	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/SUMMARY.md").Return(
+		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "SUMMARY.md", body: "too large"}))),
+		nil,
+	).Once()
+
+	body, ok := readSingleFileFromContainerArchive(ctx, cm, "/var/run/act/workflow/SUMMARY.md", 3)
+
+	assert.False(t, ok)
+	assert.Nil(t, body)
+	if assert.Len(t, hook.Entries, 1) {
+		assert.Contains(t, hook.Entries[0].Message, "job summary is too large")
+	}
+	cm.AssertExpectations(t)
+}
+
+type tarEntry struct {
+	name     string
+	body     string
+	typeflag byte
+}
+
+func tarArchive(t *testing.T, entries ...tarEntry) []byte {
+	t.Helper()
+
+	buf := &bytes.Buffer{}
+	tw := tar.NewWriter(buf)
+	for _, entry := range entries {
+		typeflag := entry.typeflag
+		if typeflag == 0 {
+			typeflag = tar.TypeReg
+		}
+		header := &tar.Header{
+			Name:     entry.name,
+			Typeflag: typeflag,
+			Mode:     0o644,
+			Size:     int64(len(entry.body)),
+		}
+		if typeflag == tar.TypeDir {
+			header.Mode = 0o755
+			header.Size = 0
+		}
+		require.NoError(t, tw.WriteHeader(header))
+		if typeflag == tar.TypeReg {
+			_, err := tw.Write([]byte(entry.body))
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, tw.Close())
+	return buf.Bytes()
 }

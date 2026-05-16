@@ -12,15 +12,22 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/model"
+)
 
-	"github.com/sirupsen/logrus"
+const maxJobSummaryBytes = 1024 * 1024
+
+var (
+	jobSummaryUploadTimeout    = 30 * time.Second
+	jobSummaryUploadRetryDelay = time.Second
 )
 
 type jobInfo interface {
@@ -128,7 +135,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			defer cancel()
 
 			logger := common.Logger(ctx)
-			tryUploadJobSummary(ctx, rc, logger)
+			tryUploadJobSummary(ctx, rc)
 			// For Gitea
 			// We don't need to call `stopServiceContainers` here since it will be called by following `info.stopContainer`
 			// logger.Infof("Cleaning up services for job %s", rc.JobName)
@@ -224,13 +231,13 @@ func setJobOutputs(ctx context.Context, rc *RunContext) {
 	}
 }
 
-func tryUploadJobSummary(ctx context.Context, rc *RunContext, logger logrus.FieldLogger) {
+func tryUploadJobSummary(ctx context.Context, rc *RunContext) {
 	if rc == nil || rc.JobContainer == nil || rc.Config == nil {
 		return
 	}
 	env := rc.GetEnv()
 	caps := strings.TrimSpace(env["GITEA_ACTIONS_CAPABILITIES"])
-	if !strings.Contains(caps, "job-summary") {
+	if !hasJobSummaryCapability(caps) {
 		// Server did not advertise support. Do not attempt upload.
 		return
 	}
@@ -247,32 +254,75 @@ func tryUploadJobSummary(ctx context.Context, rc *RunContext, logger logrus.Fiel
 	}
 
 	summaryPath := path.Join(rc.JobContainer.GetActPath(), "workflow", "SUMMARY.md")
-	body, ok := readSingleFileFromContainerArchive(ctx, rc.JobContainer, summaryPath, 1024*1024)
+	body, ok := readSingleFileFromContainerArchive(ctx, rc.JobContainer, summaryPath, maxJobSummaryBytes)
 	if !ok || len(body) == 0 {
 		return
 	}
 
 	base := strings.TrimRight(runtimeURL, "/")
 	url := base + "/_apis/pipelines/workflows/" + runID + "/jobs/" + jobID + "/summary"
+	uploadJobSummary(ctx, url, runtimeToken, body)
+}
 
+func hasJobSummaryCapability(caps string) bool {
+	return slices.Contains(strings.FieldsFunc(caps, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	}), "job-summary")
+}
+
+func uploadJobSummary(ctx context.Context, url, runtimeToken string, body []byte) {
+	logger := common.Logger(ctx)
+	client := &http.Client{Timeout: jobSummaryUploadTimeout}
+
+	var lastStatus int
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		status, err := putJobSummary(ctx, client, url, runtimeToken, body)
+		if err == nil && status/100 == 2 {
+			return
+		}
+		lastStatus = status
+		lastErr = err
+		if attempt == 1 || !isTransientJobSummaryUploadFailure(status, err) {
+			break
+		}
+		timer := time.NewTimer(jobSummaryUploadRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			lastErr = ctx.Err()
+			attempt = 1
+		case <-timer.C:
+		}
+	}
+
+	// Best-effort only; do not fail job, but log because capability was advertised.
+	if lastErr != nil {
+		logger.WithError(lastErr).Warn("job summary upload failed")
+		return
+	}
+	logger.Warnf("job summary upload failed: status=%d", lastStatus)
+}
+
+func putJobSummary(ctx context.Context, client *http.Client, url, runtimeToken string, body []byte) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
 	if err != nil {
-		return
+		return 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+runtimeToken)
-	req.Header.Set("Content-Type", "text/markdown")
+	req.Header.Set("Content-Type", "text/markdown; charset=utf-8")
 
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		// Best-effort only; do not fail job, but log because capability was advertised.
-		logger.WithError(err).Warn("job summary upload failed")
-		return
+		return 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		logger.Warnf("job summary upload failed: status=%d", resp.StatusCode)
-		return
-	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, nil
+}
+
+func isTransientJobSummaryUploadFailure(status int, err error) bool {
+	return err != nil || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status/100 == 5
 }
 
 func readSingleFileFromContainerArchive(ctx context.Context, env container.ExecutionsEnvironment, p string, maxBytes int64) ([]byte, bool) {
@@ -283,18 +333,40 @@ func readSingleFileFromContainerArchive(ctx context.Context, env container.Execu
 	defer rc.Close()
 
 	tr := tar.NewReader(rc)
-	_, err = tr.Next()
-	if err != nil {
-		return nil, false
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			return nil, false
+		}
+		if err != nil {
+			return nil, false
+		}
+		if header.Typeflag != tar.TypeReg {
+			continue
+		}
+		if !archiveEntryMatchesPath(header.Name, p) {
+			continue
+		}
+		if header.Size > maxBytes {
+			common.Logger(ctx).Warnf("job summary is too large: path=%s size=%d max=%d", p, header.Size, maxBytes)
+			return nil, false
+		}
+		b, err := io.ReadAll(io.LimitReader(tr, maxBytes+1))
+		if err != nil {
+			return nil, false
+		}
+		if int64(len(b)) > maxBytes {
+			common.Logger(ctx).Warnf("job summary is too large: path=%s size>%d max=%d", p, maxBytes, maxBytes)
+			return nil, false
+		}
+		return b, true
 	}
-	b, err := io.ReadAll(io.LimitReader(tr, maxBytes+1))
-	if err != nil {
-		return nil, false
-	}
-	if int64(len(b)) > maxBytes {
-		return nil, false
-	}
-	return b, true
+}
+
+func archiveEntryMatchesPath(entryName, requestedPath string) bool {
+	entryName = path.Clean(strings.TrimPrefix(entryName, "/"))
+	requestedPath = path.Clean(strings.TrimPrefix(requestedPath, "/"))
+	return entryName == requestedPath || entryName == path.Base(requestedPath)
 }
 
 func useStepLogger(rc *RunContext, stepModel *model.Step, stage stepStage, executor common.Executor) common.Executor {
