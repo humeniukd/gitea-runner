@@ -29,8 +29,8 @@ func parseEnvFile(e Container, srcPath string, env *map[string]string) common.Ex
 			return err
 		}
 		s := bufio.NewScanner(reader)
-		// Default 64 KiB max token size is too small for realistic env-file lines, Set to 1MB.
-		s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		// Default 64 KiB max token size is too small for realistic env-file lines; allow up to 16 MiB.
+		s.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 		for s.Scan() {
 			line := s.Text()
 			singleLineEnv := strings.Index(line, "=")
