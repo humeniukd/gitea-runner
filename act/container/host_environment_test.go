@@ -152,9 +152,8 @@ func TestHostEnvironmentRemovePreservesWorkdirByDefault(t *testing.T) {
 	require.NoError(t, os.MkdirAll(workdir, 0o700))
 
 	e := &HostEnvironment{
-		Path:        path,
-		Workdir:     workdir,
-		BindWorkdir: false,
+		Path:    path,
+		Workdir: workdir,
 		CleanUp: func() {
 			_ = os.RemoveAll(miscRoot)
 		},

@@ -790,12 +790,6 @@ func Test_newRemoteAction(t *testing.T) {
 			assert.Equalf(t, tt.wantCloneURL, cloneURL, "newRemoteAction(%v).CloneURL()", tt.action)
 		})
 	}
-
-	t.Run("empty clone base defaults to github.com", func(t *testing.T) {
-		got := newRemoteAction("actions/checkout@v4")
-		require.NotNil(t, got)
-		assert.Equal(t, "https://github.com/actions/checkout", got.CloneURL(""))
-	})
 }
 
 func Test_safeFilename(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -1025,12 +1026,12 @@ func newValidVolumeMatcher(ctx context.Context, validVolumes []string) validVolu
 			ret.allowAll = true
 			continue
 		}
-		if g, err := glob.Compile(v); err != nil {
-			logger.Errorf("create glob from %s error: %v", v, err)
-		} else {
-			ret.named = append(ret.named, g)
-		}
 		if !isHostVolumePattern(v) {
+			if g, err := glob.Compile(v); err != nil {
+				logger.Errorf("create glob from %s error: %v", v, err)
+			} else {
+				ret.named = append(ret.named, g)
+			}
 			continue
 		}
 		normalized, err := normalizeHostVolumePath(v)
@@ -1091,15 +1092,11 @@ func isHostVolumeSource(source string, sourceType mount.Type) bool {
 }
 
 func normalizeHostVolumePath(path string) (string, error) {
-	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		abs, err := filepath.Abs(cleaned)
-		if err != nil {
-			return "", err
-		}
-		cleaned = abs
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
 	}
-	return evalSymlinksExistingPrefix(cleaned)
+	return evalSymlinksExistingPrefix(abs)
 }
 
 func evalSymlinksExistingPrefix(path string) (string, error) {
@@ -1114,19 +1111,20 @@ func evalSymlinksExistingPrefix(path string) (string, error) {
 	current := path
 	var missing []string
 	for {
-		if _, err := os.Lstat(current); err == nil {
+		_, err := os.Lstat(current)
+		if err == nil {
 			resolved, err := filepath.EvalSymlinks(current)
 			if err != nil {
 				return "", err
 			}
-			for i := len(missing) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, missing[i])
+			for _, name := range slices.Backward(missing) {
+				resolved = filepath.Join(resolved, name)
 			}
 			return filepath.Clean(resolved), nil
-		} else if !errors.Is(err, os.ErrNotExist) {
+		}
+		if !errors.Is(err, os.ErrNotExist) {
 			return "", err
 		}
-
 		parent := filepath.Dir(current)
 		if parent == current {
 			return filepath.Clean(path), nil

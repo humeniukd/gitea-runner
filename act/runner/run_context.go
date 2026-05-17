@@ -225,7 +225,6 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 			ToolCache:    toolCache,
 			Workdir:      rc.Config.Workdir,
 			CleanWorkdir: rc.Config.CleanWorkdir,
-			BindWorkdir:  rc.Config.BindWorkdir,
 			ActPath:      actPath,
 			CleanUp: func() {
 				os.RemoveAll(miscpath)

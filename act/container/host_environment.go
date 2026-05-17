@@ -37,17 +37,13 @@ type HostEnvironment struct {
 	TmpDir    string
 	ToolCache string
 	Workdir   string
-	// CleanWorkdir is true when the caller owns Workdir and wants host teardown
-	// to remove it. Local host-mode execution points Workdir at the user's
-	// checkout, so it must leave this false.
+	// CleanWorkdir means teardown owns Workdir and may delete it. Leave false
+	// when Workdir points at a caller-owned checkout (e.g. `act` local mode).
 	CleanWorkdir bool
-	// BindWorkdir is true when the app runner mounts the workspace on the host and
-	// deletes the task directory after the job; host teardown must not remove Workdir.
-	BindWorkdir bool
-	ActPath     string
-	CleanUp     func()
-	StdOut      io.Writer
-	AllocatePTY bool // allocate a pseudo-TTY for each step's process
+	ActPath      string
+	CleanUp      func()
+	StdOut       io.Writer
+	AllocatePTY  bool // allocate a pseudo-TTY for each step's process
 
 	mu          sync.Mutex
 	runningPIDs map[int]struct{}
@@ -487,7 +483,7 @@ func (e *HostEnvironment) Remove() common.Executor {
 			logger.Warnf("failed to remove host misc state %s: %v", e.Path, err)
 			errs = append(errs, err)
 		}
-		if e.CleanWorkdir && e.Workdir != "" {
+		if e.CleanWorkdir {
 			if err := removePathWithRetry(ctx, e.Workdir); err != nil {
 				logger.Warnf("failed to remove host workspace %s: %v", e.Workdir, err)
 				errs = append(errs, err)
