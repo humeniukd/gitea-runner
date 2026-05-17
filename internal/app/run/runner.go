@@ -33,7 +33,7 @@ import (
 
 	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	"connectrpc.com/connect"
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/api/types/container"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -347,6 +347,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		Workdir:        workdir,
 		BindWorkdir:    r.cfg.Container.BindWorkdir,
 		ActionCacheDir: filepath.FromSlash(r.cfg.Host.WorkdirParent),
+		AllocatePTY:    r.cfg.Runner.AllocatePTY,
 
 		ReuseContainers:       false,
 		ForcePull:             r.cfg.Container.ForcePull,
