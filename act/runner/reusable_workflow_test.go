@@ -150,6 +150,12 @@ func TestShouldCloneURLUseToken(t *testing.T) {
 			want:        true,
 		},
 		{
+			name:        "same host with schemaless instance and port",
+			instanceURL: "gitea.example.net:3000",
+			cloneURL:    "https://gitea.example.net:3000/actions/tools",
+			want:        true,
+		},
+		{
 			name:        "different host",
 			instanceURL: "gitea.example.net",
 			cloneURL:    "https://github.com/actions/tools",
