@@ -11,10 +11,10 @@ require (
 	github.com/containerd/errdefs v1.0.0
 	github.com/creack/pty v1.1.24
 	github.com/distribution/reference v0.6.0
-	github.com/docker/cli v29.5.0+incompatible
+	github.com/docker/cli v29.5.1+incompatible
 	github.com/docker/go-connections v0.7.0
 	github.com/go-git/go-billy/v5 v5.9.0
-	github.com/go-git/go-git/v5 v5.19.0
+	github.com/go-git/go-git/v5 v5.19.1
 	github.com/gobwas/glob v0.2.3
 	github.com/google/go-cmp v0.7.0
 	github.com/joho/godotenv v1.5.1
