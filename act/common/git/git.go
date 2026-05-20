@@ -341,10 +341,11 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 		var hash *plumbing.Hash
 		rev := plumbing.Revision(input.Ref)
 		if hash, err = r.ResolveRevision(rev); err != nil {
+			// ResolveRevision can return a nil hash on error, and a branch ref legitimately
+			// fails here (no local refs/heads/<ref>; the duck-typing below resolves it). Only
+			// run the short-ref check when resolution succeeded, never deref a nil hash.
 			logger.Errorf("Unable to resolve %s: %v", input.Ref, err)
-		}
-
-		if hash.String() != input.Ref && strings.HasPrefix(hash.String(), input.Ref) {
+		} else if hash.String() != input.Ref && strings.HasPrefix(hash.String(), input.Ref) {
 			return &Error{
 				err:    ErrShortRef,
 				commit: hash.String(),
