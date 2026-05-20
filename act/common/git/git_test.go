@@ -300,8 +300,8 @@ func TestGitCloneExecutorOfflineMode(t *testing.T) {
 	})(context.Background()))
 
 	t.Run("cached branch resolves without fetching", func(t *testing.T) {
-		// Offline reuse of a cached branch must succeed via the duck-typed resolution,
-		// even when the first ResolveRevision(input.Ref) has no local refs/heads/<ref>.
+		// Offline reuse of a cached branch must succeed even though ResolveRevision(input.Ref)
+		// finds no local refs/heads/<ref>.
 		err := NewGitCloneExecutor(NewGitCloneExecutorInput{
 			URL:         remoteDir,
 			Ref:         "main",
@@ -315,9 +315,8 @@ func TestGitCloneExecutorOfflineMode(t *testing.T) {
 		assert.Equal(t, "initial", strings.TrimSpace(string(out)))
 	})
 
-	t.Run("unresolvable cached ref errors without panicking", func(t *testing.T) {
-		// The ref was never fetched into the cache; offline mode cannot resolve it and
-		// must return an error instead of silently succeeding.
+	t.Run("unresolvable cached ref returns error", func(t *testing.T) {
+		// The ref was never cached; offline mode cannot resolve it and must return an error.
 		err := NewGitCloneExecutor(NewGitCloneExecutorInput{
 			URL:         remoteDir,
 			Ref:         "never-fetched",
