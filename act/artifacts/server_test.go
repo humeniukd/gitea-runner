@@ -16,7 +16,9 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
+	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/model"
 	"gitea.com/gitea/runner/act/runner"
 
@@ -255,6 +257,14 @@ func TestArtifactFlow(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Bind the artifact server to an outbound IP, not loopback, so the job container can reach
+	// it — the same address the runner picks in production (see internal/app/cmd/exec.go).
+	if ip := common.GetOutboundIP(); ip != nil {
+		artifactsAddr = ip.String()
+	} else {
+		t.Skip("skipping: could not determine an outbound IP for the artifact server")
+	}
+
 	cancel := Serve(ctx, artifactsPath, artifactsAddr, artifactsPort)
 	defer cancel()
 
@@ -291,6 +301,7 @@ func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 			Platforms:             tjfi.platforms,
 			ReuseContainers:       false,
 			ContainerArchitecture: tjfi.containerArchitecture,
+			ContainerMaxLifetime:  time.Hour, // otherwise the job container is `sleep 0` and exits at once
 			GitHubInstance:        "github.com",
 			ArtifactServerPath:    artifactsPath,
 			ArtifactServerAddr:    artifactsAddr,

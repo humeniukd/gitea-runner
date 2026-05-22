@@ -571,10 +571,11 @@ func TestRunWithService(t *testing.T) {
 	assert.NoError(t, err, workflowPath) //nolint:testifylint // pre-existing issue from nektos/act
 
 	runnerConfig := &Config{
-		Workdir:         workdir,
-		EventName:       eventName,
-		Platforms:       platforms,
-		ReuseContainers: false,
+		Workdir:              workdir,
+		EventName:            eventName,
+		Platforms:            platforms,
+		ReuseContainers:      false,
+		ContainerMaxLifetime: time.Hour, // otherwise the job container is `sleep 0` and exits at once
 	}
 	runner, err := New(runnerConfig)
 	assert.NoError(t, err, workflowPath) //nolint:testifylint // pre-existing issue from nektos/act
