@@ -20,16 +20,8 @@ jobs:
         run: make build
       - name: test
         run: make test
-
-  dind:
-    name: dind daemon integration
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
-      # Builds the dind image and runs the daemon-facing tests against the docker version
-      # it ships, catching daemon-level regressions (e.g. gitea/runner#981) before release.
+      # Build the dind image and run the daemon-facing tests against the docker version it
+      # ships, catching daemon-level regressions (e.g. gitea/runner#981) before release. Runs
+      # after `make test` so the images it needs are already cached on the host daemon.
       - name: test against dind image
         run: make test-dind

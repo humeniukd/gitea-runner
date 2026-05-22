@@ -9,12 +9,15 @@
 #
 # Usage: scripts/test-dind.sh [target] [-- go-test-args...]
 #   target:        dind (default) or dind-rootless
-#   go-test-args:  passed verbatim to `go test`
-#                  (default: -race ./act/container/, the daemon-facing package)
+#   go-test-args:  passed verbatim to `go test`. The default exercises the daemon-facing tests
+#                  that need no registry access (a fresh daemon, e.g. on fork-PR CI, can't
+#                  authenticate pulls): the env-extraction build (FROM scratch) and the #981
+#                  /var/run symlink copy regression (which reuses a preloaded alpine).
 #
 # Env:
-#   DIND_TEST_PORT  host port for the daemon (default 32375)
-#   DIND_TEST_IMAGE skip the build and use this prebuilt image instead
+#   DIND_TEST_PORT     host port for the daemon (default 32375)
+#   DIND_TEST_IMAGE    skip the build and use this prebuilt image instead
+#   DIND_TEST_PRELOAD  space-separated images to copy from the host daemon into the fresh one
 set -euo pipefail
 
 target="dind"
@@ -23,11 +26,13 @@ case "${1:-}" in
 esac
 [ "${1:-}" = "--" ] && shift
 test_args=("$@")
-[ ${#test_args[@]} -eq 0 ] && test_args=(-race ./act/container/)
+[ ${#test_args[@]} -eq 0 ] && test_args=(-race -run '^TestDocker$|^TestDockerCopyToSymlinkPath$' ./act/container/)
 
 port="${DIND_TEST_PORT:-32375}"
 name="gitea-runner-dind-test-$$"
 image="${DIND_TEST_IMAGE:-gitea-runner-${target}:dind-test}"
+# The host daemon endpoint, captured before DOCKER_HOST is pointed at the fresh dind daemon.
+host_docker="${DOCKER_HOST:-unix:///var/run/docker.sock}"
 
 cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -76,6 +81,15 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 docker version --format 'server docker {{.Server.Version}}'
+
+# Seed the fresh daemon with images the host already has (the CI job pulls them in the
+# preceding `make test`), so the daemon-facing tests run without registry access.
+echo "==> Seeding daemon with cached host images"
+for img in ${DIND_TEST_PRELOAD:-alpine:latest}; do
+  if docker -H "$host_docker" image inspect "$img" >/dev/null 2>&1; then
+    docker -H "$host_docker" save "$img" | docker load >/dev/null 2>&1 && echo "  loaded $img" || true
+  fi
+done
 
 echo "==> Running tests against dind daemon"
 go test "${test_args[@]}"
