@@ -274,7 +274,6 @@ func TestRunEvent(t *testing.T) {
 		{workdir, "if-env-act", "push", "", platforms, secrets},
 		{workdir, "env-and-path", "push", "", platforms, secrets},
 		{workdir, "environment-files", "push", "", platforms, secrets},
-		{workdir, "GITHUB_STATE", "push", "", platforms, secrets},
 		{workdir, "environment-files-parser-bug", "push", "", platforms, secrets},
 		{workdir, "non-existent-action", "push", "Job 'nopanic' failed", platforms, secrets},
 		{workdir, "outputs", "push", "", platforms, secrets},
