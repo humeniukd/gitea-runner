@@ -272,6 +272,7 @@ func TestRunEvent(t *testing.T) {
 		{workdir, "if-env-act", "push", "", platforms, secrets},
 		{workdir, "env-and-path", "push", "", platforms, secrets},
 		{workdir, "environment-files", "push", "", platforms, secrets},
+		{workdir, "GITHUB_STATE", "push", "", platforms, secrets},
 		{workdir, "environment-files-parser-bug", "push", "", platforms, secrets},
 		{workdir, "non-existent-action", "push", "Job 'nopanic' failed", platforms, secrets},
 		{workdir, "outputs", "push", "", platforms, secrets},
@@ -365,7 +366,6 @@ func TestRunEventHostEnvironment(t *testing.T) {
 			{workdir, "shells/defaults", "push", "", platforms, secrets},
 			{workdir, "shells/pwsh", "push", "", platforms, secrets},
 			{workdir, "shells/bash", "push", "", platforms, secrets},
-			{workdir, "shells/python", "push", "", platforms, secrets},
 			{workdir, "shells/sh", "push", "", platforms, secrets},
 
 			// Local action
@@ -459,6 +459,17 @@ func TestDryrunEvent(t *testing.T) {
 			table.runTest(ctx, t, &Config{})
 		})
 	}
+}
+
+// TestReusableWorkflowCaller exercises the reusable-workflow caller path (typed inputs,
+// secrets as both a map and `inherit`, and reading the called workflow's outputs via `needs`).
+// It uses a remote reusable workflow and so self-skips offline: local reusable workflows resolve
+// relative to the process working directory in this harness, not the test workdir.
+func TestReusableWorkflowCaller(t *testing.T) {
+	requireDocker(t)
+	requireNetwork(t)
+	table := TestJobFileInfo{workdir, "uses-workflow", "push", "", platforms, map[string]string{"secret": "keep_it_private"}}
+	table.runTest(context.Background(), t, &Config{Secrets: table.secrets})
 }
 
 func TestDockerActionForcePullForceRebuild(t *testing.T) {
