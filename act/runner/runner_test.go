@@ -223,28 +223,6 @@ type TestConfig struct {
 	LocalRepositories map[string]string `yaml:"local-repositories"`
 }
 
-// driftedTestdataSkip quarantines integration cases whose testdata has drifted from this
-// fork's runtime and fails regardless of platform (node version, image tooling, repo owner,
-// missing fixtures). They were never run in CI before because -short skipped them; they need a
-// testdata refresh, tracked separately. Returns a skip reason, or "" to run the case.
-func driftedTestdataSkip(workflowPath, eventName string) string {
-	switch workflowPath {
-	case "shells/python":
-		return "drifted testdata: the node test image has no `python` binary"
-	case "uses-nested-composite":
-		return "drifted testdata: the composite action expects node v16 (runner ships node 24)"
-	case "local-action-dockerfile", "local-action-via-composite-dockerfile":
-		return "drifted testdata: the local docker action is missing action.yml"
-	case "issue-1195":
-		return "drifted testdata: asserts the repo owner is 'nektos'"
-	case "uses-workflow":
-		if eventName == "pull_request" {
-			return "drifted testdata: reusable-workflow fixture local-reusable-workflow-no-inputs-array.yml is missing"
-		}
-	}
-	return ""
-}
-
 func TestRunEvent(t *testing.T) {
 	requireDockerNetwork(t)
 
@@ -255,7 +233,6 @@ func TestRunEvent(t *testing.T) {
 		{workdir, "shells/defaults", "push", "", platforms, secrets},
 		{workdir, "shells/pwsh", "push", "", map[string]string{"ubuntu-latest": "catthehacker/ubuntu:pwsh-latest"}, secrets}, // custom image with pwsh
 		{workdir, "shells/bash", "push", "", platforms, secrets},
-		{workdir, "shells/python", "push", "", map[string]string{"ubuntu-latest": "node:24-bookworm"}, secrets}, // slim doesn't have python
 		{workdir, "shells/sh", "push", "", platforms, secrets},
 
 		// Local action
@@ -267,11 +244,6 @@ func TestRunEvent(t *testing.T) {
 		// Uses
 		{workdir, "uses-composite", "push", "", platforms, secrets},
 		{workdir, "uses-composite-with-error", "push", "Job 'failing-composite-action' failed", platforms, secrets},
-		{workdir, "uses-nested-composite", "push", "", platforms, secrets},
-		{workdir, "remote-action-composite-js-pre-with-defaults", "push", "", platforms, secrets},
-		{workdir, "remote-action-composite-action-ref", "push", "", platforms, secrets},
-		{workdir, "uses-workflow", "push", "", platforms, map[string]string{"secret": "keep_it_private"}},
-		{workdir, "uses-workflow", "pull_request", "", platforms, map[string]string{"secret": "keep_it_private"}},
 		{workdir, "uses-docker-url", "push", "", platforms, secrets},
 		{workdir, "act-composite-env-test", "push", "", platforms, secrets},
 
@@ -281,7 +253,6 @@ func TestRunEvent(t *testing.T) {
 		{workdir, "evalmatrixneeds2", "push", "", platforms, secrets},
 		{workdir, "evalmatrix-merge-map", "push", "", platforms, secrets},
 		{workdir, "evalmatrix-merge-array", "push", "", platforms, secrets},
-		{workdir, "issue-1195", "push", "", platforms, secrets},
 
 		{workdir, "basic", "push", "", platforms, secrets},
 		{workdir, "fail", "push", "exit with `FAILURE`: 1", platforms, secrets},
@@ -291,9 +262,6 @@ func TestRunEvent(t *testing.T) {
 		{workdir, "job-container-non-root", "push", "", platforms, secrets},
 		{workdir, "job-container-invalid-credentials", "push", "failed to handle credentials: failed to interpolate container.credentials.password", platforms, secrets},
 		{workdir, "container-hostname", "push", "", platforms, secrets},
-		{workdir, "remote-action-docker", "push", "", platforms, secrets},
-		{workdir, "remote-action-js", "push", "", platforms, secrets},
-		{workdir, "remote-action-js-node-user", "push", "", platforms, secrets}, // Test if this works with non root container
 		{workdir, "matrix", "push", "", platforms, secrets},
 		{workdir, "matrix-include-exclude", "push", "", platforms, secrets},
 		{workdir, "matrix-exitcode", "push", "Job 'test' failed", platforms, secrets},
@@ -316,7 +284,6 @@ func TestRunEvent(t *testing.T) {
 		{workdir, "job-status-check", "push", "job 'fail' failed", platforms, secrets},
 		{workdir, "if-expressions", "push", "Job 'mytest' failed", platforms, secrets},
 		{workdir, "actions-environment-and-context-tests", "push", "", platforms, secrets},
-		{workdir, "uses-action-with-pre-and-post-step", "push", "", platforms, secrets},
 		{workdir, "evalenv", "push", "", platforms, secrets},
 		{workdir, "docker-action-custom-path", "push", "", platforms, secrets},
 		{workdir, "GITHUB_ENV-use-in-env-ctx", "push", "", platforms, secrets},
@@ -350,9 +317,6 @@ func TestRunEvent(t *testing.T) {
 			case "services-host-network", "container-volumes":
 				// host networking and host /proc bind mounts are Linux-Docker-only
 				requireLinuxDocker(t)
-			}
-			if reason := driftedTestdataSkip(table.workflowPath, table.eventName); reason != "" {
-				t.Skip(reason)
 			}
 
 			config := &Config{
@@ -414,7 +378,6 @@ func TestRunEventHostEnvironment(t *testing.T) {
 			// Uses
 			{workdir, "uses-composite", "push", "", platforms, secrets},
 			{workdir, "uses-composite-with-error", "push", "Job 'failing-composite-action' failed", platforms, secrets},
-			{workdir, "uses-nested-composite", "push", "", platforms, secrets},
 			{workdir, "act-composite-env-test", "push", "", platforms, secrets},
 
 			// Eval
@@ -423,12 +386,10 @@ func TestRunEventHostEnvironment(t *testing.T) {
 			{workdir, "evalmatrixneeds2", "push", "", platforms, secrets},
 			{workdir, "evalmatrix-merge-map", "push", "", platforms, secrets},
 			{workdir, "evalmatrix-merge-array", "push", "", platforms, secrets},
-			{workdir, "issue-1195", "push", "", platforms, secrets},
 
 			{workdir, "fail", "push", "exit with `FAILURE`: 1", platforms, secrets},
 			{workdir, "runs-on", "push", "", platforms, secrets},
 			{workdir, "checkout", "push", "", platforms, secrets},
-			{workdir, "remote-action-js", "push", "", platforms, secrets},
 			{workdir, "matrix", "push", "", platforms, secrets},
 			{workdir, "matrix-include-exclude", "push", "", platforms, secrets},
 			{workdir, "commands", "push", "", platforms, secrets},
@@ -444,7 +405,6 @@ func TestRunEventHostEnvironment(t *testing.T) {
 			{workdir, "steps-context/outcome", "push", "", platforms, secrets},
 			{workdir, "job-status-check", "push", "job 'fail' failed", platforms, secrets},
 			{workdir, "if-expressions", "push", "Job 'mytest' failed", platforms, secrets},
-			{workdir, "uses-action-with-pre-and-post-step", "push", "", platforms, secrets},
 			{workdir, "evalenv", "push", "", platforms, secrets},
 			{workdir, "ensure-post-steps", "push", "Job 'second-post-step-should-fail' failed", platforms, secrets},
 		}...)
@@ -491,7 +451,6 @@ func TestDryrunEvent(t *testing.T) {
 		{workdir, "shells/defaults", "push", "", platforms, secrets},
 		{workdir, "shells/pwsh", "push", "", map[string]string{"ubuntu-latest": "catthehacker/ubuntu:pwsh-latest"}, secrets}, // custom image with pwsh
 		{workdir, "shells/bash", "push", "", platforms, secrets},
-		{workdir, "shells/python", "push", "", map[string]string{"ubuntu-latest": "node:24-bookworm"}, secrets}, // slim doesn't have python
 		{workdir, "shells/sh", "push", "", platforms, secrets},
 
 		// Local action

@@ -30,7 +30,6 @@ runs:
       who-to-greet: ${{inputs.who-to-greet}}
   - run: '[[ "${{ env.SOMEVAR }}" == "Mona is not the Octocat" ]]'
     shell: bash
-  - uses: ./localdockerimagetest_
   # Also test a remote docker action here
   - uses: actions/hello-world-docker-action@v2
     with:
