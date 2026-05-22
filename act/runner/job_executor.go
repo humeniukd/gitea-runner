@@ -183,6 +183,10 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success bool) {
 	logger := common.Logger(ctx)
 
+	// Matrix combinations share one *model.Job and run in parallel; serialize the
+	// read-modify-write of the job result so a failing combination is not lost-updated by a
+	// concurrent succeeding one.
+	unlock := lockJob(rc.Run.Job())
 	jobResult := "success"
 	// we have only one result for a whole matrix build, so we need
 	// to keep an existing result state if we run a matrix
@@ -195,6 +199,7 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 	}
 
 	info.result(jobResult)
+	unlock()
 	if rc.caller != nil {
 		// set reusable workflow job result
 		rc.caller.setReusedWorkflowJobResult(rc.JobName, jobResult) // For Gitea

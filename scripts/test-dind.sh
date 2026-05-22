@@ -37,16 +37,38 @@ if [ -z "${DIND_TEST_IMAGE:-}" ]; then
   docker build --target "$target" -t "$image" .
 fi
 
-echo "==> Starting ${target} daemon on tcp://127.0.0.1:${port}"
 # Override the image entrypoint (s6) and run only dockerd, exposed over insecure TCP.
 # We are testing the daemon the image ships, not the runner supervision tree.
-docker run -d --privileged --name "$name" \
-  -e DOCKER_TLS_CERTDIR= \
-  -p "127.0.0.1:${port}:2375" \
-  --entrypoint dockerd-entrypoint.sh \
-  "$image" --host=tcp://0.0.0.0:2375 >/dev/null
+#
+# How the test process reaches the daemon depends on where it runs:
+#   - plain host: publish 2375 on loopback and connect to 127.0.0.1.
+#   - inside a container (CI), the daemon is a sibling container, so its published port is on
+#     the host, not our loopback; instead attach it to our own network and reach it by name.
+self_container=""
+if [ -f /.dockerenv ]; then
+  self_container="$(cat /proc/sys/kernel/hostname 2>/dev/null || cat /etc/hostname)"
+fi
+self_network=""
+if [ -n "$self_container" ]; then
+  self_network="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$self_container" 2>/dev/null | head -1)"
+fi
 
-export DOCKER_HOST="tcp://127.0.0.1:${port}"
+if [ -n "$self_network" ]; then
+  echo "==> Starting ${target} daemon on network ${self_network} (reached as ${name}:2375)"
+  docker run -d --privileged --name "$name" --network "$self_network" \
+    -e DOCKER_TLS_CERTDIR= \
+    --entrypoint dockerd-entrypoint.sh \
+    "$image" --host=tcp://0.0.0.0:2375 >/dev/null
+  export DOCKER_HOST="tcp://${name}:2375"
+else
+  echo "==> Starting ${target} daemon on tcp://127.0.0.1:${port}"
+  docker run -d --privileged --name "$name" \
+    -e DOCKER_TLS_CERTDIR= \
+    -p "127.0.0.1:${port}:2375" \
+    --entrypoint dockerd-entrypoint.sh \
+    "$image" --host=tcp://0.0.0.0:2375 >/dev/null
+  export DOCKER_HOST="tcp://127.0.0.1:${port}"
+fi
 
 echo "==> Waiting for daemon"
 for _ in $(seq 1 60); do

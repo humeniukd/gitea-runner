@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
@@ -596,13 +597,29 @@ func (rc *RunContext) ActionCacheDir() string {
 }
 
 // Interpolate outputs after a job is done
+// jobMutexes serializes per-job result/output aggregation across the matrix combinations that
+// share one *model.Job and run in parallel. Keyed by the shared *model.Job (mirrors the
+// per-directory AcquireCloneLock pattern).
+var jobMutexes sync.Map // key: *model.Job; value: *sync.Mutex
+
+func lockJob(job *model.Job) func() {
+	v, _ := jobMutexes.LoadOrStore(job, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
 func (rc *RunContext) interpolateOutputs() common.Executor {
 	return func(ctx context.Context) error {
 		ee := rc.NewExpressionEvaluator(ctx)
-		for k, v := range rc.Run.Job().Outputs {
+		job := rc.Run.Job()
+		// Matrix combinations share this Job and its Outputs map; serialize the iterate+write
+		// so parallel combos don't trigger "concurrent map iteration and map write".
+		defer lockJob(job)()
+		for k, v := range job.Outputs {
 			interpolated := ee.Interpolate(ctx, v)
 			if v != interpolated {
-				rc.Run.Job().Outputs[k] = interpolated
+				job.Outputs[k] = interpolated
 			}
 		}
 		return nil
