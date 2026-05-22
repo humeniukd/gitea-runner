@@ -192,6 +192,7 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 		Secrets:               cfg.Secrets,
 		Inputs:                cfg.Inputs,
 		GitHubInstance:        "github.com",
+		DefaultActionInstance: cfg.DefaultActionInstance,
 		ContainerArchitecture: cfg.ContainerArchitecture,
 		ContainerMaxLifetime:  time.Hour,
 		Matrix:                cfg.Matrix,
@@ -461,13 +462,11 @@ func TestDryrunEvent(t *testing.T) {
 	}
 }
 
-// TestReusableWorkflowCaller exercises the reusable-workflow caller path (typed inputs,
-// secrets as both a map and `inherit`, and reading the called workflow's outputs via `needs`).
-// It uses a remote reusable workflow and so self-skips offline: local reusable workflows resolve
-// relative to the process working directory in this harness, not the test workdir.
+// TestReusableWorkflowCaller exercises the reusable-workflow caller path against a local
+// reusable workflow (typed inputs, secrets as both a map and `inherit`, and reading the called
+// workflow's outputs via `needs`).
 func TestReusableWorkflowCaller(t *testing.T) {
 	requireDocker(t)
-	requireNetwork(t)
 	table := TestJobFileInfo{workdir, "uses-workflow", "push", "", platforms, map[string]string{"secret": "keep_it_private"}}
 	table.runTest(context.Background(), t, &Config{Secrets: table.secrets})
 }

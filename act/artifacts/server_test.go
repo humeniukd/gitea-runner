@@ -251,6 +251,7 @@ var (
 
 func TestArtifactFlow(t *testing.T) {
 	requireDocker(t)
+	requireNetwork(t) // clones the upload-artifact/download-artifact actions
 
 	ctx := context.Background()
 

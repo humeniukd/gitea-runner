@@ -8,12 +8,17 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/model"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,6 +31,52 @@ func runGit(t *testing.T, dir string, args ...string) {
 	}
 	out, err := exec.Command("git", args...).CombinedOutput()
 	require.NoError(t, err, string(out))
+}
+
+// TestShortShaActionRejected verifies a `uses` ref that is a shortened commit SHA is rejected
+// with a clear error. The action is resolved from a local repo (via DefaultActionInstance) so
+// this runs offline.
+func TestShortShaActionRejected(t *testing.T) {
+	requireDocker(t)
+
+	// a local "remote" action repo at <root>/actions/hello-world-docker-action
+	actionRoot := t.TempDir()
+	repo := filepath.Join(actionRoot, "actions", "hello-world-docker-action")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	runGit(t, "", "init", "--initial-branch=main", repo)
+	runGit(t, repo, "config", "user.email", "test@example.com")
+	runGit(t, repo, "config", "user.name", "test")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "action.yml"),
+		[]byte("name: hello\nruns:\n  using: node24\n  main: index.js\n"), 0o644))
+	runGit(t, repo, "add", ".")
+	runGit(t, repo, "commit", "-m", "initial")
+	out, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	require.NoError(t, err)
+	shortSha := strings.TrimSpace(string(out))[:7]
+
+	// a workflow that uses the action at the short SHA
+	wfDir := filepath.Join(t.TempDir(), "wf")
+	require.NoError(t, os.MkdirAll(wfDir, 0o755))
+	wf := fmt.Sprintf("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/hello-world-docker-action@%s\n", shortSha)
+	require.NoError(t, os.WriteFile(filepath.Join(wfDir, "push.yml"), []byte(wf), 0o644))
+
+	runner, err := New(&Config{
+		Workdir:               wfDir,
+		EventName:             "push",
+		Platforms:             map[string]string{"ubuntu-latest": baseImage},
+		GitHubInstance:        "github.com",
+		DefaultActionInstance: actionRoot,
+		ContainerMaxLifetime:  time.Hour,
+	})
+	require.NoError(t, err)
+	planner, err := model.NewWorkflowPlanner(wfDir, true)
+	require.NoError(t, err)
+	plan, err := planner.PlanEvent("push")
+	require.NoError(t, err)
+
+	err = runner.NewPlanExecutor(plan)(common.WithDryrun(context.Background(), true))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shortened version of a commit SHA")
 }
 
 func TestActionCache(t *testing.T) {

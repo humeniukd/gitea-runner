@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -27,7 +28,9 @@ func newLocalReusableWorkflowExecutor(rc *RunContext) common.Executor {
 		workflowDir = strings.TrimPrefix(workflowDir, "./")
 
 		return common.NewPipelineExecutor(
-			newReusableWorkflowExecutor(rc, workflowDir, fileName),
+			// resolve the local workflow against the workspace root, not the process
+			// working directory, so it is found regardless of where the runner is invoked
+			newReusableWorkflowExecutor(rc, filepath.Join(rc.Config.Workdir, workflowDir), fileName),
 		)
 	}
 
