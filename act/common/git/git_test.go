@@ -180,34 +180,55 @@ func TestGitFindRef(t *testing.T) {
 }
 
 func TestGitCloneExecutor(t *testing.T) {
+	gitConfig()
+
+	// Build a local bare "remote" so this runs offline and fast. The cases below mirror
+	// the tag/branch/sha/short-sha ref paths the executor handles, formerly exercised by
+	// cloning actions/checkout and anchore/scan-action over the network.
+	remoteDir := t.TempDir()
+	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
+
+	workDir := t.TempDir()
+	require.NoError(t, gitCmd("clone", remoteDir, workDir))
+	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "main"))
+	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "initial"))
+	require.NoError(t, gitCmd("-C", workDir, "tag", "v2"))
+	require.NoError(t, gitCmd("-C", workDir, "push", "-u", "origin", "main"))
+	require.NoError(t, gitCmd("-C", workDir, "push", "origin", "v2"))
+
+	// A branch with a dash in the name (mirrors the historical scan-action@act-fails case).
+	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "act-fails"))
+	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "branch-commit"))
+	require.NoError(t, gitCmd("-C", workDir, "push", "origin", "act-fails"))
+
+	out, err := exec.Command("git", "-C", workDir, "rev-parse", "main").Output()
+	require.NoError(t, err)
+	fullSha := strings.TrimSpace(string(out))
+
 	for name, tt := range map[string]struct {
-		Err      error
-		URL, Ref string
+		Err error
+		Ref string
 	}{
 		"tag": {
 			Err: nil,
-			URL: "https://github.com/actions/checkout",
 			Ref: "v2",
 		},
 		"branch": {
 			Err: nil,
-			URL: "https://github.com/anchore/scan-action",
 			Ref: "act-fails",
 		},
 		"sha": {
 			Err: nil,
-			URL: "https://github.com/actions/checkout",
-			Ref: "5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f", // v2
+			Ref: fullSha,
 		},
 		"short-sha": {
-			Err: &Error{ErrShortRef, "5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f"},
-			URL: "https://github.com/actions/checkout",
-			Ref: "5a4ac90", // v2
+			Err: &Error{ErrShortRef, fullSha},
+			Ref: fullSha[:7],
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			clone := NewGitCloneExecutor(NewGitCloneExecutorInput{
-				URL: tt.URL,
+				URL: remoteDir,
 				Ref: tt.Ref,
 				Dir: testDir(t),
 			})

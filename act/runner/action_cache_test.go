@@ -15,9 +15,7 @@ import (
 )
 
 func TestActionCache(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireNetwork(t)
 	a := assert.New(t)
 	cache := &GoGitActionCache{
 		Path: t.TempDir(),
@@ -63,9 +61,18 @@ func TestActionCache(t *testing.T) {
 				return
 			}
 			atar, err := cache.GetTarArchive(ctx, c.CacheDir, sha, "js")
-			if !a.NoError(err) || !a.NotEmpty(atar) { //nolint:testifylint // pre-existing issue from nektos/act
+			// NotNil, not NotEmpty: atar is a live io.PipeReader whose producer goroutine is
+			// writing concurrently; NotEmpty deep-reflects over its internals and races.
+			if !a.NoError(err) || !a.NotNil(atar) { //nolint:testifylint // pre-existing issue from nektos/act
 				return
 			}
+			// GetTarArchive streams from a background goroutine walking the shared repo.
+			// Drain and close so it finishes before the next subtest fetches into the same
+			// repo; otherwise the lingering walk races with that fetch.
+			defer func() {
+				_, _ = io.Copy(io.Discard, atar)
+				_ = atar.Close()
+			}()
 			mytar := tar.NewReader(atar)
 			th, err := mytar.Next()
 			if !a.NoError(err) || !a.NotEqual(0, th.Size) { //nolint:testifylint // pre-existing issue from nektos/act

@@ -20,9 +20,7 @@ func init() {
 }
 
 func TestImageExistsLocally(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireDocker(t)
 	ctx := context.Background()
 	// to help make this test reliable and not flaky, we need to have
 	// an image that will exist, and onew that won't exist

@@ -250,9 +250,7 @@ var (
 )
 
 func TestArtifactFlow(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireDocker(t)
 
 	ctx := context.Background()
 

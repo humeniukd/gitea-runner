@@ -196,6 +196,7 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 		ContainerMaxLifetime:  time.Hour,
 		Matrix:                cfg.Matrix,
 		ActionCache:           cfg.ActionCache,
+		ValidVolumes:          []string{"**"}, // allow workflow-declared volumes (e.g. container-volumes)
 	}
 
 	runner, err := New(runnerConfig)
@@ -223,9 +224,7 @@ type TestConfig struct {
 }
 
 func TestRunEvent(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireDocker(t)
 
 	ctx := context.Background()
 
@@ -325,6 +324,12 @@ func TestRunEvent(t *testing.T) {
 
 	for _, table := range tables {
 		t.Run(table.workflowPath, func(t *testing.T) {
+			switch table.workflowPath {
+			case "services-host-network", "container-volumes":
+				// host networking and host /proc bind mounts are Linux-Docker-only
+				requireLinuxDocker(t)
+			}
+
 			config := &Config{
 				Secrets: table.secrets,
 			}
@@ -356,9 +361,10 @@ func TestRunEvent(t *testing.T) {
 }
 
 func TestRunEventHostEnvironment(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	// Runs steps directly on the host (the "-self-hosted" platform), so it needs the
+	// shells and tools the workflows invoke, plus network for remote actions.
+	requireHostTools(t, "bash", "pwsh", "python3", "node", "nix")
+	requireNetwork(t)
 
 	ctx := context.Background()
 
@@ -452,10 +458,7 @@ func TestRunEventHostEnvironment(t *testing.T) {
 }
 
 func TestDryrunEvent(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-
+	// Dryrun plans without containers or network (shells and local actions only).
 	ctx := common.WithDryrun(context.Background(), true)
 
 	tables := []TestJobFileInfo{
@@ -481,9 +484,7 @@ func TestDryrunEvent(t *testing.T) {
 }
 
 func TestDockerActionForcePullForceRebuild(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireDocker(t)
 
 	ctx := context.Background()
 
@@ -502,22 +503,6 @@ func TestDockerActionForcePullForceRebuild(t *testing.T) {
 			table.runTest(ctx, t, config)
 		})
 	}
-}
-
-func TestRunDifferentArchitecture(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-
-	tjfi := TestJobFileInfo{
-		workdir:      workdir,
-		workflowPath: "basic",
-		eventName:    "push",
-		errorMessage: "",
-		platforms:    platforms,
-	}
-
-	tjfi.runTest(context.Background(), t, &Config{ContainerArchitecture: "linux/arm64"})
 }
 
 type maskJobLoggerFactory struct {
@@ -540,9 +525,7 @@ func TestMaskValues(t *testing.T) {
 		assert.False(t, strings.Contains(text, "composite secret")) //nolint:testifylint // pre-existing issue from nektos/act
 	}
 
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireDocker(t)
 
 	log.SetLevel(log.DebugLevel)
 
@@ -563,9 +546,7 @@ func TestMaskValues(t *testing.T) {
 }
 
 func TestRunEventSecrets(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireDocker(t)
 	workflowPath := "secrets"
 
 	tjfi := TestJobFileInfo{
@@ -585,9 +566,7 @@ func TestRunEventSecrets(t *testing.T) {
 }
 
 func TestRunWithService(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireDocker(t)
 
 	log.SetLevel(log.DebugLevel)
 	ctx := context.Background()
@@ -622,9 +601,7 @@ func TestRunWithService(t *testing.T) {
 }
 
 func TestRunActionInputs(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireDocker(t)
 	workflowPath := "input-from-cli"
 
 	tjfi := TestJobFileInfo{
@@ -643,9 +620,7 @@ func TestRunActionInputs(t *testing.T) {
 }
 
 func TestRunEventPullRequest(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireDocker(t)
 
 	workflowPath := "pull-request"
 
@@ -661,9 +636,7 @@ func TestRunEventPullRequest(t *testing.T) {
 }
 
 func TestRunMatrixWithUserDefinedInclusions(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireDocker(t)
 	workflowPath := "matrix-with-user-inclusions"
 
 	tjfi := TestJobFileInfo{

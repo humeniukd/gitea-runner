@@ -21,9 +21,8 @@ import (
 )
 
 func TestJobExecutor(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	// Dryrun only checks syntax/planning, but resolving remote actions still clones.
+	requireNetwork(t)
 	tables := []TestJobFileInfo{
 		{workdir, "uses-and-run-in-one-step", "push", "Invalid run/uses syntax for job:test step:Test", platforms, secrets},
 		{workdir, "uses-github-empty", "push", "Expected format {org}/{repo}[/path]@ref", platforms, secrets},
