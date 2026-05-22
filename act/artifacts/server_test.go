@@ -251,7 +251,6 @@ var (
 
 func TestArtifactFlow(t *testing.T) {
 	requireDocker(t)
-	requireNetwork(t) // pulls a container image
 
 	ctx := context.Background()
 

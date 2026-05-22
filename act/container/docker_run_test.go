@@ -304,7 +304,6 @@ func TestDockerCopyTarStreamErrorInMkdir(t *testing.T) {
 // 29.5.2). Running against the daemon shipped in the dind image, this catches a bad bump.
 func TestDockerCopyToSymlinkPath(t *testing.T) {
 	requireDocker(t)
-	requireNetwork(t) // pulls alpine if not present
 	ctx := context.Background()
 
 	rc := NewContainer(&NewContainerInput{
