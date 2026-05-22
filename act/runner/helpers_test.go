@@ -53,6 +53,15 @@ func requireNetwork(t *testing.T) {
 	_ = conn.Close()
 }
 
+// requireDockerNetwork is for integration tests that run containers and also pull base images
+// or clone remote actions: they need a docker daemon and outbound network, and self-skip when
+// either is missing so the suite runs cleanly offline.
+func requireDockerNetwork(t *testing.T) {
+	t.Helper()
+	requireDocker(t)
+	requireNetwork(t)
+}
+
 // requireHostTools skips the test unless every named executable is on PATH. Used by the
 // self-hosted (host environment) suite, which runs steps directly on the host.
 func requireHostTools(t *testing.T, tools ...string) {

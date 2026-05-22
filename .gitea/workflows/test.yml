@@ -24,7 +24,7 @@ jobs:
       # pull only re-checks the manifest).
       - name: cache test container images
         id: docker-images
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/docker-images.tar
           key: docker-test-images-v1
@@ -38,7 +38,7 @@ jobs:
       - name: test
         run: make test
       - name: save container images to cache
-        if: steps.docker-images.outputs.cache-hit != 'true'
+        if: always() && steps.docker-images.outputs.cache-hit != 'true'
         run: |
           images=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -vE '<none>|:dind-test$' || true)
           [ -n "$images" ] && docker save -o "${{ runner.temp }}/docker-images.tar" $images || true

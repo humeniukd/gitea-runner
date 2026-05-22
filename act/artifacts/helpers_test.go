@@ -5,12 +5,25 @@ package artifacts
 
 import (
 	"context"
+	"net"
 	"testing"
+	"time"
 
 	"gitea.com/gitea/runner/act/container"
 
 	mobyclient "github.com/moby/moby/client"
 )
+
+// requireNetwork skips the test unless the network is reachable. The artifact flow pulls a
+// container image; gating lets the suite run offline without failing.
+func requireNetwork(t *testing.T) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", "github.com:443", 3*time.Second)
+	if err != nil {
+		t.Skipf("skipping: network unavailable: %v", err)
+	}
+	_ = conn.Close()
+}
 
 // requireDocker skips the test unless a reachable docker daemon is available.
 // GetDockerClient succeeds even without a running daemon (its ping is best-effort),

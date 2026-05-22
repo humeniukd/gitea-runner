@@ -246,7 +246,7 @@ func driftedTestdataSkip(workflowPath, eventName string) string {
 }
 
 func TestRunEvent(t *testing.T) {
-	requireDocker(t)
+	requireDockerNetwork(t)
 
 	ctx := context.Background()
 
@@ -509,7 +509,7 @@ func TestDryrunEvent(t *testing.T) {
 }
 
 func TestDockerActionForcePullForceRebuild(t *testing.T) {
-	requireDocker(t)
+	requireDockerNetwork(t)
 
 	ctx := context.Background()
 
@@ -550,7 +550,7 @@ func TestMaskValues(t *testing.T) {
 		assert.False(t, strings.Contains(text, "composite secret")) //nolint:testifylint // pre-existing issue from nektos/act
 	}
 
-	requireDocker(t)
+	requireDockerNetwork(t)
 
 	log.SetLevel(log.DebugLevel)
 
@@ -571,7 +571,7 @@ func TestMaskValues(t *testing.T) {
 }
 
 func TestRunEventSecrets(t *testing.T) {
-	requireDocker(t)
+	requireDockerNetwork(t)
 	workflowPath := "secrets"
 
 	tjfi := TestJobFileInfo{
@@ -591,7 +591,7 @@ func TestRunEventSecrets(t *testing.T) {
 }
 
 func TestRunWithService(t *testing.T) {
-	requireDocker(t)
+	requireDockerNetwork(t)
 
 	log.SetLevel(log.DebugLevel)
 	ctx := context.Background()
@@ -626,7 +626,7 @@ func TestRunWithService(t *testing.T) {
 }
 
 func TestRunActionInputs(t *testing.T) {
-	requireDocker(t)
+	requireDockerNetwork(t)
 	workflowPath := "input-from-cli"
 
 	tjfi := TestJobFileInfo{
@@ -645,7 +645,7 @@ func TestRunActionInputs(t *testing.T) {
 }
 
 func TestRunEventPullRequest(t *testing.T) {
-	requireDocker(t)
+	requireDockerNetwork(t)
 
 	workflowPath := "pull-request"
 
@@ -661,7 +661,7 @@ func TestRunEventPullRequest(t *testing.T) {
 }
 
 func TestRunMatrixWithUserDefinedInclusions(t *testing.T) {
-	requireDocker(t)
+	requireDockerNetwork(t)
 	workflowPath := "matrix-with-user-inclusions"
 
 	tjfi := TestJobFileInfo{
