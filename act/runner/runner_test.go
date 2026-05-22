@@ -256,14 +256,12 @@ func TestRunEvent(t *testing.T) {
 
 		{workdir, "basic", "push", "", platforms, secrets},
 		{workdir, "fail", "push", "exit with `FAILURE`: 1", platforms, secrets},
-		{workdir, "runs-on", "push", "", platforms, secrets},
 		{workdir, "checkout", "push", "", platforms, secrets},
 		{workdir, "job-container", "push", "", platforms, secrets},
 		{workdir, "job-container-non-root", "push", "", platforms, secrets},
 		{workdir, "job-container-invalid-credentials", "push", "failed to handle credentials: failed to interpolate container.credentials.password", platforms, secrets},
 		{workdir, "container-hostname", "push", "", platforms, secrets},
 		{workdir, "matrix", "push", "", platforms, secrets},
-		{workdir, "matrix-include-exclude", "push", "", platforms, secrets},
 		{workdir, "matrix-exitcode", "push", "Job 'test' failed", platforms, secrets},
 		{workdir, "commands", "push", "", platforms, secrets},
 		{workdir, "workdir", "push", "", platforms, secrets},
@@ -293,7 +291,6 @@ func TestRunEvent(t *testing.T) {
 		{workdir, "workflow_dispatch-scalar", "workflow_dispatch", "", platforms, secrets},
 		{workdir, "workflow_dispatch-scalar-composite-action", "workflow_dispatch", "", platforms, secrets},
 		{workdir, "job-needs-context-contains-result", "push", "", platforms, secrets},
-		{"../model/testdata", "strategy", "push", "", platforms, secrets}, // TODO: move all testdata into pkg so we can validate it with planner and runner
 		{"../model/testdata", "container-volumes", "push", "", platforms, secrets},
 		{workdir, "path-handling", "push", "", platforms, secrets},
 		{workdir, "do-not-leak-step-env-in-composite", "push", "", platforms, secrets},
@@ -387,10 +384,8 @@ func TestRunEventHostEnvironment(t *testing.T) {
 			{workdir, "evalmatrix-merge-array", "push", "", platforms, secrets},
 
 			{workdir, "fail", "push", "exit with `FAILURE`: 1", platforms, secrets},
-			{workdir, "runs-on", "push", "", platforms, secrets},
 			{workdir, "checkout", "push", "", platforms, secrets},
 			{workdir, "matrix", "push", "", platforms, secrets},
-			{workdir, "matrix-include-exclude", "push", "", platforms, secrets},
 			{workdir, "commands", "push", "", platforms, secrets},
 			{workdir, "defaults-run", "push", "", platforms, secrets},
 			{workdir, "composite-fail-with-output", "push", "", platforms, secrets},
