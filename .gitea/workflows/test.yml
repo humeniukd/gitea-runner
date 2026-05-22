@@ -9,17 +9,39 @@ jobs:
   lint:
     name: check and test
     runs-on: ubuntu-latest
+    env:
+      # The runner ships a stale docker.io login; point docker at an empty config so image
+      # pulls go straight to anonymous instead of attempting (and failing) that auth first.
+      DOCKER_CONFIG: ${{ runner.temp }}/docker-noauth
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
+      # actions/setup-go caches the Go module and build caches (keyed on go.sum) by default,
+      # which also caches the compiled golangci-lint. Cache the test container images too, so
+      # runs after the first don't re-download gigabytes (with the layers present even a forced
+      # pull only re-checks the manifest).
+      - name: cache test container images
+        id: docker-images
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/docker-images.tar
+          key: docker-test-images-v1
+      - name: load cached container images
+        if: steps.docker-images.outputs.cache-hit == 'true'
+        run: docker load -i "${{ runner.temp }}/docker-images.tar"
       - name: lint
         run: make lint
       - name: build
         run: make build
       - name: test
         run: make test
+      - name: save container images to cache
+        if: steps.docker-images.outputs.cache-hit != 'true'
+        run: |
+          images=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -vE '<none>|:dind-test$' || true)
+          [ -n "$images" ] && docker save -o "${{ runner.temp }}/docker-images.tar" $images || true
       # Build the dind image and run the daemon-facing tests against the docker version it
       # ships, catching daemon-level regressions (e.g. gitea/runner#981) before release. Runs
       # after `make test` so the images it needs are already cached on the host daemon.
