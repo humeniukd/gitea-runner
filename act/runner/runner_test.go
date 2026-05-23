@@ -346,12 +346,12 @@ func TestRunEvent(t *testing.T) {
 }
 
 func TestRunEventHostEnvironment(t *testing.T) {
-	// Runs steps directly on the host (the "-self-hosted" platform), so it needs the
-	// shells and tools the workflows invoke, plus network for remote actions. Only the
-	// broadly-used interpreters are required up front; the pwsh- and nix-specific cases gate
-	// on their own tool below so a missing pwsh/nix skips just those, not the whole suite.
+	// Runs steps directly on the host (the "-self-hosted" platform), so it needs the shells
+	// and tools the workflows invoke. No network gate: every action these workflows reference
+	// is a local `./` fixture or the skipped actions/checkout, so the suite runs offline (same
+	// as TestRunEvent). Only the broadly-used interpreters are required up front; the pwsh- and
+	// nix-specific cases gate on their own tool below so a missing pwsh/nix skips just those.
 	requireHostTools(t, "bash", "python3", "node")
-	requireNetwork(t)
 
 	ctx := context.Background()
 
