@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"runtime"
 	"sync"
@@ -341,6 +342,11 @@ func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, mat
 	}
 	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
 	rc.Name = rc.ExprEval.Interpolate(ctx, run.String())
+	// Snapshot the job's pristine output expressions now, before any matrix combo runs and
+	// rewrites the shared Job.Outputs (see interpolateOutputs).
+	if job := run.Job(); job != nil {
+		rc.outputTemplate = maps.Clone(job.Outputs)
+	}
 
 	return rc
 }

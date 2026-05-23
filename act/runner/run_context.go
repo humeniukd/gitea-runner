@@ -57,6 +57,10 @@ type RunContext struct {
 	Masks               []string
 	cleanUpJobContainer common.Executor
 	caller              *caller // job calling this RunContext (reusable workflows)
+	// outputTemplate is this combination's pristine snapshot of the job's output expressions,
+	// captured before execution so each matrix combo interpolates from the originals rather
+	// than from a sibling's already-resolved values written into the shared Job.Outputs.
+	outputTemplate map[string]string
 }
 
 func (rc *RunContext) AddMask(mask string) {
@@ -613,14 +617,13 @@ func (rc *RunContext) interpolateOutputs() common.Executor {
 	return func(ctx context.Context) error {
 		ee := rc.NewExpressionEvaluator(ctx)
 		job := rc.Run.Job()
-		// Matrix combinations share this Job and its Outputs map; serialize the iterate+write
-		// so parallel combos don't trigger "concurrent map iteration and map write".
+		// Matrix combinations share this Job and its Outputs map. Interpolate from this combo's
+		// pristine snapshot (outputTemplate) and write under the lock, so each combo overwrites
+		// with its own resolved values (last wins, as on GitHub) instead of the first combo's
+		// resolved values freezing the shared template against later combos.
 		defer lockJob(job)()
-		for k, v := range job.Outputs {
-			interpolated := ee.Interpolate(ctx, v)
-			if v != interpolated {
-				job.Outputs[k] = interpolated
-			}
+		for k, v := range rc.outputTemplate {
+			job.Outputs[k] = ee.Interpolate(ctx, v)
 		}
 		return nil
 	}

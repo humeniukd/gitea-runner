@@ -300,6 +300,25 @@ func TestRunContextValidVolumes(t *testing.T) {
 	assert.Len(t, rc.validVolumes(), len(got), "repeated calls must be stable, not accumulate")
 }
 
+// TestInterpolateOutputsIsPerMatrixCombo guards the matrix-output fix: combinations share one
+// *model.Job, so each must interpolate from its own pristine snapshot. Otherwise the first
+// combo's resolved value freezes the shared template and later combos can't resolve their own.
+func TestInterpolateOutputsIsPerMatrixCombo(t *testing.T) {
+	job := &model.Job{Outputs: map[string]string{"o": "${{ matrix.v }}"}}
+	run := &model.Run{JobID: "j", Workflow: &model.Workflow{Name: "w", Jobs: map[string]*model.Job{"j": job}}}
+	r := &runnerImpl{config: &Config{}}
+	ctx := context.Background()
+
+	rcA := r.newRunContext(ctx, run, map[string]any{"v": "a"})
+	rcB := r.newRunContext(ctx, run, map[string]any{"v": "b"})
+
+	require.NoError(t, rcA.interpolateOutputs()(ctx))
+	require.NoError(t, rcB.interpolateOutputs()(ctx))
+
+	// Last combo wins (matching GitHub) instead of being frozen to combo A's "a".
+	require.Equal(t, "b", job.Outputs["o"])
+}
+
 func TestGetGitHubContext(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 
