@@ -9,8 +9,25 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.yaml.in/yaml/v4"
 )
+
+// TestStepCloneIsolatesIfAndEnv guards the parallel-matrix race fix: combinations share the job's
+// *Step, and Clone() must hand each a copy whose If/Env nodes can be mutated independently. A
+// shallow copy would share Env.Content's backing array and leak writes across combinations.
+func TestStepCloneIsolatesIfAndEnv(t *testing.T) {
+	var orig Step
+	require.NoError(t, yaml.Unmarshal([]byte("if: ${{ env.X == 'a' }}\nenv:\n  KEY: original\n"), &orig))
+	require.Len(t, orig.Env.Content, 2) // [key, value]
+
+	clone := orig.Clone()
+	clone.If.Value = "changed"
+	clone.Env.Content[1].Value = "changed"
+
+	assert.Equal(t, "${{ env.X == 'a' }}", orig.If.Value, "If must not be shared with the clone")
+	assert.Equal(t, "original", orig.Env.Content[1].Value, "Env nodes must not be shared with the clone")
+}
 
 func TestReadWorkflow_ScheduleEvent(t *testing.T) {
 	yaml := `

@@ -281,6 +281,26 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 	})
 }
 
+func TestRunContextValidVolumes(t *testing.T) {
+	rc := &RunContext{
+		Name:   "job",
+		Run:    &model.Run{Workflow: &model.Workflow{Name: "wf"}},
+		Config: &Config{ValidVolumes: []string{"my-vol", "/host/path"}},
+	}
+	name := rc.jobContainerName()
+
+	got := rc.validVolumes()
+
+	// the configured volumes plus the four the runner mounts automatically
+	assert.Subset(t, got, []string{"my-vol", "/host/path"})
+	assert.Subset(t, got, []string{"act-toolcache", name, name + "-env", "/var/run/docker.sock"})
+
+	// deriving the list must never mutate or grow the shared Config slice: parallel matrix
+	// combinations share one *Config, and the previous in-place append was a data race.
+	assert.Equal(t, []string{"my-vol", "/host/path"}, rc.Config.ValidVolumes)
+	assert.Len(t, rc.validVolumes(), len(got), "repeated calls must be stable, not accumulate")
+}
+
 func TestGetGitHubContext(t *testing.T) {
 	log.SetLevel(log.DebugLevel)
 

@@ -7,6 +7,7 @@ package container
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -28,6 +29,10 @@ func buildScratchImage(t *testing.T, platform string) string {
 	tag := fmt.Sprintf("act-test-exists-%s:latest", strings.TrimPrefix(platform, "linux/"))
 	cmd := exec.Command("docker", "build", "--platform", platform, "-t", tag, "-")
 	cmd.Stdin = strings.NewReader("FROM scratch\nLABEL act-test=1\n")
+	// Force BuildKit: it records the requested architecture in the image config for a
+	// FROM-scratch build, whereas the classic builder ignores --platform and tags it with the
+	// host arch, which would break the per-platform existence assertions below.
+	cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	t.Cleanup(func() { _ = exec.Command("docker", "rmi", "-f", tag).Run() })
