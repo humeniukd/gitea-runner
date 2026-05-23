@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -79,7 +78,6 @@ func TestFindGitRemoteURL(t *testing.T) {
 	assert := assert.New(t)
 
 	basedir := testDir(t)
-	gitConfig()
 	err := gitCmd("init", basedir)
 	assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
 	err = cleanGitHooks(basedir)
@@ -103,7 +101,6 @@ func TestFindGitRemoteURL(t *testing.T) {
 
 func TestGitFindRef(t *testing.T) {
 	basedir := testDir(t)
-	gitConfig()
 
 	for name, tt := range map[string]struct {
 		Prepare func(t *testing.T, dir string)
@@ -180,8 +177,6 @@ func TestGitFindRef(t *testing.T) {
 }
 
 func TestGitCloneExecutor(t *testing.T) {
-	gitConfig()
-
 	// Build a local bare "remote" so this runs offline and fast. The cases below mirror
 	// the tag/branch/sha/short-sha ref paths the executor handles, formerly exercised by
 	// cloning actions/checkout and anchore/scan-action over the network.
@@ -249,8 +244,6 @@ func TestGitCloneExecutorNonFastForwardRef(t *testing.T) {
 	// non-fast-forward between two fetches. Before the fix, the fetch used Force=false,
 	// causing go-git to return ErrForceNeeded and short-circuit the checkout.
 
-	gitConfig()
-
 	// Create a bare "remote" repo with an initial commit on main and a feature branch.
 	remoteDir := t.TempDir()
 	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
@@ -301,8 +294,6 @@ func TestGitCloneExecutorNonFastForwardRef(t *testing.T) {
 }
 
 func TestGitCloneExecutorOfflineMode(t *testing.T) {
-	gitConfig()
-
 	// Build a local "remote" with a single commit on main.
 	remoteDir := t.TempDir()
 	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
@@ -348,22 +339,21 @@ func TestGitCloneExecutorOfflineMode(t *testing.T) {
 	})
 }
 
-func gitConfig() {
-	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		var err error
-		if err = gitCmd("config", "--global", "user.email", "test@test.com"); err != nil {
-			log.Error(err)
-		}
-		if err = gitCmd("config", "--global", "user.name", "Unit Test"); err != nil {
-			log.Error(err)
-		}
-	}
-}
-
 func gitCmd(args ...string) error {
 	cmd := exec.Command("git", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Inject a deterministic identity and ignore the host's global/system config so commits
+	// succeed regardless of the host having no user.name/user.email (e.g. CI, GITHUB_ACTIONS
+	// unset) or a global commit.gpgsign, and without mutating the developer's ~/.gitconfig.
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Unit Test",
+		"GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=Unit Test",
+		"GIT_COMMITTER_EMAIL=test@test.com",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+	)
 
 	err := cmd.Run()
 	if exitError, ok := err.(*exec.ExitError); ok {

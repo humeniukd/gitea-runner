@@ -7,17 +7,14 @@ package artifacts
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -243,29 +240,21 @@ func TestDownloadArtifactFile(t *testing.T) {
 // and reachable everywhere, including when the CI job is itself a container.
 func TestArtifactFlow(t *testing.T) {
 	artifactPath := t.TempDir()
-	const addr = "127.0.0.1"
 
-	// Grab a free port, then hand it to Serve. There is a tiny window between closing the probe
-	// listener and Serve binding it, but it is local and the readiness wait below covers startup.
-	probe, err := net.Listen("tcp", addr+":0")
-	require.NoError(t, err)
-	port := strconv.Itoa(probe.Addr().(*net.TCPAddr).Port)
-	require.NoError(t, probe.Close())
+	// Serve the exact routes Serve() wires up, on a real loopback socket via httptest. httptest
+	// picks a free port and Close() tears the server down synchronously — avoiding both the
+	// port-rebind race and Serve()'s detached ListenAndServe goroutine, which logger.Fatal()s
+	// (process exit) on a bind error and can outlive the test's temp-dir cleanup.
+	router := httprouter.New()
+	fsys := readWriteFSImpl{}
+	uploads(router, artifactPath, fsys)
+	downloads(router, artifactPath, fsys)
+	server := httptest.NewServer(router)
+	defer server.Close()
 
-	cancel := Serve(context.Background(), artifactPath, addr, port)
-	defer cancel()
-
-	baseURL := fmt.Sprintf("http://%s:%s", addr, port)
-	client := &http.Client{Timeout: 5 * time.Second}
-
-	require.Eventually(t, func() bool {
-		conn, err := net.DialTimeout("tcp", addr+":"+port, 200*time.Millisecond)
-		if err != nil {
-			return false
-		}
-		_ = conn.Close()
-		return true
-	}, 5*time.Second, 50*time.Millisecond, "artifact server never came up")
+	baseURL := server.URL
+	client := server.Client()
+	client.Timeout = 5 * time.Second
 
 	// request performs one HTTP call and returns the status and body. The default transport adds
 	// Accept-Encoding: gzip and transparently decompresses, so gzipped downloads come back plain.

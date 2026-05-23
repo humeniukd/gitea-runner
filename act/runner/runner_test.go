@@ -347,8 +347,10 @@ func TestRunEvent(t *testing.T) {
 
 func TestRunEventHostEnvironment(t *testing.T) {
 	// Runs steps directly on the host (the "-self-hosted" platform), so it needs the
-	// shells and tools the workflows invoke, plus network for remote actions.
-	requireHostTools(t, "bash", "pwsh", "python3", "node", "nix")
+	// shells and tools the workflows invoke, plus network for remote actions. Only the
+	// broadly-used interpreters are required up front; the pwsh- and nix-specific cases gate
+	// on their own tool below so a missing pwsh/nix skips just those, not the whole suite.
+	requireHostTools(t, "bash", "python3", "node")
 	requireNetwork(t)
 
 	ctx := context.Background()
@@ -430,6 +432,12 @@ func TestRunEventHostEnvironment(t *testing.T) {
 
 	for _, table := range tables {
 		t.Run(table.workflowPath, func(t *testing.T) {
+			switch table.workflowPath {
+			case "shells/pwsh":
+				requireHostTools(t, "pwsh")
+			case "nix-prepend-path":
+				requireHostTools(t, "nix")
+			}
 			table.runTest(ctx, t, &Config{})
 		})
 	}

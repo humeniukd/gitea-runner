@@ -225,7 +225,11 @@ func setJobOutputs(ctx context.Context, rc *RunContext) {
 			callerOutputs[k] = ee.Interpolate(ctx, ee.Interpolate(ctx, v.Value))
 		}
 
-		rc.caller.runContext.Run.Job().Outputs = callerOutputs
+		// Matrix combinations of a reusable-workflow caller share the caller's *model.Job;
+		// serialize the write so parallel combos don't race on its Outputs field.
+		callerJob := rc.caller.runContext.Run.Job()
+		defer lockJob(callerJob)()
+		callerJob.Outputs = callerOutputs
 	}
 }
 
