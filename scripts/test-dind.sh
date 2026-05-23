@@ -63,16 +63,19 @@ fi
 if [ -n "$self_network" ]; then
   echo "==> Starting ${target} daemon on network ${self_network} (reached as ${name}:2375)"
   run_args=(--network "$self_network")
-  export DOCKER_HOST="tcp://${name}:2375"
+  daemon_host="tcp://${name}:2375"
 else
   echo "==> Starting ${target} daemon on tcp://127.0.0.1:${port}"
   run_args=(-p "127.0.0.1:${port}:2375")
-  export DOCKER_HOST="tcp://127.0.0.1:${port}"
+  daemon_host="tcp://127.0.0.1:${port}"
 fi
+# Create the dind container on the host daemon first, then repoint DOCKER_HOST at it: exporting
+# DOCKER_HOST before `docker run` would make this `docker run` target the not-yet-existent dind.
 docker run -d --privileged --name "$name" "${run_args[@]}" \
   -e DOCKER_TLS_CERTDIR= \
   --entrypoint dockerd-entrypoint.sh \
   "$image" --host=tcp://0.0.0.0:2375 >/dev/null
+export DOCKER_HOST="$daemon_host"
 
 echo "==> Waiting for daemon"
 for _ in $(seq 1 60); do
