@@ -186,12 +186,13 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 	// Matrix combinations share one *model.Job and run in parallel; serialize the
 	// read-modify-write of the job result so a failing combination is not lost-updated by a
 	// concurrent succeeding one.
-	unlock := lockJob(rc.Run.Job())
+	job := rc.Run.Job()
+	unlock := lockJob(job)
 	jobResult := "success"
 	// we have only one result for a whole matrix build, so we need
 	// to keep an existing result state if we run a matrix
-	if len(info.matrix()) > 0 && rc.Run.Job().Result != "" {
-		jobResult = rc.Run.Job().Result
+	if len(info.matrix()) > 0 && job.Result != "" {
+		jobResult = job.Result
 	}
 
 	if !success {

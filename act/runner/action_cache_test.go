@@ -29,7 +29,15 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if dir != "" {
 		args = append([]string{"-C", dir}, args...)
 	}
-	out, err := exec.Command("git", args...).CombinedOutput()
+	cmd := exec.Command("git", args...)
+	// Fixed identity and host-config isolation so commits succeed offline regardless of the
+	// host's git config (mirrors gitCmd in act/common/git).
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+	)
+	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 }
 
@@ -44,8 +52,6 @@ func TestShortShaActionRejected(t *testing.T) {
 	repo := filepath.Join(actionRoot, "actions", "hello-world-docker-action")
 	require.NoError(t, os.MkdirAll(repo, 0o755))
 	runGit(t, "", "init", "--initial-branch=main", repo)
-	runGit(t, repo, "config", "user.email", "test@example.com")
-	runGit(t, repo, "config", "user.name", "test")
 	require.NoError(t, os.WriteFile(filepath.Join(repo, "action.yml"),
 		[]byte("name: hello\nruns:\n  using: node24\n  main: index.js\n"), 0o644))
 	runGit(t, repo, "add", ".")
@@ -92,8 +98,6 @@ func TestActionCache(t *testing.T) {
 
 	workDir := t.TempDir()
 	runGit(t, "", "clone", remoteDir, workDir)
-	runGit(t, workDir, "config", "user.email", "test@example.com")
-	runGit(t, workDir, "config", "user.name", "test")
 	require.NoError(t, os.MkdirAll(filepath.Join(workDir, "js"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "js", "action.yml"),
 		[]byte("name: js\nruns:\n  using: node24\n  main: index.js\n"), 0o644))

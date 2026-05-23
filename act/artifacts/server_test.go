@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -262,9 +263,7 @@ func TestArtifactFlow(t *testing.T) {
 		t.Helper()
 		req, err := http.NewRequest(method, rawURL, body)
 		require.NoError(t, err)
-		for key := range header {
-			req.Header.Set(key, header.Get(key))
-		}
+		maps.Copy(req.Header, header)
 		resp, err := client.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()

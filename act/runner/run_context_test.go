@@ -292,8 +292,7 @@ func TestRunContextValidVolumes(t *testing.T) {
 	got := rc.validVolumes()
 
 	// the configured volumes plus the four the runner mounts automatically
-	assert.Subset(t, got, []string{"my-vol", "/host/path"})
-	assert.Subset(t, got, []string{"act-toolcache", name, name + "-env", "/var/run/docker.sock"})
+	assert.Subset(t, got, []string{"my-vol", "/host/path", "act-toolcache", name, name + "-env", "/var/run/docker.sock"})
 
 	// deriving the list must never mutate or grow the shared Config slice: parallel matrix
 	// combinations share one *Config, and the previous in-place append was a data race.

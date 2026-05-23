@@ -25,8 +25,7 @@ case "${1:-}" in
   dind|dind-rootless) target="$1"; shift ;;
 esac
 [ "${1:-}" = "--" ] && shift
-test_args=("$@")
-[ ${#test_args[@]} -eq 0 ] && test_args=(-race -run '^TestDocker$|^TestDockerCopyToSymlinkPath$' ./act/container/)
+[ $# -eq 0 ] && set -- -race -run '^TestDocker$|^TestDockerCopyToSymlinkPath$' ./act/container/
 
 port="${DIND_TEST_PORT:-32375}"
 name="gitea-runner-dind-test-$$"
@@ -58,29 +57,28 @@ if [ -n "$self_container" ]; then
   self_network="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$self_container" 2>/dev/null | head -1)"
 fi
 
+# The two cases differ only in how the daemon is exposed and addressed; everything else
+# (privileged, name, TLS-off entrypoint, image, --host) is shared, so collect just the
+# differing run args and the resulting DOCKER_HOST here.
 if [ -n "$self_network" ]; then
   echo "==> Starting ${target} daemon on network ${self_network} (reached as ${name}:2375)"
-  docker run -d --privileged --name "$name" --network "$self_network" \
-    -e DOCKER_TLS_CERTDIR= \
-    --entrypoint dockerd-entrypoint.sh \
-    "$image" --host=tcp://0.0.0.0:2375 >/dev/null
+  run_args=(--network "$self_network")
   export DOCKER_HOST="tcp://${name}:2375"
 else
   echo "==> Starting ${target} daemon on tcp://127.0.0.1:${port}"
-  docker run -d --privileged --name "$name" \
-    -e DOCKER_TLS_CERTDIR= \
-    -p "127.0.0.1:${port}:2375" \
-    --entrypoint dockerd-entrypoint.sh \
-    "$image" --host=tcp://0.0.0.0:2375 >/dev/null
+  run_args=(-p "127.0.0.1:${port}:2375")
   export DOCKER_HOST="tcp://127.0.0.1:${port}"
 fi
+docker run -d --privileged --name "$name" "${run_args[@]}" \
+  -e DOCKER_TLS_CERTDIR= \
+  --entrypoint dockerd-entrypoint.sh \
+  "$image" --host=tcp://0.0.0.0:2375 >/dev/null
 
 echo "==> Waiting for daemon"
 for _ in $(seq 1 60); do
-  docker version >/dev/null 2>&1 && break
+  docker version --format 'server docker {{.Server.Version}}' 2>/dev/null && break
   sleep 1
 done
-docker version --format 'server docker {{.Server.Version}}'
 
 # Seed the fresh daemon with images the host already has (the CI job pulls them in the
 # preceding `make test`), so the daemon-facing tests run without registry access.
@@ -92,4 +90,4 @@ for img in ${DIND_TEST_PRELOAD:-alpine:latest}; do
 done
 
 echo "==> Running tests against dind daemon"
-go test "${test_args[@]}"
+go test "$@"

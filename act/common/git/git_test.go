@@ -49,10 +49,6 @@ func TestFindGitSlug(t *testing.T) {
 	}
 }
 
-func testDir(t *testing.T) string {
-	return t.TempDir()
-}
-
 func cleanGitHooks(dir string) error {
 	hooksDir := filepath.Join(dir, ".git", "hooks")
 	files, err := os.ReadDir(hooksDir)
@@ -77,7 +73,7 @@ func cleanGitHooks(dir string) error {
 func TestFindGitRemoteURL(t *testing.T) {
 	assert := assert.New(t)
 
-	basedir := testDir(t)
+	basedir := t.TempDir()
 	err := gitCmd("init", basedir)
 	assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
 	err = cleanGitHooks(basedir)
@@ -100,7 +96,7 @@ func TestFindGitRemoteURL(t *testing.T) {
 }
 
 func TestGitFindRef(t *testing.T) {
-	basedir := testDir(t)
+	basedir := t.TempDir()
 
 	for name, tt := range map[string]struct {
 		Prepare func(t *testing.T, dir string)
@@ -225,7 +221,7 @@ func TestGitCloneExecutor(t *testing.T) {
 			clone := NewGitCloneExecutor(NewGitCloneExecutorInput{
 				URL: remoteDir,
 				Ref: tt.Ref,
-				Dir: testDir(t),
+				Dir: t.TempDir(),
 			})
 
 			err := clone(context.Background())
