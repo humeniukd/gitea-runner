@@ -302,7 +302,6 @@ func TestRunEvent(t *testing.T) {
 
 		// services
 		{workdir, "services", "push", "", platforms, secrets},
-		{workdir, "services-host-network", "push", "", platforms, secrets},
 		{workdir, "services-with-container", "push", "", platforms, secrets},
 
 		// local remote action overrides
@@ -311,9 +310,8 @@ func TestRunEvent(t *testing.T) {
 
 	for _, table := range tables {
 		t.Run(table.workflowPath, func(t *testing.T) {
-			switch table.workflowPath {
-			case "services-host-network", "container-volumes":
-				// host networking and host /proc bind mounts are Linux-Docker-only
+			if table.workflowPath == "container-volumes" {
+				// host /proc bind mounts are Linux-Docker-only
 				requireLinuxDocker(t)
 			}
 

@@ -10,14 +10,19 @@ jobs:
     name: check and test
     runs-on: ubuntu-latest
     env:
-      # The runner ships a stale docker.io login; point docker at an empty config so image
-      # pulls go straight to anonymous instead of attempting (and failing) that auth first.
-      DOCKER_CONFIG: ${{ runner.temp }}/docker-noauth
+      # The runner image ships a stale docker.io login; point docker at an empty config so
+      # image pulls go straight to anonymous instead of attempting (and failing) that auth
+      # first. The path must be a literal: the `runner` context is unavailable in job-level
+      # env, so `${{ runner.temp }}` would resolve to empty and config.Dir() would fall back
+      # to ~/.docker with the stale credentials.
+      DOCKER_CONFIG: /tmp/docker-noauth
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
+      - name: prepare anonymous docker config
+        run: mkdir -p "$DOCKER_CONFIG" && echo '{}' > "$DOCKER_CONFIG/config.json"
       # actions/setup-go caches the Go module and build caches (keyed on go.sum) by default,
       # which also caches the compiled golangci-lint. Cache the test container images too, so
       # runs after the first don't re-download gigabytes (with the layers present even a forced
