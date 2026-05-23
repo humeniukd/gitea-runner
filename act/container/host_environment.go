@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -440,30 +439,92 @@ func removePathWithRetry(ctx context.Context, path string) error {
 	return lastErr
 }
 
+// buildWindowsWorkspaceKillScript builds a PowerShell command that enumerates
+// processes via Win32_Process and `taskkill /T /F`s any whose ExecutablePath
+// or CommandLine references one of the given absolute workspace directories.
+//
+// PowerShell is used because Win32_Process exposes both ExecutablePath and
+// CommandLine — Get-Process alone doesn't, and `wmic` is deprecated. Matching
+// on either covers two distinct cases:
+//   - binaries launched from inside the workspace (ExecutablePath under dir)
+//   - system binaries (cmd.exe, python.exe, ...) invoked with workspace paths
+//     as arguments (CommandLine references dir)
+//
+// Each matching PID is force-killed with `taskkill /T /F` so the entire child
+// tree (e.g. the test process tree under a UI test runner) comes down with it.
+//
+// Extracted as a pure function so the script-building logic — in particular
+// the PowerShell single-quote escaping of paths — can be unit-tested on any
+// platform without invoking PowerShell.
+func buildWindowsWorkspaceKillScript(dirs []string) string {
+	var pathArgs strings.Builder
+	pathArgs.WriteString("@(")
+	for i, d := range dirs {
+		if i > 0 {
+			pathArgs.WriteString(",")
+		}
+		// Single-quoted PowerShell strings: escape ' by doubling it.
+		pathArgs.WriteString("'")
+		pathArgs.WriteString(strings.ReplaceAll(d, "'", "''"))
+		pathArgs.WriteString("'")
+	}
+	pathArgs.WriteString(")")
+
+	return `$paths = ` + pathArgs.String() + `
+$selfPid = $PID
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    if ($_.ProcessId -eq $selfPid) { return $false }
+    foreach ($p in $paths) {
+        if ($_.ExecutablePath -and $_.ExecutablePath -like ($p + '*')) { return $true }
+        if ($_.CommandLine -and $_.CommandLine -like ('*' + $p + '*')) { return $true }
+    }
+    return $false
+} | ForEach-Object {
+    & taskkill.exe /PID $_.ProcessId /T /F 2>$null | Out-Null
+}
+`
+}
+
 func (e *HostEnvironment) terminateRunningProcesses(ctx context.Context) {
 	if runtime.GOOS != "windows" {
 		return
 	}
-	e.mu.Lock()
-	pids := make([]int, 0, len(e.runningPIDs))
-	for pid := range e.runningPIDs {
-		pids = append(pids, pid)
-	}
-	e.mu.Unlock()
 
-	if len(pids) == 0 {
+	// Use a detached context with a bounded timeout: a server-initiated job
+	// cancellation cancels the parent ctx, and exec.CommandContext on a
+	// cancelled ctx refuses to start — so without this we would never run the
+	// kill commands we need to release file handles in the workspace.
+	killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer killCancel()
+
+	logger := common.Logger(ctx)
+
+	// Build the list of workspace directories we own for this job. Any process
+	// running from, or referencing, one of these paths is a leftover job
+	// process (containers/UI tests/long-running scripts that escaped the
+	// immediate exec.Cmd kill). The toolcache is intentionally excluded — it
+	// is shared across jobs and persistent.
+	dirs := make([]string, 0, 3)
+	for _, d := range []string{e.Path, e.Workdir, e.TmpDir} {
+		if d == "" {
+			continue
+		}
+		abs, err := filepath.Abs(d)
+		if err != nil {
+			continue
+		}
+		dirs = append(dirs, abs)
+	}
+	if len(dirs) == 0 {
 		return
 	}
 
-	logger := common.Logger(ctx)
-	for _, pid := range pids {
-		// Best-effort: forcibly terminate process tree to release file handles
-		// so that workspace cleanup can succeed on Windows.
-		cmd := exec.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(pid), "/T", "/F")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			logger.Debugf("taskkill failed for pid=%d: %v output=%s", pid, err, strings.TrimSpace(string(out)))
-		}
+	script := buildWindowsWorkspaceKillScript(dirs)
+
+	cmd := exec.CommandContext(killCtx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		logger.Debugf("workspace process-tree kill via PowerShell failed: %v output=%s", err, strings.TrimSpace(string(out)))
 	}
 }
 
