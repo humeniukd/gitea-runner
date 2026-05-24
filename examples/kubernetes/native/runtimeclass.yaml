@@ -1,0 +1,64 @@
+# Copyright 2026 The Gitea Authors. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# Sandboxed-runtime RuntimeClass objects for the Kubernetes-native pod backend.
+#
+# RuntimeClass is CLUSTER-SCOPED and selects which CRI runtime handler the
+# kubelet uses for a pod (via pod.spec.runtimeClassName, which the runner sets
+# from kubernetes.runtime_class_name / runtime_class_by_label). These objects
+# are a CONTRACT with the node: the named `handler` must be configured in the
+# container runtime (containerd/CRI-O) on every node that may schedule these
+# pods, and the sandbox binary must be installed there:
+#
+#   gVisor (runsc): install runsc + the containerd shim, then add a containerd
+#     runtime named "runsc". https://gvisor.dev/docs/user_guide/install/
+#   Kata Containers: install kata + the shim, then add a containerd runtime
+#     named "kata". https://github.com/kata-containers/kata-containers
+#
+# Pods land only where their handler exists: pair each RuntimeClass with
+# `scheduling.nodeSelector` (and matching node labels/taints) when only some
+# nodes provide the sandbox, so the scheduler never places a sandboxed pod on a
+# node that cannot honor it.
+#
+# Apply (once the node-side handlers exist):
+#   kubectl apply -f runtimeclass.yaml
+# Then enable it in the runner config (see configmap.yaml):
+#   kubernetes.runtime_class_name: gvisor          # one runtime for all jobs
+#   kubernetes.runtime_class_by_label:             # or per runs-on label
+#     k8s-gvisor: gvisor
+#     k8s-kata: kata
+#
+# NOTE: a privileged dind sidecar (kubernetes.dind.rootless: false) is generally
+# incompatible with gVisor; prefer rootless dind, or route docker:// jobs to a
+# runc-backed runs-on label.
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+# handler must match the containerd/CRI-O runtime name configured on the node.
+handler: runsc
+# Uncomment to confine gVisor pods to nodes that actually run runsc:
+# scheduling:
+#   nodeSelector:
+#     sandbox.gitea.com/runtime: gvisor
+#   tolerations:
+#     - key: sandbox.gitea.com/runtime
+#       operator: Equal
+#       value: gvisor
+#       effect: NoSchedule
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata
+# handler must match the containerd/CRI-O runtime name configured on the node.
+handler: kata
+# scheduling:
+#   nodeSelector:
+#     sandbox.gitea.com/runtime: kata
+#   tolerations:
+#     - key: sandbox.gitea.com/runtime
+#       operator: Equal
+#       value: kata
+#       effect: NoSchedule

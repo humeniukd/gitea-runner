@@ -817,10 +817,16 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 		name := rc.jobContainerName()
 		rc.Env["JOB_CONTAINER_NAME"] = name
 
+		// Select the pod's RuntimeClass from the job's runs-on labels so a single
+		// runner can mix sandboxed runtimes (e.g. runs-on: k8s-gvisor -> gvisor),
+		// falling back to the configured global default.
+		runtimeClass := container.ResolveKubernetesRuntimeClass(rc.Config.Kubernetes, rc.runsOnPlatformNames(ctx))
+
 		pod, err := container.NewKubernetesPod(container.KubernetesPodConfig{
-			Config:      rc.Config.Kubernetes,
-			PodName:     name,
-			MaxLifetime: rc.Config.ContainerMaxLifetime,
+			Config:           rc.Config.Kubernetes,
+			PodName:          name,
+			MaxLifetime:      rc.Config.ContainerMaxLifetime,
+			RuntimeClassName: runtimeClass,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to initialize kubernetes pod backend: %w", err)

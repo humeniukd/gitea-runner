@@ -85,6 +85,27 @@ data:
       # load; cap with a ResourceQuota rather than a tiny runner limit.
       max_concurrent_jobs: 0
 
+      # Sandboxed container runtimes via Kubernetes RuntimeClass. The named
+      # RuntimeClass objects must already exist in the cluster (see
+      # runtimeclass.yaml for gVisor/Kata examples) and the node must run the
+      # matching runtime handler (runsc for gVisor, kata for Kata). Leave both
+      # unset to use the node default runtime (runc).
+      #
+      # runtime_class_name applies one RuntimeClass to EVERY job pod:
+      #   runtime_class_name: gvisor
+      #
+      # runtime_class_by_label maps a runs-on label to a RuntimeClass so a
+      # single runner can mix isolation levels per workflow. The first matching
+      # runs-on label wins; jobs matching no entry fall back to
+      # runtime_class_name (and then to the cluster default if that is empty).
+      # With the mapping below, `runs-on: k8s-gvisor` runs under gVisor and
+      # `runs-on: k8s-kata` under Kata, while a plain `runs-on: k8s-native`
+      # uses the node default runtime.
+      #
+      # runtime_class_by_label:
+      #   k8s-gvisor: gvisor
+      #   k8s-kata: kata
+
       workspace_volume:
         type: emptyDir
 

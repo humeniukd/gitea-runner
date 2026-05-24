@@ -72,6 +72,7 @@ type podBuilder struct {
 	activeDeadlineSeconds *int64
 	ownerReference        *metav1.OwnerReference
 	hostAliases           []corev1.HostAlias
+	runtimeClassName      string
 
 	jobContainer   *corev1.Container
 	sidecars       []corev1.Container
@@ -207,6 +208,12 @@ func (b *podBuilder) build() *corev1.Pod {
 		Volumes:               []corev1.Volume{b.workspaceVolumeSpec()},
 		ActiveDeadlineSeconds: b.activeDeadlineSeconds,
 		HostAliases:           b.hostAliases,
+	}
+	// runtimeClassName selects a sandboxed runtime (gVisor/Kata) for the whole
+	// pod. Left unset when empty so the cluster's default runtime applies.
+	if b.runtimeClassName != "" {
+		runtimeClass := b.runtimeClassName
+		spec.RuntimeClassName = &runtimeClass
 	}
 	if b.serviceAccount != "" {
 		spec.ServiceAccountName = b.serviceAccount

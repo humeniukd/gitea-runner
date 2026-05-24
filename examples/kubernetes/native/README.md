@@ -23,6 +23,7 @@ execution via `remotecommand`, native sidecars for services).
 | `configmap.yaml` | Runner config (includes `kubernetes:` section) |
 | `service.yaml` | `gitea-runner-cache` ClusterIP Service for the embedded cache |
 | `pvc.yaml` | PVC for `.runner` registration state |
+| `runtimeclass.yaml` | Optional gVisor/Kata `RuntimeClass` objects for sandboxed jobs (see [Sandboxed runtimes](#sandboxed-runtimes-gvisor--kata)) |
 | `deployment.yaml` | Runner Deployment |
 
 ---
@@ -183,6 +184,8 @@ ignored.
 | `kubernetes.pod_ready_timeout` | `10m` | Increase for slow image pulls |
 | `kubernetes.pod_cleanup` | `always` | When to delete completed job pods: `always`, `on-failure`, or `never` (see [Job pod retention](#job-pod-retention-auditing)) |
 | `kubernetes.max_concurrent_jobs` | `0` (unlimited) | Concurrent job-pod cap in k8s mode; `0` = unlimited (see [Job concurrency](#job-concurrency-kube-scheduler-handles-the-backlog)) |
+| `kubernetes.runtime_class_name` | _(unset)_ | `RuntimeClass` for every job pod, e.g. `gvisor`/`kata` (see [Sandboxed runtimes](#sandboxed-runtimes-gvisor--kata)) |
+| `kubernetes.runtime_class_by_label` | _(unset)_ | Map a `runs-on` label to a `RuntimeClass` to mix isolation levels per workflow |
 | `kubernetes.resources.job` | `250m/256Mi` req, `2/2Gi` lim | Per-job container |
 | `kubernetes.resources.service` | `100m/128Mi` req, `1/1Gi` lim | Per-service sidecar |
 | `kubernetes.resources.dind` | `500m/1Gi` req, `2/4Gi` lim | DinD sidecar (≥1Gi required) |
@@ -275,6 +278,64 @@ restart will not reap them.
 > ```bash
 > kubectl -n gitea-e2e delete pods -l actions.gitea.com/retain=true
 > ```
+
+---
+
+## Sandboxed runtimes (gVisor / Kata)
+
+Each job is one Pod, so a Kubernetes [`RuntimeClass`](https://kubernetes.io/docs/concepts/containers/runtime-class/)
+is all that's needed to run untrusted job code under a sandboxed runtime —
+**gVisor** (`runsc`, a userspace kernel) or **Kata Containers** (lightweight
+VMs) — instead of the node default (`runc`). The runner sets
+`pod.spec.runtimeClassName` from config; everything else (services as native
+sidecars, exec-in steps, ephemeral workspace) is unchanged.
+
+**Prerequisite — node side.** `RuntimeClass` is a contract with the node: the
+runtime handler binary (runsc / kata) and a matching containerd/CRI-O runtime
+must already be installed on every node that may schedule these pods. Install
+the binaries, register the runtime name, then apply the `RuntimeClass` objects:
+
+```bash
+kubectl apply -f runtimeclass.yaml   # defines `gvisor` and `kata`
+```
+
+**One runtime for all jobs** — set a global default:
+
+```yaml
+kubernetes:
+  runtime_class_name: gvisor
+```
+
+**Mix isolation per workflow** — map `runs-on` labels to runtime classes so a
+single runner serves both. The first matching `runs-on` label wins; a job that
+matches no entry falls back to `runtime_class_name` (then the cluster default):
+
+```yaml
+kubernetes:
+  runtime_class_by_label:
+    k8s-gvisor: gvisor
+    k8s-kata: kata
+```
+
+```yaml
+# .gitea/workflows/ci.yml — picks gVisor for this job
+jobs:
+  build:
+    runs-on: k8s-gvisor
+```
+
+Notes:
+
+- If only some nodes provide the sandbox, give each `RuntimeClass` a
+  `scheduling.nodeSelector`/`tolerations` (commented examples in
+  `runtimeclass.yaml`) so the scheduler never places a sandboxed pod on a node
+  that cannot honor it — otherwise the pod stays `Pending`.
+- A **privileged** DinD sidecar (`kubernetes.dind.rootless: false`) is generally
+  incompatible with gVisor; prefer rootless DinD, or route `uses: docker://`
+  jobs to a `runc`-backed `runs-on` label.
+- A misnamed or absent `RuntimeClass` surfaces at pod admission (creation error
+  or a `Pending` pod with a clear event), so misconfiguration fails visibly
+  rather than silently downgrading isolation.
 
 ---
 
