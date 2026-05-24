@@ -415,3 +415,9 @@ func ownerReferenceFromEnv(podName, podUID string) *metav1.OwnerReference {
 func perJobSecretName(podName string) string {
 	return podName + "-secrets"
 }
+
+// perJobConfigMapName derives a deterministic per-job ConfigMap name from the
+// pod name so the dangling-owner sweep can target it even after a restart.
+func perJobConfigMapName(podName string) string {
+	return podName + "-config"
+}

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/internal/app/poll"
 	"gitea.com/gitea/runner/internal/app/run"
 	"gitea.com/gitea/runner/internal/pkg/client"
@@ -40,6 +41,15 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 
 		initLogging(cfg)
 		log.Infoln("Starting runner daemon")
+
+		// C2/RC2 startup backstop: reap any leaked job pods whose owning runner
+		// Pod is gone (dangling owner). Best-effort — never block startup. Live
+		// sibling runners' pods (resolvable owner) are spared.
+		if cfg.Kubernetes.Enabled {
+			if err := container.SweepDanglingJobPods(ctx, run.KubernetesRunnerConfig(&cfg.Kubernetes)); err != nil {
+				log.WithError(err).Warn("kubernetes startup dangling-owner sweep failed, continuing")
+			}
+		}
 
 		reg, err := config.LoadRegistration(cfg.Runner.File)
 		if os.IsNotExist(err) {

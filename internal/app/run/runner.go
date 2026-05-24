@@ -456,7 +456,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		Vars:                  task.Vars,
 		ValidVolumes:          r.cfg.Container.ValidVolumes,
 		InsecureSkipTLS:       r.cfg.Runner.Insecure,
-		Kubernetes:            kubernetesRunnerConfig(&r.cfg.Kubernetes),
+		Kubernetes:            KubernetesRunnerConfig(&r.cfg.Kubernetes),
 	}
 
 	rr, err := runner.New(runnerConfig)
@@ -579,10 +579,10 @@ func (r *Runner) Declare(ctx context.Context, labels []string) (*connect.Respons
 	}))
 }
 
-// kubernetesRunnerConfig maps the YAML-facing Kubernetes settings into the
+// KubernetesRunnerConfig maps the YAML-facing Kubernetes settings into the
 // runtime KubernetesConfig the act engine consumes. It returns nil when the
 // backend is disabled so the docker/host branches are selected unchanged.
-func kubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfig {
+func KubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfig {
 	if k == nil || !k.Enabled {
 		return nil
 	}
