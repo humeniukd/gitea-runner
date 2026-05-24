@@ -307,7 +307,15 @@ func kubernetesContainerSpec(name string, input *NewContainerInput, res Kubernet
 // connection-refused flake. A service with no declared ports gets no probe and
 // is considered ready once running.
 func serviceSidecarSpec(input *NewContainerInput, res KubernetesResources, capAdd, capDrop []string, forcePull bool) corev1.Container {
-	c := kubernetesContainerSpec(serviceContainerName(input.Name), input, res, capAdd, capDrop, forcePull)
+	// Use the workflow service key (NetworkAliases[0]) as the sidecar container
+	// name so it stays human-readable within the pod scope.  The compound
+	// Docker-style name stored in input.Name is too long for Kubernetes and
+	// becomes an opaque hash after RFC 1123 sanitization.
+	sidecarName := input.Name
+	if len(input.NetworkAliases) > 0 {
+		sidecarName = input.NetworkAliases[0]
+	}
+	c := kubernetesContainerSpec(serviceContainerName(sidecarName), input, res, capAdd, capDrop, forcePull)
 
 	ports := sortedExposedPorts(input.ExposedPorts)
 	for _, port := range ports {
