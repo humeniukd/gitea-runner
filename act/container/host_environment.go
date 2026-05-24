@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,9 +42,6 @@ type HostEnvironment struct {
 	CleanUp      func()
 	StdOut       io.Writer
 	AllocatePTY  bool // allocate a pseudo-TTY for each step's process
-
-	mu          sync.Mutex
-	runningPIDs map[int]struct{}
 }
 
 func (e *HostEnvironment) Create(_, _ []string) common.Executor {
@@ -352,23 +348,8 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 		go copyPtyOutput(writer, ppty, finishLog)
 		go writeKeepAlive(ppty)
 	}
-	// Split Start/Wait so the PID can be registered before the process can exit;
-	// cmd.Run() would block until exit, by which time the PID may have been reused.
 	if err := cmd.Start(); err != nil {
 		return err
-	}
-	if cmd.Process != nil {
-		e.mu.Lock()
-		if e.runningPIDs == nil {
-			e.runningPIDs = map[int]struct{}{}
-		}
-		e.runningPIDs[cmd.Process.Pid] = struct{}{}
-		e.mu.Unlock()
-		defer func(pid int) {
-			e.mu.Lock()
-			delete(e.runningPIDs, pid)
-			e.mu.Unlock()
-		}(cmd.Process.Pid)
 	}
 	err = cmd.Wait()
 	if err != nil {
@@ -439,44 +420,32 @@ func removePathWithRetry(ctx context.Context, path string) error {
 	return lastErr
 }
 
-// buildWindowsWorkspaceKillScript builds a PowerShell command that enumerates
-// processes via Win32_Process and `taskkill /T /F`s any whose ExecutablePath
-// or CommandLine references one of the given absolute workspace directories.
+// buildWindowsWorkspaceKillScript builds a PowerShell command that `taskkill
+// /T /F`s every process tree whose ExecutablePath or CommandLine references one
+// of the given absolute workspace dirs, releasing file handles for cleanup.
 //
-// PowerShell is used because Win32_Process exposes both ExecutablePath and
-// CommandLine — Get-Process alone doesn't, and `wmic` is deprecated. Matching
-// on either covers two distinct cases:
-//   - binaries launched from inside the workspace (ExecutablePath under dir)
-//   - system binaries (cmd.exe, python.exe, ...) invoked with workspace paths
-//     as arguments (CommandLine references dir)
+// Win32_Process is used because it exposes both ExecutablePath and CommandLine
+// (Get-Process doesn't, wmic is deprecated). Both match the dir+separator
+// prefix, so a sibling dir sharing a name prefix (job1 vs job10) is spared.
+// Ordinal String methods, not -like, so path metacharacters ([ ] ? *) stay
+// literal.
 //
-// Each matching PID is force-killed with `taskkill /T /F` so the entire child
-// tree (e.g. the test process tree under a UI test runner) comes down with it.
-//
-// Extracted as a pure function so the script-building logic — in particular
-// the PowerShell single-quote escaping of paths — can be unit-tested on any
-// platform without invoking PowerShell.
+// Pure function so the quote-escaping can be unit-tested without PowerShell.
 func buildWindowsWorkspaceKillScript(dirs []string) string {
-	var pathArgs strings.Builder
-	pathArgs.WriteString("@(")
+	quoted := make([]string, len(dirs))
 	for i, d := range dirs {
-		if i > 0 {
-			pathArgs.WriteString(",")
-		}
-		// Single-quoted PowerShell strings: escape ' by doubling it.
-		pathArgs.WriteString("'")
-		pathArgs.WriteString(strings.ReplaceAll(d, "'", "''"))
-		pathArgs.WriteString("'")
+		// Single-quoted PowerShell literal; escape ' by doubling it.
+		quoted[i] = "'" + strings.ReplaceAll(d, "'", "''") + "'"
 	}
-	pathArgs.WriteString(")")
 
-	return `$paths = ` + pathArgs.String() + `
+	return `$paths = @(` + strings.Join(quoted, ",") + `)
 $selfPid = $PID
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
     if ($_.ProcessId -eq $selfPid) { return $false }
     foreach ($p in $paths) {
-        if ($_.ExecutablePath -and $_.ExecutablePath -like ($p + '*')) { return $true }
-        if ($_.CommandLine -and $_.CommandLine -like ('*' + $p + '*')) { return $true }
+        $prefix = $p + '\'
+        if ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+        if ($_.CommandLine -and $_.CommandLine.IndexOf($prefix, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
     }
     return $false
 } | ForEach-Object {
@@ -490,22 +459,22 @@ func (e *HostEnvironment) terminateRunningProcesses(ctx context.Context) {
 		return
 	}
 
-	// Use a detached context with a bounded timeout: a server-initiated job
-	// cancellation cancels the parent ctx, and exec.CommandContext on a
-	// cancelled ctx refuses to start — so without this we would never run the
-	// kill commands we need to release file handles in the workspace.
+	// Detached: exec.CommandContext won't start on a cancelled ctx, and a
+	// server cancel has already cancelled the parent ctx.
 	killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer killCancel()
 
 	logger := common.Logger(ctx)
 
-	// Build the list of workspace directories we own for this job. Any process
-	// running from, or referencing, one of these paths is a leftover job
-	// process (containers/UI tests/long-running scripts that escaped the
-	// immediate exec.Cmd kill). The toolcache is intentionally excluded — it
-	// is shared across jobs and persistent.
-	dirs := make([]string, 0, 3)
-	for _, d := range []string{e.Path, e.Workdir, e.TmpDir} {
+	// Workspace dirs we own. Any process running from or referencing one is a
+	// leftover job process. ToolCache is shared across jobs; Workdir only when
+	// we own it (else it's a caller-provided checkout, e.g. act local mode).
+	owned := []string{e.Path, e.TmpDir}
+	if e.CleanWorkdir {
+		owned = append(owned, e.Workdir)
+	}
+	dirs := make([]string, 0, len(owned))
+	for _, d := range owned {
 		if d == "" {
 			continue
 		}
@@ -538,14 +507,20 @@ func (e *HostEnvironment) Remove() common.Executor {
 		if e.CleanUp != nil {
 			e.CleanUp()
 		}
+
+		// Detach: a cancelled ctx would skip removePathWithRetry's retries,
+		// which absorb Windows file-handle release lag after the kill above.
+		rmCtx, rmCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer rmCancel()
+
 		logger := common.Logger(ctx)
 		var errs []error
-		if err := removePathWithRetry(ctx, e.Path); err != nil {
+		if err := removePathWithRetry(rmCtx, e.Path); err != nil {
 			logger.Warnf("failed to remove host misc state %s: %v", e.Path, err)
 			errs = append(errs, err)
 		}
 		if e.CleanWorkdir {
-			if err := removePathWithRetry(ctx, e.Workdir); err != nil {
+			if err := removePathWithRetry(rmCtx, e.Workdir); err != nil {
 				logger.Warnf("failed to remove host workspace %s: %v", e.Workdir, err)
 				errs = append(errs, err)
 			}

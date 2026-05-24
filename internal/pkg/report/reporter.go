@@ -58,10 +58,8 @@ type Reporter struct {
 	logReportMaxLatency time.Duration
 	logBatchSize        int
 	stateReportInterval time.Duration
-	// closeTimeout bounds each RPC attempt used to flush final state/logs (Close)
-	// and to keep heartbeating after r.ctx has been cancelled — on a fresh ctx
-	// detached from r.ctx so that a server-initiated cancel does not abort the
-	// runner's acknowledgement back to Gitea.
+	// closeTimeout bounds each RPC attempt in the final flush, on a context
+	// detached from r.ctx so a server cancel can't abort the acknowledgement.
 	closeTimeout time.Duration
 
 	// Event notification channels (non-blocking, buffered 1)
@@ -335,14 +333,9 @@ func (r *Reporter) runDaemonLoop() {
 			_ = r.ReportLog(false)
 
 		case <-r.ctx.Done():
-			// Stop heartbeating as soon as the task context is cancelled. This
-			// is intentional backpressure: while a cancelled job is still
-			// cleaning up (containers, workspace, child processes), Gitea
-			// should see the runner as offline so it does not assign a new
-			// task that would overlap the in-progress cleanup. Close() still
-			// flushes the final UpdateLog{NoMore:true} and UpdateTask on a
-			// detached context via rpcCtx(), so the cancel acknowledgement is
-			// delivered even though the heartbeat loop has stopped.
+			// Stop heartbeating on cancel so Gitea sees the runner as offline
+			// during cleanup and won't assign an overlapping task. Close() still
+			// delivers the final flush on a detached context (flushFinal).
 			close(r.daemon)
 			return
 		}
@@ -445,40 +438,38 @@ func (r *Reporter) Close(lastWords string) error {
 	}
 	r.stateMu.Unlock()
 
-	// Use a detached context for the final flush so that a server-initiated
-	// cancellation — which has already cancelled r.ctx via r.cancel() — does
-	// not abort our own acknowledgement back to Gitea. The bound is sized to
-	// allow a couple of retry attempts; each individual RPC is further bounded
-	// by rpcCtx().
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), 3*r.closeTimeout)
-	defer closeCancel()
-
-	// Report the job outcome even when all log upload retry attempts have been exhausted
+	// Separate budgets so a slow ReportLog can't starve the ReportState that
+	// carries the cancel acknowledgement.
 	return errors.Join(
-		retry.New(retry.Context(closeCtx)).Do(func() error {
-			return r.ReportLog(true)
-		}),
-		retry.New(retry.Context(closeCtx)).Do(func() error {
-			return r.ReportState(true)
-		}),
+		r.flushFinal(func() error { return r.ReportLog(true) }),
+		r.flushFinal(func() error { return r.ReportState(true) }),
 	)
 }
 
-// rpcCtx returns the context to use for an outbound RPC, along with a cancel
-// function the caller must invoke when done. While r.ctx is still alive the
-// task context is used directly (zero-cost cancel). Once r.ctx has been
-// cancelled — e.g. because the server returned RESULT_CANCELLED and the
-// reporter cancelled the executor — RPCs switch to a fresh detached context
-// with a bounded timeout so the runner can still flush the final state/logs
-// and continue heartbeating during cleanup.
+// flushFinal retries fn on a detached, bounded context so a cancelled r.ctx
+// does not abort the final flush. Each call gets its own fresh budget.
+func (r *Reporter) flushFinal(fn func() error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*r.effectiveCloseTimeout())
+	defer cancel()
+	return retry.New(retry.Context(ctx)).Do(fn)
+}
+
+// effectiveCloseTimeout returns closeTimeout, or 10s when unset, so a zero
+// value can't produce an already-expired context for the final flush.
+func (r *Reporter) effectiveCloseTimeout() time.Duration {
+	if r.closeTimeout <= 0 {
+		return 10 * time.Second
+	}
+	return r.closeTimeout
+}
+
+// rpcCtx returns the context for an outbound RPC plus a cancel func. While
+// r.ctx is alive it's used directly; once cancelled (server RESULT_CANCELLED),
+// RPCs switch to a fresh bounded context so Close()'s final flush still lands.
 func (r *Reporter) rpcCtx() (context.Context, context.CancelFunc) {
 	select {
 	case <-r.ctx.Done():
-		timeout := r.closeTimeout
-		if timeout <= 0 {
-			timeout = 10 * time.Second
-		}
-		return context.WithTimeout(context.Background(), timeout)
+		return context.WithTimeout(context.Background(), r.effectiveCloseTimeout())
 	default:
 		return r.ctx, func() {}
 	}
