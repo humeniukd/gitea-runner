@@ -5,6 +5,7 @@ package container
 
 import (
 	"context"
+	"io"
 
 	"gitea.com/gitea/runner/act/common"
 )
@@ -26,33 +27,49 @@ func (p *KubernetesPod) AddDindSidecar(workdir string) {
 }
 
 // NewKubernetesDockerStepContainer returns a Container that translates a
-// `uses: docker://` step into docker CLI commands exec'd inside the job
-// container (which has DOCKER_HOST pointed at the dind sidecar). Pull/Start
-// become `docker pull` / `docker run`; file and path operations delegate to the
-// job container. It only needs the job environment, not the pod coordinator.
-func NewKubernetesDockerStepContainer(job ExecutionsEnvironment, input *NewContainerInput) Container {
-	return &kubernetesDockerStepContainer{ExecutionsEnvironment: job, input: input}
+// `uses: docker://` step into docker CLI commands exec'd inside the dind
+// sidecar (which has docker CLI in PATH). Pull/Start become `docker pull` /
+// `docker run`; file and path operations delegate to the job container.
+func NewKubernetesDockerStepContainer(job *KubernetesExecutionEnvironment, input *NewContainerInput) Container {
+	return newKubernetesDockerStepContainer(job, input, job.pod.execInDindContainer)
+}
+
+// newKubernetesDockerStepContainer is the testable constructor that accepts an
+// explicit dindExec function so unit tests can stub the sidecar exec without a
+// live cluster.
+func newKubernetesDockerStepContainer(job ExecutionsEnvironment, input *NewContainerInput, dindExec func(context.Context, []string, io.Writer, io.Writer) error) Container {
+	return &kubernetesDockerStepContainer{ExecutionsEnvironment: job, input: input, dindExec: dindExec}
 }
 
 // kubernetesDockerStepContainer embeds the job container's ExecutionsEnvironment
 // so file/path operations delegate to it, and overrides the lifecycle methods to
-// drive the dind daemon via docker CLI exec'd in the job container.
+// drive the dind daemon via docker CLI exec'd in the dind sidecar.
 type kubernetesDockerStepContainer struct {
 	ExecutionsEnvironment
 
 	input   *NewContainerInput
 	capAdd  []string
 	capDrop []string
+	// dindExec runs a shell-wrapped command in the dind sidecar, streaming
+	// stdout/stderr to the supplied writers.
+	dindExec func(context.Context, []string, io.Writer, io.Writer) error
 }
 
-// Pull runs `docker pull` only when forcePull is set; otherwise the image is
-// pulled lazily by `docker run`.
+// execInDind wraps command with buildExecCommand and runs it in the dind
+// sidecar, streaming to the step's log writers.
+func (c *kubernetesDockerStepContainer) execInDind(ctx context.Context, command []string) error {
+	wrapped := buildExecCommand(command, nil, "", "")
+	return c.dindExec(ctx, wrapped, c.input.Stdout, c.input.Stderr)
+}
+
+// Pull runs `docker pull` in the dind sidecar only when forcePull is set;
+// otherwise the image is pulled lazily by `docker run`.
 func (c *kubernetesDockerStepContainer) Pull(forcePull bool) common.Executor {
 	return func(ctx context.Context) error {
 		if !forcePull {
 			return nil
 		}
-		return c.Exec([]string{"docker", "pull", c.input.Image}, nil, "", "")(ctx)
+		return c.execInDind(ctx, []string{"docker", "pull", c.input.Image})
 	}
 }
 
@@ -67,10 +84,10 @@ func (c *kubernetesDockerStepContainer) Create(capAdd, capDrop []string) common.
 }
 
 // Start runs the step image via `docker run` against the dind daemon, exec'd
-// inside the job container and streamed to its log writers.
+// inside the dind sidecar and streamed to the job's log writers.
 func (c *kubernetesDockerStepContainer) Start(_ bool) common.Executor {
 	return func(ctx context.Context) error {
-		return c.Exec(dockerRunArgs(c.input, c.capAdd, c.capDrop), nil, "", "")(ctx)
+		return c.execInDind(ctx, dockerRunArgs(c.input, c.capAdd, c.capDrop))
 	}
 }
 

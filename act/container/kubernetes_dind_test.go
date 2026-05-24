@@ -81,37 +81,46 @@ func TestDockerRunArgs(t *testing.T) {
 
 func TestKubernetesDockerStepContainerTranslatesToDockerCLI(t *testing.T) {
 	job := &fakeExecEnv{}
-	step := NewKubernetesDockerStepContainer(job, &NewContainerInput{
+	var dindCalls [][]string
+	fakeDindExec := func(_ context.Context, command []string, _, _ io.Writer) error {
+		dindCalls = append(dindCalls, command)
+		return nil
+	}
+	step := newKubernetesDockerStepContainer(job, &NewContainerInput{
 		Image:      "alpine:3",
 		WorkingDir: "/workspace",
 		Cmd:        []string{"echo", "hi"},
-	})
+	}, fakeDindExec)
 
 	ctx := context.Background()
 	// forcePull=false: no docker pull (run pulls lazily).
 	require.NoError(t, step.Pull(false)(ctx))
-	assert.Empty(t, job.execCalls)
+	assert.Empty(t, dindCalls)
 
-	// forcePull=true: docker pull.
+	// forcePull=true: docker pull exec'd in dind sidecar.
 	require.NoError(t, step.Pull(true)(ctx))
-	require.Len(t, job.execCalls, 1)
-	assert.Equal(t, []string{"docker", "pull", "alpine:3"}, job.execCalls[0])
+	require.Len(t, dindCalls, 1)
+	// buildExecCommand wraps with sh -c so dind sidecar gets: ["sh", "-c", "exec docker pull alpine:3"]
+	assert.Equal(t, []string{"sh", "-c", "exec docker pull alpine:3"}, dindCalls[0])
 
 	require.NoError(t, step.Create([]string{"SYS_PTRACE"}, nil)(ctx))
 	require.NoError(t, step.Start(false)(ctx))
-	require.Len(t, job.execCalls, 2)
-	run := job.execCalls[1]
-	assert.Equal(t, "docker", run[0])
-	assert.Equal(t, "run", run[1])
-	assert.Contains(t, run, "--cap-add")
-	assert.Contains(t, run, "SYS_PTRACE")
-	assert.Equal(t, "alpine:3", run[len(run)-3])
-	assert.Equal(t, []string{"echo", "hi"}, run[len(run)-2:])
+	require.Len(t, dindCalls, 2)
+	// Start sends the full docker run command wrapped in sh -c to the dind sidecar.
+	run := dindCalls[1]
+	assert.Equal(t, []string{"sh", "-c"}, run[:2])
+	assert.Contains(t, run[2], "docker run")
+	assert.Contains(t, run[2], "--cap-add SYS_PTRACE")
+	assert.Contains(t, run[2], "alpine:3")
+	assert.Contains(t, run[2], "echo hi")
+
+	// job.Exec is NOT called: docker commands go to dind, not job container.
+	assert.Empty(t, job.execCalls)
 
 	// Remove/Close are no-ops (docker run --rm self-cleans).
 	require.NoError(t, step.Remove()(ctx))
 	require.NoError(t, step.Close()(ctx))
-	assert.Len(t, job.execCalls, 2)
+	assert.Len(t, dindCalls, 2)
 }
 
 func TestAddDindSidecarRootless(t *testing.T) {

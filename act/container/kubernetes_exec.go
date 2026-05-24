@@ -26,17 +26,32 @@ func (p *KubernetesPod) execInJobContainer(ctx context.Context, command []string
 	return p.streamExec(ctx, command, nil, stdout, stderr)
 }
 
-// streamExec is the shared pods/exec transport. A non-nil stdin is piped into
-// the command (used to deliver tar archives for Copy); nil stdout/stderr
-// streams are omitted from the request. A non-zero exit maps to ExitCodeError.
+// execInDindContainer runs command in the dind sidecar container over
+// pods/exec, streaming stdout/stderr to the provided writers. Used by the
+// `uses: docker://` translation layer so docker CLI commands target the
+// in-cluster daemon (which has docker in PATH) rather than the job container.
+func (p *KubernetesPod) execInDindContainer(ctx context.Context, command []string, stdout, stderr io.Writer) error {
+	return p.streamExecContainer(ctx, kubernetesDindContainerName, command, nil, stdout, stderr)
+}
+
+// streamExec is the pods/exec transport for the job container. A non-nil
+// stdin is piped into the command (used to deliver tar archives for Copy);
+// nil stdout/stderr streams are omitted from the request.
 func (p *KubernetesPod) streamExec(ctx context.Context, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	return p.streamExecContainer(ctx, kubernetesJobContainerName, command, stdin, stdout, stderr)
+}
+
+// streamExecContainer is the generic pods/exec transport. It targets the named
+// container within the submitted pod. A non-nil stdin is piped; nil stdout/
+// stderr are omitted. A non-zero exit maps to ExitCodeError.
+func (p *KubernetesPod) streamExecContainer(ctx context.Context, containerName string, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	req := p.clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(p.builder.name).
 		Namespace(p.namespace).
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
-			Container: kubernetesJobContainerName,
+			Container: containerName,
 			Command:   command,
 			Stdin:     stdin != nil,
 			Stdout:    stdout != nil,

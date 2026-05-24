@@ -141,9 +141,12 @@ func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd, e
 	}
 	// On the kubernetes backend a `uses: docker://` step cannot construct a real
 	// container via the docker SDK; translate it into docker CLI commands exec'd
-	// inside the job container, which targets the on-demand dind sidecar.
+	// inside the dind sidecar (which has docker CLI), streaming output through
+	// the job container's log writers.
 	if rc.usesKubernetes() {
-		return container.NewKubernetesDockerStepContainer(rc.JobContainer, input)
+		if jobEnv, ok := rc.JobContainer.(*container.KubernetesExecutionEnvironment); ok {
+			return container.NewKubernetesDockerStepContainer(jobEnv, input)
+		}
 	}
 	return ContainerNewContainer(input)
 }
