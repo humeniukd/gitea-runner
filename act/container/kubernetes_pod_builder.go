@@ -5,12 +5,15 @@ package container
 
 import (
 	"maps"
+	"sort"
 	"time"
 
+	"github.com/docker/go-connections/nat"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 const (
@@ -101,6 +104,22 @@ func (b *podBuilder) addSidecar(c corev1.Container) {
 	always := corev1.ContainerRestartPolicyAlways
 	c.RestartPolicy = &always
 	b.sidecars = append(b.sidecars, c)
+}
+
+// addHostAlias maps hostnames to an IP in the Pod's /etc/hosts so a job step can
+// reach a service by name (servicename:port) in addition to localhost:port.
+func (b *podBuilder) addHostAlias(ip string, hostnames ...string) {
+	b.hostAliases = append(b.hostAliases, corev1.HostAlias{IP: ip, Hostnames: hostnames})
+}
+
+// sidecarContainerNames returns the names of the registered service sidecars,
+// used by the readiness gate.
+func (b *podBuilder) sidecarContainerNames() []string {
+	names := make([]string, 0, len(b.sidecars))
+	for _, s := range b.sidecars {
+		names = append(names, s.Name)
+	}
+	return names
 }
 
 // build materialises the corev1.Pod. Native sidecars precede any plain init
@@ -230,6 +249,51 @@ func kubernetesContainerSpec(name string, input *NewContainerInput, res Kubernet
 		c.SecurityContext = sc
 	}
 	return c
+}
+
+// serviceSidecarSpec builds a service container with its exposed ports declared
+// and TCP startup/readiness probes on the first port (C3). The probes let the
+// readiness gate (and native-sidecar ordering) hold the job container's first
+// step until the service is actually accepting connections, eliminating the
+// connection-refused flake. A service with no declared ports gets no probe and
+// is considered ready once running.
+func serviceSidecarSpec(input *NewContainerInput, res KubernetesResources, capAdd, capDrop []string, forcePull bool) corev1.Container {
+	c := kubernetesContainerSpec(serviceContainerName(input.Name), input, res, capAdd, capDrop, forcePull)
+
+	ports := sortedExposedPorts(input.ExposedPorts)
+	for _, port := range ports {
+		c.Ports = append(c.Ports, corev1.ContainerPort{ContainerPort: int32(port)})
+	}
+	if len(ports) > 0 {
+		probe := tcpPortProbe(ports[0])
+		c.StartupProbe = probe
+		c.ReadinessProbe = probe
+	}
+	return c
+}
+
+// tcpPortProbe returns a TCP socket probe that polls every 2s and tolerates a
+// slow-starting service for up to ~2 minutes before giving up.
+func tcpPortProbe(port int) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(port)},
+		},
+		PeriodSeconds:    2,
+		TimeoutSeconds:   2,
+		FailureThreshold: 60,
+	}
+}
+
+// sortedExposedPorts returns the numeric container ports from an act PortSet in
+// ascending order for deterministic output.
+func sortedExposedPorts(exposed nat.PortSet) []int {
+	ports := make([]int, 0, len(exposed))
+	for p := range exposed {
+		ports = append(ports, p.Int())
+	}
+	sort.Ints(ports)
+	return ports
 }
 
 // workspaceMountPath returns where the shared workspace volume is mounted. The

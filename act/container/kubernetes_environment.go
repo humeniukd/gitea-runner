@@ -183,6 +183,63 @@ func (p *KubernetesPod) remove(ctx context.Context) error {
 	return firstErr
 }
 
+// AddServiceAlias maps a service id to localhost in the Pod's hostAliases so a
+// job step can reach the service at both servicename:port and localhost:port.
+func (p *KubernetesPod) AddServiceAlias(serviceID string) {
+	p.builder.addHostAlias("127.0.0.1", serviceID)
+}
+
+// WaitForServicesReady blocks until every service sidecar reports Ready, so the
+// first job step never races a service that is still starting (C3). Native
+// sidecars surface in the Pod's initContainerStatuses.
+func (p *KubernetesPod) WaitForServicesReady(ctx context.Context) common.Executor {
+	return func(ctx context.Context) error {
+		names := p.builder.sidecarContainerNames()
+		if len(names) == 0 {
+			return nil
+		}
+		want := make(map[string]struct{}, len(names))
+		for _, n := range names {
+			want[n] = struct{}{}
+		}
+
+		timeout := p.podReadyTimeout
+		if timeout <= 0 {
+			timeout = defaultPodReadyTimeout
+		}
+		deadline := time.Now().Add(timeout)
+
+		for {
+			pod, err := p.clientset.CoreV1().Pods(p.namespace).Get(ctx, p.builder.name, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("get job pod %s/%s: %w", p.namespace, p.builder.name, err)
+			}
+			if sidecarsReady(pod, want) {
+				return nil
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("service sidecars not ready within %s", timeout)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(podReadyPollInterval):
+			}
+		}
+	}
+}
+
+// sidecarsReady reports whether every named sidecar has Ready=true.
+func sidecarsReady(pod *corev1.Pod, want map[string]struct{}) bool {
+	ready := 0
+	for _, st := range pod.Status.InitContainerStatuses {
+		if _, ok := want[st.Name]; ok && st.Ready {
+			ready++
+		}
+	}
+	return ready == len(want)
+}
+
 // isPodReady reports whether the Pod's Ready condition is true.
 func isPodReady(pod *corev1.Pod) bool {
 	for _, cond := range pod.Status.Conditions {
@@ -229,8 +286,7 @@ func (e *KubernetesExecutionEnvironment) Create(capAdd, capDrop []string) common
 			spec := kubernetesContainerSpec(kubernetesJobContainerName, e.input, e.resources, capAdd, capDrop, e.forcePull)
 			e.pod.builder.setJobContainer(spec)
 		case roleService:
-			spec := kubernetesContainerSpec(serviceContainerName(e.input.Name), e.input, e.resources, capAdd, capDrop, e.forcePull)
-			e.pod.builder.addSidecar(spec)
+			e.pod.builder.addSidecar(serviceSidecarSpec(e.input, e.resources, capAdd, capDrop, e.forcePull))
 		}
 		return nil
 	}

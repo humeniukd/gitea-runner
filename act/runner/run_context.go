@@ -725,9 +725,10 @@ func (rc *RunContext) usesKubernetes() bool {
 	return rc.Config.Kubernetes != nil && rc.Config.Kubernetes.Enabled
 }
 
-// startKubernetesEnvironment provisions the job Pod (long-lived job container,
-// service sidecars added in a later phase) and execs steps into it. Steps run
-// via client-go remotecommand against the job container.
+// startKubernetesEnvironment provisions the job Pod (long-lived job container
+// plus one native sidecar per service) and execs steps into it. Steps run via
+// client-go remotecommand against the job container; services are reachable at
+// both localhost:port and servicename:port (hostAliases).
 func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 	return func(ctx context.Context) error {
 		// R2: assign the cleanup hook as the FIRST statement, before the
@@ -773,6 +774,22 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 			fmt.Sprintf("%s=%s", "LANG", "C.UTF-8"),
 		}
 
+		// Register each service as a native sidecar in the same Pod, reusing the
+		// shared Phase 1.5 helper so the service interpolation/credential logic is
+		// not duplicated (A1 sidesteps the Docker network executors entirely).
+		serviceInputs, err := rc.buildServiceContainerInputs(ctx, logWriter, "")
+		if err != nil {
+			return err
+		}
+		for _, input := range serviceInputs {
+			rc.ServiceContainers = append(rc.ServiceContainers, pod.NewServiceContainer(input))
+			// NetworkAliases carries the service id; map it to localhost so the
+			// job step resolves servicename:port in addition to localhost:port.
+			for _, alias := range input.NetworkAliases {
+				pod.AddServiceAlias(alias)
+			}
+		}
+
 		ext := container.LinuxContainerEnvironmentExtensions{}
 		rc.JobContainer = pod.NewJobContainer(&container.NewContainerInput{
 			Entrypoint: []string{"/bin/sleep", fmt.Sprint(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds())},
@@ -786,11 +803,27 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 			Platform:   rc.Config.ContainerArchitecture,
 		})
 
-		return common.NewPipelineExecutor(
+		// Sidecars must be registered into the pod builder (service Create) before
+		// the job container's Start submits the whole Pod. Service Start/Pull are
+		// no-ops; only Create matters for them.
+		executors := make([]common.Executor, 0, len(rc.ServiceContainers)*2+5)
+		for _, service := range rc.ServiceContainers {
+			executors = append(executors,
+				service.Pull(rc.Config.ForcePull),
+				service.Create(nil, nil),
+			)
+		}
+		executors = append(executors,
 			rc.JobContainer.Pull(rc.Config.ForcePull),
 			rc.JobContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 			rc.JobContainer.Start(false),
-		)(ctx)
+			// C3: hold the first step until every service sidecar is Ready so a DB
+			// step issued immediately after pod-Ready does not race the service.
+			pod.WaitForServicesReady(ctx),
+			rc.JobContainer.Copy(rc.JobContainer.GetActPath()+"/", rc.seedWorkspaceFiles()...),
+		)
+
+		return common.NewPipelineExecutor(executors...)(ctx)
 	}
 }
 

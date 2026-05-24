@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -177,6 +178,48 @@ func TestKubernetesSidecarRestartPolicyAlways(t *testing.T) {
 	assert.Equal(t, "postgres", sidecar.Name)
 	require.NotNil(t, sidecar.RestartPolicy)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *sidecar.RestartPolicy)
+}
+
+func TestKubernetesServiceSidecarPortsAndProbes(t *testing.T) {
+	cfg := testKubernetesConfig()
+	input := &NewContainerInput{
+		Image:          "postgres:16",
+		Name:           "gitea-job-postgres",
+		ExposedPorts:   nat.PortSet{"5432/tcp": struct{}{}},
+		NetworkAliases: []string{"postgres"},
+	}
+	spec := serviceSidecarSpec(input, cfg.Resources.Service, nil, nil, false)
+
+	require.Len(t, spec.Ports, 1)
+	assert.Equal(t, int32(5432), spec.Ports[0].ContainerPort)
+
+	require.NotNil(t, spec.StartupProbe)
+	require.NotNil(t, spec.StartupProbe.TCPSocket)
+	assert.Equal(t, 5432, spec.StartupProbe.TCPSocket.Port.IntValue())
+	require.NotNil(t, spec.ReadinessProbe)
+	require.NotNil(t, spec.ReadinessProbe.TCPSocket)
+	assert.Equal(t, 5432, spec.ReadinessProbe.TCPSocket.Port.IntValue())
+}
+
+func TestKubernetesServiceSidecarNoPortsNoProbe(t *testing.T) {
+	cfg := testKubernetesConfig()
+	spec := serviceSidecarSpec(&NewContainerInput{Image: "redis:7", Name: "redis"}, cfg.Resources.Service, nil, nil, false)
+	assert.Empty(t, spec.Ports)
+	assert.Nil(t, spec.StartupProbe)
+	assert.Nil(t, spec.ReadinessProbe)
+}
+
+func TestKubernetesHostAliases(t *testing.T) {
+	cfg := testKubernetesConfig()
+	b := newPodBuilder("gitea-job-aliases", cfg.Namespace, cfg, 0, nil)
+	b.addHostAlias("127.0.0.1", "postgres")
+	b.addHostAlias("127.0.0.1", "redis")
+	pod := b.build()
+
+	require.Len(t, pod.Spec.HostAliases, 2)
+	assert.Equal(t, "127.0.0.1", pod.Spec.HostAliases[0].IP)
+	assert.Equal(t, []string{"postgres"}, pod.Spec.HostAliases[0].Hostnames)
+	assert.Equal(t, []string{"redis"}, pod.Spec.HostAliases[1].Hostnames)
 }
 
 func TestKubernetesPullPolicy(t *testing.T) {

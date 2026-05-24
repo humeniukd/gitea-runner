@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -135,6 +136,61 @@ func TestKubernetesUpdateFromImageEnvReturnsPath(t *testing.T) {
 	env := map[string]string{}
 	require.NoError(t, job.UpdateFromImageEnv(&env)(context.Background()))
 	assert.NotEmpty(t, env["PATH"], "image env PATH should be resolved via exec env")
+}
+
+// TestKubernetesServiceSidecarReachable verifies a postgres sidecar is reachable
+// from the job container at both localhost:5432 and postgres:5432 immediately
+// after the pod is Ready, repeated to flush out connection-refused flakes (C3).
+// Run with: go test -tags integration -run TestKubernetesServiceSidecarReachable -count=10 ./act/container/
+func TestKubernetesServiceSidecarReachable(t *testing.T) {
+	pod, err := NewKubernetesPod(KubernetesPodConfig{
+		Config:      integrationConfig(t),
+		PodName:     "gitea-it-svc",
+		MaxLifetime: 10 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	job := pod.NewJobContainer(&NewContainerInput{
+		Image:      integrationImage(),
+		Entrypoint: []string{"/bin/sleep", "600"},
+		WorkingDir: "/workspace",
+		Name:       "gitea-it-svc",
+	})
+	postgres := pod.NewServiceContainer(&NewContainerInput{
+		Image:          "postgres:16",
+		Name:           "gitea-it-svc-postgres",
+		Env:            []string{"POSTGRES_PASSWORD=postgres"},
+		ExposedPorts:   nat.PortSet{"5432/tcp": struct{}{}},
+		NetworkAliases: []string{"postgres"},
+	})
+	pod.AddServiceAlias("postgres")
+
+	ctx := context.Background()
+	require.NoError(t, postgres.Create(nil, nil)(ctx))
+	require.NoError(t, job.Create(nil, nil)(ctx))
+	require.NoError(t, job.Start(false)(ctx))
+	defer func() { _ = job.Remove()(context.Background()) }()
+	require.NoError(t, pod.WaitForServicesReady(ctx)(ctx))
+
+	for _, hostport := range []string{"localhost:5432", "postgres:5432"} {
+		var out bytes.Buffer
+		job.input.Stdout = &out
+		job.input.Stderr = &out
+		host, port, _ := splitHostPort(hostport)
+		// /dev/tcp is a bash-ism; busybox `nc -z` is the portable check.
+		err := job.Exec([]string{"sh", "-c", "nc -z " + host + " " + port + " && echo OK"}, nil, "", "")(ctx)
+		require.NoError(t, err, "service unreachable at %s", hostport)
+		assert.Contains(t, out.String(), "OK")
+	}
+}
+
+func splitHostPort(hostport string) (host, port string, ok bool) {
+	for i := len(hostport) - 1; i >= 0; i-- {
+		if hostport[i] == ':' {
+			return hostport[:i], hostport[i+1:], true
+		}
+	}
+	return hostport, "", false
 }
 
 func TestKubernetesExecHonorsEnvAndWorkdir(t *testing.T) {
