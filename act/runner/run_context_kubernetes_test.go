@@ -70,6 +70,38 @@ func TestGuardKubernetesActionUnsupported(t *testing.T) {
 	})
 }
 
+func TestJobHasDockerURLStep(t *testing.T) {
+	newRC := func(steps []*model.Step) *RunContext {
+		return &RunContext{Run: &model.Run{
+			JobID: "j",
+			Workflow: &model.Workflow{
+				Jobs: map[string]*model.Job{"j": {Steps: steps}},
+			},
+		}}
+	}
+
+	t.Run("job with a uses: docker:// step", func(t *testing.T) {
+		rc := newRC([]*model.Step{
+			{Run: "echo hi"},
+			{Uses: "docker://alpine:3"},
+		})
+		assert.True(t, rc.jobHasDockerURLStep())
+	})
+
+	t.Run("bare run / JS / composite job has none", func(t *testing.T) {
+		rc := newRC([]*model.Step{
+			{Run: "echo hi"},
+			{Uses: "actions/checkout@v4"},
+			{Uses: "./local/action"},
+		})
+		assert.False(t, rc.jobHasDockerURLStep())
+	})
+
+	t.Run("nil run is safe", func(t *testing.T) {
+		assert.False(t, (&RunContext{}).jobHasDockerURLStep())
+	})
+}
+
 func TestResolveKubernetesJobImage(t *testing.T) {
 	const def = "node:20-bookworm"
 

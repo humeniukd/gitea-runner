@@ -725,6 +725,22 @@ func (rc *RunContext) usesKubernetes() bool {
 	return rc.Config.Kubernetes != nil && rc.Config.Kubernetes.Enabled
 }
 
+// jobHasDockerURLStep reports whether the job contains at least one
+// `uses: docker://` step (StepTypeUsesDockerURL) — the only step shape the
+// kubernetes backend serves via the dind sidecar. It gates dind injection so
+// pure run:/JS/composite/Go jobs do not get a needless sidecar.
+func (rc *RunContext) jobHasDockerURLStep() bool {
+	if rc.Run == nil || rc.Run.Job() == nil {
+		return false
+	}
+	for _, step := range rc.Run.Job().Steps {
+		if step != nil && step.Type() == model.StepTypeUsesDockerURL {
+			return true
+		}
+	}
+	return false
+}
+
 // guardKubernetesActionUnsupported returns a clear error when the kubernetes
 // backend cannot run an action of the given `runs.using` type (RC1). v1 rejects
 // ONLY `using: docker` actions — they construct a step container that bypasses
@@ -814,10 +830,12 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 
 		ext := container.LinuxContainerEnvironmentExtensions{}
 
-		// When dind is enabled, register the on-demand docker-in-docker sidecar
-		// and point the job container at it so `uses: docker://` steps build/run
-		// against an in-cluster daemon rather than a host socket.
-		if rc.Config.Kubernetes.Dind.Enabled {
+		// Inject the on-demand docker-in-docker sidecar (and point the job
+		// container at it via DOCKER_HOST) only when dind is enabled AND this job
+		// actually has a `uses: docker://` step. Pure run:/JS/composite/Go jobs get
+		// no dind sidecar — avoiding a needless (and, when rootless:false,
+		// privileged) container plus its startup latency on every pod.
+		if rc.Config.Kubernetes.Dind.Enabled && rc.jobHasDockerURLStep() {
 			pod.AddDindSidecar(ext.ToContainerPath(rc.Config.Workdir))
 			envList = append(envList, fmt.Sprintf("%s=%s", "DOCKER_HOST", container.KubernetesDindDockerHost))
 		}
