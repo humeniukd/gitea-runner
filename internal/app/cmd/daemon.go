@@ -77,7 +77,10 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			log.Warn("no labels configured, runner may not be able to pick up jobs")
 		}
 
-		if ls.RequireDocker() || cfg.Container.RequireDocker {
+		// The Kubernetes pod backend has no host docker daemon; skip the
+		// docker-readiness wait entirely so pod-mode startup never blocks on (or
+		// pings) /var/run/docker.sock.
+		if !cfg.Kubernetes.Enabled && (ls.RequireDocker() || cfg.Container.RequireDocker) {
 			// Wait for dockerd be ready
 			if timeout := cfg.Container.DockerTimeout; timeout > 0 {
 				tctx, cancel := context.WithTimeout(ctx, timeout)

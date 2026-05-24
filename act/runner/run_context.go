@@ -823,7 +823,7 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 		envList := []string{
 			fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"),
 			fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"),
-			fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)),
+			fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArchLocal()),
 			fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"),
 			fmt.Sprintf("%s=%s", "LANG", "C.UTF-8"),
 		}

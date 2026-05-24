@@ -274,6 +274,21 @@ type KubernetesExecutionEnvironment struct {
 // compile-time assertion that the backend satisfies the interface.
 var _ ExecutionsEnvironment = (*KubernetesExecutionEnvironment)(nil)
 
+// GetRunnerContext overrides the embedded LinuxContainerEnvironmentExtensions
+// implementation so the runner.arch value is resolved locally (RunnerArchLocal)
+// instead of by pinging a host docker daemon (RunnerArch). The pod backend has
+// no host docker socket, and the expression evaluator calls GetRunnerContext
+// many times per run — deferring to the docker resolver would emit a flood of
+// non-fatal "docker daemon ping ... /var/run/docker.sock: no such file" lines.
+func (e *KubernetesExecutionEnvironment) GetRunnerContext(_ context.Context) map[string]any {
+	return map[string]any{
+		"os":         "Linux",
+		"arch":       RunnerArchLocal(),
+		"temp":       "/tmp",
+		"tool_cache": "/opt/hostedtoolcache",
+	}
+}
+
 func resolveKubernetesRestConfig(kubeconfig string) (*rest.Config, error) {
 	if kubeconfig == "" {
 		return rest.InClusterConfig()

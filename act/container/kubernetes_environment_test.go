@@ -5,6 +5,7 @@ package container
 
 import (
 	"context"
+	goruntime "runtime"
 	"testing"
 	"time"
 
@@ -234,6 +235,41 @@ func TestOwnerReferenceFromEnv(t *testing.T) {
 	require.NotNil(t, owner)
 	assert.Equal(t, "v1", owner.APIVersion)
 	assert.Equal(t, "Pod", owner.Kind)
+}
+
+// TestRunnerArchLocal asserts the docker-free resolver maps the local
+// architecture to GitHub runner.arch names without touching a docker daemon.
+func TestRunnerArchLocal(t *testing.T) {
+	want := map[string]string{
+		"amd64":   "X64",
+		"x86_64":  "X64",
+		"386":     "X86",
+		"arm64":   "ARM64",
+		"aarch64": "ARM64",
+	}
+	expected, ok := want[goruntime.GOARCH]
+	if !ok {
+		expected = goruntime.GOARCH
+	}
+	assert.Equal(t, expected, RunnerArchLocal())
+}
+
+// TestKubernetesGetRunnerContext asserts the pod backend resolves runner.arch
+// locally (RunnerArchLocal) — never via the docker-pinging RunnerArch — so the
+// expression evaluator never constructs a docker client. The environment is
+// built without a pod/clientset precisely to prove GetRunnerContext needs no
+// docker (or kubernetes) connection.
+func TestKubernetesGetRunnerContext(t *testing.T) {
+	env := &KubernetesExecutionEnvironment{}
+	ctx := context.Background()
+
+	runnerCtx := env.GetRunnerContext(ctx)
+
+	assert.Equal(t, "Linux", runnerCtx["os"])
+	assert.Equal(t, RunnerArchLocal(), runnerCtx["arch"])
+	assert.NotEmpty(t, runnerCtx["arch"])
+	assert.Equal(t, "/tmp", runnerCtx["temp"])
+	assert.Equal(t, "/opt/hostedtoolcache", runnerCtx["tool_cache"])
 }
 
 func newTestPod(t *testing.T, clientset *fake.Clientset, podName string) *KubernetesPod {
