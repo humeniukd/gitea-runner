@@ -159,6 +159,7 @@ type Kubernetes struct {
 	ConnectBackAddress string                       `yaml:"connect_back_address"` // ConnectBackAddress is the cluster-reachable DNS job pods use to reach the runner's cache/results server.
 	Dind               KubernetesDind               `yaml:"dind"`                 // Dind configures the optional docker-in-docker sidecar.
 	PodCleanup         string                       `yaml:"pod_cleanup"`          // PodCleanup selects when completed job pods (and their per-job Secret/ConfigMap) are deleted: "always" (default), "on-failure" (delete only on success, keep failed pods), or "never" (keep all for auditing). Retained pods consume cluster resources and a capacity slot until manually deleted.
+	MaxConcurrentJobs  int                          `yaml:"max_concurrent_jobs"`  // MaxConcurrentJobs caps how many job pods this runner will run concurrently in Kubernetes mode. 0 (default) means UNLIMITED: the runner accepts every assigned job and creates a pod for it, letting the kube-scheduler and a namespace ResourceQuota be the real backpressure. A positive value is an optional client-side cap. Ignored unless kubernetes.enabled; docker/host modes always use runner.capacity.
 }
 
 // Config represents the overall configuration.
@@ -419,6 +420,9 @@ func validateKubernetes(k *Kubernetes) error {
 	case "", "always", "on-failure", "never":
 	default:
 		return fmt.Errorf("kubernetes.pod_cleanup %q is invalid; must be \"always\", \"on-failure\", or \"never\"", k.PodCleanup)
+	}
+	if k.MaxConcurrentJobs < 0 {
+		return fmt.Errorf("kubernetes.max_concurrent_jobs must be >= 0 (0 = unlimited), got %d", k.MaxConcurrentJobs)
 	}
 	return nil
 }

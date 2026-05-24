@@ -182,11 +182,59 @@ ignored.
 | `kubernetes.default_job_image` | `node:20-bookworm` | Image for bare `run:` jobs with no `container: image:` |
 | `kubernetes.pod_ready_timeout` | `10m` | Increase for slow image pulls |
 | `kubernetes.pod_cleanup` | `always` | When to delete completed job pods: `always`, `on-failure`, or `never` (see [Job pod retention](#job-pod-retention-auditing)) |
+| `kubernetes.max_concurrent_jobs` | `0` (unlimited) | Concurrent job-pod cap in k8s mode; `0` = unlimited (see [Job concurrency](#job-concurrency-kube-scheduler-handles-the-backlog)) |
 | `kubernetes.resources.job` | `250m/256Mi` req, `2/2Gi` lim | Per-job container |
 | `kubernetes.resources.service` | `100m/128Mi` req, `1/1Gi` lim | Per-service sidecar |
 | `kubernetes.resources.dind` | `500m/1Gi` req, `2/4Gi` lim | DinD sidecar (≥1Gi required) |
-| `runner.capacity` | `4` | Max concurrent jobs |
+| `runner.capacity` | `4` | Max concurrent jobs for **docker/host** backends; **bypassed** in k8s mode (use `kubernetes.max_concurrent_jobs`) |
 | `GITEA_INSTANCE_URL` | `http://gitea.192.168.2.190.nip.io` | Set to your Gitea URL |
+
+---
+
+## Job concurrency (kube-scheduler handles the backlog)
+
+In Kubernetes mode the runner only **creates** job pods and execs into them — the
+**kube-scheduler** queues and places the real workloads. So the small
+host-process `runner.capacity` (which bounds the docker/host backends) is an
+artificial bottleneck: it makes the runner queue jobs internally instead of
+letting Kubernetes pend them. The pod backend therefore uses
+`kubernetes.max_concurrent_jobs` instead:
+
+| Value | Behaviour |
+|---|---|
+| `0` (default) | **Unlimited.** The runner accepts every assigned job and creates a pod for it; the kube-scheduler pends whatever the cluster cannot place yet. |
+| _N_ > 0 | Optional client-side cap: at most _N_ in-flight job pods from this runner. |
+
+`runner.capacity` is **ignored** when `kubernetes.enabled: true`; docker/host
+runners are unaffected.
+
+> **Let the cluster be the backpressure, not the runner.** True-unlimited keeps
+> one runner goroutine **and** one Kubernetes API watch alive per in-flight job,
+> so a very large fan-out adds API-server load. The correct way to bound a build
+> namespace is a **ResourceQuota** (and/or `LimitRange`), which makes the
+> scheduler reject/pend excess pods — far better than throttling the runner to a
+> tiny number and serialising the queue inside it.
+
+Example: cap the `gitea-e2e` namespace at 50 pods and a CPU/memory budget so an
+unbounded runner cannot exhaust the cluster:
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: gitea-e2e-quota
+  namespace: gitea-e2e
+spec:
+  hard:
+    pods: "50"
+    requests.cpu: "20"
+    requests.memory: 40Gi
+    limits.cpu: "80"
+    limits.memory: 160Gi
+```
+
+With the quota in place you can safely run `kubernetes.max_concurrent_jobs: 0`
+and let pods pend when the budget is full.
 
 ---
 
@@ -218,9 +266,11 @@ startup dangling-owner sweep **skips** pods carrying this marker, so a runner
 restart will not reap them.
 
 > **Cost of retention.** A retained pod keeps consuming its requested CPU and
-> memory **and** occupies one of the runner's `runner.capacity` slots until it
-> is removed. Under `never` (or `on-failure` on a flaky pipeline) retained pods
-> accumulate and will eventually starve new jobs. Prune them on a schedule:
+> memory **and** counts against the namespace `ResourceQuota` (see [Job
+> concurrency](#job-concurrency-kube-scheduler-handles-the-backlog)) until it is
+> removed. Under `never` (or `on-failure` on a flaky pipeline) retained pods
+> accumulate and will eventually exhaust the quota and pend new jobs. Prune them
+> on a schedule:
 >
 > ```bash
 > kubectl -n gitea-e2e delete pods -l actions.gitea.com/retain=true

@@ -317,6 +317,37 @@ kubernetes:
 	assert.Contains(t, err.Error(), "pod_cleanup")
 }
 
+func TestLoadDefault_KubernetesMaxConcurrentJobsDefaultUnlimited(t *testing.T) {
+	cfg, err := LoadDefault("")
+	require.NoError(t, err)
+	// 0 == unlimited: the runner accepts all jobs and lets kube-scheduler queue.
+	assert.Equal(t, 0, cfg.Kubernetes.MaxConcurrentJobs)
+}
+
+func TestLoadDefault_KubernetesMaxConcurrentJobsPositiveAccepted(t *testing.T) {
+	path := writeConfig(t, `
+kubernetes:
+  enabled: true
+  connect_back_address: http://gitea-runner-cache.gitea-e2e.svc:8088
+  max_concurrent_jobs: 32
+`)
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, 32, cfg.Kubernetes.MaxConcurrentJobs)
+}
+
+func TestLoadDefault_KubernetesMaxConcurrentJobsNegativeRejected(t *testing.T) {
+	path := writeConfig(t, `
+kubernetes:
+  enabled: true
+  connect_back_address: http://gitea-runner-cache.gitea-e2e.svc:8088
+  max_concurrent_jobs: -1
+`)
+	_, err := LoadDefault(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_concurrent_jobs")
+}
+
 func TestLoadDefault_DisabledKubernetesLeavesContainerDefaults(t *testing.T) {
 	// With the backend off, unrelated defaults remain untouched.
 	cfg, err := LoadDefault("")

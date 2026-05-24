@@ -335,3 +335,136 @@ func TestPoller_ShutdownForcesJobsOnTimeout(t *testing.T) {
 	assert.Equal(t, int64(1), runner.totalCompleted.Load(),
 		"the parked task must be cancelled and unwound")
 }
+
+// TestPoller_ConcurrencyLimit asserts the per-mode concurrency selection:
+// docker/host use runner.capacity unchanged; Kubernetes mode uses
+// max_concurrent_jobs (0 = unlimited, a positive value is the cap).
+func TestPoller_ConcurrencyLimit(t *testing.T) {
+	cases := []struct {
+		name              string
+		k8sEnabled        bool
+		maxConcurrentJobs int
+		capacity          int
+		want              int
+	}{
+		{"docker/host uses capacity", false, 0, 4, 4},
+		{"k8s unlimited (0) bypasses capacity", true, 0, 4, unlimitedConcurrencySlots},
+		{"k8s explicit cap wins", true, 7, 4, 7},
+		{"k8s disabled ignores max_concurrent_jobs", false, 7, 4, 4},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := config.LoadDefault("")
+			require.NoError(t, err)
+			cfg.Runner.Capacity = c.capacity
+			cfg.Kubernetes.Enabled = c.k8sEnabled
+			cfg.Kubernetes.MaxConcurrentJobs = c.maxConcurrentJobs
+			p := &Poller{cfg: cfg}
+			assert.Equal(t, c.want, p.concurrencyLimit())
+		})
+	}
+}
+
+// TestPoller_KubernetesUnlimitedConcurrency verifies that with kubernetes.enabled
+// and max_concurrent_jobs=0, the runner is NOT bounded by runner.capacity: many
+// jobs run concurrently even though capacity is 1 (the kube-scheduler, not the
+// host process, is the backpressure).
+func TestPoller_KubernetesUnlimitedConcurrency(t *testing.T) {
+	const (
+		totalTasks = 6
+		taskDelay  = 100 * time.Millisecond
+	)
+
+	var tasksReturned atomic.Int64
+	cli := mocks.NewClient(t)
+	cli.On("FetchTask", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ *connect_go.Request[runnerv1.FetchTaskRequest]) (*connect_go.Response[runnerv1.FetchTaskResponse], error) {
+			n := tasksReturned.Add(1)
+			if n <= totalTasks {
+				return connect_go.NewResponse(&runnerv1.FetchTaskResponse{Task: &runnerv1.Task{Id: n}}), nil
+			}
+			return connect_go.NewResponse(&runnerv1.FetchTaskResponse{}), nil
+		},
+	)
+
+	runner := &mockRunner{delay: taskDelay}
+
+	cfg, err := config.LoadDefault("")
+	require.NoError(t, err)
+	cfg.Runner.Capacity = 1 // deliberately tiny: must be ignored in k8s mode.
+	cfg.Kubernetes.Enabled = true
+	cfg.Kubernetes.MaxConcurrentJobs = 0 // unlimited
+	cfg.Runner.FetchInterval = 10 * time.Millisecond
+	cfg.Runner.FetchIntervalMax = 10 * time.Millisecond
+
+	poller := New(cfg, cli, runner)
+
+	var wg sync.WaitGroup
+	wg.Go(poller.Poll)
+
+	require.Eventually(t, func() bool {
+		return runner.totalCompleted.Load() >= totalTasks
+	}, 2*time.Second, 10*time.Millisecond, "all tasks should complete")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, poller.Shutdown(ctx))
+	wg.Wait()
+
+	assert.Greater(t, runner.maxConcurrent.Load(), int64(cfg.Runner.Capacity),
+		"k8s unlimited mode must exceed runner.capacity")
+	assert.Equal(t, int64(totalTasks), runner.totalCompleted.Load())
+}
+
+// TestPoller_KubernetesCappedConcurrency verifies that a positive
+// max_concurrent_jobs is honored as the cap in k8s mode (independent of
+// runner.capacity).
+func TestPoller_KubernetesCappedConcurrency(t *testing.T) {
+	const (
+		maxJobs    = 2
+		totalTasks = 6
+		taskDelay  = 80 * time.Millisecond
+	)
+
+	var tasksReturned atomic.Int64
+	cli := mocks.NewClient(t)
+	cli.On("FetchTask", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ *connect_go.Request[runnerv1.FetchTaskRequest]) (*connect_go.Response[runnerv1.FetchTaskResponse], error) {
+			n := tasksReturned.Add(1)
+			if n <= totalTasks {
+				return connect_go.NewResponse(&runnerv1.FetchTaskResponse{Task: &runnerv1.Task{Id: n}}), nil
+			}
+			return connect_go.NewResponse(&runnerv1.FetchTaskResponse{}), nil
+		},
+	)
+
+	runner := &mockRunner{delay: taskDelay}
+
+	cfg, err := config.LoadDefault("")
+	require.NoError(t, err)
+	cfg.Runner.Capacity = 1 // must be ignored: k8s cap takes over.
+	cfg.Kubernetes.Enabled = true
+	cfg.Kubernetes.MaxConcurrentJobs = maxJobs
+	cfg.Runner.FetchInterval = 10 * time.Millisecond
+	cfg.Runner.FetchIntervalMax = 10 * time.Millisecond
+
+	poller := New(cfg, cli, runner)
+
+	var wg sync.WaitGroup
+	wg.Go(poller.Poll)
+
+	require.Eventually(t, func() bool {
+		return runner.totalCompleted.Load() >= totalTasks
+	}, 2*time.Second, 10*time.Millisecond, "all tasks should complete")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, poller.Shutdown(ctx))
+	wg.Wait()
+
+	assert.LessOrEqual(t, runner.maxConcurrent.Load(), int64(maxJobs),
+		"concurrent jobs must not exceed the configured max_concurrent_jobs")
+	assert.Greater(t, runner.maxConcurrent.Load(), int64(cfg.Runner.Capacity),
+		"the k8s cap (2), not runner.capacity (1), must govern")
+	assert.Equal(t, int64(totalTasks), runner.totalCompleted.Load())
+}

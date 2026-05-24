@@ -27,6 +27,10 @@ data:
     runner:
       # .runner lives on the PVC so registration survives pod restarts.
       file: /data/.runner
+      # capacity bounds concurrent jobs for the docker/host backends only.
+      # In kubernetes mode it is BYPASSED — see kubernetes.max_concurrent_jobs
+      # (0 = unlimited) below; the kube-scheduler + a namespace ResourceQuota
+      # are the real backpressure.
       capacity: 4
       timeout: 3h
 
@@ -66,6 +70,20 @@ data:
       # AND a runner capacity slot until you delete it manually
       # (kubectl delete pod <name>); prune retained pods regularly.
       pod_cleanup: always
+
+      # Max job pods this runner runs concurrently. 0 (default) = UNLIMITED:
+      # the runner accepts every assigned job and creates a pod for it, letting
+      # the kube-scheduler pend the backlog instead of queuing it inside the
+      # runner. This makes the small host-process `runner.capacity` irrelevant
+      # in k8s mode (it still bounds docker/host runners). A positive value is
+      # an OPTIONAL client-side cap on in-flight job pods.
+      #
+      # The REAL admission control should be the cluster, not the runner: set a
+      # ResourceQuota (and/or LimitRange) on this namespace to bound total pods
+      # / CPU / memory — see the README. Cost of unlimited: one runner goroutine
+      # + one API watch per in-flight job, so very large fan-outs add API-server
+      # load; cap with a ResourceQuota rather than a tiny runner limit.
+      max_concurrent_jobs: 0
 
       workspace_volume:
         type: emptyDir

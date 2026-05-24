@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,14 @@ import (
 	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
 	log "github.com/sirupsen/logrus"
 )
+
+// unlimitedConcurrencySlots sizes the worker semaphore in Kubernetes mode when
+// kubernetes.max_concurrent_jobs is 0 (unlimited). A struct{} channel buffer
+// allocates no backing array regardless of capacity, so this is effectively a
+// no-op cap: the runner accepts every assigned job and creates a pod for it,
+// deferring admission control to the kube-scheduler and a namespace
+// ResourceQuota rather than an artificial host-process limit.
+const unlimitedConcurrencySlots = math.MaxInt32
 
 // TaskRunner abstracts task execution so the poller can be tested
 // without a real runner.
@@ -81,8 +90,24 @@ func New(cfg *config.Config, client client.Client, runner TaskRunner) *Poller {
 	}
 }
 
+// concurrencyLimit returns the maximum number of jobs the poller runs at once.
+// In Kubernetes mode the runner only creates pods and execs into them — the
+// kube-scheduler queues the real workloads — so the small host-process
+// runner.capacity is an artificial bottleneck. There, max_concurrent_jobs
+// governs: 0 means unlimited (accept all jobs, one pod each), a positive value
+// is an optional cap. Docker/host modes are unchanged: always runner.capacity.
+func (p *Poller) concurrencyLimit() int {
+	if p.cfg.Kubernetes.Enabled {
+		if p.cfg.Kubernetes.MaxConcurrentJobs > 0 {
+			return p.cfg.Kubernetes.MaxConcurrentJobs
+		}
+		return unlimitedConcurrencySlots
+	}
+	return p.cfg.Runner.Capacity
+}
+
 func (p *Poller) Poll() {
-	sem := make(chan struct{}, p.cfg.Runner.Capacity)
+	sem := make(chan struct{}, p.concurrencyLimit())
 	wg := &sync.WaitGroup{}
 	s := &workerState{}
 
