@@ -115,7 +115,7 @@ func TestKubernetesPodBuilder(t *testing.T) {
 
 func TestKubernetesPodBuilderPVCWorkspace(t *testing.T) {
 	cfg := testKubernetesConfig()
-	cfg.WorkspaceVolume = KubernetesWorkspaceVolume{Type: "pvc", PVCSize: "10Gi"}
+	cfg.WorkspaceVolume = KubernetesWorkspaceVolume{Type: "pvc", Size: "10Gi"}
 	b := newPodBuilder("gitea-job-2", cfg.Namespace, cfg, 0, nil)
 	b.setJobContainer(kubernetesContainerSpec(kubernetesJobContainerName, &NewContainerInput{Image: "alpine:3"}, cfg.Resources.Job, nil, nil, false))
 	pod := b.build()
@@ -126,6 +126,44 @@ func TestKubernetesPodBuilderPVCWorkspace(t *testing.T) {
 	// no maxLifetime -> no deadline; no env owner -> no ownerReference
 	assert.Nil(t, pod.Spec.ActiveDeadlineSeconds)
 	assert.Empty(t, pod.OwnerReferences)
+}
+
+func TestKubernetesPodBuilderEphemeralWorkspace(t *testing.T) {
+	cfg := testKubernetesConfig()
+	cfg.WorkspaceVolume = KubernetesWorkspaceVolume{
+		Type:             "ephemeral",
+		Size:             "20Gi",
+		StorageClassName: "fast-ssd",
+		AccessModes:      []string{"ReadWriteOnce"},
+	}
+	b := newPodBuilder("gitea-job-eph", cfg.Namespace, cfg, 0, nil)
+	b.setJobContainer(kubernetesContainerSpec(kubernetesJobContainerName, &NewContainerInput{Image: "alpine:3"}, cfg.Resources.Job, nil, nil, false))
+	pod := b.build()
+
+	require.Len(t, pod.Spec.Volumes, 1)
+	eph := pod.Spec.Volumes[0].Ephemeral
+	require.NotNil(t, eph)
+	require.NotNil(t, eph.VolumeClaimTemplate)
+	spec := eph.VolumeClaimTemplate.Spec
+	assert.Equal(t, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, spec.AccessModes)
+	require.NotNil(t, spec.StorageClassName)
+	assert.Equal(t, "fast-ssd", *spec.StorageClassName)
+	assert.True(t, spec.Resources.Requests.Storage().Equal(resource.MustParse("20Gi")))
+	// emptyDir and static pvc must not be set for the ephemeral type.
+	assert.Nil(t, pod.Spec.Volumes[0].EmptyDir)
+	assert.Nil(t, pod.Spec.Volumes[0].PersistentVolumeClaim)
+}
+
+func TestKubernetesPodBuilderEphemeralDefaultsAccessMode(t *testing.T) {
+	cfg := testKubernetesConfig()
+	cfg.WorkspaceVolume = KubernetesWorkspaceVolume{Type: "ephemeral", Size: "5Gi"}
+	b := newPodBuilder("gitea-job-eph2", cfg.Namespace, cfg, 0, nil)
+	b.setJobContainer(kubernetesContainerSpec(kubernetesJobContainerName, &NewContainerInput{Image: "alpine:3"}, cfg.Resources.Job, nil, nil, false))
+	pod := b.build()
+
+	spec := pod.Spec.Volumes[0].Ephemeral.VolumeClaimTemplate.Spec
+	assert.Equal(t, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, spec.AccessModes)
+	assert.Nil(t, spec.StorageClassName)
 }
 
 func TestKubernetesSidecarRestartPolicyAlways(t *testing.T) {

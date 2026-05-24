@@ -27,12 +27,15 @@ type KubernetesRoleResources struct {
 	Dind    KubernetesResources
 }
 
-// KubernetesWorkspaceVolume selects how the shared job workspace is backed.
-// Type is "emptyDir" (default) or "pvc"; PVCSize is the requested size when
-// Type is "pvc".
+// KubernetesWorkspaceVolume selects how the shared job workspace is backed:
+// "emptyDir" (default), "ephemeral" (a pod-owned generic ephemeral volume), or
+// "pvc" (a static claim named after the pod). Size/StorageClassName/AccessModes
+// apply to the claim-backed types.
 type KubernetesWorkspaceVolume struct {
-	Type    string
-	PVCSize string
+	Type             string
+	Size             string
+	StorageClassName string
+	AccessModes      []string
 }
 
 // KubernetesDindConfig configures the optional on-demand docker-in-docker

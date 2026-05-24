@@ -64,7 +64,7 @@ kubernetes:
     - regcred
   workspace_volume:
     type: pvc
-    pvc_size: 10Gi
+    size: 10Gi
   pod_labels:
     team: ci
   pod_annotations:
@@ -95,7 +95,9 @@ kubernetes:
 	assert.Equal(t, "/etc/kube/config", k.Kubeconfig)
 	assert.Equal(t, []string{"regcred"}, k.ImagePullSecrets)
 	assert.Equal(t, "pvc", k.WorkspaceVolume.Type)
-	assert.Equal(t, "10Gi", k.WorkspaceVolume.PVCSize)
+	assert.Equal(t, "10Gi", k.WorkspaceVolume.Size)
+	// claim-backed workspaces default to ReadWriteOnce
+	assert.Equal(t, []string{"ReadWriteOnce"}, k.WorkspaceVolume.AccessModes)
 	assert.Equal(t, "ci", k.PodLabels["team"])
 	assert.Equal(t, "hello", k.PodAnnotations["note"])
 	assert.Equal(t, 90*time.Second, k.PodReadyTimeout)
@@ -123,7 +125,39 @@ kubernetes:
 
 	_, err := LoadDefault(path)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pvc_size")
+	assert.Contains(t, err.Error(), "size")
+}
+
+func TestLoadDefault_KubernetesEphemeralRequiresSize(t *testing.T) {
+	path := writeConfig(t, `
+kubernetes:
+  enabled: true
+  workspace_volume:
+    type: ephemeral
+`)
+
+	_, err := LoadDefault(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "size")
+}
+
+func TestLoadDefault_KubernetesEphemeralDefaults(t *testing.T) {
+	path := writeConfig(t, `
+kubernetes:
+  enabled: true
+  workspace_volume:
+    type: ephemeral
+    size: 20Gi
+    storage_class_name: fast-ssd
+`)
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	wv := cfg.Kubernetes.WorkspaceVolume
+	assert.Equal(t, "ephemeral", wv.Type)
+	assert.Equal(t, "20Gi", wv.Size)
+	assert.Equal(t, "fast-ssd", wv.StorageClassName)
+	assert.Equal(t, []string{"ReadWriteOnce"}, wv.AccessModes)
 }
 
 func TestLoadDefault_KubernetesInvalidWorkspaceType(t *testing.T) {

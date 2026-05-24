@@ -119,9 +119,18 @@ type KubernetesContainerResources struct {
 }
 
 // KubernetesWorkspaceVolume selects how the shared job workspace is backed.
+//
+//   - "emptyDir" (default): node-local scratch, freed with the pod.
+//   - "ephemeral": a pod-owned generic ephemeral volume (a PVC auto-created and
+//     auto-GC'd with the pod) — the recommended persistent-backed per-job
+//     workspace; composes with the own-Pod ownerReference cleanup.
+//   - "pvc": a pre-existing/static PersistentVolumeClaim named after the pod
+//     (shared/advanced use).
 type KubernetesWorkspaceVolume struct {
-	Type    string `yaml:"type"`     // Type is "emptyDir" (default) or "pvc".
-	PVCSize string `yaml:"pvc_size"` // PVCSize is the requested size when Type is "pvc" (e.g. "10Gi").
+	Type             string   `yaml:"type"`               // Type is "emptyDir" (default), "ephemeral", or "pvc".
+	Size             string   `yaml:"size"`               // Size is the requested storage when Type is "ephemeral" or "pvc" (e.g. "10Gi").
+	StorageClassName string   `yaml:"storage_class_name"` // StorageClassName optionally selects a storage class for "ephemeral"/"pvc"; empty uses the cluster default.
+	AccessModes      []string `yaml:"access_modes"`       // AccessModes for the backing claim; defaults to ["ReadWriteOnce"].
 }
 
 // KubernetesDind configures the optional on-demand docker-in-docker sidecar that
@@ -297,10 +306,11 @@ func LoadDefault(file string) (*Config, error) {
 // Kubernetes backend defaults (M3). Each container role is tuned independently;
 // the dind sidecar needs >=1Gi to build images reliably.
 const (
-	defaultKubernetesNamespace       = "gitea-e2e"
-	defaultKubernetesPodReadyTimeout = 5 * time.Minute
-	defaultKubernetesWorkspaceType   = "emptyDir"
-	defaultKubernetesDindRootless    = true
+	defaultKubernetesNamespace           = "gitea-e2e"
+	defaultKubernetesPodReadyTimeout     = 5 * time.Minute
+	defaultKubernetesWorkspaceType       = "emptyDir"
+	defaultKubernetesWorkspaceAccessMode = "ReadWriteOnce"
+	defaultKubernetesDindRootless        = true
 
 	defaultKubernetesJobCPURequest    = "250m"
 	defaultKubernetesJobMemoryRequest = "256Mi"
@@ -330,6 +340,11 @@ func applyKubernetesDefaults(k *Kubernetes) {
 	}
 	if k.WorkspaceVolume.Type == "" {
 		k.WorkspaceVolume.Type = defaultKubernetesWorkspaceType
+	}
+	// Claim-backed workspaces default to ReadWriteOnce when access modes are
+	// unset; emptyDir ignores the field.
+	if (k.WorkspaceVolume.Type == "ephemeral" || k.WorkspaceVolume.Type == "pvc") && len(k.WorkspaceVolume.AccessModes) == 0 {
+		k.WorkspaceVolume.AccessModes = []string{defaultKubernetesWorkspaceAccessMode}
 	}
 	// Rootless defaults to true; an explicit `rootless: false` opts into a
 	// privileged dind sidecar. The pointer distinguishes the two.
@@ -378,12 +393,12 @@ func validateKubernetes(k *Kubernetes) error {
 	}
 	switch k.WorkspaceVolume.Type {
 	case "emptyDir":
-	case "pvc":
-		if k.WorkspaceVolume.PVCSize == "" {
-			return errors.New("kubernetes.workspace_volume.pvc_size is required when workspace_volume.type is \"pvc\"")
+	case "ephemeral", "pvc":
+		if k.WorkspaceVolume.Size == "" {
+			return fmt.Errorf("kubernetes.workspace_volume.size is required when workspace_volume.type is %q", k.WorkspaceVolume.Type)
 		}
 	default:
-		return fmt.Errorf("kubernetes.workspace_volume.type %q is invalid; must be \"emptyDir\" or \"pvc\"", k.WorkspaceVolume.Type)
+		return fmt.Errorf("kubernetes.workspace_volume.type %q is invalid; must be \"emptyDir\", \"ephemeral\", or \"pvc\"", k.WorkspaceVolume.Type)
 	}
 	return nil
 }

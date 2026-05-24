@@ -28,7 +28,11 @@ const (
 	// kubernetesWorkspaceVolumeName backs the shared job workspace.
 	kubernetesWorkspaceVolumeName = "gitea-workspace"
 
-	kubernetesWorkspaceTypePVC = "pvc"
+	kubernetesWorkspaceTypePVC       = "pvc"
+	kubernetesWorkspaceTypeEphemeral = "ephemeral"
+
+	// defaultWorkspaceAccessMode backs claim-based workspaces when none is set.
+	defaultWorkspaceAccessMode = corev1.ReadWriteOnce
 )
 
 // podBuilder assembles the single corev1.Pod that backs one Actions job: a
@@ -139,10 +143,24 @@ func (b *podBuilder) build() *corev1.Pod {
 	return &corev1.Pod{ObjectMeta: meta, Spec: spec}
 }
 
-// workspaceVolumeSpec returns the shared workspace volume: a PVC-backed volume
-// when configured, otherwise an emptyDir (default).
+// workspaceVolumeSpec returns the shared workspace volume. "ephemeral" yields a
+// pod-owned generic ephemeral volume (a PVC auto-created and GC'd with the pod);
+// "pvc" references a static claim named after the pod; otherwise an emptyDir
+// (default).
 func (b *podBuilder) workspaceVolumeSpec() corev1.Volume {
-	if b.workspaceVolume.Type == kubernetesWorkspaceTypePVC {
+	switch b.workspaceVolume.Type {
+	case kubernetesWorkspaceTypeEphemeral:
+		return corev1.Volume{
+			Name: kubernetesWorkspaceVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Ephemeral: &corev1.EphemeralVolumeSource{
+					VolumeClaimTemplate: &corev1.PersistentVolumeClaimTemplate{
+						Spec: b.workspaceClaimSpec(),
+					},
+				},
+			},
+		}
+	case kubernetesWorkspaceTypePVC:
 		return corev1.Volume{
 			Name: kubernetesWorkspaceVolumeName,
 			VolumeSource: corev1.VolumeSource{
@@ -151,11 +169,39 @@ func (b *podBuilder) workspaceVolumeSpec() corev1.Volume {
 				},
 			},
 		}
+	default:
+		return corev1.Volume{
+			Name:         kubernetesWorkspaceVolumeName,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		}
 	}
-	return corev1.Volume{
-		Name:         kubernetesWorkspaceVolumeName,
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+}
+
+// workspaceClaimSpec builds the PVC spec for the generic ephemeral volume from
+// the configured size, storage class, and access modes (defaulting to
+// ReadWriteOnce).
+func (b *podBuilder) workspaceClaimSpec() corev1.PersistentVolumeClaimSpec {
+	accessModes := make([]corev1.PersistentVolumeAccessMode, 0, len(b.workspaceVolume.AccessModes))
+	for _, mode := range b.workspaceVolume.AccessModes {
+		accessModes = append(accessModes, corev1.PersistentVolumeAccessMode(mode))
 	}
+	if len(accessModes) == 0 {
+		accessModes = []corev1.PersistentVolumeAccessMode{defaultWorkspaceAccessMode}
+	}
+
+	spec := corev1.PersistentVolumeClaimSpec{
+		AccessModes: accessModes,
+		Resources: corev1.VolumeResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse(b.workspaceVolume.Size),
+			},
+		},
+	}
+	if b.workspaceVolume.StorageClassName != "" {
+		storageClass := b.workspaceVolume.StorageClassName
+		spec.StorageClassName = &storageClass
+	}
+	return spec
 }
 
 // kubernetesContainerSpec builds a corev1.Container from an act container input,

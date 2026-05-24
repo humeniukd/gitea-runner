@@ -590,8 +590,10 @@ func kubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfi
 		ServiceAccount:   k.ServiceAccount,
 		ImagePullSecrets: k.ImagePullSecrets,
 		WorkspaceVolume: act_container.KubernetesWorkspaceVolume{
-			Type:    k.WorkspaceVolume.Type,
-			PVCSize: k.WorkspaceVolume.PVCSize,
+			Type:             k.WorkspaceVolume.Type,
+			Size:             k.WorkspaceVolume.Size,
+			StorageClassName: k.WorkspaceVolume.StorageClassName,
+			AccessModes:      k.WorkspaceVolume.AccessModes,
 		},
 		PodLabels:          k.PodLabels,
 		PodAnnotations:     k.PodAnnotations,
