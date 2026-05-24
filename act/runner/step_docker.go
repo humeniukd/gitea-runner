@@ -110,9 +110,17 @@ func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd, e
 		envList = append(envList, fmt.Sprintf("%s=%s", k, v))
 	}
 
+	// Resolve runner arch without pinging a Docker daemon on backends that
+	// have no host socket (e.g. Kubernetes). RunnerArch contacts the daemon
+	// for the exact arch; RunnerArchLocal reads runtime.GOARCH instead.
+	runnerArch := container.RunnerArchLocal()
+	if !rc.usesKubernetes() {
+		runnerArch = container.RunnerArch(ctx)
+	}
+
 	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
 	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
+	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", runnerArch))
 	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
 
 	binds, mounts := rc.GetBindsAndMounts()
