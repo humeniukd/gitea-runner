@@ -283,8 +283,13 @@ func (e *KubernetesExecutionEnvironment) Start(_ bool) common.Executor {
 	}
 }
 
-func (e *KubernetesExecutionEnvironment) Exec(_ []string, _ map[string]string, _, _ string) common.Executor {
-	return notImplemented()
+// Exec runs a step command in the job container via remotecommand, streaming
+// output to this container's log writers. Only the job container is exec'd into.
+func (e *KubernetesExecutionEnvironment) Exec(command []string, env map[string]string, user, workdir string) common.Executor {
+	return func(ctx context.Context) error {
+		wrapped := buildExecCommand(command, env, user, workdir)
+		return e.pod.execInJobContainer(ctx, wrapped, e.input.Stdout, e.input.Stderr)
+	}
 }
 
 func (e *KubernetesExecutionEnvironment) UpdateFromEnv(_ string, _ *map[string]string) common.Executor {
@@ -310,8 +315,13 @@ func (e *KubernetesExecutionEnvironment) Close() common.Executor {
 	return func(_ context.Context) error { return nil }
 }
 
+// ReplaceLogWriter swaps the writers Exec streams to, returning the previous
+// pair so callers can restore them — mirroring the docker backend.
 func (e *KubernetesExecutionEnvironment) ReplaceLogWriter(stdout, stderr io.Writer) (io.Writer, io.Writer) {
-	return stdout, stderr
+	prevOut, prevErr := e.input.Stdout, e.input.Stderr
+	e.input.Stdout = stdout
+	e.input.Stderr = stderr
+	return prevOut, prevErr
 }
 
 // serviceContainerName sanitises an act service container name into a DNS-label
