@@ -1,0 +1,89 @@
+# Copyright 2026 The Gitea Authors. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# Runner configuration for the Kubernetes-native pod backend.
+#
+# The kubernetes.* field names must match the Kubernetes config struct defined
+# in internal/pkg/config/config.go (Phase 1, task #2). These are drafted from
+# plan §Phase 1; reconcile against the actual struct yaml tags once task #2
+# lands.
+#
+# cache.host MUST be a cluster-routable DNS name — never 127.0.0.1 or
+# localhost. The Phase 6 startup guard rejects loopback values when
+# kubernetes.enabled is true.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitea-runner-config
+  namespace: gitea-e2e
+  labels:
+    app.kubernetes.io/name: gitea-runner
+    app.kubernetes.io/component: runner
+data:
+  config.yaml: |
+    log:
+      level: info
+
+    runner:
+      # .runner lives on the PVC so registration survives pod restarts.
+      file: /data/.runner
+      capacity: 4
+      timeout: 3h
+
+    cache:
+      enabled: true
+      dir: /tmp/actcache
+      # Cluster-routable hostname for the gitea-runner-cache Service.
+      # Must match the Service name + namespace in service.yaml.
+      host: gitea-runner-cache.gitea-e2e.svc.cluster.local
+      port: 3000
+
+    kubernetes:
+      enabled: true
+      namespace: gitea-e2e
+      service_account: gitea-runner
+
+      # URL job pods use to reach the embedded cache server.
+      # Must be cluster-routable (Phase 6 startup guard enforces this).
+      connect_back_address: "http://gitea-runner-cache.gitea-e2e.svc.cluster.local:3000"
+
+      # How long to wait for a job pod to reach Ready before timing out.
+      pod_ready_timeout: 10m
+
+      workspace_volume:
+        type: emptyDir
+
+      # Per-container-role resource defaults (M3). Each role is independently
+      # overridable. dind requests >=1Gi memory (plan M3 constraint).
+      resources:
+        job:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        service:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        dind:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi
+
+      dind:
+        # Set enabled: true to support uses: docker:// steps (Phase 8).
+        # No auto-detect: must be explicitly opted in (plan ruling).
+        enabled: false
+        # rootless: true uses docker:dind-rootless (default, lower privilege).
+        # Set false for a privileged sidecar when rootless dind cannot build
+        # certain images.
+        rootless: true
+        image: docker:28-dind-rootless
