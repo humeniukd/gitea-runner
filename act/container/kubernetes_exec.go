@@ -22,6 +22,13 @@ import (
 // command exit is surfaced as ExitCodeError so it propagates exactly like the
 // Docker backend's exec.
 func (p *KubernetesPod) execInJobContainer(ctx context.Context, command []string, stdout, stderr io.Writer) error {
+	return p.streamExec(ctx, command, nil, stdout, stderr)
+}
+
+// streamExec is the shared pods/exec transport. A non-nil stdin is piped into
+// the command (used to deliver tar archives for Copy); nil stdout/stderr
+// streams are omitted from the request. A non-zero exit maps to ExitCodeError.
+func (p *KubernetesPod) streamExec(ctx context.Context, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	req := p.clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(p.builder.name).
@@ -30,9 +37,9 @@ func (p *KubernetesPod) execInJobContainer(ctx context.Context, command []string
 		VersionedParams(&corev1.PodExecOptions{
 			Container: kubernetesJobContainerName,
 			Command:   command,
-			Stdin:     false,
-			Stdout:    true,
-			Stderr:    true,
+			Stdin:     stdin != nil,
+			Stdout:    stdout != nil,
+			Stderr:    stderr != nil,
 			TTY:       false,
 		}, scheme.ParameterCodec)
 
@@ -42,6 +49,7 @@ func (p *KubernetesPod) execInJobContainer(ctx context.Context, command []string
 	}
 
 	return mapExecError(executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:  stdin,
 		Stdout: stdout,
 		Stderr: stderr,
 	}))

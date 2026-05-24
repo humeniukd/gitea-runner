@@ -33,10 +33,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// errKubernetesNotImplemented is returned by methods whose real implementation
-// lands in a later phase (Exec/Copy/UpdateFromImageEnv).
-var errKubernetesNotImplemented = errors.New("kubernetes execution environment: not implemented")
-
 // podReadyPollInterval is how often Start polls a submitted Pod for readiness.
 const podReadyPollInterval = 500 * time.Millisecond
 
@@ -245,22 +241,6 @@ func (e *KubernetesExecutionEnvironment) ConnectToNetwork(_ string) common.Execu
 	return func(_ context.Context) error { return nil }
 }
 
-func (e *KubernetesExecutionEnvironment) Copy(_ string, _ ...*FileEntry) common.Executor {
-	return notImplemented()
-}
-
-func (e *KubernetesExecutionEnvironment) CopyTarStream(_ context.Context, _ string, _ io.Reader) error {
-	return errKubernetesNotImplemented
-}
-
-func (e *KubernetesExecutionEnvironment) CopyDir(_, _ string, _ bool) common.Executor {
-	return notImplemented()
-}
-
-func (e *KubernetesExecutionEnvironment) GetContainerArchive(_ context.Context, _ string) (io.ReadCloser, error) {
-	return nil, errKubernetesNotImplemented
-}
-
 // Pull is a no-op against the API server: the kubelet pulls images per the
 // Pod's imagePullPolicy. It records forcePull so Create can set imagePullPolicy
 // to Always (Pull runs before Create in the start pipeline).
@@ -290,14 +270,6 @@ func (e *KubernetesExecutionEnvironment) Exec(command []string, env map[string]s
 		wrapped := buildExecCommand(command, env, user, workdir)
 		return e.pod.execInJobContainer(ctx, wrapped, e.input.Stdout, e.input.Stderr)
 	}
-}
-
-func (e *KubernetesExecutionEnvironment) UpdateFromEnv(_ string, _ *map[string]string) common.Executor {
-	return notImplemented()
-}
-
-func (e *KubernetesExecutionEnvironment) UpdateFromImageEnv(_ *map[string]string) common.Executor {
-	return notImplemented()
 }
 
 // Remove deletes the whole Pod (and per-job Secrets) when called on the job
@@ -331,10 +303,4 @@ func serviceContainerName(name string) string {
 		return "service"
 	}
 	return name
-}
-
-func notImplemented() common.Executor {
-	return func(_ context.Context) error {
-		return errKubernetesNotImplemented
-	}
 }

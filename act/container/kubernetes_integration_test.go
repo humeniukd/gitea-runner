@@ -12,8 +12,10 @@
 package container
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -21,6 +23,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// tarReader returns the body of the first regular file in a tar stream.
+func tarReader(t *testing.T, rc io.Reader) string {
+	t.Helper()
+	tr := tar.NewReader(rc)
+	_, err := tr.Next()
+	require.NoError(t, err)
+	body, err := io.ReadAll(tr)
+	require.NoError(t, err)
+	return string(body)
+}
 
 func integrationConfig(t *testing.T) *KubernetesConfig {
 	t.Helper()
@@ -89,6 +102,39 @@ func TestKubernetesExecRoundTrip(t *testing.T) {
 	err = job.Exec([]string{"false"}, nil, "", "")(ctx)
 	require.ErrorAs(t, err, &exit)
 	assert.Equal(t, 1, int(exit))
+}
+
+func TestKubernetesCopyRoundTrip(t *testing.T) {
+	job, cleanup := startIntegrationJob(t, "gitea-it-copy")
+	defer cleanup()
+
+	ctx := context.Background()
+	const actDir = "/var/run/act/"
+	require.NoError(t, job.Copy(actDir, &FileEntry{
+		Name: "workflow/event.json",
+		Mode: 0o644,
+		Body: `{"hello":"world"}`,
+	}, &FileEntry{
+		Name: "workflow/envs.txt",
+		Mode: 0o666,
+		Body: "",
+	})(ctx))
+
+	// Read the file back via GetContainerArchive; the tar's first entry is the file.
+	rc, err := job.GetContainerArchive(ctx, "/var/run/act/workflow/event.json")
+	require.NoError(t, err)
+	defer rc.Close()
+	tr := tarReader(t, rc)
+	assert.Equal(t, `{"hello":"world"}`, tr)
+}
+
+func TestKubernetesUpdateFromImageEnvReturnsPath(t *testing.T) {
+	job, cleanup := startIntegrationJob(t, "gitea-it-imageenv")
+	defer cleanup()
+
+	env := map[string]string{}
+	require.NoError(t, job.UpdateFromImageEnv(&env)(context.Background()))
+	assert.NotEmpty(t, env["PATH"], "image env PATH should be resolved via exec env")
 }
 
 func TestKubernetesExecHonorsEnvAndWorkdir(t *testing.T) {
