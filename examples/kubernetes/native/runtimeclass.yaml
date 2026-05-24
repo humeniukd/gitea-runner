@@ -5,10 +5,10 @@
 #
 # RuntimeClass is CLUSTER-SCOPED and selects which CRI runtime handler the
 # kubelet uses for a pod (via pod.spec.runtimeClassName, which the runner sets
-# from kubernetes.runtime_class_name / runtime_class_by_label). These objects
-# are a CONTRACT with the node: the named `handler` must be configured in the
-# container runtime (containerd/CRI-O) on every node that may schedule these
-# pods, and the sandbox binary must be installed there:
+# from kubernetes.runtime_class_name). These objects are a CONTRACT with the
+# node: the named `handler` must be configured in the container runtime
+# (containerd/CRI-O) on every node that may schedule these pods, and the sandbox
+# binary must be installed there:
 #
 #   gVisor (runsc): install runsc + the containerd shim, then add a containerd
 #     runtime named "runsc". https://gvisor.dev/docs/user_guide/install/
@@ -22,15 +22,14 @@
 #
 # Apply (once the node-side handlers exist):
 #   kubectl apply -f runtimeclass.yaml
-# Then enable it in the runner config (see configmap.yaml):
-#   kubernetes.runtime_class_name: gvisor          # one runtime for all jobs
-#   kubernetes.runtime_class_by_label:             # or per runs-on label
-#     k8s-gvisor: gvisor
-#     k8s-kata: kata
+# Then enable it in the runner config (see configmap.yaml). The runtime is a
+# per-runner policy enforced on every job pod, so to mix isolation levels run
+# one runner per trust tier and route with runs-on (see the README):
+#   kubernetes.runtime_class_name: gvisor
 #
 # NOTE: a privileged dind sidecar (kubernetes.dind.rootless: false) is generally
-# incompatible with gVisor; prefer rootless dind, or route docker:// jobs to a
-# runc-backed runs-on label.
+# incompatible with gVisor; prefer rootless dind, or run docker:// jobs on a
+# runc-backed runner.
 ---
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass

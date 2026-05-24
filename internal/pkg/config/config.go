@@ -145,23 +145,22 @@ type KubernetesDind struct {
 // When Enabled, every job runs as one Pod (init + long-lived job container +
 // native service sidecars) instead of via the docker/host backends.
 type Kubernetes struct {
-	Enabled             bool                         `yaml:"enabled"`                // Enabled routes every job to the Kubernetes pod backend.
-	Namespace           string                       `yaml:"namespace"`              // Namespace for all runner-created pods/secrets/configmaps.
-	Kubeconfig          string                       `yaml:"kubeconfig"`             // Kubeconfig path for out-of-cluster dev; empty selects in-cluster config.
-	ServiceAccount      string                       `yaml:"service_account"`        // ServiceAccount assigned to job pods.
-	DefaultJobImage     string                       `yaml:"default_job_image"`      // DefaultJobImage backs jobs with no explicit container:image (a bare run: job whose runs-on label maps to no image). Defaults to node:20-bookworm.
-	ImagePullSecrets    []string                     `yaml:"image_pull_secrets"`     // ImagePullSecrets attached to job pods for private registries.
-	WorkspaceVolume     KubernetesWorkspaceVolume    `yaml:"workspace_volume"`       // WorkspaceVolume backs the shared job workspace.
-	PodLabels           map[string]string            `yaml:"pod_labels"`             // PodLabels are merged onto every job pod.
-	PodAnnotations      map[string]string            `yaml:"pod_annotations"`        // PodAnnotations are merged onto every job pod.
-	Resources           KubernetesContainerResources `yaml:"resources"`              // Resources are the per-container-role requests/limits.
-	PodReadyTimeout     time.Duration                `yaml:"pod_ready_timeout"`      // PodReadyTimeout bounds the wait for a job pod to become Ready.
-	ConnectBackAddress  string                       `yaml:"connect_back_address"`   // ConnectBackAddress is the cluster-reachable DNS job pods use to reach the runner's cache/results server.
-	Dind                KubernetesDind               `yaml:"dind"`                   // Dind configures the optional docker-in-docker sidecar.
-	PodCleanup          string                       `yaml:"pod_cleanup"`            // PodCleanup selects when completed job pods (and their per-job Secret/ConfigMap) are deleted: "always" (default), "on-failure" (delete only on success, keep failed pods), or "never" (keep all for auditing). Retained pods consume cluster resources and a capacity slot until manually deleted.
-	MaxConcurrentJobs   int                          `yaml:"max_concurrent_jobs"`    // MaxConcurrentJobs caps how many job pods this runner will run concurrently in Kubernetes mode. 0 (default) means UNLIMITED: the runner accepts every assigned job and creates a pod for it, letting the kube-scheduler and a namespace ResourceQuota be the real backpressure. A positive value is an optional client-side cap. Ignored unless kubernetes.enabled; docker/host modes always use runner.capacity.
-	RuntimeClassName    string                       `yaml:"runtime_class_name"`     // RuntimeClassName is the cluster RuntimeClass applied to every job pod by default (e.g. "gvisor" or "kata"), selecting a sandboxed container runtime in place of the node default (runc). Empty leaves spec.runtimeClassName unset (cluster default runtime). The named RuntimeClass must already exist in the cluster.
-	RuntimeClassByLabel map[string]string            `yaml:"runtime_class_by_label"` // RuntimeClassByLabel maps a job's runs-on label to a RuntimeClass so one runner can mix isolation levels (e.g. {k8s-gvisor: gvisor, k8s-kata: kata}). The first matching runs-on label wins; jobs matching no entry fall back to runtime_class_name.
+	Enabled            bool                         `yaml:"enabled"`              // Enabled routes every job to the Kubernetes pod backend.
+	Namespace          string                       `yaml:"namespace"`            // Namespace for all runner-created pods/secrets/configmaps.
+	Kubeconfig         string                       `yaml:"kubeconfig"`           // Kubeconfig path for out-of-cluster dev; empty selects in-cluster config.
+	ServiceAccount     string                       `yaml:"service_account"`      // ServiceAccount assigned to job pods.
+	DefaultJobImage    string                       `yaml:"default_job_image"`    // DefaultJobImage backs jobs with no explicit container:image (a bare run: job whose runs-on label maps to no image). Defaults to node:20-bookworm.
+	ImagePullSecrets   []string                     `yaml:"image_pull_secrets"`   // ImagePullSecrets attached to job pods for private registries.
+	WorkspaceVolume    KubernetesWorkspaceVolume    `yaml:"workspace_volume"`     // WorkspaceVolume backs the shared job workspace.
+	PodLabels          map[string]string            `yaml:"pod_labels"`           // PodLabels are merged onto every job pod.
+	PodAnnotations     map[string]string            `yaml:"pod_annotations"`      // PodAnnotations are merged onto every job pod.
+	Resources          KubernetesContainerResources `yaml:"resources"`            // Resources are the per-container-role requests/limits.
+	PodReadyTimeout    time.Duration                `yaml:"pod_ready_timeout"`    // PodReadyTimeout bounds the wait for a job pod to become Ready.
+	ConnectBackAddress string                       `yaml:"connect_back_address"` // ConnectBackAddress is the cluster-reachable DNS job pods use to reach the runner's cache/results server.
+	Dind               KubernetesDind               `yaml:"dind"`                 // Dind configures the optional docker-in-docker sidecar.
+	PodCleanup         string                       `yaml:"pod_cleanup"`          // PodCleanup selects when completed job pods (and their per-job Secret/ConfigMap) are deleted: "always" (default), "on-failure" (delete only on success, keep failed pods), or "never" (keep all for auditing). Retained pods consume cluster resources and a capacity slot until manually deleted.
+	MaxConcurrentJobs  int                          `yaml:"max_concurrent_jobs"`  // MaxConcurrentJobs caps how many job pods this runner will run concurrently in Kubernetes mode. 0 (default) means UNLIMITED: the runner accepts every assigned job and creates a pod for it, letting the kube-scheduler and a namespace ResourceQuota be the real backpressure. A positive value is an optional client-side cap. Ignored unless kubernetes.enabled; docker/host modes always use runner.capacity.
+	RuntimeClassName   string                       `yaml:"runtime_class_name"`   // RuntimeClassName is the cluster RuntimeClass applied to every job pod (e.g. "gvisor" or "kata"), selecting a sandboxed container runtime in place of the node default (runc). It is an operator/cluster policy enforced on every job this runner accepts, so a workflow cannot opt out of isolation; route different trust tiers to different runners via runs-on. Empty leaves spec.runtimeClassName unset (cluster default runtime). The named RuntimeClass must already exist in the cluster.
 }
 
 // Config represents the overall configuration.

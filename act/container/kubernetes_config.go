@@ -80,31 +80,11 @@ type KubernetesConfig struct {
 	Dind               KubernetesDindConfig
 	PodCleanup         string
 
-	// RuntimeClassName is the cluster RuntimeClass applied to every job pod by
-	// default (e.g. "gvisor" or "kata"), selecting a sandboxed container runtime
-	// in place of the node default (runc). Empty leaves spec.runtimeClassName
-	// unset, so the cluster's default runtime is used.
+	// RuntimeClassName is the cluster RuntimeClass applied to every job pod
+	// (e.g. "gvisor" or "kata"), selecting a sandboxed container runtime in place
+	// of the node default (runc). It is an operator/cluster policy enforced on
+	// every job this runner accepts, so a workflow cannot opt out of isolation;
+	// route different trust tiers to different runners via runs-on. Empty leaves
+	// spec.runtimeClassName unset, so the cluster's default runtime is used.
 	RuntimeClassName string
-	// RuntimeClassByLabel maps a job's runs-on label to a RuntimeClass, letting a
-	// single runner mix isolation levels: `runs-on: k8s-gvisor` -> "gvisor",
-	// `runs-on: k8s-kata` -> "kata". The first matching label wins; a job whose
-	// labels match no entry falls back to RuntimeClassName.
-	RuntimeClassByLabel map[string]string
-}
-
-// ResolveKubernetesRuntimeClass selects the RuntimeClass for a job from its
-// runs-on labels: the first label present in RuntimeClassByLabel wins, otherwise
-// the global RuntimeClassName default applies (which may be empty, meaning the
-// cluster default runtime). It is pure so the resolution is unit-testable
-// without an API server.
-func ResolveKubernetesRuntimeClass(cfg *KubernetesConfig, runsOnLabels []string) string {
-	if cfg == nil {
-		return ""
-	}
-	for _, label := range runsOnLabels {
-		if class, ok := cfg.RuntimeClassByLabel[label]; ok && class != "" {
-			return class
-		}
-	}
-	return cfg.RuntimeClassName
 }

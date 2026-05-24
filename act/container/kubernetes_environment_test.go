@@ -445,45 +445,13 @@ func TestKubernetesFailedStartCleanup(t *testing.T) {
 }
 
 func TestKubernetesPodBuilderRuntimeClass(t *testing.T) {
-	cfg := testKubernetesConfig()
-	b := newPodBuilder("gitea-job-rc", cfg.Namespace, cfg, 0, nil)
-
 	// Unset by default: spec.runtimeClassName stays nil (cluster default runtime).
-	assert.Nil(t, b.build().Spec.RuntimeClassName)
+	cfg := testKubernetesConfig()
+	assert.Nil(t, newPodBuilder("gitea-job-rc0", cfg.Namespace, cfg, 0, nil).build().Spec.RuntimeClassName)
 
-	// A resolved runtime class is rendered into the pod spec.
-	b.runtimeClassName = "gvisor"
-	rc := b.build().Spec.RuntimeClassName
+	// A configured RuntimeClass is applied to every job pod the runner builds.
+	cfg.RuntimeClassName = "gvisor"
+	rc := newPodBuilder("gitea-job-rc1", cfg.Namespace, cfg, 0, nil).build().Spec.RuntimeClassName
 	require.NotNil(t, rc)
 	assert.Equal(t, "gvisor", *rc)
-}
-
-func TestResolveKubernetesRuntimeClass(t *testing.T) {
-	cfg := &KubernetesConfig{
-		RuntimeClassName: "gvisor",
-		RuntimeClassByLabel: map[string]string{
-			"k8s-kata":   "kata",
-			"k8s-native": "",
-		},
-	}
-
-	tests := []struct {
-		name   string
-		cfg    *KubernetesConfig
-		labels []string
-		want   string
-	}{
-		{"nil config", nil, []string{"k8s-kata"}, ""},
-		{"global default when no label matches", cfg, []string{"self-hosted"}, "gvisor"},
-		{"global default when no labels", cfg, nil, "gvisor"},
-		{"label override wins", cfg, []string{"k8s-kata"}, "kata"},
-		{"first matching label wins", cfg, []string{"k8s-kata", "self-hosted"}, "kata"},
-		{"empty mapping value falls back to default", cfg, []string{"k8s-native"}, "gvisor"},
-		{"no default and no match yields empty", &KubernetesConfig{RuntimeClassByLabel: map[string]string{"k8s-kata": "kata"}}, []string{"x"}, ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, ResolveKubernetesRuntimeClass(tc.cfg, tc.labels))
-		})
-	}
 }

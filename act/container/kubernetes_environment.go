@@ -50,10 +50,6 @@ type KubernetesPodConfig struct {
 	Config      *KubernetesConfig
 	PodName     string
 	MaxLifetime time.Duration
-	// RuntimeClassName is the RuntimeClass already resolved for this job from its
-	// runs-on labels (see ResolveKubernetesRuntimeClass). Empty leaves the pod on
-	// the cluster default runtime.
-	RuntimeClassName string
 }
 
 // KubernetesPod coordinates the single Pod backing one Actions job. It holds the
@@ -102,7 +98,6 @@ func newKubernetesPodWithClientset(clientset kubernetes.Interface, restConfig *r
 	// the builder (and thus the per-job Secret/ConfigMap names derived from it).
 	podName := sanitizeRFC1123Name(cfg.PodName)
 	builder := newPodBuilder(podName, cfg.Config.Namespace, cfg.Config, cfg.MaxLifetime, owner)
-	builder.runtimeClassName = cfg.RuntimeClassName
 
 	return &KubernetesPod{
 		config:          cfg.Config,

@@ -110,6 +110,7 @@ func newPodBuilder(name, namespace string, cfg *KubernetesConfig, maxLifetime ti
 		workspaceVolume:       cfg.WorkspaceVolume,
 		activeDeadlineSeconds: deadline,
 		ownerReference:        owner,
+		runtimeClassName:      cfg.RuntimeClassName,
 	}
 }
 

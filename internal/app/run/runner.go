@@ -615,9 +615,8 @@ func KubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfi
 			Rootless: rootless,
 			Image:    k.Dind.Image,
 		},
-		PodCleanup:          k.PodCleanup,
-		RuntimeClassName:    k.RuntimeClassName,
-		RuntimeClassByLabel: k.RuntimeClassByLabel,
+		PodCleanup:       k.PodCleanup,
+		RuntimeClassName: k.RuntimeClassName,
 	}
 }
 
