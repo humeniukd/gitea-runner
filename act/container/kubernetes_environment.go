@@ -92,7 +92,11 @@ func NewKubernetesPod(cfg KubernetesPodConfig) (*KubernetesPod, error) {
 // from an already-constructed clientset (a fake clientset in unit tests).
 func newKubernetesPodWithClientset(clientset kubernetes.Interface, restConfig *rest.Config, cfg KubernetesPodConfig) *KubernetesPod {
 	owner := ownerReferenceFromEnv(os.Getenv("POD_NAME"), os.Getenv("POD_UID"))
-	builder := newPodBuilder(cfg.PodName, cfg.Config.Namespace, cfg.Config, cfg.MaxLifetime, owner)
+	// act's jobContainerName() is mixed-case and ~128 chars; the API server
+	// requires the Pod name to be an RFC 1123 name. Sanitize before it reaches
+	// the builder (and thus the per-job Secret/ConfigMap names derived from it).
+	podName := sanitizeRFC1123Name(cfg.PodName)
+	builder := newPodBuilder(podName, cfg.Config.Namespace, cfg.Config, cfg.MaxLifetime, owner)
 
 	return &KubernetesPod{
 		config:          cfg.Config,
@@ -352,11 +356,13 @@ func (e *KubernetesExecutionEnvironment) ReplaceLogWriter(stdout, stderr io.Writ
 	return prevOut, prevErr
 }
 
-// serviceContainerName sanitises an act service container name into a DNS-label
-// compatible container name. act already produces lowercase hyphenated names.
+// serviceContainerName converts an act service container name (mixed-case and
+// ~128 chars, from createContainerName) into a valid RFC 1123 label (<=63,
+// lowercase, alphanumeric start/end) for use as a Pod container name. A short
+// hash keeps distinct services distinct after truncation.
 func serviceContainerName(name string) string {
 	if name == "" {
 		return "service"
 	}
-	return name
+	return sanitizeRFC1123Name(name)
 }

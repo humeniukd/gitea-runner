@@ -4,8 +4,11 @@
 package container
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"maps"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/docker/go-connections/nat"
@@ -466,4 +469,69 @@ func perJobSecretName(podName string) string {
 // pod name so the dangling-owner sweep can target it even after a restart.
 func perJobConfigMapName(podName string) string {
 	return podName + "-config"
+}
+
+// kubernetesNameMaxLen is the RFC 1123 label limit (63). Pod names may be up to
+// 253, but constraining them to a single valid label is a strict subset that is
+// always acceptable and leaves ample room for the per-job Secret/ConfigMap
+// suffixes; container names MUST be <=63.
+const kubernetesNameMaxLen = 63
+
+// sanitizeRFC1123Name converts an arbitrary act container/pod name (which may be
+// mixed-case and ~128 chars, e.g. "GITEA-ACTIONS-TASK-1-WORKFLOW-CI-JOB-build-...-<sha>")
+// into a valid RFC 1123 label: lowercase [a-z0-9-], starting and ending
+// alphanumeric, at most kubernetesNameMaxLen (63) chars. When truncation is
+// needed a short hash of the ORIGINAL name is appended so distinct inputs stay
+// distinct (preserving per-service uniqueness). The API server rejects
+// Pods()/containers whose names violate this, so every name fed to the cluster
+// must pass through here.
+func sanitizeRFC1123Name(name string) string {
+	lowered := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		default:
+			return '-'
+		}
+	}, name)
+
+	sanitized := strings.Trim(collapseDashes(lowered), "-")
+	if sanitized == "" {
+		sanitized = "x"
+	}
+
+	if len(sanitized) > kubernetesNameMaxLen {
+		suffix := "-" + shortNameHash(name)
+		keep := max(kubernetesNameMaxLen-len(suffix), 1)
+		sanitized = strings.TrimRight(sanitized[:keep], "-") + suffix
+	}
+	return sanitized
+}
+
+// collapseDashes replaces runs of '-' with a single '-'.
+func collapseDashes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	prevDash := false
+	for _, r := range s {
+		if r == '-' {
+			if prevDash {
+				continue
+			}
+			prevDash = true
+		} else {
+			prevDash = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// shortNameHash returns the first 8 hex chars of the SHA-256 of name — a stable,
+// collision-resistant suffix for disambiguating truncated names.
+func shortNameHash(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	return hex.EncodeToString(sum[:])[:8]
 }
