@@ -69,3 +69,38 @@ func TestGuardKubernetesActionUnsupported(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveKubernetesJobImage(t *testing.T) {
+	const def = "node:20-bookworm"
+
+	t.Run("explicit/real image wins over the default", func(t *testing.T) {
+		got, err := resolveKubernetesJobImage("postgres:16-alpine", def, "build")
+		require.NoError(t, err)
+		assert.Equal(t, "postgres:16-alpine", got)
+	})
+
+	t.Run("bare run job (empty image) falls back to default", func(t *testing.T) {
+		got, err := resolveKubernetesJobImage("", def, "build")
+		require.NoError(t, err)
+		assert.Equal(t, def, got)
+	})
+
+	t.Run("self-hosted sentinel falls back to default", func(t *testing.T) {
+		got, err := resolveKubernetesJobImage("-self-hosted", def, "build")
+		require.NoError(t, err)
+		assert.Equal(t, def, got)
+	})
+
+	t.Run("empty image and no default is a clear error", func(t *testing.T) {
+		_, err := resolveKubernetesJobImage("", "", "build")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "default_job_image")
+		assert.Contains(t, err.Error(), "build")
+	})
+
+	t.Run("sentinel image and no default is a clear error", func(t *testing.T) {
+		_, err := resolveKubernetesJobImage("-self-hosted", "", "build")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "default_job_image")
+	})
+}

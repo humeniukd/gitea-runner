@@ -149,6 +149,7 @@ type Kubernetes struct {
 	Namespace          string                       `yaml:"namespace"`            // Namespace for all runner-created pods/secrets/configmaps.
 	Kubeconfig         string                       `yaml:"kubeconfig"`           // Kubeconfig path for out-of-cluster dev; empty selects in-cluster config.
 	ServiceAccount     string                       `yaml:"service_account"`      // ServiceAccount assigned to job pods.
+	DefaultJobImage    string                       `yaml:"default_job_image"`    // DefaultJobImage backs jobs with no explicit container:image (a bare run: job whose runs-on label maps to no image). Defaults to node:20-bookworm.
 	ImagePullSecrets   []string                     `yaml:"image_pull_secrets"`   // ImagePullSecrets attached to job pods for private registries.
 	WorkspaceVolume    KubernetesWorkspaceVolume    `yaml:"workspace_volume"`     // WorkspaceVolume backs the shared job workspace.
 	PodLabels          map[string]string            `yaml:"pod_labels"`           // PodLabels are merged onto every job pod.
@@ -314,6 +315,9 @@ const (
 	defaultKubernetesWorkspaceType       = "emptyDir"
 	defaultKubernetesWorkspaceAccessMode = "ReadWriteOnce"
 	defaultKubernetesDindRootless        = true
+	// defaultKubernetesJobImage backs bare run: jobs (no container:image). It
+	// carries node (for JS actions) plus common build tools.
+	defaultKubernetesJobImage = "node:20-bookworm"
 
 	defaultKubernetesJobCPURequest    = "250m"
 	defaultKubernetesJobMemoryRequest = "256Mi"
@@ -337,6 +341,9 @@ const (
 func applyKubernetesDefaults(k *Kubernetes) {
 	if k.Namespace == "" {
 		k.Namespace = defaultKubernetesNamespace
+	}
+	if k.DefaultJobImage == "" {
+		k.DefaultJobImage = defaultKubernetesJobImage
 	}
 	if k.PodReadyTimeout <= 0 {
 		k.PodReadyTimeout = defaultKubernetesPodReadyTimeout

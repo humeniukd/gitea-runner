@@ -179,6 +179,7 @@ ignored.
 
 | ConfigMap field | Default | Notes |
 |---|---|---|
+| `kubernetes.default_job_image` | `node:20-bookworm` | Image for bare `run:` jobs with no `container: image:` |
 | `kubernetes.pod_ready_timeout` | `10m` | Increase for slow image pulls |
 | `kubernetes.resources.job` | `250m/256Mi` req, `2/2Gi` lim | Per-job container |
 | `kubernetes.resources.service` | `100m/128Mi` req, `1/1Gi` lim | Per-service sidecar |

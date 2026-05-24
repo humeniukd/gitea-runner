@@ -739,6 +739,23 @@ func (rc *RunContext) guardKubernetesActionUnsupported(using model.ActionRunsUsi
 	return fmt.Errorf("'using: docker' actions are not supported by the kubernetes backend in v1; use 'uses: docker://<image>', or a JS/composite/Go action (action %q)", actionName)
 }
 
+// resolveKubernetesJobImage picks the job container image for the pod backend.
+// A real, explicit image (from container:image or a label→image mapping) is
+// used as-is. An unusable resolution — empty, or a sentinel like "-self-hosted"
+// (any value starting with "-", which is never a valid image reference) — comes
+// from a bare run: job whose runs-on label maps to no image; those fall back to
+// defaultImage. With no default configured, return a clear, actionable error
+// rather than letting the API server reject the Pod with InvalidImageName.
+func resolveKubernetesJobImage(resolved, defaultImage, jobName string) (string, error) {
+	if resolved != "" && !strings.HasPrefix(resolved, "-") {
+		return resolved, nil
+	}
+	if defaultImage != "" {
+		return defaultImage, nil
+	}
+	return "", fmt.Errorf("kubernetes backend: job %q has no usable container image (resolved %q) and kubernetes.default_job_image is not set; add a `container: image:` to the job or set kubernetes.default_job_image", jobName, resolved)
+}
+
 // startKubernetesEnvironment provisions the job Pod (long-lived job container
 // plus one native sidecar per service) and execs steps into it. Steps run via
 // client-go remotecommand against the job container; services are reachable at
@@ -757,7 +774,14 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 		}
 
 		logger := common.Logger(ctx)
-		image := rc.platformImage(ctx)
+		// A bare `run:` job (no container:image) whose runs-on label maps to no
+		// image resolves to "" or a "-self-hosted" sentinel — invalid as a Pod
+		// image. Fall back to kubernetes.default_job_image; an explicit
+		// container:image already wins via platformImage and is left untouched.
+		image, err := resolveKubernetesJobImage(rc.platformImage(ctx), rc.Config.Kubernetes.DefaultJobImage, rc.JobName)
+		if err != nil {
+			return err
+		}
 		rawLogger := logger.WithField(rawOutputField, true)
 		logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
 			if rc.Config.LogOutput {

@@ -31,6 +31,9 @@ func TestLoadDefault_KubernetesDefaults(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, k.PodReadyTimeout)
 	assert.Equal(t, "emptyDir", k.WorkspaceVolume.Type)
 
+	// bare run: jobs fall back to the default job image.
+	assert.Equal(t, "node:20-bookworm", k.DefaultJobImage)
+
 	// dind.enabled defaults to false; rootless defaults to true.
 	assert.False(t, k.Dind.Enabled)
 	require.NotNil(t, k.Dind.Rootless)
@@ -51,6 +54,19 @@ func TestLoadDefault_KubernetesDefaults(t *testing.T) {
 	assert.Equal(t, "1Gi", k.Resources.Dind.Requests.Memory)
 	assert.Equal(t, "2", k.Resources.Dind.Limits.CPU)
 	assert.Equal(t, "4Gi", k.Resources.Dind.Limits.Memory)
+}
+
+func TestLoadDefault_KubernetesDefaultJobImageOverride(t *testing.T) {
+	path := writeConfig(t, `
+kubernetes:
+  enabled: true
+  connect_back_address: http://gitea-runner-cache.gitea-e2e.svc:8088
+  default_job_image: ghcr.io/acme/ci-base:latest
+`)
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, "ghcr.io/acme/ci-base:latest", cfg.Kubernetes.DefaultJobImage)
 }
 
 func TestLoadDefault_KubernetesEnabledValidBlock(t *testing.T) {

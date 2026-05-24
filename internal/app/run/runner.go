@@ -597,6 +597,7 @@ func KubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfi
 		Namespace:        k.Namespace,
 		Kubeconfig:       k.Kubeconfig,
 		ServiceAccount:   k.ServiceAccount,
+		DefaultJobImage:  k.DefaultJobImage,
 		ImagePullSecrets: k.ImagePullSecrets,
 		WorkspaceVolume: act_container.KubernetesWorkspaceVolume{
 			Type:             k.WorkspaceVolume.Type,

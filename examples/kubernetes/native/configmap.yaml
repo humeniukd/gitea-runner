@@ -43,6 +43,10 @@ data:
       namespace: gitea-e2e
       service_account: gitea-runner
 
+      # Image for bare `run:` jobs that declare no `container: image:` (a
+      # runs-on label that maps to no image). Defaults to node:20-bookworm.
+      default_job_image: node:20-bookworm
+
       # URL job pods use to reach the embedded cache server.
       # Must be cluster-routable (Phase 6 startup guard enforces this).
       connect_back_address: "http://gitea-runner-cache.gitea-e2e.svc.cluster.local:3000"

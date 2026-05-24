@@ -55,6 +55,7 @@ type KubernetesConfig struct {
 	Namespace          string
 	Kubeconfig         string
 	ServiceAccount     string
+	DefaultJobImage    string
 	ImagePullSecrets   []string
 	WorkspaceVolume    KubernetesWorkspaceVolume
 	PodLabels          map[string]string
