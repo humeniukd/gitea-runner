@@ -774,6 +774,16 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 			fmt.Sprintf("%s=%s", "LANG", "C.UTF-8"),
 		}
 
+		ext := container.LinuxContainerEnvironmentExtensions{}
+
+		// When dind is enabled, register the on-demand docker-in-docker sidecar
+		// and point the job container at it so `uses: docker://` steps build/run
+		// against an in-cluster daemon rather than a host socket.
+		if rc.Config.Kubernetes.Dind.Enabled {
+			pod.AddDindSidecar(ext.ToContainerPath(rc.Config.Workdir))
+			envList = append(envList, fmt.Sprintf("%s=%s", "DOCKER_HOST", container.KubernetesDindDockerHost))
+		}
+
 		// Register each service as a native sidecar in the same Pod, reusing the
 		// shared Phase 1.5 helper so the service interpolation/credential logic is
 		// not duplicated (A1 sidesteps the Docker network executors entirely).
@@ -790,7 +800,6 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 			}
 		}
 
-		ext := container.LinuxContainerEnvironmentExtensions{}
 		rc.JobContainer = pod.NewJobContainer(&container.NewContainerInput{
 			Entrypoint: []string{"/bin/sleep", fmt.Sprint(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds())},
 			WorkingDir: ext.ToContainerPath(rc.Config.Workdir),

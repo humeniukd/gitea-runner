@@ -201,6 +201,15 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 
 			return rc.execJobContainer(containerArgs, *step.getEnv(), "", "")(ctx)
 		case x.IsDocker():
+			// RC1: the kubernetes backend does not support `using: docker` actions
+			// in v1 (they construct a step container via newStepContainer, bypassing
+			// the ContainerNewContainer seam and any in-cluster dind daemon). Fail
+			// fast with a clear message instead of dialing a dead socket / nil stub.
+			// This guard fires ONLY here — JS, composite, and Go `uses:` actions
+			// above run via exec-in and are fully supported.
+			if rc.usesKubernetes() {
+				return fmt.Errorf("'using: docker' actions are not supported by the kubernetes backend in v1; use 'uses: docker://<image>', or a JS/composite/Go action (action %q)", actionName)
+			}
 			location := actionLocation
 			if remoteAction == nil {
 				location = containerActionDir

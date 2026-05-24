@@ -34,6 +34,14 @@ const (
 	kubernetesWorkspaceTypePVC       = "pvc"
 	kubernetesWorkspaceTypeEphemeral = "ephemeral"
 
+	// dind sidecar wiring: the daemon listens on TCP 2375 (TLS disabled) and the
+	// job container reaches it at localhost:2375 via the shared pod network.
+	kubernetesDindContainerName   = "dind"
+	kubernetesDindPort            = 2375
+	kubernetesDindHost            = "tcp://localhost:2375"
+	kubernetesDindImageRootless   = "docker:dind-rootless"
+	kubernetesDindImagePrivileged = "docker:dind"
+
 	// defaultWorkspaceAccessMode backs claim-based workspaces when none is set.
 	defaultWorkspaceAccessMode = corev1.ReadWriteOnce
 )
@@ -110,6 +118,44 @@ func (b *podBuilder) addSidecar(c corev1.Container) {
 // reach a service by name (servicename:port) in addition to localhost:port.
 func (b *podBuilder) addHostAlias(ip string, hostnames ...string) {
 	b.hostAliases = append(b.hostAliases, corev1.HostAlias{IP: ip, Hostnames: hostnames})
+}
+
+// addDindSidecar injects an on-demand docker-in-docker native sidecar so a
+// `uses: docker://` step can build/run images. The job container reaches it at
+// localhost:2375 (DOCKER_HOST). The same workspace volume is mounted so a
+// `docker run -v <workdir>:<workdir>` resolves against shared files. rootless
+// selects docker:dind-rootless; otherwise a privileged docker:dind is used.
+func (b *podBuilder) addDindSidecar(cfg *KubernetesConfig, workdir string) {
+	rootless := cfg.Dind.Rootless
+	image := cfg.Dind.Image
+	if image == "" {
+		if rootless {
+			image = kubernetesDindImageRootless
+		} else {
+			image = kubernetesDindImagePrivileged
+		}
+	}
+
+	probe := tcpPortProbe(kubernetesDindPort)
+	c := corev1.Container{
+		Name:  kubernetesDindContainerName,
+		Image: image,
+		// Disable TLS so the daemon serves plain TCP on 2375.
+		Env:       []corev1.EnvVar{{Name: "DOCKER_TLS_CERTDIR", Value: ""}},
+		Resources: resourceRequirements(cfg.Resources.Dind),
+		VolumeMounts: []corev1.VolumeMount{{
+			Name:      kubernetesWorkspaceVolumeName,
+			MountPath: workspaceMountPath(workdir),
+		}},
+		Ports:          []corev1.ContainerPort{{ContainerPort: int32(kubernetesDindPort)}},
+		StartupProbe:   probe,
+		ReadinessProbe: probe,
+	}
+	if !rootless {
+		privileged := true
+		c.SecurityContext = &corev1.SecurityContext{Privileged: &privileged}
+	}
+	b.addSidecar(c)
 }
 
 // sidecarContainerNames returns the names of the registered service sidecars,

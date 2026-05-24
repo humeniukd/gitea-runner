@@ -120,7 +120,7 @@ func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd, e
 	if rc.IsHostEnv(ctx) {
 		networkMode = "default"
 	}
-	stepContainer := ContainerNewContainer(&container.NewContainerInput{
+	input := &container.NewContainerInput{
 		Cmd:          cmd,
 		Entrypoint:   entrypoint,
 		WorkingDir:   rc.JobContainer.ToContainerPath(rc.Config.Workdir),
@@ -138,6 +138,12 @@ func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd, e
 		AutoRemove:   rc.Config.AutoRemove,
 		ValidVolumes: rc.validVolumes(),
 		AllocatePTY:  rc.Config.AllocatePTY,
-	})
-	return stepContainer
+	}
+	// On the kubernetes backend a `uses: docker://` step cannot construct a real
+	// container via the docker SDK; translate it into docker CLI commands exec'd
+	// inside the job container, which targets the on-demand dind sidecar.
+	if rc.usesKubernetes() {
+		return container.NewKubernetesDockerStepContainer(rc.JobContainer, input)
+	}
+	return ContainerNewContainer(input)
 }
