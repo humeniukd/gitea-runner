@@ -1,0 +1,238 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+package container
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+)
+
+func testKubernetesConfig() *KubernetesConfig {
+	return &KubernetesConfig{
+		Enabled:   true,
+		Namespace: "gitea-e2e",
+		Resources: KubernetesRoleResources{
+			Job: KubernetesResources{
+				Requests: KubernetesResourceList{CPU: "250m", Memory: "256Mi"},
+				Limits:   KubernetesResourceList{CPU: "2", Memory: "2Gi"},
+			},
+			Service: KubernetesResources{
+				Requests: KubernetesResourceList{CPU: "100m", Memory: "128Mi"},
+				Limits:   KubernetesResourceList{CPU: "1", Memory: "1Gi"},
+			},
+		},
+		PodReadyTimeout: time.Second,
+	}
+}
+
+// readyOnCreateReactor mutates every created Pod to Running+Ready so Start's
+// readiness wait completes immediately under the fake clientset.
+func readyOnCreateReactor(action k8stesting.Action) (bool, runtime.Object, error) {
+	pod := action.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	return false, pod, nil
+}
+
+func TestKubernetesPodBuilder(t *testing.T) {
+	cfg := testKubernetesConfig()
+	cfg.PodLabels = map[string]string{"team": "ci"}
+	cfg.ImagePullSecrets = []string{"regcred"}
+	cfg.ServiceAccount = "gitea-runner"
+
+	owner := ownerReferenceFromEnv("runner-pod", "uid-123")
+	require.NotNil(t, owner)
+
+	b := newPodBuilder("gitea-job-1", cfg.Namespace, cfg, 3*time.Hour, owner)
+	jobSpec := kubernetesContainerSpec(kubernetesJobContainerName,
+		&NewContainerInput{Image: "alpine:3", WorkingDir: "/workspace/owner/repo", Env: []string{"FOO=bar", "EQ=a=b"}},
+		cfg.Resources.Job, []string{"SYS_PTRACE"}, []string{"MKNOD"}, false)
+	b.setJobContainer(jobSpec)
+
+	pod := b.build()
+
+	// identity + labels + annotations
+	assert.Equal(t, "gitea-job-1", pod.Name)
+	assert.Equal(t, "gitea-e2e", pod.Namespace)
+	assert.Equal(t, kubernetesBackendValue, pod.Labels[kubernetesBackendLabel])
+	assert.Equal(t, "ci", pod.Labels["team"])
+	assert.Equal(t, "gitea-runner", pod.Spec.ServiceAccountName)
+	require.Len(t, pod.Spec.ImagePullSecrets, 1)
+	assert.Equal(t, "regcred", pod.Spec.ImagePullSecrets[0].Name)
+
+	// never-restart pod with a single job container
+	assert.Equal(t, corev1.RestartPolicyNever, pod.Spec.RestartPolicy)
+	require.Len(t, pod.Spec.Containers, 1)
+	job := pod.Spec.Containers[0]
+	assert.Equal(t, kubernetesJobContainerName, job.Name)
+	assert.Equal(t, "alpine:3", job.Image)
+	assert.Equal(t, "/workspace/owner/repo", job.WorkingDir)
+
+	// env preserves order and values containing '='
+	require.Len(t, job.Env, 2)
+	assert.Equal(t, corev1.EnvVar{Name: "FOO", Value: "bar"}, job.Env[0])
+	assert.Equal(t, corev1.EnvVar{Name: "EQ", Value: "a=b"}, job.Env[1])
+
+	// per-role resources
+	assert.True(t, job.Resources.Requests.Cpu().Equal(resource.MustParse("250m")))
+	assert.True(t, job.Resources.Requests.Memory().Equal(resource.MustParse("256Mi")))
+	assert.True(t, job.Resources.Limits.Cpu().Equal(resource.MustParse("2")))
+	assert.True(t, job.Resources.Limits.Memory().Equal(resource.MustParse("2Gi")))
+
+	// workspace volume + mount
+	require.Len(t, pod.Spec.Volumes, 1)
+	assert.Equal(t, kubernetesWorkspaceVolumeName, pod.Spec.Volumes[0].Name)
+	require.NotNil(t, pod.Spec.Volumes[0].EmptyDir)
+	require.Len(t, job.VolumeMounts, 1)
+	assert.Equal(t, "/workspace/owner/repo", job.VolumeMounts[0].MountPath)
+
+	// security context from cap add/drop
+	require.NotNil(t, job.SecurityContext)
+	require.NotNil(t, job.SecurityContext.Capabilities)
+	assert.Equal(t, []corev1.Capability{"SYS_PTRACE"}, job.SecurityContext.Capabilities.Add)
+	assert.Equal(t, []corev1.Capability{"MKNOD"}, job.SecurityContext.Capabilities.Drop)
+
+	// orphan-reaping primitives (C2/RC2)
+	require.NotNil(t, pod.Spec.ActiveDeadlineSeconds)
+	assert.Equal(t, int64(3*60*60), *pod.Spec.ActiveDeadlineSeconds)
+	require.Len(t, pod.OwnerReferences, 1)
+	assert.Equal(t, "Pod", pod.OwnerReferences[0].Kind)
+	assert.Equal(t, "runner-pod", pod.OwnerReferences[0].Name)
+	assert.Equal(t, "uid-123", string(pod.OwnerReferences[0].UID))
+}
+
+func TestKubernetesPodBuilderPVCWorkspace(t *testing.T) {
+	cfg := testKubernetesConfig()
+	cfg.WorkspaceVolume = KubernetesWorkspaceVolume{Type: "pvc", PVCSize: "10Gi"}
+	b := newPodBuilder("gitea-job-2", cfg.Namespace, cfg, 0, nil)
+	b.setJobContainer(kubernetesContainerSpec(kubernetesJobContainerName, &NewContainerInput{Image: "alpine:3"}, cfg.Resources.Job, nil, nil, false))
+	pod := b.build()
+
+	require.Len(t, pod.Spec.Volumes, 1)
+	require.NotNil(t, pod.Spec.Volumes[0].PersistentVolumeClaim)
+	assert.Equal(t, "gitea-job-2", pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
+	// no maxLifetime -> no deadline; no env owner -> no ownerReference
+	assert.Nil(t, pod.Spec.ActiveDeadlineSeconds)
+	assert.Empty(t, pod.OwnerReferences)
+}
+
+func TestKubernetesSidecarRestartPolicyAlways(t *testing.T) {
+	cfg := testKubernetesConfig()
+	b := newPodBuilder("gitea-job-3", cfg.Namespace, cfg, 0, nil)
+	b.addSidecar(kubernetesContainerSpec("postgres", &NewContainerInput{Image: "postgres:16", Name: "postgres"}, cfg.Resources.Service, nil, nil, false))
+	pod := b.build()
+
+	require.Len(t, pod.Spec.InitContainers, 1)
+	sidecar := pod.Spec.InitContainers[0]
+	assert.Equal(t, "postgres", sidecar.Name)
+	require.NotNil(t, sidecar.RestartPolicy)
+	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *sidecar.RestartPolicy)
+}
+
+func TestKubernetesPullPolicy(t *testing.T) {
+	assert.Equal(t, corev1.PullIfNotPresent, imagePullPolicy(false))
+	assert.Equal(t, corev1.PullAlways, imagePullPolicy(true))
+}
+
+func TestOwnerReferenceFromEnv(t *testing.T) {
+	assert.Nil(t, ownerReferenceFromEnv("", "uid"))
+	assert.Nil(t, ownerReferenceFromEnv("name", ""))
+	owner := ownerReferenceFromEnv("runner-pod", "uid-9")
+	require.NotNil(t, owner)
+	assert.Equal(t, "v1", owner.APIVersion)
+	assert.Equal(t, "Pod", owner.Kind)
+}
+
+func newTestPod(t *testing.T, clientset *fake.Clientset, podName string) *KubernetesPod {
+	t.Helper()
+	cfg := testKubernetesConfig()
+	return newKubernetesPodWithClientset(clientset, nil, KubernetesPodConfig{
+		Config:      cfg,
+		PodName:     podName,
+		MaxLifetime: time.Hour,
+	})
+}
+
+func TestKubernetesCreateStartSubmitsReadyPod(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	clientset.PrependReactor("create", "pods", readyOnCreateReactor)
+
+	pod := newTestPod(t, clientset, "gitea-job-start")
+	job := pod.NewJobContainer(&NewContainerInput{Image: "alpine:3", WorkingDir: "/workspace"})
+
+	ctx := context.Background()
+	require.NoError(t, job.Create(nil, nil)(ctx))
+	require.NoError(t, job.Start(false)(ctx))
+
+	got, err := clientset.CoreV1().Pods("gitea-e2e").Get(ctx, "gitea-job-start", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "gitea-job-start", got.Name)
+	require.Len(t, got.Spec.Containers, 1)
+
+	// Remove deletes the Pod.
+	require.NoError(t, job.Remove()(ctx))
+	_, err = clientset.CoreV1().Pods("gitea-e2e").Get(ctx, "gitea-job-start", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func TestKubernetesServiceStartIsNoop(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	pod := newTestPod(t, clientset, "gitea-job-svc")
+	svc := pod.NewServiceContainer(&NewContainerInput{Image: "postgres:16", Name: "postgres"})
+
+	ctx := context.Background()
+	require.NoError(t, svc.Create(nil, nil)(ctx))
+	// A service Start must not submit a Pod.
+	require.NoError(t, svc.Start(false)(ctx))
+	list, err := clientset.CoreV1().Pods("gitea-e2e").List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items)
+}
+
+// TestKubernetesFailedStartCleanup forces a mid-pipeline Start failure (Ready
+// timeout) and asserts the explicit Remove path deletes the Pod AND its per-job
+// Secret (R2). It does NOT assert real ownerReference GC or activeDeadlineSeconds
+// — the fake clientset has no GC controller or kubelet.
+func TestKubernetesFailedStartCleanup(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	// No ready reactor: the Pod never becomes Ready, so Start times out.
+
+	pod := newTestPod(t, clientset, "gitea-job-fail")
+	secretName := perJobSecretName("gitea-job-fail")
+	_, err := clientset.CoreV1().Secrets("gitea-e2e").Create(context.Background(),
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "gitea-e2e"}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	pod.registerPerJobSecret(secretName)
+
+	job := pod.NewJobContainer(&NewContainerInput{Image: "alpine:3", WorkingDir: "/workspace"})
+	ctx := context.Background()
+	require.NoError(t, job.Create(nil, nil)(ctx))
+
+	// Start submits the Pod then blocks on readiness; with the 1s timeout it fails.
+	startErr := job.Start(false)(ctx)
+	require.Error(t, startErr)
+	assert.Contains(t, startErr.Error(), "not ready")
+
+	// The created Pod exists at this point (submit succeeded, readiness failed).
+	_, err = clientset.CoreV1().Pods("gitea-e2e").Get(ctx, "gitea-job-fail", metav1.GetOptions{})
+	require.NoError(t, err)
+
+	// cleanupFailedStart routes through Remove: Pod and per-job Secret deleted.
+	require.NoError(t, job.Remove()(ctx))
+	_, err = clientset.CoreV1().Pods("gitea-e2e").Get(ctx, "gitea-job-fail", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "pod should be deleted")
+	_, err = clientset.CoreV1().Secrets("gitea-e2e").Get(ctx, secretName, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "per-job secret should be deleted")
+}

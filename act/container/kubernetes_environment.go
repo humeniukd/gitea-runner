@@ -6,77 +6,217 @@
 // transport. Unlike the docker backend it carries NO build tag: client-go is
 // pure Go and cross-platform, so the type is always compiled and only its
 // selection is gated at runtime by the kubernetes.enabled config flag.
+//
+// One job maps to one KubernetesPod coordinator that owns the clientset and the
+// shared podBuilder. The job container and each service sidecar are exposed as
+// KubernetesExecutionEnvironment values that implement the Container interface;
+// they register their spec into the shared builder on Create, and the job
+// container's Start submits the whole Pod (service Starts are no-ops).
 
 package container
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"time"
 
 	"gitea.com/gitea/runner/act/common"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// errKubernetesNotImplemented is returned by the not-yet-wired methods of the
-// Kubernetes backend skeleton. Subsequent phases replace these stubs with real
-// pod-lifecycle and exec-in implementations.
+// errKubernetesNotImplemented is returned by methods whose real implementation
+// lands in a later phase (Exec/Copy/UpdateFromImageEnv).
 var errKubernetesNotImplemented = errors.New("kubernetes execution environment: not implemented")
 
-// KubernetesExecutionEnvironment is the ExecutionsEnvironment backend that runs
-// a Gitea Actions job as one Kubernetes Pod. The embedded
-// LinuxContainerEnvironmentExtensions supplies the Linux path/runner-context
-// helpers (job containers are Linux-only in v1).
-type KubernetesExecutionEnvironment struct {
-	LinuxContainerEnvironmentExtensions
+// podReadyPollInterval is how often Start polls a submitted Pod for readiness.
+const podReadyPollInterval = 500 * time.Millisecond
 
-	input *NewContainerInput
+type kubernetesContainerRole int
 
-	restConfig *rest.Config
-	clientset  kubernetes.Interface
-	namespace  string
+const (
+	roleJob kubernetesContainerRole = iota
+	roleService
+)
+
+// KubernetesPodConfig carries everything the coordinator needs to assemble and
+// submit the job Pod.
+type KubernetesPodConfig struct {
+	Config      *KubernetesConfig
+	PodName     string
+	MaxLifetime time.Duration
 }
 
-// compile-time assertion that the backend satisfies the interface.
-var _ ExecutionsEnvironment = (*KubernetesExecutionEnvironment)(nil)
+// KubernetesPod coordinates the single Pod backing one Actions job. It holds the
+// clientset and the shared builder; the job/service environments it vends share
+// this state so the job container's Start submits one Pod containing the service
+// sidecars.
+type KubernetesPod struct {
+	config    *KubernetesConfig
+	clientset kubernetes.Interface
+	rest      *rest.Config
+	namespace string
+	builder   *podBuilder
 
-// KubernetesEnvironmentConfig carries the cluster connection settings the
-// backend needs to build a clientset. An empty Kubeconfig selects in-cluster
-// config; a non-empty path is the out-of-cluster dev fallback.
-type KubernetesEnvironmentConfig struct {
-	Input      *NewContainerInput
-	Namespace  string
-	Kubeconfig string
+	podReadyTimeout time.Duration
+
+	submitted     *corev1.Pod
+	perJobSecrets []string
 }
 
-// NewKubernetesExecutionEnvironment builds a Kubernetes-backed
-// ExecutionsEnvironment. It resolves a rest.Config from the in-cluster
-// ServiceAccount, falling back to an explicit kubeconfig path for
-// out-of-cluster development.
-func NewKubernetesExecutionEnvironment(cfg KubernetesEnvironmentConfig) (*KubernetesExecutionEnvironment, error) {
-	restConfig, err := resolveKubernetesRestConfig(cfg.Kubeconfig)
+// NewKubernetesPod builds the coordinator: it resolves a clientset (in-cluster
+// with a kubeconfig dev fallback) and seeds the pod builder with identity,
+// orphan-reaping primitives, and the own-Pod ownerReference (RC2).
+func NewKubernetesPod(cfg KubernetesPodConfig) (*KubernetesPod, error) {
+	if cfg.Config == nil {
+		return nil, errors.New("kubernetes pod: nil config")
+	}
+
+	restConfig, err := resolveKubernetesRestConfig(cfg.Config.Kubeconfig)
 	if err != nil {
 		return nil, err
 	}
-
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	return &KubernetesExecutionEnvironment{
-		input:      cfg.Input,
-		restConfig: restConfig,
-		clientset:  clientset,
-		namespace:  cfg.Namespace,
-	}, nil
+	return newKubernetesPodWithClientset(clientset, restConfig, cfg), nil
 }
 
-// resolveKubernetesRestConfig returns the in-cluster config when kubeconfig is
-// empty, otherwise loads the supplied kubeconfig file.
+// newKubernetesPodWithClientset is the testable seam: it builds the coordinator
+// from an already-constructed clientset (a fake clientset in unit tests).
+func newKubernetesPodWithClientset(clientset kubernetes.Interface, restConfig *rest.Config, cfg KubernetesPodConfig) *KubernetesPod {
+	owner := ownerReferenceFromEnv(os.Getenv("POD_NAME"), os.Getenv("POD_UID"))
+	builder := newPodBuilder(cfg.PodName, cfg.Config.Namespace, cfg.Config, cfg.MaxLifetime, owner)
+
+	return &KubernetesPod{
+		config:          cfg.Config,
+		clientset:       clientset,
+		rest:            restConfig,
+		namespace:       cfg.Config.Namespace,
+		builder:         builder,
+		podReadyTimeout: cfg.Config.PodReadyTimeout,
+	}
+}
+
+// NewJobContainer returns the environment representing the long-lived job
+// container act execs steps into.
+func (p *KubernetesPod) NewJobContainer(input *NewContainerInput) *KubernetesExecutionEnvironment {
+	return &KubernetesExecutionEnvironment{pod: p, input: input, role: roleJob, resources: p.config.Resources.Job}
+}
+
+// NewServiceContainer returns the environment representing one service sidecar.
+func (p *KubernetesPod) NewServiceContainer(input *NewContainerInput) *KubernetesExecutionEnvironment {
+	return &KubernetesExecutionEnvironment{pod: p, input: input, role: roleService, resources: p.config.Resources.Service}
+}
+
+// registerPerJobSecret records a Secret name the coordinator must delete on
+// cleanup alongside the Pod.
+func (p *KubernetesPod) registerPerJobSecret(name string) {
+	p.perJobSecrets = append(p.perJobSecrets, name)
+}
+
+// submit creates the Pod and blocks until it is Ready or the timeout elapses.
+func (p *KubernetesPod) submit(ctx context.Context) error {
+	pod := p.builder.build()
+	created, err := p.clientset.CoreV1().Pods(p.namespace).Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("create job pod %s/%s: %w", p.namespace, pod.Name, err)
+	}
+	p.submitted = created
+	common.Logger(ctx).Infof("Created job pod %s/%s", p.namespace, created.Name)
+	return p.waitReady(ctx, created.Name)
+}
+
+// waitReady polls the Pod until its Ready condition is true. A Failed pod or an
+// elapsed pod_ready_timeout is a hard error so a stuck start surfaces promptly.
+func (p *KubernetesPod) waitReady(ctx context.Context, name string) error {
+	timeout := p.podReadyTimeout
+	if timeout <= 0 {
+		timeout = defaultPodReadyTimeout
+	}
+	deadline := time.Now().Add(timeout)
+
+	for {
+		pod, err := p.clientset.CoreV1().Pods(p.namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get job pod %s/%s: %w", p.namespace, name, err)
+		}
+		if pod.Status.Phase == corev1.PodFailed {
+			return fmt.Errorf("job pod %s/%s entered phase %s", p.namespace, name, pod.Status.Phase)
+		}
+		if isPodReady(pod) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("job pod %s/%s not ready within %s", p.namespace, name, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(podReadyPollInterval):
+		}
+	}
+}
+
+// remove deletes the Pod and any registered per-job Secrets, tolerating
+// already-absent objects so cleanup is idempotent (R2).
+func (p *KubernetesPod) remove(ctx context.Context) error {
+	var firstErr error
+	if p.builder != nil && p.builder.name != "" {
+		if err := p.clientset.CoreV1().Pods(p.namespace).Delete(ctx, p.builder.name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			firstErr = fmt.Errorf("delete job pod %s/%s: %w", p.namespace, p.builder.name, err)
+		}
+	}
+	for _, secret := range p.perJobSecrets {
+		if err := p.clientset.CoreV1().Secrets(p.namespace).Delete(ctx, secret, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("delete per-job secret %s/%s: %w", p.namespace, secret, err)
+			}
+		}
+	}
+	return firstErr
+}
+
+// isPodReady reports whether the Pod's Ready condition is true.
+func isPodReady(pod *corev1.Pod) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady {
+			return cond.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// defaultPodReadyTimeout mirrors the config default so a zero timeout (e.g. a
+// directly-constructed coordinator in tests) still bounds the wait.
+const defaultPodReadyTimeout = 5 * time.Minute
+
+// KubernetesExecutionEnvironment is one container's view of the job Pod (the job
+// container or a service sidecar). The embedded LinuxContainerEnvironmentExtensions
+// supplies the Linux path/runner-context helpers (job containers are Linux-only).
+type KubernetesExecutionEnvironment struct {
+	LinuxContainerEnvironmentExtensions
+
+	pod       *KubernetesPod
+	input     *NewContainerInput
+	role      kubernetesContainerRole
+	resources KubernetesResources
+	forcePull bool
+}
+
+// compile-time assertion that the backend satisfies the interface.
+var _ ExecutionsEnvironment = (*KubernetesExecutionEnvironment)(nil)
+
 func resolveKubernetesRestConfig(kubeconfig string) (*rest.Config, error) {
 	if kubeconfig == "" {
 		return rest.InClusterConfig()
@@ -84,16 +224,24 @@ func resolveKubernetesRestConfig(kubeconfig string) (*rest.Config, error) {
 	return clientcmd.BuildConfigFromFlags("", kubeconfig)
 }
 
-func (e *KubernetesExecutionEnvironment) Create(_, _ []string) common.Executor {
+// Create registers this container's spec into the shared pod builder. It does
+// not submit the Pod — that happens in the job container's Start.
+func (e *KubernetesExecutionEnvironment) Create(capAdd, capDrop []string) common.Executor {
 	return func(_ context.Context) error {
-		_ = e.input
-		return errKubernetesNotImplemented
+		switch e.role {
+		case roleJob:
+			spec := kubernetesContainerSpec(kubernetesJobContainerName, e.input, e.resources, capAdd, capDrop, e.forcePull)
+			e.pod.builder.setJobContainer(spec)
+		case roleService:
+			spec := kubernetesContainerSpec(serviceContainerName(e.input.Name), e.input, e.resources, capAdd, capDrop, e.forcePull)
+			e.pod.builder.addSidecar(spec)
+		}
+		return nil
 	}
 }
 
+// ConnectToNetwork is a no-op: containers in a Pod share one network namespace.
 func (e *KubernetesExecutionEnvironment) ConnectToNetwork(_ string) common.Executor {
-	// Containers in a Pod share a single network namespace, so there is no
-	// per-container network to join. This is intentionally a no-op.
 	return func(_ context.Context) error { return nil }
 }
 
@@ -113,26 +261,30 @@ func (e *KubernetesExecutionEnvironment) GetContainerArchive(_ context.Context, 
 	return nil, errKubernetesNotImplemented
 }
 
-func (e *KubernetesExecutionEnvironment) Pull(_ bool) common.Executor {
-	// The kubelet pulls images per the Pod's imagePullPolicy; the runner never
-	// pulls directly. This is a no-op by design.
-	return func(_ context.Context) error { return nil }
+// Pull is a no-op against the API server: the kubelet pulls images per the
+// Pod's imagePullPolicy. It records forcePull so Create can set imagePullPolicy
+// to Always (Pull runs before Create in the start pipeline).
+func (e *KubernetesExecutionEnvironment) Pull(forcePull bool) common.Executor {
+	return func(_ context.Context) error {
+		e.forcePull = forcePull
+		return nil
+	}
 }
 
+// Start submits the Pod and waits for readiness when called on the job
+// container. Service-sidecar Starts are no-ops: the sidecars are submitted as
+// part of the same Pod.
 func (e *KubernetesExecutionEnvironment) Start(_ bool) common.Executor {
-	return func(_ context.Context) error {
-		if e.clientset == nil || e.namespace == "" {
-			return errKubernetesNotImplemented
+	return func(ctx context.Context) error {
+		if e.role != roleJob {
+			return nil
 		}
-		return errKubernetesNotImplemented
+		return e.pod.submit(ctx)
 	}
 }
 
 func (e *KubernetesExecutionEnvironment) Exec(_ []string, _ map[string]string, _, _ string) common.Executor {
-	return func(_ context.Context) error {
-		_ = e.restConfig
-		return errKubernetesNotImplemented
-	}
+	return notImplemented()
 }
 
 func (e *KubernetesExecutionEnvironment) UpdateFromEnv(_ string, _ *map[string]string) common.Executor {
@@ -143,8 +295,15 @@ func (e *KubernetesExecutionEnvironment) UpdateFromImageEnv(_ *map[string]string
 	return notImplemented()
 }
 
+// Remove deletes the whole Pod (and per-job Secrets) when called on the job
+// container; service Removes are no-ops since they share the Pod.
 func (e *KubernetesExecutionEnvironment) Remove() common.Executor {
-	return notImplemented()
+	return func(ctx context.Context) error {
+		if e.role != roleJob {
+			return nil
+		}
+		return e.pod.remove(ctx)
+	}
 }
 
 func (e *KubernetesExecutionEnvironment) Close() common.Executor {
@@ -153,6 +312,15 @@ func (e *KubernetesExecutionEnvironment) Close() common.Executor {
 
 func (e *KubernetesExecutionEnvironment) ReplaceLogWriter(stdout, stderr io.Writer) (io.Writer, io.Writer) {
 	return stdout, stderr
+}
+
+// serviceContainerName sanitises an act service container name into a DNS-label
+// compatible container name. act already produces lowercase hyphenated names.
+func serviceContainerName(name string) string {
+	if name == "" {
+		return "service"
+	}
+	return name
 }
 
 func notImplemented() common.Executor {

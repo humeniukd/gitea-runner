@@ -725,13 +725,72 @@ func (rc *RunContext) usesKubernetes() bool {
 	return rc.Config.Kubernetes != nil && rc.Config.Kubernetes.Enabled
 }
 
-// startKubernetesEnvironment provisions the job Pod (init + long-lived job
-// container + native service sidecars) and execs steps into it. The real
-// implementation lands in a later phase; the selection seam is wired here so
-// the routing is reachable and fails cleanly until then.
+// startKubernetesEnvironment provisions the job Pod (long-lived job container,
+// service sidecars added in a later phase) and execs steps into it. Steps run
+// via client-go remotecommand against the job container.
 func (rc *RunContext) startKubernetesEnvironment() common.Executor {
-	return func(_ context.Context) error {
-		return errors.New("kubernetes backend: startKubernetesEnvironment not implemented")
+	return func(ctx context.Context) error {
+		// R2: assign the cleanup hook as the FIRST statement, before the
+		// clientset is built or the Pod is submitted, so a mid-pipeline Start
+		// failure routes through startContainer's cleanupFailedStart and deletes
+		// the partially-created Pod and per-job Secret rather than leaking them.
+		rc.cleanUpJobContainer = func(ctx context.Context) error {
+			if rc.JobContainer != nil {
+				return rc.JobContainer.Remove()(ctx)
+			}
+			return nil
+		}
+
+		logger := common.Logger(ctx)
+		image := rc.platformImage(ctx)
+		rawLogger := logger.WithField(rawOutputField, true)
+		logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
+			if rc.Config.LogOutput {
+				rawLogger.Infof("%s", s)
+			} else {
+				rawLogger.Debugf("%s", s)
+			}
+			return true
+		})
+
+		name := rc.jobContainerName()
+		rc.Env["JOB_CONTAINER_NAME"] = name
+
+		pod, err := container.NewKubernetesPod(container.KubernetesPodConfig{
+			Config:      rc.Config.Kubernetes,
+			PodName:     name,
+			MaxLifetime: rc.Config.ContainerMaxLifetime,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to initialize kubernetes pod backend: %w", err)
+		}
+
+		envList := []string{
+			fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"),
+			fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"),
+			fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)),
+			fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"),
+			fmt.Sprintf("%s=%s", "LANG", "C.UTF-8"),
+		}
+
+		ext := container.LinuxContainerEnvironmentExtensions{}
+		rc.JobContainer = pod.NewJobContainer(&container.NewContainerInput{
+			Entrypoint: []string{"/bin/sleep", fmt.Sprint(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds())},
+			WorkingDir: ext.ToContainerPath(rc.Config.Workdir),
+			Image:      image,
+			Name:       name,
+			Env:        envList,
+			Stdout:     logWriter,
+			Stderr:     logWriter,
+			Privileged: rc.Config.Privileged,
+			Platform:   rc.Config.ContainerArchitecture,
+		})
+
+		return common.NewPipelineExecutor(
+			rc.JobContainer.Pull(rc.Config.ForcePull),
+			rc.JobContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
+			rc.JobContainer.Start(false),
+		)(ctx)
 	}
 }
 
