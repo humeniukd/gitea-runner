@@ -278,15 +278,7 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 		}
 
 		return common.NewPipelineExecutor(
-			rc.JobContainer.Copy(rc.JobContainer.GetActPath()+"/", &container.FileEntry{
-				Name: "workflow/event.json",
-				Mode: 0o644,
-				Body: rc.EventJSON,
-			}, &container.FileEntry{
-				Name: "workflow/envs.txt",
-				Mode: 0o666,
-				Body: "",
-			}),
+			rc.JobContainer.Copy(rc.JobContainer.GetActPath()+"/", rc.seedWorkspaceFiles()...),
 		)(ctx)
 	}
 }
@@ -302,6 +294,100 @@ func printStartJobContainerGroup(ctx context.Context, image, name, network strin
 	return func() {
 		rawLogger.Infof("::endgroup::")
 	}
+}
+
+// seedWorkspaceFiles returns the workspace files act seeds into every backend's
+// act path before steps run: the event payload and an empty envs file. Both the
+// host/docker and Kubernetes backends copy this set, so it is shared here.
+func (rc *RunContext) seedWorkspaceFiles() []*container.FileEntry {
+	return []*container.FileEntry{
+		{
+			Name: "workflow/event.json",
+			Mode: 0o644,
+			Body: rc.EventJSON,
+		},
+		{
+			Name: "workflow/envs.txt",
+			Mode: 0o666,
+			Body: "",
+		},
+	}
+}
+
+// buildServiceContainerInputs interpolates each service definition into a
+// container input. It is side-effect-free (RC3): it does NOT touch
+// rc.ServiceContainers — the caller accumulates — so both the Docker backend
+// (which constructs containers) and the Kubernetes backend (which builds sidecar
+// specs) can consume the same inputs. Per-service credentials are resolved in
+// loop order, after the job-container credentials, preserving the original
+// sequencing.
+func (rc *RunContext) buildServiceContainerInputs(ctx context.Context, logWriter io.Writer, networkName string) ([]*container.NewContainerInput, error) {
+	ext := container.LinuxContainerEnvironmentExtensions{}
+	services := rc.Run.Job().Services
+	inputs := make([]*container.NewContainerInput, 0, len(services))
+
+	for serviceID, spec := range services {
+		// interpolate env
+		interpolatedEnvs := make(map[string]string, len(spec.Env))
+		for k, v := range spec.Env {
+			interpolatedEnvs[k] = rc.ExprEval.Interpolate(ctx, v)
+		}
+		envs := make([]string, 0, len(interpolatedEnvs))
+		for k, v := range interpolatedEnvs {
+			envs = append(envs, fmt.Sprintf("%s=%s", k, v))
+		}
+		// interpolate cmd
+		interpolatedCmd := make([]string, 0, len(spec.Cmd))
+		for _, v := range spec.Cmd {
+			interpolatedCmd = append(interpolatedCmd, rc.ExprEval.Interpolate(ctx, v))
+		}
+		username, password, err := rc.handleServiceCredentials(ctx, spec.Credentials)
+		if err != nil {
+			return nil, fmt.Errorf("failed to handle service %s credentials: %w", serviceID, err)
+		}
+
+		interpolatedVolumes := make([]string, 0, len(spec.Volumes))
+		for _, volume := range spec.Volumes {
+			interpolatedVolumes = append(interpolatedVolumes, rc.ExprEval.Interpolate(ctx, volume))
+		}
+		serviceBinds, serviceMounts := rc.GetServiceBindsAndMounts(interpolatedVolumes)
+
+		interpolatedPorts := make([]string, 0, len(spec.Ports))
+		for _, port := range spec.Ports {
+			interpolatedPorts = append(interpolatedPorts, rc.ExprEval.Interpolate(ctx, port))
+		}
+		exposedPorts, portBindings, err := nat.ParsePortSpecs(interpolatedPorts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse service %s ports: %w", serviceID, err)
+		}
+
+		serviceContainerName := createContainerName(rc.jobContainerName(), serviceID)
+		inputs = append(inputs, &container.NewContainerInput{
+			Name:           serviceContainerName,
+			WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
+			Image:          rc.ExprEval.Interpolate(ctx, spec.Image),
+			Username:       username,
+			Password:       password,
+			Cmd:            interpolatedCmd,
+			Env:            envs,
+			Mounts:         serviceMounts,
+			Binds:          serviceBinds,
+			Stdout:         logWriter,
+			Stderr:         logWriter,
+			Privileged:     rc.Config.Privileged,
+			UsernsMode:     rc.Config.UsernsMode,
+			Platform:       rc.Config.ContainerArchitecture,
+			AutoRemove:     rc.Config.AutoRemove,
+			Options:        rc.ExprEval.Interpolate(ctx, spec.Options),
+			NetworkMode:    networkName,
+			NetworkAliases: []string{serviceID},
+			ExposedPorts:   exposedPorts,
+			PortBindings:   portBindings,
+			AllocatePTY:    rc.Config.AllocatePTY,
+		})
+	}
+
+	return inputs, nil
 }
 
 func (rc *RunContext) startJobContainer() common.Executor {
@@ -345,66 +431,19 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		networkName, createAndDeleteNetwork := rc.networkNameForGitea()
 
 		// add service containers
-		for serviceID, spec := range rc.Run.Job().Services {
-			// interpolate env
-			interpolatedEnvs := make(map[string]string, len(spec.Env))
-			for k, v := range spec.Env {
-				interpolatedEnvs[k] = rc.ExprEval.Interpolate(ctx, v)
-			}
-			envs := make([]string, 0, len(interpolatedEnvs))
-			for k, v := range interpolatedEnvs {
-				envs = append(envs, fmt.Sprintf("%s=%s", k, v))
-			}
-			// interpolate cmd
-			interpolatedCmd := make([]string, 0, len(spec.Cmd))
-			for _, v := range spec.Cmd {
-				interpolatedCmd = append(interpolatedCmd, rc.ExprEval.Interpolate(ctx, v))
-			}
-			username, password, err = rc.handleServiceCredentials(ctx, spec.Credentials)
-			if err != nil {
-				return fmt.Errorf("failed to handle service %s credentials: %w", serviceID, err)
-			}
-
-			interpolatedVolumes := make([]string, 0, len(spec.Volumes))
-			for _, volume := range spec.Volumes {
-				interpolatedVolumes = append(interpolatedVolumes, rc.ExprEval.Interpolate(ctx, volume))
-			}
-			serviceBinds, serviceMounts := rc.GetServiceBindsAndMounts(interpolatedVolumes)
-
-			interpolatedPorts := make([]string, 0, len(spec.Ports))
-			for _, port := range spec.Ports {
-				interpolatedPorts = append(interpolatedPorts, rc.ExprEval.Interpolate(ctx, port))
-			}
-			exposedPorts, portBindings, err := nat.ParsePortSpecs(interpolatedPorts)
-			if err != nil {
-				return fmt.Errorf("failed to parse service %s ports: %w", serviceID, err)
-			}
-
-			serviceContainerName := createContainerName(rc.jobContainerName(), serviceID)
-			c := container.NewContainer(&container.NewContainerInput{
-				Name:           serviceContainerName,
-				WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
-				Image:          rc.ExprEval.Interpolate(ctx, spec.Image),
-				Username:       username,
-				Password:       password,
-				Cmd:            interpolatedCmd,
-				Env:            envs,
-				Mounts:         serviceMounts,
-				Binds:          serviceBinds,
-				Stdout:         logWriter,
-				Stderr:         logWriter,
-				Privileged:     rc.Config.Privileged,
-				UsernsMode:     rc.Config.UsernsMode,
-				Platform:       rc.Config.ContainerArchitecture,
-				AutoRemove:     rc.Config.AutoRemove,
-				Options:        rc.ExprEval.Interpolate(ctx, spec.Options),
-				NetworkMode:    networkName,
-				NetworkAliases: []string{serviceID},
-				ExposedPorts:   exposedPorts,
-				PortBindings:   portBindings,
-				AllocatePTY:    rc.Config.AllocatePTY,
-			})
-			rc.ServiceContainers = append(rc.ServiceContainers, c)
+		serviceInputs, err := rc.buildServiceContainerInputs(ctx, logWriter, networkName)
+		if err != nil {
+			return err
+		}
+		for _, input := range serviceInputs {
+			rc.ServiceContainers = append(rc.ServiceContainers, container.NewContainer(input))
+		}
+		// Preserve the pre-refactor credential sequencing (RC3): the job container
+		// historically reused the username/password variables left by the last
+		// service iteration, so keep that binding to avoid any behavior change.
+		if n := len(serviceInputs); n > 0 {
+			username = serviceInputs[n-1].Username
+			password = serviceInputs[n-1].Password
 		}
 
 		rc.cleanUpJobContainer = func(ctx context.Context) error {
@@ -479,15 +518,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			rc.startServiceContainers(networkName),
 			rc.JobContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 			rc.JobContainer.Start(false),
-			rc.JobContainer.Copy(rc.JobContainer.GetActPath()+"/", &container.FileEntry{
-				Name: "workflow/event.json",
-				Mode: 0o644,
-				Body: rc.EventJSON,
-			}, &container.FileEntry{
-				Name: "workflow/envs.txt",
-				Mode: 0o666,
-				Body: "",
-			}),
+			rc.JobContainer.Copy(rc.JobContainer.GetActPath()+"/", rc.seedWorkspaceFiles()...),
 		)(ctx)
 	}
 }
