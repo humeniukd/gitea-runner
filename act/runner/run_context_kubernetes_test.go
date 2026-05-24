@@ -4,13 +4,11 @@
 package runner
 
 import (
-	"context"
 	"testing"
 
 	"gitea.com/gitea/runner/act/container"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestUsesKubernetes(t *testing.T) {
@@ -28,11 +26,4 @@ func TestUsesKubernetes(t *testing.T) {
 		rc := &RunContext{Config: &Config{Kubernetes: &container.KubernetesConfig{Enabled: true}}}
 		assert.True(t, rc.usesKubernetes())
 	})
-}
-
-func TestStartKubernetesEnvironmentNotImplemented(t *testing.T) {
-	rc := &RunContext{Config: &Config{Kubernetes: &container.KubernetesConfig{Enabled: true}}}
-	err := rc.startKubernetesEnvironment()(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not implemented")
 }
