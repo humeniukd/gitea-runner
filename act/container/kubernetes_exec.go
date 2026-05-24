@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -69,14 +70,24 @@ func mapExecError(err error) error {
 	return err
 }
 
+// validEnvKey matches a POSIX shell name. Env keys are emitted UNQUOTED into the
+// `export <key>=` script, so a key must be validated to a safe shell identifier
+// to avoid command injection through the key (the value is always shell-quoted).
+var validEnvKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // buildExecCommand wraps an act step command so the pods/exec subresource — which
 // has no native env/workdir/user fields — reproduces the Docker exec semantics:
 // it exports each env var, changes into the working directory, then execs the
 // command. When user is set the script runs via `su <user> -c`, otherwise `sh`.
-// Env keys are emitted in sorted order for deterministic output.
+// Env keys are emitted in sorted order for deterministic output; keys that are
+// not valid shell identifiers are skipped (the unquoted key would otherwise be a
+// shell-injection vector).
 func buildExecCommand(command []string, env map[string]string, user, workdir string) []string {
 	var script strings.Builder
 	for _, key := range sortedKeys(env) {
+		if !validEnvKey.MatchString(key) {
+			continue
+		}
 		script.WriteString("export ")
 		script.WriteString(key)
 		script.WriteString("=")

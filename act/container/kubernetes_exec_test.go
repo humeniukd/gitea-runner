@@ -5,6 +5,7 @@ package container
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -39,6 +40,29 @@ func TestBuildExecCommandQuotesUnsafeValues(t *testing.T) {
 	// The value and the command arg must be shell-quoted so metacharacters are literal.
 	assert.Contains(t, got[2], "export FOO='a b; rm -rf /'")
 	assert.Contains(t, got[2], "exec sh -c 'echo $FOO'")
+}
+
+func TestBuildExecCommandSkipsMaliciousEnvKeys(t *testing.T) {
+	got := buildExecCommand(
+		[]string{"echo", "hi"},
+		map[string]string{
+			"GOOD":      "1",
+			"x; id #":   "evil", // shell metacharacters in the key
+			"$(reboot)": "evil", // command substitution in the key
+			"1BAD":      "evil", // starts with a digit
+			"with-dash": "evil", // hyphen not allowed in shell name
+		},
+		"", "",
+	)
+	script := got[2]
+	// Only the valid key is exported; malicious keys are skipped entirely.
+	assert.Contains(t, script, "export GOOD=1")
+	assert.NotContains(t, script, "id #")
+	assert.NotContains(t, script, "reboot")
+	assert.NotContains(t, script, "1BAD")
+	assert.NotContains(t, script, "with-dash")
+	// exactly one export line
+	assert.Equal(t, 1, strings.Count(script, "export "))
 }
 
 func TestBuildExecCommandUser(t *testing.T) {

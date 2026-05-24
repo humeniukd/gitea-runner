@@ -725,6 +725,20 @@ func (rc *RunContext) usesKubernetes() bool {
 	return rc.Config.Kubernetes != nil && rc.Config.Kubernetes.Enabled
 }
 
+// guardKubernetesActionUnsupported returns a clear error when the kubernetes
+// backend cannot run an action of the given `runs.using` type (RC1). v1 rejects
+// ONLY `using: docker` actions — they construct a step container that bypasses
+// the ContainerNewContainer seam. JS, composite, and Go actions exec into the
+// job container and are allowed (this returns nil for them). It also returns nil
+// when the kubernetes backend is not selected, so docker/host runs are
+// unaffected.
+func (rc *RunContext) guardKubernetesActionUnsupported(using model.ActionRunsUsing, actionName string) error {
+	if !rc.usesKubernetes() || !using.IsDocker() {
+		return nil
+	}
+	return fmt.Errorf("'using: docker' actions are not supported by the kubernetes backend in v1; use 'uses: docker://<image>', or a JS/composite/Go action (action %q)", actionName)
+}
+
 // startKubernetesEnvironment provisions the job Pod (long-lived job container
 // plus one native sidecar per service) and execs steps into it. Steps run via
 // client-go remotecommand against the job container; services are reachable at
