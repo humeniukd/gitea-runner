@@ -22,7 +22,7 @@ import (
 
 	"gitea.com/gitea/runner/act/artifactcache"
 	"gitea.com/gitea/runner/act/common"
-	"gitea.com/gitea/runner/act/container"
+	act_container "gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/model"
 	"gitea.com/gitea/runner/act/runner"
 	"gitea.com/gitea/runner/internal/pkg/client"
@@ -435,7 +435,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		ContainerMaxLifetime: maxLifetime,
 		CleanWorkdir:         true,
 		ContainerNetworkMode: docker_container.NetworkMode(r.cfg.Container.Network),
-		ContainerNetworkCreateOptions: container.NewDockerNetworkCreateExecutorInput{
+		ContainerNetworkCreateOptions: act_container.NewDockerNetworkCreateExecutorInput{
 			EnableIPv4: r.cfg.Container.NetworkCreateOptions.EnableIPv4,
 			EnableIPv6: r.cfg.Container.NetworkCreateOptions.EnableIPv6,
 		},
@@ -447,6 +447,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		Vars:                  task.Vars,
 		ValidVolumes:          r.cfg.Container.ValidVolumes,
 		InsecureSkipTLS:       r.cfg.Runner.Insecure,
+		Kubernetes:            kubernetesRunnerConfig(&r.cfg.Kubernetes),
 	}
 
 	rr, err := runner.New(runnerConfig)
@@ -567,4 +568,55 @@ func (r *Runner) Declare(ctx context.Context, labels []string) (*connect.Respons
 		Labels:       labels,
 		Capabilities: RunnerCapabilities(),
 	}))
+}
+
+// kubernetesRunnerConfig maps the YAML-facing Kubernetes settings into the
+// runtime KubernetesConfig the act engine consumes. It returns nil when the
+// backend is disabled so the docker/host branches are selected unchanged.
+func kubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfig {
+	if k == nil || !k.Enabled {
+		return nil
+	}
+
+	rootless := true
+	if k.Dind.Rootless != nil {
+		rootless = *k.Dind.Rootless
+	}
+
+	return &act_container.KubernetesConfig{
+		Enabled:          true,
+		Namespace:        k.Namespace,
+		Kubeconfig:       k.Kubeconfig,
+		ServiceAccount:   k.ServiceAccount,
+		ImagePullSecrets: k.ImagePullSecrets,
+		WorkspaceVolume: act_container.KubernetesWorkspaceVolume{
+			Type:    k.WorkspaceVolume.Type,
+			PVCSize: k.WorkspaceVolume.PVCSize,
+		},
+		PodLabels:          k.PodLabels,
+		PodAnnotations:     k.PodAnnotations,
+		Resources:          kubernetesRoleResources(&k.Resources),
+		PodReadyTimeout:    k.PodReadyTimeout,
+		ConnectBackAddress: k.ConnectBackAddress,
+		Dind: act_container.KubernetesDindConfig{
+			Enabled:  k.Dind.Enabled,
+			Rootless: rootless,
+			Image:    k.Dind.Image,
+		},
+	}
+}
+
+func kubernetesRoleResources(r *config.KubernetesContainerResources) act_container.KubernetesRoleResources {
+	return act_container.KubernetesRoleResources{
+		Job:     kubernetesResources(&r.Job),
+		Service: kubernetesResources(&r.Service),
+		Dind:    kubernetesResources(&r.Dind),
+	}
+}
+
+func kubernetesResources(r *config.KubernetesResources) act_container.KubernetesResources {
+	return act_container.KubernetesResources{
+		Requests: act_container.KubernetesResourceList{CPU: r.Requests.CPU, Memory: r.Requests.Memory},
+		Limits:   act_container.KubernetesResourceList{CPU: r.Limits.CPU, Memory: r.Limits.Memory},
+	}
 }

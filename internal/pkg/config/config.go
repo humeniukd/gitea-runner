@@ -97,14 +97,68 @@ type Metrics struct {
 	Addr    string `yaml:"addr"`    // Addr specifies the listen address for the metrics HTTP server (e.g., ":9101").
 }
 
+// KubernetesResourceList is the cpu/memory pair for a requests or limits entry.
+// Values are Kubernetes resource.Quantity strings (e.g. "250m", "256Mi").
+type KubernetesResourceList struct {
+	CPU    string `yaml:"cpu"`    // CPU quantity (e.g. "250m", "2").
+	Memory string `yaml:"memory"` // Memory quantity (e.g. "256Mi", "2Gi").
+}
+
+// KubernetesResources holds the requests and limits for one container role.
+type KubernetesResources struct {
+	Requests KubernetesResourceList `yaml:"requests"` // Requests is the guaranteed reservation.
+	Limits   KubernetesResourceList `yaml:"limits"`   // Limits is the hard cap.
+}
+
+// KubernetesContainerResources carries per-container-role resource requirements.
+// Each role is tuned independently because their footprints differ markedly.
+type KubernetesContainerResources struct {
+	Job     KubernetesResources `yaml:"job"`     // Job container running the steps.
+	Service KubernetesResources `yaml:"service"` // Service sidecar containers.
+	Dind    KubernetesResources `yaml:"dind"`    // Optional docker-in-docker sidecar (needs >=1Gi).
+}
+
+// KubernetesWorkspaceVolume selects how the shared job workspace is backed.
+type KubernetesWorkspaceVolume struct {
+	Type    string `yaml:"type"`     // Type is "emptyDir" (default) or "pvc".
+	PVCSize string `yaml:"pvc_size"` // PVCSize is the requested size when Type is "pvc" (e.g. "10Gi").
+}
+
+// KubernetesDind configures the optional on-demand docker-in-docker sidecar that
+// serves `uses: docker://` container steps.
+type KubernetesDind struct {
+	Enabled  bool   `yaml:"enabled"`  // Enabled injects the dind sidecar for container steps. Explicit; no auto-detect.
+	Rootless *bool  `yaml:"rootless"` // Rootless selects docker:dind-rootless. It is a pointer to distinguish unset (defaults true) from an explicit false (privileged sidecar).
+	Image    string `yaml:"image"`    // Image overrides the dind image; empty selects a sensible default.
+}
+
+// Kubernetes represents the configuration for the Kubernetes-native pod backend.
+// When Enabled, every job runs as one Pod (init + long-lived job container +
+// native service sidecars) instead of via the docker/host backends.
+type Kubernetes struct {
+	Enabled            bool                         `yaml:"enabled"`              // Enabled routes every job to the Kubernetes pod backend.
+	Namespace          string                       `yaml:"namespace"`            // Namespace for all runner-created pods/secrets/configmaps.
+	Kubeconfig         string                       `yaml:"kubeconfig"`           // Kubeconfig path for out-of-cluster dev; empty selects in-cluster config.
+	ServiceAccount     string                       `yaml:"service_account"`      // ServiceAccount assigned to job pods.
+	ImagePullSecrets   []string                     `yaml:"image_pull_secrets"`   // ImagePullSecrets attached to job pods for private registries.
+	WorkspaceVolume    KubernetesWorkspaceVolume    `yaml:"workspace_volume"`     // WorkspaceVolume backs the shared job workspace.
+	PodLabels          map[string]string            `yaml:"pod_labels"`           // PodLabels are merged onto every job pod.
+	PodAnnotations     map[string]string            `yaml:"pod_annotations"`      // PodAnnotations are merged onto every job pod.
+	Resources          KubernetesContainerResources `yaml:"resources"`            // Resources are the per-container-role requests/limits.
+	PodReadyTimeout    time.Duration                `yaml:"pod_ready_timeout"`    // PodReadyTimeout bounds the wait for a job pod to become Ready.
+	ConnectBackAddress string                       `yaml:"connect_back_address"` // ConnectBackAddress is the cluster-reachable DNS job pods use to reach the runner's cache/results server.
+	Dind               KubernetesDind               `yaml:"dind"`                 // Dind configures the optional docker-in-docker sidecar.
+}
+
 // Config represents the overall configuration.
 type Config struct {
-	Log       Log       `yaml:"log"`       // Log represents the configuration for logging.
-	Runner    Runner    `yaml:"runner"`    // Runner represents the configuration for the runner.
-	Cache     Cache     `yaml:"cache"`     // Cache represents the configuration for caching.
-	Container Container `yaml:"container"` // Container represents the configuration for the container.
-	Host      Host      `yaml:"host"`      // Host represents the configuration for the host.
-	Metrics   Metrics   `yaml:"metrics"`   // Metrics represents the configuration for the Prometheus metrics endpoint.
+	Log        Log        `yaml:"log"`        // Log represents the configuration for logging.
+	Runner     Runner     `yaml:"runner"`     // Runner represents the configuration for the runner.
+	Cache      Cache      `yaml:"cache"`      // Cache represents the configuration for caching.
+	Container  Container  `yaml:"container"`  // Container represents the configuration for the container.
+	Host       Host       `yaml:"host"`       // Host represents the configuration for the host.
+	Metrics    Metrics    `yaml:"metrics"`    // Metrics represents the configuration for the Prometheus metrics endpoint.
+	Kubernetes Kubernetes `yaml:"kubernetes"` // Kubernetes represents the configuration for the Kubernetes-native pod backend.
 }
 
 // LoadDefault returns the default configuration.
@@ -219,6 +273,11 @@ func LoadDefault(file string) (*Config, error) {
 			cfg.Runner.LogReportMaxLatency, cfg.Runner.LogReportInterval)
 	}
 
+	applyKubernetesDefaults(&cfg.Kubernetes)
+	if err := validateKubernetes(&cfg.Kubernetes); err != nil {
+		return nil, err
+	}
+
 	// although `container.network_mode` will be deprecated, but we have to be compatible with it for now.
 	if cfg.Container.NetworkMode != "" && cfg.Container.Network == "" {
 		log.Warn("You are trying to use deprecated configuration item of `container.network_mode`, please use `container.network` instead.")
@@ -233,6 +292,100 @@ func LoadDefault(file string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Kubernetes backend defaults (M3). Each container role is tuned independently;
+// the dind sidecar needs >=1Gi to build images reliably.
+const (
+	defaultKubernetesNamespace       = "gitea-e2e"
+	defaultKubernetesPodReadyTimeout = 5 * time.Minute
+	defaultKubernetesWorkspaceType   = "emptyDir"
+	defaultKubernetesDindRootless    = true
+
+	defaultKubernetesJobCPURequest    = "250m"
+	defaultKubernetesJobMemoryRequest = "256Mi"
+	defaultKubernetesJobCPULimit      = "2"
+	defaultKubernetesJobMemoryLimit   = "2Gi"
+
+	defaultKubernetesServiceCPURequest    = "100m"
+	defaultKubernetesServiceMemoryRequest = "128Mi"
+	defaultKubernetesServiceCPULimit      = "1"
+	defaultKubernetesServiceMemoryLimit   = "1Gi"
+
+	defaultKubernetesDindCPURequest    = "500m"
+	defaultKubernetesDindMemoryRequest = "1Gi"
+	defaultKubernetesDindCPULimit      = "2"
+	defaultKubernetesDindMemoryLimit   = "4Gi"
+)
+
+// applyKubernetesDefaults fills empty Kubernetes settings with their defaults.
+// It is safe to call regardless of Enabled: the values are inert for the
+// docker/host backends and only consulted when the pod backend is selected.
+func applyKubernetesDefaults(k *Kubernetes) {
+	if k.Namespace == "" {
+		k.Namespace = defaultKubernetesNamespace
+	}
+	if k.PodReadyTimeout <= 0 {
+		k.PodReadyTimeout = defaultKubernetesPodReadyTimeout
+	}
+	if k.WorkspaceVolume.Type == "" {
+		k.WorkspaceVolume.Type = defaultKubernetesWorkspaceType
+	}
+	// Rootless defaults to true; an explicit `rootless: false` opts into a
+	// privileged dind sidecar. The pointer distinguishes the two.
+	if k.Dind.Rootless == nil {
+		rootless := defaultKubernetesDindRootless
+		k.Dind.Rootless = &rootless
+	}
+	defaultRoleResources(&k.Resources)
+}
+
+// defaultRoleResources fills any empty per-role requests/limits with the M3
+// defaults, preserving operator overrides.
+func defaultRoleResources(r *KubernetesContainerResources) {
+	defaultResource(&r.Job,
+		defaultKubernetesJobCPURequest, defaultKubernetesJobMemoryRequest,
+		defaultKubernetesJobCPULimit, defaultKubernetesJobMemoryLimit)
+	defaultResource(&r.Service,
+		defaultKubernetesServiceCPURequest, defaultKubernetesServiceMemoryRequest,
+		defaultKubernetesServiceCPULimit, defaultKubernetesServiceMemoryLimit)
+	defaultResource(&r.Dind,
+		defaultKubernetesDindCPURequest, defaultKubernetesDindMemoryRequest,
+		defaultKubernetesDindCPULimit, defaultKubernetesDindMemoryLimit)
+}
+
+func defaultResource(res *KubernetesResources, cpuReq, memReq, cpuLim, memLim string) {
+	if res.Requests.CPU == "" {
+		res.Requests.CPU = cpuReq
+	}
+	if res.Requests.Memory == "" {
+		res.Requests.Memory = memReq
+	}
+	if res.Limits.CPU == "" {
+		res.Limits.CPU = cpuLim
+	}
+	if res.Limits.Memory == "" {
+		res.Limits.Memory = memLim
+	}
+}
+
+// validateKubernetes rejects incoherent Kubernetes settings. Validation only
+// fires when the backend is enabled so a stray disabled block cannot break a
+// docker/host runner.
+func validateKubernetes(k *Kubernetes) error {
+	if !k.Enabled {
+		return nil
+	}
+	switch k.WorkspaceVolume.Type {
+	case "emptyDir":
+	case "pvc":
+		if k.WorkspaceVolume.PVCSize == "" {
+			return errors.New("kubernetes.workspace_volume.pvc_size is required when workspace_volume.type is \"pvc\"")
+		}
+	default:
+		return fmt.Errorf("kubernetes.workspace_volume.type %q is invalid; must be \"emptyDir\" or \"pvc\"", k.WorkspaceVolume.Type)
+	}
+	return nil
 }
 
 func definedRunnerConfigKeys(content []byte) (map[string]bool, error) {

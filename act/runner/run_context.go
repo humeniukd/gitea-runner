@@ -648,9 +648,12 @@ func (rc *RunContext) interpolateOutputs() common.Executor {
 func (rc *RunContext) startContainer() common.Executor {
 	return func(ctx context.Context) error {
 		var err error
-		if rc.IsHostEnv(ctx) {
+		switch {
+		case rc.usesKubernetes():
+			err = rc.startKubernetesEnvironment()(ctx)
+		case rc.IsHostEnv(ctx):
 			err = rc.startHostEnvironment()(ctx)
-		} else {
+		default:
 			err = rc.startJobContainer()(ctx)
 		}
 		if err != nil {
@@ -682,6 +685,23 @@ func (rc *RunContext) IsHostEnv(ctx context.Context) bool {
 	platform := rc.runsOnImage(ctx)
 	image := rc.containerImage(ctx)
 	return image == "" && strings.EqualFold(platform, "-self-hosted")
+}
+
+// usesKubernetes reports whether jobs should run on the Kubernetes pod backend.
+// Selection is global: when enabled it takes precedence over the host/docker
+// branches so every job runs as a Pod.
+func (rc *RunContext) usesKubernetes() bool {
+	return rc.Config.Kubernetes != nil && rc.Config.Kubernetes.Enabled
+}
+
+// startKubernetesEnvironment provisions the job Pod (init + long-lived job
+// container + native service sidecars) and execs steps into it. The real
+// implementation lands in a later phase; the selection seam is wired here so
+// the routing is reachable and fails cleanly until then.
+func (rc *RunContext) startKubernetesEnvironment() common.Executor {
+	return func(_ context.Context) error {
+		return errors.New("kubernetes backend: startKubernetesEnvironment not implemented")
+	}
 }
 
 func (rc *RunContext) stopContainer() common.Executor {

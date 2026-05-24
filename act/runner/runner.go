@@ -84,6 +84,7 @@ type Config struct {
 	InsecureSkipTLS       bool                         // whether to skip verifying TLS certificate of the Gitea instance
 	MaxParallel           int                          // max parallel jobs to run across all workflows (0 = no limit, uses CPU count)
 	AllocatePTY           bool                         // allocate a pseudo-TTY for each step's process
+	Kubernetes            *container.KubernetesConfig  // when non-nil and Enabled, route every job to the Kubernetes pod backend instead of docker/host
 }
 
 // GetToken: Adapt to Gitea
