@@ -185,3 +185,29 @@ ignored.
 | `kubernetes.resources.dind` | `500m/1Gi` req, `2/4Gi` lim | DinD sidecar (≥1Gi required) |
 | `runner.capacity` | `4` | Max concurrent jobs |
 | `GITEA_INSTANCE_URL` | `http://gitea.192.168.2.190.nip.io` | Set to your Gitea URL |
+
+---
+
+## Security considerations
+
+The native pod backend deliberately runs each job as an unprivileged Pod with a
+least-privilege ServiceAccount. A few behaviours nonetheless warrant operator
+attention:
+
+- **DinD daemon serves plaintext TCP on pod loopback.** When
+  `kubernetes.dind.enabled: true`, the docker-in-docker sidecar listens on
+  `tcp://localhost:2375` with TLS disabled (`DOCKER_TLS_CERTDIR=""`). This is
+  only reachable over the job Pod's loopback interface (the shared pod network),
+  so it is safe **provided no untrusted container is co-scheduled into the job
+  Pod**. Do not add arbitrary user-controlled sidecars to a job Pod that also
+  runs DinD.
+- **Translated `uses: docker://` steps run with `--network host`.** Inside the
+  DinD daemon, the translated `docker run` uses `--network host`, so the step
+  container shares the DinD network namespace rather than being isolated on its
+  own bridge. Treat container-step images with the same trust level as the job.
+- **`kubernetes.dind.rootless: false` makes every job's DinD privileged.**
+  The default is rootless (`true`). Setting it to `false` injects a
+  **privileged** `docker:dind` sidecar into *every* job Pod, which materially
+  weakens isolation (a compromised job could escalate via the privileged
+  daemon). Only disable rootless when a specific image genuinely cannot build
+  under rootless DinD, and prefer per-runner scoping in that case.
