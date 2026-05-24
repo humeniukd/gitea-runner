@@ -286,6 +286,9 @@ func LoadDefault(file string) (*Config, error) {
 	if err := validateKubernetes(&cfg.Kubernetes); err != nil {
 		return nil, err
 	}
+	if err := validateKubernetesCacheReachability(cfg); err != nil {
+		return nil, err
+	}
 
 	// although `container.network_mode` will be deprecated, but we have to be compatible with it for now.
 	if cfg.Container.NetworkMode != "" && cfg.Container.Network == "" {
@@ -401,6 +404,39 @@ func validateKubernetes(k *Kubernetes) error {
 		return fmt.Errorf("kubernetes.workspace_volume.type %q is invalid; must be \"emptyDir\", \"ephemeral\", or \"pvc\"", k.WorkspaceVolume.Type)
 	}
 	return nil
+}
+
+// validateKubernetesCacheReachability fails fast when the Kubernetes backend is
+// enabled but the embedded cache server would advertise a URL job pods cannot
+// reach (pre-mortem #2). The embedded cache binds to cache.host (loopback/empty
+// in-cluster); job pods can only reach it via a cluster DNS name, so either
+// kubernetes.connect_back_address (the cache Service DNS) or an external cache
+// (cache.external_server) must be set. The existing external_server/external_secret
+// rule is enforced separately and is unaffected (D6).
+func validateKubernetesCacheReachability(cfg *Config) error {
+	if !cfg.Kubernetes.Enabled {
+		return nil
+	}
+	cacheEnabled := cfg.Cache.Enabled == nil || *cfg.Cache.Enabled
+	if !cacheEnabled || cfg.Cache.ExternalServer != "" {
+		// Disabled cache or an explicit external server: nothing loopback to guard.
+		return nil
+	}
+	if cfg.Kubernetes.ConnectBackAddress == "" && isLoopbackOrEmptyHost(cfg.Cache.Host) {
+		return errors.New("kubernetes.enabled with the embedded cache, but cache.host is loopback/empty and kubernetes.connect_back_address is unset; job pods cannot reach 127.0.0.1 — set kubernetes.connect_back_address to a cluster-reachable cache Service DNS (or set cache.external_server)")
+	}
+	return nil
+}
+
+// isLoopbackOrEmptyHost reports whether host is empty or a loopback/wildcard
+// address that a job pod in another network namespace cannot route to.
+func isLoopbackOrEmptyHost(host string) bool {
+	switch host {
+	case "", "127.0.0.1", "localhost", "::1", "0.0.0.0":
+		return true
+	default:
+		return false
+	}
 }
 
 func definedRunnerConfigKeys(content []byte) (map[string]bool, error) {

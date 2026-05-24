@@ -145,6 +145,7 @@ func TestLoadDefault_KubernetesEphemeralDefaults(t *testing.T) {
 	path := writeConfig(t, `
 kubernetes:
   enabled: true
+  connect_back_address: http://gitea-runner-cache.gitea-e2e.svc:8088
   workspace_volume:
     type: ephemeral
     size: 20Gi
@@ -190,6 +191,7 @@ func TestLoadDefault_KubernetesRootlessExplicitFalse(t *testing.T) {
 	path := writeConfig(t, `
 kubernetes:
   enabled: true
+  connect_back_address: http://gitea-runner-cache.gitea-e2e.svc:8088
   dind:
     enabled: true
     rootless: false
@@ -199,6 +201,72 @@ kubernetes:
 	require.NoError(t, err)
 	require.NotNil(t, cfg.Kubernetes.Dind.Rootless)
 	assert.False(t, *cfg.Kubernetes.Dind.Rootless)
+}
+
+func TestLoadDefault_KubernetesCacheLoopbackRejected(t *testing.T) {
+	// k8s enabled + embedded cache (default) + no connect-back -> unreachable.
+	path := writeConfig(t, `
+kubernetes:
+  enabled: true
+  workspace_volume:
+    type: emptyDir
+`)
+
+	_, err := LoadDefault(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "connect_back_address")
+}
+
+func TestLoadDefault_KubernetesCacheConnectBackAccepted(t *testing.T) {
+	path := writeConfig(t, `
+kubernetes:
+  enabled: true
+  connect_back_address: http://gitea-runner-cache.gitea-e2e.svc:8088
+`)
+
+	_, err := LoadDefault(path)
+	require.NoError(t, err)
+}
+
+func TestLoadDefault_KubernetesCacheExternalServerAccepted(t *testing.T) {
+	// An explicit external cache server satisfies reachability without connect-back.
+	path := writeConfig(t, `
+cache:
+  enabled: true
+  external_server: http://cache.gitea-e2e.svc:8088/
+  external_secret: shh
+kubernetes:
+  enabled: true
+`)
+
+	_, err := LoadDefault(path)
+	require.NoError(t, err)
+}
+
+func TestLoadDefault_KubernetesCacheDisabledSkipsGuard(t *testing.T) {
+	path := writeConfig(t, `
+cache:
+  enabled: false
+kubernetes:
+  enabled: true
+`)
+
+	_, err := LoadDefault(path)
+	require.NoError(t, err)
+}
+
+func TestLoadDefault_KubernetesCacheNonLoopbackHostAccepted(t *testing.T) {
+	// A non-loopback bind host is reachable without connect-back.
+	path := writeConfig(t, `
+cache:
+  enabled: true
+  host: gitea-runner-cache.gitea-e2e.svc
+kubernetes:
+  enabled: true
+`)
+
+	_, err := LoadDefault(path)
+	require.NoError(t, err)
 }
 
 func TestLoadDefault_DisabledKubernetesLeavesContainerDefaults(t *testing.T) {

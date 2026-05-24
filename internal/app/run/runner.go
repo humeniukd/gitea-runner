@@ -94,7 +94,16 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 				// go on
 			} else {
 				cacheHandler = handler
-				envs["ACTIONS_CACHE_URL"] = handler.ExternalURL() + "/"
+				cacheURL := handler.ExternalURL() + "/"
+				// On the Kubernetes backend the embedded cache binds to a
+				// loopback/pod-local address that job pods in other network
+				// namespaces cannot reach; advertise the cluster-reachable
+				// connect-back Service DNS instead (pre-mortem #2). The config
+				// guard already rejects an unreachable embedded cache.
+				if cfg.Kubernetes.Enabled && cfg.Kubernetes.ConnectBackAddress != "" {
+					cacheURL = strings.TrimSuffix(cfg.Kubernetes.ConnectBackAddress, "/") + "/"
+				}
+				envs["ACTIONS_CACHE_URL"] = cacheURL
 			}
 		}
 	}
