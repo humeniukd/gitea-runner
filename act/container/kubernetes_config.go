@@ -5,6 +5,20 @@ package container
 
 import "time"
 
+// Pod cleanup policies select when a completed job Pod (and its per-job Secret
+// and ConfigMap) is deleted. Retained pods keep the backend label and survive
+// the startup dangling-owner sweep via the retain marker, so they remain
+// available for kubectl-exec auditing until manually removed.
+const (
+	// KubernetesPodCleanupAlways deletes the pod after every job (default).
+	KubernetesPodCleanupAlways = "always"
+	// KubernetesPodCleanupOnFailure deletes the pod only when the job succeeded,
+	// keeping failed pods for debugging.
+	KubernetesPodCleanupOnFailure = "on-failure"
+	// KubernetesPodCleanupNever keeps every pod for full audit retention.
+	KubernetesPodCleanupNever = "never"
+)
+
 // KubernetesResourceList is the cpu/memory pair for a single requests or limits
 // entry. Values are Kubernetes resource.Quantity strings (e.g. "250m", "256Mi").
 type KubernetesResourceList struct {
@@ -64,4 +78,5 @@ type KubernetesConfig struct {
 	PodReadyTimeout    time.Duration
 	ConnectBackAddress string
 	Dind               KubernetesDindConfig
+	PodCleanup         string
 }

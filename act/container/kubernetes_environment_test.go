@@ -282,6 +282,96 @@ func newTestPod(t *testing.T, clientset *fake.Clientset, podName string) *Kubern
 	})
 }
 
+func newTestPodWithCleanup(t *testing.T, clientset *fake.Clientset, podName, policy string) *KubernetesPod {
+	t.Helper()
+	cfg := testKubernetesConfig()
+	cfg.PodCleanup = policy
+	return newKubernetesPodWithClientset(clientset, nil, KubernetesPodConfig{
+		Config:      cfg,
+		PodName:     podName,
+		MaxLifetime: time.Hour,
+	})
+}
+
+func TestShouldRetainPod(t *testing.T) {
+	cases := []struct {
+		policy       string
+		jobSucceeded bool
+		want         bool
+	}{
+		{KubernetesPodCleanupAlways, true, false},
+		{KubernetesPodCleanupAlways, false, false},
+		{KubernetesPodCleanupOnFailure, true, false},
+		{KubernetesPodCleanupOnFailure, false, true},
+		{KubernetesPodCleanupNever, true, true},
+		{KubernetesPodCleanupNever, false, true},
+		{"", true, false}, // unset behaves as "always"
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, shouldRetainPod(c.policy, c.jobSucceeded),
+			"policy=%q jobSucceeded=%v", c.policy, c.jobSucceeded)
+	}
+}
+
+// submitJobPod creates+starts a ready job pod under a cleanup policy, returning
+// the job environment so a test can drive RemoveWithRetention.
+func submitJobPod(t *testing.T, clientset *fake.Clientset, podName, policy string) *KubernetesExecutionEnvironment {
+	t.Helper()
+	clientset.PrependReactor("create", "pods", readyOnCreateReactor)
+	pod := newTestPodWithCleanup(t, clientset, podName, policy)
+	job := pod.NewJobContainer(&NewContainerInput{Image: "alpine:3", WorkingDir: "/workspace"})
+	ctx := context.Background()
+	require.NoError(t, job.Create(nil, nil)(ctx))
+	require.NoError(t, job.Start(false)(ctx))
+	return job
+}
+
+func TestKubernetesPodCleanupAlwaysDeletes(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	job := submitJobPod(t, clientset, "gitea-job-always", KubernetesPodCleanupAlways)
+	ctx := context.Background()
+
+	// Even a successful job is deleted under "always".
+	require.NoError(t, job.RemoveWithRetention(true)(ctx))
+	_, err := clientset.CoreV1().Pods("gitea-e2e").Get(ctx, "gitea-job-always", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "always must delete the pod")
+}
+
+func TestKubernetesPodCleanupOnFailureDeletesOnSuccess(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	job := submitJobPod(t, clientset, "gitea-job-onfail-ok", KubernetesPodCleanupOnFailure)
+	ctx := context.Background()
+
+	require.NoError(t, job.RemoveWithRetention(true)(ctx))
+	_, err := clientset.CoreV1().Pods("gitea-e2e").Get(ctx, "gitea-job-onfail-ok", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "on-failure must delete a SUCCEEDED job's pod")
+}
+
+func TestKubernetesPodCleanupOnFailureKeepsOnFailure(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	job := submitJobPod(t, clientset, "gitea-job-onfail-bad", KubernetesPodCleanupOnFailure)
+	ctx := context.Background()
+
+	require.NoError(t, job.RemoveWithRetention(false)(ctx))
+	got, err := clientset.CoreV1().Pods("gitea-e2e").Get(ctx, "gitea-job-onfail-bad", metav1.GetOptions{})
+	require.NoError(t, err, "on-failure must KEEP a FAILED job's pod")
+	assert.Equal(t, kubernetesRetainValue, got.Labels[kubernetesRetainLabel], "kept pod must carry the retain marker")
+}
+
+func TestKubernetesPodCleanupNeverKeeps(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	job := submitJobPod(t, clientset, "gitea-job-never", KubernetesPodCleanupNever)
+	ctx := context.Background()
+
+	// Even a successful job is kept under "never".
+	require.NoError(t, job.RemoveWithRetention(true)(ctx))
+	got, err := clientset.CoreV1().Pods("gitea-e2e").Get(ctx, "gitea-job-never", metav1.GetOptions{})
+	require.NoError(t, err, "never must KEEP the pod")
+	assert.Equal(t, kubernetesRetainValue, got.Labels[kubernetesRetainLabel])
+	// The backend class label is preserved alongside the retain marker.
+	assert.Equal(t, kubernetesBackendValue, got.Labels[kubernetesBackendLabel])
+}
+
 func TestKubernetesCreateStartSubmitsReadyPod(t *testing.T) {
 	clientset := fake.NewSimpleClientset()
 	clientset.PrependReactor("create", "pods", readyOnCreateReactor)

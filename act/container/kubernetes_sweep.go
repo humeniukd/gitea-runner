@@ -54,6 +54,11 @@ func sweepDanglingJobPods(ctx context.Context, clientset kubernetes.Interface, n
 	var firstErr error
 	for i := range pods.Items {
 		pod := &pods.Items[i]
+		// A pod the pod_cleanup policy chose to KEEP for auditing must survive a
+		// runner restart; never reap it, regardless of owner resolvability.
+		if pod.Labels[kubernetesRetainLabel] == kubernetesRetainValue {
+			continue
+		}
 		owner := podOwnerReference(pod)
 		if owner == nil {
 			// No Pod owner to resolve; leave it alone (conservative).

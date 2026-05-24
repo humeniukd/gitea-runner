@@ -783,10 +783,16 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 		// failure routes through startContainer's cleanupFailedStart and deletes
 		// the partially-created Pod and per-job Secret rather than leaking them.
 		rc.cleanUpJobContainer = func(ctx context.Context) error {
-			if rc.JobContainer != nil {
-				return rc.JobContainer.Remove()(ctx)
+			if rc.JobContainer == nil {
+				return nil
 			}
-			return nil
+			// Apply the configured pod_cleanup policy at teardown, where the job
+			// conclusion is known: common.JobError(ctx) is nil iff the job
+			// succeeded. The policy decides delete vs. retain-for-auditing.
+			if k8sJob, ok := rc.JobContainer.(*container.KubernetesExecutionEnvironment); ok {
+				return k8sJob.RemoveWithRetention(common.JobError(ctx) == nil)(ctx)
+			}
+			return rc.JobContainer.Remove()(ctx)
 		}
 
 		logger := common.Logger(ctx)

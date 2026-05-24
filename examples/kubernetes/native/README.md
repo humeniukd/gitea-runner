@@ -181,11 +181,50 @@ ignored.
 |---|---|---|
 | `kubernetes.default_job_image` | `node:20-bookworm` | Image for bare `run:` jobs with no `container: image:` |
 | `kubernetes.pod_ready_timeout` | `10m` | Increase for slow image pulls |
+| `kubernetes.pod_cleanup` | `always` | When to delete completed job pods: `always`, `on-failure`, or `never` (see [Job pod retention](#job-pod-retention-auditing)) |
 | `kubernetes.resources.job` | `250m/256Mi` req, `2/2Gi` lim | Per-job container |
 | `kubernetes.resources.service` | `100m/128Mi` req, `1/1Gi` lim | Per-service sidecar |
 | `kubernetes.resources.dind` | `500m/1Gi` req, `2/4Gi` lim | DinD sidecar (≥1Gi required) |
 | `runner.capacity` | `4` | Max concurrent jobs |
 | `GITEA_INSTANCE_URL` | `http://gitea.192.168.2.190.nip.io` | Set to your Gitea URL |
+
+---
+
+## Job pod retention (auditing)
+
+By default a job pod (and its per-job Secret/ConfigMap) is deleted as soon as the
+job finishes. To keep completed pods around for post-mortem inspection, set
+`kubernetes.pod_cleanup`:
+
+| Value | Behaviour |
+|---|---|
+| `always` (default) | Delete the pod after every job. |
+| `on-failure` | Delete only when the job **succeeded**; **keep** pods for **failed** jobs. |
+| `never` | **Keep** every pod, regardless of result. |
+
+When a pod is kept, the job container stays alive running its `sleep`
+entrypoint, so you can inspect the workspace and rerun commands:
+
+```bash
+# find retained pods
+kubectl -n gitea-e2e get pods -l actions.gitea.com/retain=true
+
+# inspect the workspace of a retained job
+kubectl -n gitea-e2e exec -it <pod-name> -c job -- sh
+```
+
+Retained pods are labelled `actions.gitea.com/retain=true`. The runner's
+startup dangling-owner sweep **skips** pods carrying this marker, so a runner
+restart will not reap them.
+
+> **Cost of retention.** A retained pod keeps consuming its requested CPU and
+> memory **and** occupies one of the runner's `runner.capacity` slots until it
+> is removed. Under `never` (or `on-failure` on a flaky pipeline) retained pods
+> accumulate and will eventually starve new jobs. Prune them on a schedule:
+>
+> ```bash
+> kubectl -n gitea-e2e delete pods -l actions.gitea.com/retain=true
+> ```
 
 ---
 

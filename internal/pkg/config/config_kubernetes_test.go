@@ -285,6 +285,38 @@ kubernetes:
 	require.NoError(t, err)
 }
 
+func TestLoadDefault_KubernetesPodCleanupDefault(t *testing.T) {
+	cfg, err := LoadDefault("")
+	require.NoError(t, err)
+	assert.Equal(t, "always", cfg.Kubernetes.PodCleanup)
+}
+
+func TestLoadDefault_KubernetesPodCleanupValidValues(t *testing.T) {
+	for _, policy := range []string{"always", "on-failure", "never"} {
+		path := writeConfig(t, `
+kubernetes:
+  enabled: true
+  connect_back_address: http://gitea-runner-cache.gitea-e2e.svc:8088
+  pod_cleanup: `+policy+`
+`)
+		cfg, err := LoadDefault(path)
+		require.NoError(t, err, "policy %q should be accepted", policy)
+		assert.Equal(t, policy, cfg.Kubernetes.PodCleanup)
+	}
+}
+
+func TestLoadDefault_KubernetesPodCleanupInvalidRejected(t *testing.T) {
+	path := writeConfig(t, `
+kubernetes:
+  enabled: true
+  connect_back_address: http://gitea-runner-cache.gitea-e2e.svc:8088
+  pod_cleanup: sometimes
+`)
+	_, err := LoadDefault(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pod_cleanup")
+}
+
 func TestLoadDefault_DisabledKubernetesLeavesContainerDefaults(t *testing.T) {
 	// With the backend off, unrelated defaults remain untouched.
 	cfg, err := LoadDefault("")

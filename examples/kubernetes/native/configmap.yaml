@@ -54,6 +54,19 @@ data:
       # How long to wait for a job pod to reach Ready before timing out.
       pod_ready_timeout: 10m
 
+      # When to delete a completed job pod (and its per-job Secret/ConfigMap):
+      #   always     - delete after every job (default).
+      #   on-failure - delete only when the job SUCCEEDED; KEEP failed pods so
+      #                you can `kubectl exec` into the (still-sleeping) job
+      #                container and inspect the workspace for debugging.
+      #   never      - KEEP every pod for full audit retention.
+      # Retained pods are marked actions.gitea.com/retain=true so a runner
+      # restart's dangling-owner sweep will NOT reap them. NOTE: a retained pod
+      # keeps running its sleep entrypoint and so consumes cluster CPU/memory
+      # AND a runner capacity slot until you delete it manually
+      # (kubectl delete pod <name>); prune retained pods regularly.
+      pod_cleanup: always
+
       workspace_volume:
         type: emptyDir
 

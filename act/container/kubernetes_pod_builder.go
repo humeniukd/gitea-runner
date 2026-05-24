@@ -27,6 +27,13 @@ const (
 	kubernetesBackendLabel = "actions.gitea.com/backend"
 	kubernetesBackendValue = "kubernetes"
 
+	// kubernetesRetainLabel marks a completed job Pod that the pod_cleanup policy
+	// chose to KEEP for auditing. The startup dangling-owner sweep skips any pod
+	// carrying this marker so a runner restart cannot reap a retained pod (which
+	// would defeat the audit). The pod is retained until manually deleted.
+	kubernetesRetainLabel = "actions.gitea.com/retain"
+	kubernetesRetainValue = "true"
+
 	// kubernetesJobContainerName is the long-lived container act execs steps
 	// into. Service sidecars are named after their service id.
 	kubernetesJobContainerName = "job"

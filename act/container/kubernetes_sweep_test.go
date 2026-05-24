@@ -125,6 +125,23 @@ func TestSweepMixedFleet(t *testing.T) {
 	assert.False(t, podExists(t, cs, "job-dangling"))
 }
 
+// TestSweepSkipsRetainedPod: a pod the pod_cleanup policy chose to KEEP (carries
+// the retain marker) must survive the sweep even when its owner is dangling,
+// else a runner restart would reap exactly the pods kept for auditing.
+func TestSweepSkipsRetainedPod(t *testing.T) {
+	retained := jobPodOwnedBy("job-retained", "runner-dead", types.UID("dead-uid"))
+	retained.Labels[kubernetesRetainLabel] = kubernetesRetainValue
+	cs := fake.NewSimpleClientset(
+		retained,
+		perJobSecret("job-retained"),
+	)
+
+	require.NoError(t, sweepDanglingJobPods(context.Background(), cs, sweepNS))
+
+	assert.True(t, podExists(t, cs, "job-retained"), "retained pod must survive the sweep")
+	assert.True(t, secretExists(t, cs, "job-retained"), "retained pod's secret must survive the sweep")
+}
+
 // TestSweepLeavesOwnerlessPods: a labeled pod with no Pod owner is left
 // untouched (provenance unknown).
 func TestSweepLeavesOwnerlessPods(t *testing.T) {

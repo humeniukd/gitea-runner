@@ -158,6 +158,7 @@ type Kubernetes struct {
 	PodReadyTimeout    time.Duration                `yaml:"pod_ready_timeout"`    // PodReadyTimeout bounds the wait for a job pod to become Ready.
 	ConnectBackAddress string                       `yaml:"connect_back_address"` // ConnectBackAddress is the cluster-reachable DNS job pods use to reach the runner's cache/results server.
 	Dind               KubernetesDind               `yaml:"dind"`                 // Dind configures the optional docker-in-docker sidecar.
+	PodCleanup         string                       `yaml:"pod_cleanup"`          // PodCleanup selects when completed job pods (and their per-job Secret/ConfigMap) are deleted: "always" (default), "on-failure" (delete only on success, keep failed pods), or "never" (keep all for auditing). Retained pods consume cluster resources and a capacity slot until manually deleted.
 }
 
 // Config represents the overall configuration.
@@ -315,6 +316,7 @@ const (
 	defaultKubernetesWorkspaceType       = "emptyDir"
 	defaultKubernetesWorkspaceAccessMode = "ReadWriteOnce"
 	defaultKubernetesDindRootless        = true
+	defaultKubernetesPodCleanup          = "always"
 	// defaultKubernetesJobImage backs bare run: jobs (no container:image). It
 	// carries node (for JS actions) plus common build tools.
 	defaultKubernetesJobImage = "node:20-bookworm"
@@ -361,6 +363,9 @@ func applyKubernetesDefaults(k *Kubernetes) {
 	if k.Dind.Rootless == nil {
 		rootless := defaultKubernetesDindRootless
 		k.Dind.Rootless = &rootless
+	}
+	if k.PodCleanup == "" {
+		k.PodCleanup = defaultKubernetesPodCleanup
 	}
 	defaultRoleResources(&k.Resources)
 }
@@ -409,6 +414,11 @@ func validateKubernetes(k *Kubernetes) error {
 		}
 	default:
 		return fmt.Errorf("kubernetes.workspace_volume.type %q is invalid; must be \"emptyDir\", \"ephemeral\", or \"pvc\"", k.WorkspaceVolume.Type)
+	}
+	switch k.PodCleanup {
+	case "", "always", "on-failure", "never":
+	default:
+		return fmt.Errorf("kubernetes.pod_cleanup %q is invalid; must be \"always\", \"on-failure\", or \"never\"", k.PodCleanup)
 	}
 	return nil
 }

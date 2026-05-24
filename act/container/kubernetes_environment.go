@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -185,6 +186,71 @@ func (p *KubernetesPod) remove(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+// removeWithPolicy applies the configured pod_cleanup policy to a completed job:
+// it either deletes the Pod (and per-job Secrets) or retains it for auditing,
+// marking a retained Pod so the dangling-owner sweep spares it. jobSucceeded
+// carries the job conclusion the cleanup decision depends on.
+func (p *KubernetesPod) removeWithPolicy(ctx context.Context, jobSucceeded bool) error {
+	if !shouldRetainPod(p.cleanupPolicy(), jobSucceeded) {
+		return p.remove(ctx)
+	}
+
+	result := "failure"
+	if jobSucceeded {
+		result = "success"
+	}
+	name := ""
+	if p.builder != nil {
+		name = p.builder.name
+	}
+	if err := p.markRetained(ctx, name); err != nil {
+		// Marking is best-effort: even if the label patch fails the operator
+		// asked us to KEEP the pod, so we must not fall through to deletion.
+		common.Logger(ctx).Warnf("failed to mark retained job pod %s/%s (sweep may later reap it): %v", p.namespace, name, err)
+	}
+	common.Logger(ctx).Infof("retaining job pod %s/%s per kubernetes.pod_cleanup=%s (job result=%s)", p.namespace, name, p.cleanupPolicy(), result)
+	return nil
+}
+
+// cleanupPolicy returns the effective pod_cleanup policy, defaulting to "always"
+// so a zero-value config (e.g. a directly-constructed coordinator in tests)
+// preserves the historical delete-on-completion behavior.
+func (p *KubernetesPod) cleanupPolicy() string {
+	if p.config == nil || p.config.PodCleanup == "" {
+		return KubernetesPodCleanupAlways
+	}
+	return p.config.PodCleanup
+}
+
+// markRetained patches the retain marker onto the live Pod so the startup
+// dangling-owner sweep skips it. A merge patch is idempotent and tolerates an
+// already-absent pod (NotFound).
+func (p *KubernetesPod) markRetained(ctx context.Context, name string) error {
+	if name == "" {
+		return nil
+	}
+	patch := []byte(fmt.Sprintf(`{"metadata":{"labels":{%q:%q}}}`, kubernetesRetainLabel, kubernetesRetainValue))
+	_, err := p.clientset.CoreV1().Pods(p.namespace).Patch(ctx, name, k8stypes.MergePatchType, patch, metav1.PatchOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// shouldRetainPod decides whether a completed job Pod is kept per the policy:
+// "never" keeps all, "on-failure" keeps only failed jobs, anything else
+// ("always", the default) keeps none.
+func shouldRetainPod(policy string, jobSucceeded bool) bool {
+	switch policy {
+	case KubernetesPodCleanupNever:
+		return true
+	case KubernetesPodCleanupOnFailure:
+		return !jobSucceeded
+	default:
+		return false
+	}
 }
 
 // AddServiceAlias maps a service id to localhost in the Pod's hostAliases so a
@@ -348,13 +414,29 @@ func (e *KubernetesExecutionEnvironment) Exec(command []string, env map[string]s
 }
 
 // Remove deletes the whole Pod (and per-job Secrets) when called on the job
-// container; service Removes are no-ops since they share the Pod.
+// container; service Removes are no-ops since they share the Pod. It always
+// deletes regardless of pod_cleanup — it is the failed-start backstop and the
+// interface-level teardown; the policy-aware path is RemoveWithRetention.
 func (e *KubernetesExecutionEnvironment) Remove() common.Executor {
 	return func(ctx context.Context) error {
 		if e.role != roleJob {
 			return nil
 		}
 		return e.pod.remove(ctx)
+	}
+}
+
+// RemoveWithRetention deletes or retains the job Pod per the configured
+// pod_cleanup policy and the job conclusion (jobSucceeded). Service-sidecar
+// calls are no-ops since they share the Pod. Callers that know the job result
+// (the run-context teardown) use this instead of Remove so completed pods can
+// be kept for auditing.
+func (e *KubernetesExecutionEnvironment) RemoveWithRetention(jobSucceeded bool) common.Executor {
+	return func(ctx context.Context) error {
+		if e.role != roleJob {
+			return nil
+		}
+		return e.pod.removeWithPolicy(ctx, jobSucceeded)
 	}
 }
 
