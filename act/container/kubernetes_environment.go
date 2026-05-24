@@ -231,7 +231,7 @@ func (p *KubernetesPod) markRetained(ctx context.Context, name string) error {
 	if name == "" {
 		return nil
 	}
-	patch := []byte(fmt.Sprintf(`{"metadata":{"labels":{%q:%q}}}`, kubernetesRetainLabel, kubernetesRetainValue))
+	patch := fmt.Appendf(nil, `{"metadata":{"labels":{%q:%q}}}`, kubernetesRetainLabel, kubernetesRetainValue)
 	_, err := p.clientset.CoreV1().Pods(p.namespace).Patch(ctx, name, k8stypes.MergePatchType, patch, metav1.PatchOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
