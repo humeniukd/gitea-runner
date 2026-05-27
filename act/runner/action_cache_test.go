@@ -45,8 +45,6 @@ func runGit(t *testing.T, dir string, args ...string) {
 // with a clear error. The action is resolved from a local repo (via DefaultActionInstance) so
 // this runs offline.
 func TestShortShaActionRejected(t *testing.T) {
-	requireDocker(t)
-
 	// a local "remote" action repo at <root>/actions/hello-world-docker-action
 	actionRoot := t.TempDir()
 	repo := filepath.Join(actionRoot, "actions", "hello-world-docker-action")

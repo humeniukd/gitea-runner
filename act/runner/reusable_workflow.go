@@ -287,7 +287,11 @@ func setReusedWorkflowCallerResult(rc *RunContext, runner Runner) common.Executo
 			if rc.caller != nil {
 				rc.caller.setReusedWorkflowJobResult(rc.JobName, reusedWorkflowJobResult)
 			} else {
+				// Serialize this shared Job.Result write against the other matrix combos
+				// and setJobResult (same lockJob key).
+				unlock := lockJob(rc.Run.Job())
 				rc.result(reusedWorkflowJobResult)
+				unlock()
 				logger.WithField("jobResult", reusedWorkflowJobResult).Infof("Job %s", reusedWorkflowJobResultMessage)
 			}
 		}

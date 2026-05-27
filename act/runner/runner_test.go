@@ -351,7 +351,7 @@ func TestRunEventHostEnvironment(t *testing.T) {
 	// is a local `./` fixture or the skipped actions/checkout, so the suite runs offline (same
 	// as TestRunEvent). Only the broadly-used interpreters are required up front; the pwsh- and
 	// nix-specific cases gate on their own tool below so a missing pwsh/nix skips just those.
-	requireHostTools(t, "bash", "python3", "node")
+	requireHostTools(t, "bash", "node")
 
 	ctx := context.Background()
 
