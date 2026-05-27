@@ -32,18 +32,10 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/docker-images.tar
-          key: docker-test-images-v2
+          key: docker-test-images-v1
       - name: load cached container images
         if: steps.docker-images.outputs.cache-hit == 'true'
-        # A save/load round-trip, or a truncated restore of this large tar, can leave an image
-        # present but missing its config blob, which then fails only at container create
-        # ("failed to read config content"). With a static key such a cache is sticky, so drop
-        # any image whose config is unreadable and let the runner re-pull a clean copy.
-        run: |
-          docker load -i "${{ runner.temp }}/docker-images.tar" || true
-          docker images --format '{{.Repository}}:{{.Tag}}' | grep -vE '<none>|:dind-test$' | while read -r img; do
-            docker image inspect "$img" >/dev/null 2>&1 || docker rmi -f "$img" >/dev/null 2>&1 || true
-          done
+        run: docker load -i "${{ runner.temp }}/docker-images.tar"
       - name: lint
         run: make lint
       - name: build
