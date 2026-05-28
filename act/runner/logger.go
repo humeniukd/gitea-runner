@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -187,6 +188,7 @@ func valueMasker(insecureSecrets bool, secrets map[string]string) entryProcessor
 	for _, v := range secrets {
 		oldnew = AppendSecretMasker(oldnew, v)
 	}
+	oldnew = slices.Clip(oldnew)
 	defReplacer := strings.NewReplacer(oldnew...)
 	return func(entry *logrus.Entry) *logrus.Entry {
 		if insecureSecrets {

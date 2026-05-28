@@ -685,26 +685,12 @@ func (r *Reporter) handleCommand(originalContent, command, value string) *string
 	return &originalContent
 }
 
-// this is a copy, change all instances
-func unescapeCommandData(arg string) string {
-	escapeMap := map[string]string{
-		"%25": "%",
-		"%0D": "\r",
-		"%0A": "\n",
-	}
-	for k, v := range escapeMap {
-		arg = strings.ReplaceAll(arg, k, v)
-	}
-	return arg
-}
-
 func (r *Reporter) parseLogRow(entry *log.Entry) *runnerv1.LogRow {
 	content := strings.TrimRight(entry.Message, "\r\n")
 
 	matches := cmdRegex.FindStringSubmatch(content)
 	if matches != nil {
-		// unescapeCommandData from an internal act package is required for add-mask to allow multiline secret masking
-		if output := r.handleCommand(content, matches[1], unescapeCommandData(matches[3])); output != nil {
+		if output := r.handleCommand(content, matches[1], runner.UnescapeCommandData(matches[3])); output != nil {
 			content = *output
 		} else {
 			return nil
