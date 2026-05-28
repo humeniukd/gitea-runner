@@ -316,95 +316,57 @@ func TestDockerCopyTarStreamErrorInMkdir(t *testing.T) {
 // find() must drop a stale cached id so later Copy/Exec don't hit the
 // daemon with a torn-down container.
 func TestFindRevalidatesStaleID(t *testing.T) {
-	notFound := cerrdefs.ErrNotFound.WithMessage("No such container: 9a89fb9b")
-
-	t.Run("clears stale id when name lookup finds nothing", func(t *testing.T) {
-		ctx := context.Background()
+	ctx := context.Background()
+	notFound := cerrdefs.ErrNotFound.WithMessage("No such container")
+	boom := errors.New("daemon unreachable")
+	newCR := func(id string) (*containerReference, *mockDockerClient) {
 		client := &mockDockerClient{}
-		client.On("ContainerInspect", ctx, "9a89fb9b", mobyclient.ContainerInspectOptions{}).
-			Return(mobyclient.ContainerInspectResult{}, notFound)
-		client.On("ContainerList", ctx, mobyclient.ContainerListOptions{All: true}).
-			Return(mobyclient.ContainerListResult{}, nil)
+		return &containerReference{id: id, cli: client, input: &NewContainerInput{Name: "job-1"}}, client
+	}
+	listOpts := mobyclient.ContainerListOptions{All: true}
+	inspectOpts := mobyclient.ContainerInspectOptions{}
 
-		cr := &containerReference{
-			id:    "9a89fb9b",
-			cli:   client,
-			input: &NewContainerInput{Name: "job-1"},
-		}
+	t.Run("stale id cleared, name lookup empty", func(t *testing.T) {
+		cr, client := newCR("stale")
+		client.On("ContainerInspect", ctx, "stale", inspectOpts).Return(mobyclient.ContainerInspectResult{}, notFound)
+		client.On("ContainerList", ctx, listOpts).Return(mobyclient.ContainerListResult{}, nil)
 		require.NoError(t, cr.find()(ctx))
-		assert.Empty(t, cr.id, "stale id should be cleared")
+		assert.Empty(t, cr.id)
 		client.AssertExpectations(t)
 	})
 
-	t.Run("clears stale id and repopulates from name lookup", func(t *testing.T) {
-		ctx := context.Background()
-		client := &mockDockerClient{}
-		client.On("ContainerInspect", ctx, "9a89fb9b", mobyclient.ContainerInspectOptions{}).
-			Return(mobyclient.ContainerInspectResult{}, notFound)
-		client.On("ContainerList", ctx, mobyclient.ContainerListOptions{All: true}).
-			Return(mobyclient.ContainerListResult{Items: []container.Summary{
-				{ID: "other-id", Names: []string{"/somebody-else"}},
-				{ID: "fresh-id", Names: []string{"/job-1"}},
-			}}, nil)
-
-		cr := &containerReference{
-			id:    "9a89fb9b",
-			cli:   client,
-			input: &NewContainerInput{Name: "job-1"},
-		}
+	t.Run("stale id cleared, name lookup repopulates", func(t *testing.T) {
+		cr, client := newCR("stale")
+		client.On("ContainerInspect", ctx, "stale", inspectOpts).Return(mobyclient.ContainerInspectResult{}, notFound)
+		client.On("ContainerList", ctx, listOpts).Return(mobyclient.ContainerListResult{Items: []container.Summary{
+			{ID: "other", Names: []string{"/somebody-else"}},
+			{ID: "fresh", Names: []string{"/job-1"}},
+		}}, nil)
 		require.NoError(t, cr.find()(ctx))
-		assert.Equal(t, "fresh-id", cr.id, "id should be repopulated from name lookup")
+		assert.Equal(t, "fresh", cr.id)
 		client.AssertExpectations(t)
 	})
 
-	t.Run("keeps id when container still exists", func(t *testing.T) {
-		ctx := context.Background()
-		client := &mockDockerClient{}
-		client.On("ContainerInspect", ctx, "live-id", mobyclient.ContainerInspectOptions{}).
-			Return(mobyclient.ContainerInspectResult{}, nil)
-
-		cr := &containerReference{
-			id:    "live-id",
-			cli:   client,
-			input: &NewContainerInput{Name: "job-1"},
-		}
+	t.Run("live id kept", func(t *testing.T) {
+		cr, client := newCR("live")
+		client.On("ContainerInspect", ctx, "live", inspectOpts).Return(mobyclient.ContainerInspectResult{}, nil)
 		require.NoError(t, cr.find()(ctx))
-		assert.Equal(t, "live-id", cr.id)
+		assert.Equal(t, "live", cr.id)
 		client.AssertExpectations(t)
 	})
 
-	t.Run("tolerates transient inspect errors and trusts cache", func(t *testing.T) {
-		// Cleanup pipelines must not abort on a daemon blip.
-		ctx := context.Background()
-		client := &mockDockerClient{}
-		boom := errors.New("daemon unreachable")
-		client.On("ContainerInspect", ctx, "live-id", mobyclient.ContainerInspectOptions{}).
-			Return(mobyclient.ContainerInspectResult{}, boom)
-
-		cr := &containerReference{
-			id:    "live-id",
-			cli:   client,
-			input: &NewContainerInput{Name: "job-1"},
-		}
+	t.Run("transient inspect error trusts cache", func(t *testing.T) {
+		cr, client := newCR("live")
+		client.On("ContainerInspect", ctx, "live", inspectOpts).Return(mobyclient.ContainerInspectResult{}, boom)
 		require.NoError(t, cr.find()(ctx))
-		assert.Equal(t, "live-id", cr.id, "id must survive transient inspect errors")
+		assert.Equal(t, "live", cr.id)
 		client.AssertExpectations(t)
 	})
 
-	t.Run("propagates ContainerList errors", func(t *testing.T) {
-		// Name-lookup failures must surface (no cached id to fall back on).
-		ctx := context.Background()
-		client := &mockDockerClient{}
-		boom := errors.New("daemon list failed")
-		client.On("ContainerList", ctx, mobyclient.ContainerListOptions{All: true}).
-			Return(mobyclient.ContainerListResult{}, boom)
-
-		cr := &containerReference{
-			cli:   client,
-			input: &NewContainerInput{Name: "job-1"},
-		}
-		err := cr.find()(ctx)
-		require.ErrorIs(t, err, boom)
+	t.Run("list error propagates", func(t *testing.T) {
+		cr, client := newCR("")
+		client.On("ContainerList", ctx, listOpts).Return(mobyclient.ContainerListResult{}, boom)
+		require.ErrorIs(t, cr.find()(ctx), boom)
 		client.AssertExpectations(t)
 	})
 }
@@ -413,38 +375,18 @@ func TestFindRevalidatesStaleID(t *testing.T) {
 // error when no live cr.id is known.
 func TestRejectsMissingContainer(t *testing.T) {
 	ctx := context.Background()
-	cr := &containerReference{
-		input: &NewContainerInput{Name: "job-1"},
+	cr := &containerReference{input: &NewContainerInput{Name: "job-1"}}
+	check := func(op string, err error) {
+		t.Helper()
+		require.Error(t, err, op)
+		assert.Contains(t, err.Error(), `container "job-1" does not exist`, op)
 	}
-
-	cases := []struct {
-		name string
-		run  func() error
-	}{
-		{"copyContent", func() error {
-			return cr.copyContent("/var/run/act", &FileEntry{Name: "x", Mode: 0o644})(ctx)
-		}},
-		{"copyDir", func() error {
-			return cr.copyDir("/var/run/act", t.TempDir(), false)(ctx)
-		}},
-		{"CopyTarStream", func() error {
-			return cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
-		}},
-		{"exec", func() error {
-			return cr.exec([]string{"echo"}, nil, "", "")(ctx)
-		}},
-		{"GetContainerArchive", func() error {
-			_, err := cr.GetContainerArchive(ctx, "/var/run/act/x")
-			return err
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.run()
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), `container "job-1" does not exist`)
-		})
-	}
+	check("copyContent", cr.copyContent("/var/run/act", &FileEntry{Name: "x", Mode: 0o644})(ctx))
+	check("copyDir", cr.copyDir("/var/run/act", t.TempDir(), false)(ctx))
+	check("CopyTarStream", cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{}))
+	check("exec", cr.exec([]string{"echo"}, nil, "", "")(ctx))
+	_, err := cr.GetContainerArchive(ctx, "/var/run/act/x")
+	check("GetContainerArchive", err)
 }
 
 // End-to-end: a stale cr.id is cleared, repopulated from name lookup,
@@ -452,24 +394,19 @@ func TestRejectsMissingContainer(t *testing.T) {
 func TestPublicCopyPipelineHandlesStaleID(t *testing.T) {
 	ctx := context.Background()
 	client := &mockDockerClient{}
-	notFound := cerrdefs.ErrNotFound.WithMessage("No such container: stale")
-	client.On("ContainerInspect", ctx, "stale-id", mobyclient.ContainerInspectOptions{}).
-		Return(mobyclient.ContainerInspectResult{}, notFound)
+	client.On("ContainerInspect", ctx, "stale", mobyclient.ContainerInspectOptions{}).
+		Return(mobyclient.ContainerInspectResult{}, cerrdefs.ErrNotFound.WithMessage("gone"))
 	client.On("ContainerList", ctx, mobyclient.ContainerListOptions{All: true}).
 		Return(mobyclient.ContainerListResult{Items: []container.Summary{
-			{ID: "fresh-id", Names: []string{"/job-1"}},
+			{ID: "fresh", Names: []string{"/job-1"}},
 		}}, nil)
-	client.On("CopyToContainer", ctx, "fresh-id", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
+	client.On("CopyToContainer", ctx, "fresh", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
 		return opts.DestinationPath == "/var/run/act"
 	})).Return(mobyclient.CopyToContainerResult{}, nil)
 
-	cr := &containerReference{
-		id:    "stale-id",
-		cli:   client,
-		input: &NewContainerInput{Name: "job-1"},
-	}
+	cr := &containerReference{id: "stale", cli: client, input: &NewContainerInput{Name: "job-1"}}
 	require.NoError(t, cr.Copy("/var/run/act", &FileEntry{Name: "x", Mode: 0o644})(ctx))
-	assert.Equal(t, "fresh-id", cr.id)
+	assert.Equal(t, "fresh", cr.id)
 	client.AssertExpectations(t)
 }
 
