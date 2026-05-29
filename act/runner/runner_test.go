@@ -184,6 +184,7 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 	runnerConfig := &Config{
 		Workdir:               workdir,
 		BindWorkdir:           false,
+		ContainerNamePrefix:   j.workflowPath + "-" + j.eventName,
 		EventName:             j.eventName,
 		EventPath:             cfg.EventPath,
 		Platforms:             j.platforms,
@@ -232,7 +233,6 @@ func TestRunEvent(t *testing.T) {
 	tables := []TestJobFileInfo{
 		// Shells
 		{workdir, "shells/defaults", "push", "", platforms, secrets},
-		{workdir, "shells/pwsh", "push", "", map[string]string{"ubuntu-latest": "catthehacker/ubuntu:pwsh-latest"}, secrets}, // custom image with pwsh
 		{workdir, "shells/bash", "push", "", platforms, secrets},
 		{workdir, "shells/sh", "push", "", platforms, secrets},
 
@@ -310,6 +310,7 @@ func TestRunEvent(t *testing.T) {
 
 	for _, table := range tables {
 		t.Run(table.workflowPath, func(t *testing.T) {
+			t.Parallel()
 			if table.workflowPath == "container-volumes" {
 				// host /proc bind mounts are Linux-Docker-only
 				requireLinuxDocker(t)
@@ -450,7 +451,7 @@ func TestDryrunEvent(t *testing.T) {
 	tables := []TestJobFileInfo{
 		// Shells
 		{workdir, "shells/defaults", "push", "", platforms, secrets},
-		{workdir, "shells/pwsh", "push", "", map[string]string{"ubuntu-latest": "catthehacker/ubuntu:pwsh-latest"}, secrets}, // custom image with pwsh
+		{workdir, "shells/pwsh", "push", "", platforms, secrets},
 		{workdir, "shells/bash", "push", "", platforms, secrets},
 		{workdir, "shells/sh", "push", "", platforms, secrets},
 
