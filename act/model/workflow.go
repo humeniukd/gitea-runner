@@ -658,6 +658,7 @@ func (s *Step) Clone() *Step {
 	clone := *s
 	clone.If = CloneYamlNode(s.If)
 	clone.Env = CloneYamlNode(s.Env)
+	clone.With = maps.Clone(s.With)
 	return &clone
 }
 
@@ -665,6 +666,10 @@ func (s *Step) Clone() *Step {
 // mutating a node shared across parallel jobs.
 func CloneYamlNode(n yaml.Node) yaml.Node {
 	clone := n
+	if n.Alias != nil {
+		aliasClone := CloneYamlNode(*n.Alias)
+		clone.Alias = &aliasClone
+	}
 	if n.Content != nil {
 		clone.Content = make([]*yaml.Node, len(n.Content))
 		for i, child := range n.Content {

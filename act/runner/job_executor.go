@@ -187,20 +187,21 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 	// read-modify-write of the job result so a failing combination is not lost-updated by a
 	// concurrent succeeding one.
 	job := rc.Run.Job()
-	unlock := lockJob(job)
-	jobResult := "success"
-	// we have only one result for a whole matrix build, so we need
-	// to keep an existing result state if we run a matrix
-	if len(info.matrix()) > 0 && job.Result != "" {
-		jobResult = job.Result
-	}
+	jobResult := func() string {
+		defer lockJob(job)()
+		result := "success"
+		// we have only one result for a whole matrix build, so we need
+		// to keep an existing result state if we run a matrix
+		if len(info.matrix()) > 0 && job.Result != "" {
+			result = job.Result
+		}
+		if !success {
+			result = "failure"
+		}
+		info.result(result)
+		return result
+	}()
 
-	if !success {
-		jobResult = "failure"
-	}
-
-	info.result(jobResult)
-	unlock()
 	if rc.caller != nil {
 		// set reusable workflow job result
 		rc.caller.setReusedWorkflowJobResult(rc.JobName, jobResult) // For Gitea
