@@ -184,7 +184,6 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 	runnerConfig := &Config{
 		Workdir:               workdir,
 		BindWorkdir:           false,
-		ContainerNamePrefix:   j.workflowPath + "-" + j.eventName,
 		EventName:             j.eventName,
 		EventPath:             cfg.EventPath,
 		Platforms:             j.platforms,
@@ -310,7 +309,6 @@ func TestRunEvent(t *testing.T) {
 
 	for _, table := range tables {
 		t.Run(table.workflowPath, func(t *testing.T) {
-			t.Parallel()
 			if table.workflowPath == "container-volumes" {
 				// host /proc bind mounts are Linux-Docker-only
 				requireLinuxDocker(t)

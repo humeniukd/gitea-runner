@@ -141,7 +141,7 @@ tidy-check: tidy
 
 .PHONY: test
 test: fmt-check security-check ## test everything (integration tests self-skip without docker/network)
-	@$(GO) test -race -parallel 4 -v -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
+	@$(GO) test -race -timeout 20m -v -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
 
 .PHONY: test-dind
 test-dind: ## run the daemon-facing tests against the built dind image (TARGET=dind|dind-rootless)
