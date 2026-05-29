@@ -375,14 +375,16 @@ func TestFindRevalidatesStaleID(t *testing.T) {
 // error when no live cr.id is known.
 func TestRejectsMissingContainer(t *testing.T) {
 	ctx := context.Background()
-	cr := &containerReference{input: &NewContainerInput{Name: "job-1"}}
+	client := &mockDockerClient{}
+	client.On("ContainerList", ctx, mobyclient.ContainerListOptions{All: true}).Return(mobyclient.ContainerListResult{}, nil)
+	cr := &containerReference{cli: client, input: &NewContainerInput{Name: "job-1"}}
 	check := func(op string, err error) {
 		t.Helper()
 		require.Error(t, err, op)
 		assert.Contains(t, err.Error(), `container "job-1" does not exist`, op)
 	}
 	check("copyContent", cr.copyContent("/var/run/act", &FileEntry{Name: "x", Mode: 0o644})(ctx))
-	check("copyDir", cr.copyDir("/var/run/act", t.TempDir(), false)(ctx))
+	check("copyDir", cr.copyDir("/var/run/act", "/src", false)(ctx))
 	check("CopyTarStream", cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{}))
 	check("exec", cr.exec([]string{"echo"}, nil, "", "")(ctx))
 	_, err := cr.GetContainerArchive(ctx, "/var/run/act/x")
