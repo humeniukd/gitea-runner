@@ -8,6 +8,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,8 +98,10 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			return common.NewErrorExecutor(err)
 		}
 
+		stepIdx := stepModel.Number
 		preExec := step.pre()
 		preSteps = append(preSteps, useStepLogger(rc, stepModel, stepStagePre, func(ctx context.Context) error {
+			rc.CurrentStepIndex = stepIdx
 			preErr := preExec(ctx)
 			if preErr != nil {
 				reportStepError(ctx, preErr)
@@ -109,6 +113,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 
 		stepExec := step.main()
 		steps = append(steps, useStepLogger(rc, stepModel, stepStageMain, func(ctx context.Context) error {
+			rc.CurrentStepIndex = stepIdx
 			err := stepExec(ctx)
 			if err != nil {
 				reportStepError(ctx, err)
@@ -120,6 +125,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 
 		postFn := step.post()
 		postExec := useStepLogger(rc, stepModel, stepStagePost, func(ctx context.Context) error {
+			rc.CurrentStepIndex = stepIdx
 			err := postFn(ctx)
 			if err != nil {
 				reportStepError(ctx, err)
@@ -254,24 +260,51 @@ func tryUploadJobSummary(ctx context.Context, rc *RunContext) {
 	runtimeURL := strings.TrimSpace(env["ACTIONS_RUNTIME_URL"])
 	runtimeToken := strings.TrimSpace(env["ACTIONS_RUNTIME_TOKEN"])
 	runID := strings.TrimSpace(env["GITEA_RUN_ID"])
-	if runID == "" {
-		// Fallback to GitHub-compatible name; on Gitea runs this is the numeric ActionRun ID.
-		runID = strings.TrimSpace(env["GITHUB_RUN_ID"])
+	if runtimeURL == "" || runtimeToken == "" || runID == "" {
+		return
 	}
-	jobID := strings.TrimSpace(env["GITEA_RUN_JOB_ID"])
-	if runtimeURL == "" || runtimeToken == "" || runID == "" || jobID == "" {
+	if rc.Run == nil || rc.Run.Job() == nil {
+		return
+	}
+	// The numeric ActionRunJob ID is not exposed in the proto Task message or task context,
+	// but the server signs it into the ACTIONS_RUNTIME_TOKEN JWT claims. We decode the
+	// unverified claims to retrieve it; the server re-verifies the token on the request.
+	jobID := extractJobIDFromRuntimeToken(runtimeToken)
+	if jobID <= 0 {
 		return
 	}
 
-	summaryPath := path.Join(rc.JobContainer.GetActPath(), "workflow", "SUMMARY.md")
-	body, ok := readSingleFileFromContainerArchive(ctx, rc.JobContainer, summaryPath, maxJobSummaryBytes)
-	if !ok || len(body) == 0 {
-		return
+	base := strings.TrimRight(runtimeURL, "/") + "/_apis/pipelines/workflows/" + runID +
+		"/jobs/" + strconv.FormatInt(jobID, 10) + "/steps/"
+	actPath := rc.JobContainer.GetActPath()
+	for i := range rc.Run.Job().Steps {
+		summaryPath := path.Join(actPath, "workflow", "step-summary-"+strconv.Itoa(i)+".md")
+		body, ok := readSingleFileFromContainerArchive(ctx, rc.JobContainer, summaryPath, maxJobSummaryBytes)
+		if !ok || len(body) == 0 {
+			continue
+		}
+		uploadJobSummary(ctx, base+strconv.Itoa(i)+"/summary", runtimeToken, body)
 	}
+}
 
-	base := strings.TrimRight(runtimeURL, "/")
-	url := base + "/_apis/pipelines/workflows/" + runID + "/jobs/" + jobID + "/summary"
-	uploadJobSummary(ctx, url, runtimeToken, body)
+// extractJobIDFromRuntimeToken returns the JobID claim from an ACTIONS_RUNTIME_TOKEN JWT
+// without verifying its signature. Returns 0 if the token is unparseable or has no JobID.
+func extractJobIDFromRuntimeToken(token string) int64 {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return 0
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return 0
+	}
+	var claims struct {
+		JobID int64 `json:"JobID"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return 0
+	}
+	return claims.JobID
 }
 
 func hasJobSummaryCapability(caps string) bool {

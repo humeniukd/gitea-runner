@@ -8,12 +8,14 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"testing"
 
 	"gitea.com/gitea/runner/act/common"
@@ -354,6 +356,36 @@ func TestHasJobSummaryCapability(t *testing.T) {
 	assert.False(t, hasJobSummaryCapability("not-job-summary,job-summary-v2"))
 }
 
+// fakeRuntimeToken builds a JWT-shaped string whose middle (claims) segment encodes
+// the given JobID. The header and signature segments are filler — the runner does not
+// verify the signature; the server does.
+func fakeRuntimeToken(jobID int64) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	claims := base64.RawURLEncoding.EncodeToString(fmt.Appendf(nil, `{"JobID":%d}`, jobID))
+	sig := base64.RawURLEncoding.EncodeToString([]byte("sig"))
+	return header + "." + claims + "." + sig
+}
+
+func newJobSummaryRC(env map[string]string, jobContainer container.ExecutionsEnvironment, stepCount int) *RunContext {
+	steps := make([]*model.Step, stepCount)
+	for i := range steps {
+		steps[i] = &model.Step{ID: strconv.Itoa(i)}
+	}
+	return &RunContext{
+		Config:       &Config{},
+		JobContainer: jobContainer,
+		Env:          env,
+		Run: &model.Run{
+			JobID: "test",
+			Workflow: &model.Workflow{
+				Jobs: map[string]*model.Job{
+					"test": {Steps: steps},
+				},
+			},
+		},
+	}
+}
+
 func TestTryUploadJobSummaryRetriesTransientFailure(t *testing.T) {
 	oldDelay := jobSummaryUploadRetryDelay
 	jobSummaryUploadRetryDelay = 0
@@ -361,12 +393,14 @@ func TestTryUploadJobSummaryRetriesTransientFailure(t *testing.T) {
 		jobSummaryUploadRetryDelay = oldDelay
 	}()
 
+	runtimeToken := fakeRuntimeToken(34)
+
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		assert.Equal(t, http.MethodPut, r.Method)
-		assert.Equal(t, "/_apis/pipelines/workflows/12/jobs/34/summary", r.URL.Path)
-		assert.Equal(t, "Bearer runtime-token", r.Header.Get("Authorization"))
+		assert.Equal(t, "/_apis/pipelines/workflows/12/jobs/34/steps/0/summary", r.URL.Path)
+		assert.Equal(t, "Bearer "+runtimeToken, r.Header.Get("Authorization"))
 		assert.Equal(t, "text/markdown; charset=utf-8", r.Header.Get("Content-Type"))
 		body, err := io.ReadAll(r.Body)
 		assert.NoError(t, err)
@@ -381,26 +415,69 @@ func TestTryUploadJobSummaryRetriesTransientFailure(t *testing.T) {
 
 	ctx := context.Background()
 	cm := &containerMock{}
-	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/SUMMARY.md").Return(
-		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "SUMMARY.md", body: "# summary"}))),
+	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/step-summary-0.md").Return(
+		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "step-summary-0.md", body: "# summary"}))),
 		nil,
 	).Once()
 
-	rc := &RunContext{
-		Config:       &Config{},
-		JobContainer: cm,
-		Env: map[string]string{
-			"GITEA_ACTIONS_CAPABILITIES": "cache, job-summary",
-			"ACTIONS_RUNTIME_URL":        server.URL,
-			"ACTIONS_RUNTIME_TOKEN":      "runtime-token",
-			"GITEA_RUN_ID":               "12",
-			"GITEA_RUN_JOB_ID":           "34",
-		},
-	}
+	rc := newJobSummaryRC(map[string]string{
+		"GITEA_ACTIONS_CAPABILITIES": "cache, job-summary",
+		"ACTIONS_RUNTIME_URL":        server.URL,
+		"ACTIONS_RUNTIME_TOKEN":      runtimeToken,
+		"GITEA_RUN_ID":               "12",
+	}, cm, 1)
 
 	tryUploadJobSummary(ctx, rc)
 
 	assert.Equal(t, 2, requests)
+	cm.AssertExpectations(t)
+}
+
+func TestTryUploadJobSummaryUploadsEachStepIndependently(t *testing.T) {
+	runtimeToken := fakeRuntimeToken(34)
+
+	type upload struct {
+		path string
+		body string
+	}
+	var got []upload
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		got = append(got, upload{r.URL.Path, string(body)})
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	cm := &containerMock{}
+	// Three steps: 0 has content, 1 has empty content (skipped), 2 has content.
+	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/step-summary-0.md").Return(
+		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "step-summary-0.md", body: "first"}))),
+		nil,
+	).Once()
+	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/step-summary-1.md").Return(
+		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "step-summary-1.md", body: ""}))),
+		nil,
+	).Once()
+	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/step-summary-2.md").Return(
+		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "step-summary-2.md", body: "third"}))),
+		nil,
+	).Once()
+
+	rc := newJobSummaryRC(map[string]string{
+		"GITEA_ACTIONS_CAPABILITIES": "job-summary",
+		"ACTIONS_RUNTIME_URL":        server.URL,
+		"ACTIONS_RUNTIME_TOKEN":      runtimeToken,
+		"GITEA_RUN_ID":               "12",
+	}, cm, 3)
+
+	tryUploadJobSummary(ctx, rc)
+
+	assert.Equal(t, []upload{
+		{"/_apis/pipelines/workflows/12/jobs/34/steps/0/summary", "first"},
+		{"/_apis/pipelines/workflows/12/jobs/34/steps/2/summary", "third"},
+	}, got)
 	cm.AssertExpectations(t)
 }
 
@@ -412,21 +489,43 @@ func TestTryUploadJobSummaryRequiresExactCapability(t *testing.T) {
 	}))
 	defer server.Close()
 
-	rc := &RunContext{
-		Config:       &Config{},
-		JobContainer: &containerMock{},
-		Env: map[string]string{
-			"GITEA_ACTIONS_CAPABILITIES": "not-job-summary,job-summary-v2",
-			"ACTIONS_RUNTIME_URL":        server.URL,
-			"ACTIONS_RUNTIME_TOKEN":      "runtime-token",
-			"GITEA_RUN_ID":               "12",
-			"GITEA_RUN_JOB_ID":           "34",
-		},
-	}
+	rc := newJobSummaryRC(map[string]string{
+		"GITEA_ACTIONS_CAPABILITIES": "not-job-summary,job-summary-v2",
+		"ACTIONS_RUNTIME_URL":        server.URL,
+		"ACTIONS_RUNTIME_TOKEN":      fakeRuntimeToken(34),
+		"GITEA_RUN_ID":               "12",
+	}, &containerMock{}, 1)
 
 	tryUploadJobSummary(context.Background(), rc)
 
 	assert.Equal(t, 0, requests)
+}
+
+func TestTryUploadJobSummarySkipsWhenJobIDMissingFromToken(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	rc := newJobSummaryRC(map[string]string{
+		"GITEA_ACTIONS_CAPABILITIES": "job-summary",
+		"ACTIONS_RUNTIME_URL":        server.URL,
+		"ACTIONS_RUNTIME_TOKEN":      "not-a-jwt",
+		"GITEA_RUN_ID":               "12",
+	}, &containerMock{}, 1)
+
+	tryUploadJobSummary(context.Background(), rc)
+
+	assert.Equal(t, 0, requests)
+}
+
+func TestExtractJobIDFromRuntimeToken(t *testing.T) {
+	assert.Equal(t, int64(42), extractJobIDFromRuntimeToken(fakeRuntimeToken(42)))
+	assert.Equal(t, int64(0), extractJobIDFromRuntimeToken("not-a-jwt"))
+	assert.Equal(t, int64(0), extractJobIDFromRuntimeToken("a.b.c"))
+	assert.Equal(t, int64(0), extractJobIDFromRuntimeToken(""))
 }
 
 func TestReadSingleFileFromContainerArchiveFindsMatchingRegularFile(t *testing.T) {

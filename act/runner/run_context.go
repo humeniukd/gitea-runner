@@ -34,15 +34,19 @@ import (
 
 // RunContext contains info about current job
 type RunContext struct {
-	Name                string
-	Config              *Config
-	Matrix              map[string]any
-	Run                 *model.Run
-	EventJSON           string
-	Env                 map[string]string
-	GlobalEnv           map[string]string // to pass env changes of GITHUB_ENV and set-env correctly, due to dirty Env field
-	ExtraPath           []string
-	CurrentStep         string
+	Name        string
+	Config      *Config
+	Matrix      map[string]any
+	Run         *model.Run
+	EventJSON   string
+	Env         map[string]string
+	GlobalEnv   map[string]string // to pass env changes of GITHUB_ENV and set-env correctly, due to dirty Env field
+	ExtraPath   []string
+	CurrentStep string
+	// CurrentStepIndex is the index of the top-level job step currently executing
+	// (model.Step.Number). Composite sub-steps inherit the outer step's index by
+	// walking the Parent chain; see topLevelRunContext.
+	CurrentStepIndex    int
 	StepResults         map[string]*model.StepResult
 	IntraActionState    map[string]map[string]string
 	ExprEval            ExpressionEvaluator
@@ -55,6 +59,14 @@ type RunContext struct {
 	Masks               []string
 	cleanUpJobContainer common.Executor
 	caller              *caller // job calling this RunContext (reusable workflows)
+	// summaryFileInitialized tracks which per-step summary files (workflow/step-summary-N.md)
+	// have already been created on the JobContainer. The runner sets up file-command files
+	// via JobContainer.Copy at the start of every phase, which truncates them — fine for
+	// GITHUB_ENV/OUTPUT/STATE/PATH (consumed per phase) but wrong for GITHUB_STEP_SUMMARY,
+	// which has accumulating semantics. We initialize each step's summary file exactly once
+	// so writes from later phases and from composite sub-steps append to the same file.
+	// Only populated on the top-level RunContext; child RCs walk Parent via topLevelRunContext.
+	summaryFileInitialized map[int]bool
 }
 
 func (rc *RunContext) AddMask(mask string) {
@@ -637,6 +649,17 @@ func (rc *RunContext) result(result string) {
 
 func (rc *RunContext) steps() []*model.Step {
 	return rc.Run.Job().Steps
+}
+
+// topLevelRunContext walks the Parent chain to the outermost RunContext. Composite
+// actions create child RunContexts whose sub-steps need to share the outer job step's
+// summary file path so that nested writes accumulate under the right step_index.
+func (rc *RunContext) topLevelRunContext() *RunContext {
+	top := rc
+	for top.Parent != nil {
+		top = top.Parent
+	}
+	return top
 }
 
 // Executor returns a pipeline executor for all the steps in the job

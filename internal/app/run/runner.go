@@ -228,8 +228,10 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 }
 
 func (r *Runner) cloneEnvs() map[string]string {
-	// Reserve space for the per-task keys injected by run().
-	envs := make(map[string]string, len(r.envs)+6)
+	// Reserve space for the per-task keys injected by run():
+	// ACTIONS_ID_TOKEN_REQUEST_URL, ACTIONS_ID_TOKEN_REQUEST_TOKEN, ACTIONS_RUNTIME_TOKEN,
+	// GITEA_ACTIONS_CAPABILITIES, GITEA_RUN_ID.
+	envs := make(map[string]string, len(r.envs)+5)
 	maps.Copy(envs, r.envs)
 	return envs
 }
@@ -274,9 +276,6 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	}
 	if v := taskContext["run_id"].GetStringValue(); v != "" {
 		envs["GITEA_RUN_ID"] = v
-	}
-	if v := taskContext["job"].GetStringValue(); v != "" {
-		envs["GITEA_RUN_JOB_ID"] = v
 	}
 
 	log.Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
