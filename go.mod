@@ -3,15 +3,15 @@ module gitea.com/gitea/runner
 go 1.26.0
 
 require (
-	code.gitea.io/actions-proto-go v0.4.1
-	connectrpc.com/connect v1.19.2
+	connectrpc.com/connect v1.20.0
 	dario.cat/mergo v1.0.2
+	gitea.dev/actions-proto-go v0.5.0
 	github.com/Masterminds/semver v1.5.0
 	github.com/avast/retry-go/v5 v5.0.0
 	github.com/containerd/errdefs v1.0.0
 	github.com/creack/pty v1.1.24
 	github.com/distribution/reference v0.6.0
-	github.com/docker/cli v29.5.1+incompatible
+	github.com/docker/cli v29.5.2+incompatible
 	github.com/docker/go-connections v0.7.0
 	github.com/go-git/go-billy/v5 v5.9.0
 	github.com/go-git/go-git/v5 v5.19.1
@@ -26,7 +26,7 @@ require (
 	github.com/moby/moby/client v0.4.1
 	github.com/moby/patternmatcher v0.6.1
 	github.com/opencontainers/image-spec v1.1.1
-	github.com/opencontainers/selinux v1.14.1
+	github.com/opencontainers/selinux v1.15.0
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rhysd/actionlint v1.7.12
@@ -37,6 +37,7 @@ require (
 	github.com/timshannon/bolthold v0.0.0-20240314194003-30aac6950928
 	go.etcd.io/bbolt v1.4.3
 	go.yaml.in/yaml/v4 v4.0.0-rc.3
+	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
 	google.golang.org/protobuf v1.36.11
 	gotest.tools/v3 v3.5.2
@@ -106,7 +107,6 @@ require (
 	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.44.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

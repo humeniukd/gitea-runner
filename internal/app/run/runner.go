@@ -31,8 +31,8 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/report"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
-	runnerv1 "code.gitea.io/actions-proto-go/runner/v1"
 	"connectrpc.com/connect"
+	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
 	"github.com/moby/moby/api/types/container"
 	log "github.com/sirupsen/logrus"
 )
@@ -361,10 +361,11 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	runnerConfig := &runner.Config{
 		// On Linux, Workdir will be like "/<parent_directory>/<owner>/<repo>"
 		// On Windows, Workdir will be like "\<parent_directory>\<owner>\<repo>"
-		Workdir:        workdir,
-		BindWorkdir:    r.cfg.Container.BindWorkdir,
-		ActionCacheDir: filepath.FromSlash(r.cfg.Host.WorkdirParent),
-		AllocatePTY:    r.cfg.Runner.AllocatePTY,
+		Workdir:           workdir,
+		BindWorkdir:       r.cfg.Container.BindWorkdir,
+		ActionCacheDir:    filepath.FromSlash(r.cfg.Host.WorkdirParent),
+		AllocatePTY:       r.cfg.Runner.AllocatePTY,
+		ActionOfflineMode: r.cfg.Cache.OfflineMode,
 
 		ReuseContainers:       false,
 		ForcePull:             r.cfg.Container.ForcePull,
