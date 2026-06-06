@@ -297,13 +297,15 @@ func tryUploadJobSummary(ctx context.Context, rc *RunContext) {
 	base := strings.TrimRight(runtimeURL, "/") + "/_apis/pipelines/workflows/" + runID +
 		"/jobs/" + strconv.FormatInt(jobID, 10) + "/steps/"
 	actPath := rc.JobContainer.GetActPath()
+	// Reuse a single client across all step uploads so connections can be pooled.
+	client := &http.Client{Timeout: jobSummaryUploadTimeout}
 	for i := range rc.Run.Job().Steps {
 		summaryPath := path.Join(actPath, "workflow", "step-summary-"+strconv.Itoa(i)+".md")
 		body, ok := readSingleFileFromContainerArchive(ctx, rc.JobContainer, summaryPath, maxJobSummaryBytes)
 		if !ok || len(body) == 0 {
 			continue
 		}
-		uploadJobSummary(ctx, base+strconv.Itoa(i)+"/summary", runtimeToken, body)
+		uploadJobSummary(ctx, client, base+strconv.Itoa(i)+"/summary", runtimeToken, body)
 	}
 }
 
@@ -333,9 +335,8 @@ func hasJobSummaryCapability(caps string) bool {
 	}), "job-summary")
 }
 
-func uploadJobSummary(ctx context.Context, url, runtimeToken string, body []byte) {
+func uploadJobSummary(ctx context.Context, client *http.Client, url, runtimeToken string, body []byte) {
 	logger := common.Logger(ctx)
-	client := &http.Client{Timeout: jobSummaryUploadTimeout}
 
 	var lastStatus int
 	var lastErr error
