@@ -595,7 +595,7 @@ func TestReadSingleFileFromContainerArchiveFindsMatchingRegularFile(t *testing.T
 	cm.AssertExpectations(t)
 }
 
-func TestReadSingleFileFromContainerArchiveWarnsWhenTooLarge(t *testing.T) {
+func TestReadSingleFileFromContainerArchiveTruncatesWhenTooLarge(t *testing.T) {
 	logger, hook := logrustest.NewNullLogger()
 	ctx := common.WithLogger(context.Background(), logger)
 	cm := &containerMock{}
@@ -606,11 +606,30 @@ func TestReadSingleFileFromContainerArchiveWarnsWhenTooLarge(t *testing.T) {
 
 	body, ok := readSingleFileFromContainerArchive(ctx, cm, "/var/run/act/workflow/SUMMARY.md", 3)
 
-	assert.False(t, ok)
-	assert.Nil(t, body)
+	// Oversized summaries are truncated to the limit rather than dropped entirely.
+	assert.True(t, ok)
+	assert.Equal(t, []byte("too"), body)
 	if assert.Len(t, hook.Entries, 1) {
-		assert.Contains(t, hook.Entries[0].Message, "job summary is too large")
+		assert.Contains(t, hook.Entries[0].Message, "job summary truncated")
 	}
+	cm.AssertExpectations(t)
+}
+
+func TestReadSingleFileFromContainerArchiveKeepsExactLimitWithoutWarning(t *testing.T) {
+	logger, hook := logrustest.NewNullLogger()
+	ctx := common.WithLogger(context.Background(), logger)
+	cm := &containerMock{}
+	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/SUMMARY.md").Return(
+		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "SUMMARY.md", body: "abc"}))),
+		nil,
+	).Once()
+
+	body, ok := readSingleFileFromContainerArchive(ctx, cm, "/var/run/act/workflow/SUMMARY.md", 3)
+
+	// A summary that is exactly at the limit is kept whole and not flagged as truncated.
+	assert.True(t, ok)
+	assert.Equal(t, []byte("abc"), body)
+	assert.Empty(t, hook.Entries)
 	cm.AssertExpectations(t)
 }
 

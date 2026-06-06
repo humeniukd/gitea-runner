@@ -410,17 +410,18 @@ func readSingleFileFromContainerArchive(ctx context.Context, env container.Execu
 		if !archiveEntryMatchesPath(header.Name, p) {
 			continue
 		}
-		if header.Size > maxBytes {
-			common.Logger(ctx).Warnf("job summary is too large: path=%s size=%d max=%d", p, header.Size, maxBytes)
-			return nil, false
-		}
+		// Summaries larger than the limit are truncated rather than dropped, so the
+		// user still gets the leading content (mirroring how GitHub caps oversized
+		// step summaries instead of discarding them). Read one extra byte so an
+		// over-limit file is detected from the actual stream rather than trusting
+		// header.Size, then cap the returned content at maxBytes.
 		b, err := io.ReadAll(io.LimitReader(tr, maxBytes+1))
 		if err != nil {
 			return nil, false
 		}
 		if int64(len(b)) > maxBytes {
-			common.Logger(ctx).Warnf("job summary is too large: path=%s size>%d max=%d", p, maxBytes, maxBytes)
-			return nil, false
+			b = b[:maxBytes]
+			common.Logger(ctx).Warnf("job summary truncated: path=%s max=%d", p, maxBytes)
 		}
 		return b, true
 	}
