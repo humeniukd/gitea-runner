@@ -30,6 +30,11 @@ const maxJobSummaryBytes = 1024 * 1024
 var (
 	jobSummaryUploadTimeout    = 30 * time.Second
 	jobSummaryUploadRetryDelay = time.Second
+	// jobSummaryUploadPhaseTimeout bounds the total time spent uploading all step
+	// summaries. The uploads run inside the job cleanup budget that is also used to
+	// stop and remove the container, so a slow or unreachable endpoint must not be
+	// allowed to consume it; this keeps the remaining budget available for teardown.
+	jobSummaryUploadPhaseTimeout = 15 * time.Second
 )
 
 type jobInfo interface {
@@ -262,6 +267,10 @@ func tryUploadJobSummary(ctx context.Context, rc *RunContext) {
 	if rc == nil || rc.JobContainer == nil || rc.Config == nil {
 		return
 	}
+	// Bound the whole upload phase so a slow or unreachable endpoint cannot consume
+	// the job cleanup budget reserved for stopping and removing the container.
+	ctx, cancel := context.WithTimeout(ctx, jobSummaryUploadPhaseTimeout)
+	defer cancel()
 	env := rc.GetEnv()
 	caps := strings.TrimSpace(env["GITEA_ACTIONS_CAPABILITIES"])
 	if !hasJobSummaryCapability(caps) {

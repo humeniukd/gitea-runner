@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
@@ -410,7 +411,7 @@ func TestTryUploadJobSummaryRetriesTransientFailure(t *testing.T) {
 
 	ctx := context.Background()
 	cm := &containerMock{}
-	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/step-summary-0.md").Return(
+	cm.On("GetContainerArchive", mock.Anything, "/var/run/act/workflow/step-summary-0.md").Return(
 		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "step-summary-0.md", body: "# summary"}))),
 		nil,
 	).Once()
@@ -425,6 +426,58 @@ func TestTryUploadJobSummaryRetriesTransientFailure(t *testing.T) {
 	tryUploadJobSummary(ctx, rc)
 
 	assert.Equal(t, 2, requests)
+	cm.AssertExpectations(t)
+}
+
+func TestTryUploadJobSummaryStopsAtPhaseTimeout(t *testing.T) {
+	oldPhase := jobSummaryUploadPhaseTimeout
+	jobSummaryUploadPhaseTimeout = 100 * time.Millisecond
+	defer func() {
+		jobSummaryUploadPhaseTimeout = oldPhase
+	}()
+
+	runtimeToken := fakeRuntimeToken(34)
+
+	// The server blocks until either the request context is cancelled (the behaviour
+	// under test: the phase timeout aborts the in-flight upload) or the test tears it
+	// down. Without the phase timeout the upload would hang until the 30s client
+	// timeout instead of releasing the cleanup budget. The release channel guarantees
+	// the handler always returns so server.Close() cannot itself hang.
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	ctx := context.Background()
+	cm := &containerMock{}
+	cm.On("GetContainerArchive", mock.Anything, "/var/run/act/workflow/step-summary-0.md").Return(
+		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "step-summary-0.md", body: "# summary"}))),
+		nil,
+	).Once()
+
+	rc := newJobSummaryRC(map[string]string{
+		"GITEA_ACTIONS_CAPABILITIES": "job-summary",
+		"ACTIONS_RUNTIME_URL":        server.URL,
+		"ACTIONS_RUNTIME_TOKEN":      runtimeToken,
+		"GITEA_RUN_ID":               "12",
+	}, cm, 1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tryUploadJobSummary(ctx, rc)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tryUploadJobSummary did not honour the phase timeout")
+	}
 	cm.AssertExpectations(t)
 }
 
@@ -447,15 +500,15 @@ func TestTryUploadJobSummaryUploadsEachStepIndependently(t *testing.T) {
 	ctx := context.Background()
 	cm := &containerMock{}
 	// Three steps: 0 has content, 1 has empty content (skipped), 2 has content.
-	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/step-summary-0.md").Return(
+	cm.On("GetContainerArchive", mock.Anything, "/var/run/act/workflow/step-summary-0.md").Return(
 		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "step-summary-0.md", body: "first"}))),
 		nil,
 	).Once()
-	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/step-summary-1.md").Return(
+	cm.On("GetContainerArchive", mock.Anything, "/var/run/act/workflow/step-summary-1.md").Return(
 		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "step-summary-1.md", body: ""}))),
 		nil,
 	).Once()
-	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/step-summary-2.md").Return(
+	cm.On("GetContainerArchive", mock.Anything, "/var/run/act/workflow/step-summary-2.md").Return(
 		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "step-summary-2.md", body: "third"}))),
 		nil,
 	).Once()
