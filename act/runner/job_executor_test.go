@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -599,16 +600,21 @@ func TestReadSingleFileFromContainerArchiveTruncatesWhenTooLarge(t *testing.T) {
 	logger, hook := logrustest.NewNullLogger()
 	ctx := common.WithLogger(context.Background(), logger)
 	cm := &containerMock{}
+	content := strings.Repeat("a", 300)
 	cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/SUMMARY.md").Return(
-		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "SUMMARY.md", body: "too large"}))),
+		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "SUMMARY.md", body: content}))),
 		nil,
 	).Once()
 
-	body, ok := readSingleFileFromContainerArchive(ctx, cm, "/var/run/act/workflow/SUMMARY.md", 3)
+	const maxBytes = 200
+	body, ok := readSingleFileFromContainerArchive(ctx, cm, "/var/run/act/workflow/SUMMARY.md", maxBytes)
 
-	// Oversized summaries are truncated to the limit rather than dropped entirely.
+	// Oversized summaries are truncated to the limit (reserving room for the marker)
+	// rather than dropped entirely, and the truncation marker is appended.
 	assert.True(t, ok)
-	assert.Equal(t, []byte("too"), body)
+	assert.LessOrEqual(t, len(body), maxBytes)
+	keep := maxBytes - len(jobSummaryTruncationMarker)
+	assert.Equal(t, []byte(content[:keep]+jobSummaryTruncationMarker), body)
 	if assert.Len(t, hook.Entries, 1) {
 		assert.Contains(t, hook.Entries[0].Message, "job summary truncated")
 	}

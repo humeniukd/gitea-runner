@@ -27,6 +27,10 @@ import (
 
 const maxJobSummaryBytes = 1024 * 1024
 
+// jobSummaryTruncationMarker is appended to a summary that exceeded the size limit
+// so the rendered output makes the truncation visible instead of silently cutting off.
+const jobSummaryTruncationMarker = "\n\n---\n\n*Job summary truncated: it exceeded the maximum allowed size.*\n"
+
 var (
 	jobSummaryUploadTimeout    = 30 * time.Second
 	jobSummaryUploadRetryDelay = time.Second
@@ -421,7 +425,10 @@ func readSingleFileFromContainerArchive(ctx context.Context, env container.Execu
 			return nil, false
 		}
 		if int64(len(b)) > maxBytes {
-			b = b[:maxBytes]
+			// Reserve room for the marker so the marked-up result still fits in maxBytes.
+			marker := []byte(jobSummaryTruncationMarker)
+			keep := max(maxBytes-int64(len(marker)), 0)
+			b = append(b[:keep], marker...)
 			common.Logger(ctx).Warnf("job summary truncated: path=%s max=%d", p, maxBytes)
 		}
 		return b, true
