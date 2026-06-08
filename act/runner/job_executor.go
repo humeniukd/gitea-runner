@@ -32,8 +32,12 @@ const maxJobSummaryBytes = 1024 * 1024
 const jobSummaryTruncationMarker = "\n\n---\n\n*Job summary truncated: it exceeded the maximum allowed size.*\n"
 
 var (
-	jobSummaryUploadTimeout    = 30 * time.Second
 	jobSummaryUploadRetryDelay = time.Second
+	// jobSummaryUploadRequestTimeout bounds a single step upload request. It is kept
+	// below jobSummaryUploadPhaseTimeout so one slow or unreachable request times out
+	// and lets the remaining steps still upload within the phase budget, instead of a
+	// single stuck request consuming the whole phase.
+	jobSummaryUploadRequestTimeout = 5 * time.Second
 	// jobSummaryUploadPhaseTimeout bounds the total time spent uploading all step
 	// summaries. The uploads run inside the job cleanup budget that is also used to
 	// stop and remove the container, so a slow or unreachable endpoint must not be
@@ -302,7 +306,7 @@ func tryUploadJobSummary(ctx context.Context, rc *RunContext) {
 		"/jobs/" + strconv.FormatInt(jobID, 10) + "/steps/"
 	actPath := rc.JobContainer.GetActPath()
 	// Reuse a single client across all step uploads so connections can be pooled.
-	client := &http.Client{Timeout: jobSummaryUploadTimeout}
+	client := &http.Client{Timeout: jobSummaryUploadRequestTimeout}
 	for i := range rc.Run.Job().Steps {
 		summaryPath := path.Join(actPath, "workflow", "step-summary-"+strconv.Itoa(i)+".md")
 		body, ok := readSingleFileFromContainerArchive(ctx, rc.JobContainer, summaryPath, maxJobSummaryBytes)
