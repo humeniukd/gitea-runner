@@ -6,7 +6,6 @@
 package container
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,9 +22,29 @@ import (
 // processAlive reports whether pid refers to a still-running process. Signal 0
 // performs error checking without delivering a signal: a nil error (or EPERM)
 // means the process exists, ESRCH means it is gone.
+//
+// On Linux, zombie processes (state Z in /proc/<pid>/stat) appear alive to
+// kill(0) but have already terminated — their corpse lingers until the parent
+// calls wait(). In a Docker container the child may be reparented to a PID 1
+// that does not reap promptly, so we treat zombies as not alive.
 func processAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	if err != nil {
+		return false
+	}
+	// On Linux /proc is available; check whether the process is a zombie.
+	if b, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); readErr == nil {
+		// Format: "pid (comm) state ..." — state follows the closing ')' of the
+		// command name (which may itself contain spaces and parens).
+		rest := string(b)
+		if idx := strings.LastIndex(rest, ") "); idx >= 0 {
+			fields := strings.Fields(rest[idx+2:])
+			if len(fields) > 0 && fields[0] == "Z" {
+				return false // zombie: terminated but not yet reaped
+			}
+		}
+	}
+	return true
 }
 
 // TestProcessKillerKillsTree verifies that a process group captured by the
