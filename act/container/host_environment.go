@@ -429,6 +429,24 @@ func (e *HostEnvironment) UpdateFromEnv(srcPath string, env *map[string]string) 
 	return parseEnvFile(e, srcPath, env)
 }
 
+// removeAll is the filesystem delete used by removeAllWithContext. A package
+// var so tests can substitute a blocking stub without patching os.RemoveAll.
+var removeAll = os.RemoveAll
+
+// removeAllWithContext runs removeAll in a goroutine and returns once it
+// finishes or ctx is cancelled. On cancellation the goroutine is left running —
+// a delete blocked inside a syscall cannot be interrupted (see runWithTimeout).
+func removeAllWithContext(ctx context.Context, path string) error {
+	done := make(chan error, 1)
+	go func() { done <- removeAll(path) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func removePathWithRetry(ctx context.Context, path string) error {
 	if path == "" {
 		return nil
@@ -448,9 +466,12 @@ func removePathWithRetry(ctx context.Context, path string) error {
 			case <-time.After(delay):
 			}
 		}
-		lastErr = os.RemoveAll(path)
+		lastErr = removeAllWithContext(ctx, path)
 		if lastErr == nil {
 			return nil
+		}
+		if errors.Is(lastErr, context.DeadlineExceeded) {
+			return lastErr
 		}
 	}
 	return lastErr
@@ -599,7 +620,14 @@ func (e *HostEnvironment) Remove() common.Executor {
 				errs = append(errs, err)
 			}
 		}
-		return errors.Join(errs...)
+		for _, err := range errs {
+			if !errors.Is(err, context.DeadlineExceeded) {
+				return errors.Join(errs...)
+			}
+		}
+		// Bounded teardown timed out; warnings already logged above. Do not
+		// fail job completion — leaked scratch is reclaimed by the idle sweep.
+		return nil
 	}
 }
 

@@ -189,6 +189,24 @@ func TestHostEnvironmentRemoveCleansWorkdirWhenOwned(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestRemoveAllWithContextDoesNotHangOnStuckDelete(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	orig := removeAll
+	removeAll = func(string) error {
+		<-release
+		return nil
+	}
+	t.Cleanup(func() { removeAll = orig })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := removeAllWithContext(ctx, t.TempDir())
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 // TestHostEnvironmentRemoveDoesNotHangOnStuckCleanUp guards against a stalled
 // CleanUp callback (e.g. an os.RemoveAll blocked by an AV/EDR filter driver or
 // an unresponsive mount) wedging the runner slot forever at "Cleaning up
@@ -224,6 +242,47 @@ func TestHostEnvironmentRemoveDoesNotHangOnStuckCleanUp(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("Remove() hung on a stuck CleanUp callback")
+	}
+}
+
+// TestHostEnvironmentRemoveDoesNotHangOnStuckPathRemoval guards against a
+// stalled os.RemoveAll on the misc/workspace paths (same AV/EDR wedge as
+// #1023) wedging job completion after the CleanUp callback has already timed
+// out or finished.
+func TestHostEnvironmentRemoveDoesNotHangOnStuckPathRemoval(t *testing.T) {
+	origTimeout := hostCleanupTimeout
+	hostCleanupTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { hostCleanupTimeout = origTimeout })
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	origRemoveAll := removeAll
+	removeAll = func(string) error {
+		<-release
+		return nil
+	}
+	t.Cleanup(func() { removeAll = origRemoveAll })
+
+	logger := logrus.New()
+	ctx := common.WithLogger(context.Background(), logrus.NewEntry(logger))
+	base := t.TempDir()
+	path := filepath.Join(base, "misc", "hostexecutor")
+	require.NoError(t, os.MkdirAll(path, 0o700))
+
+	e := &HostEnvironment{
+		Path:   path,
+		StdOut: os.Stdout,
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- e.Remove()(ctx) }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Remove() hung on a stuck path removal")
 	}
 }
 
