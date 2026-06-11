@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"gitea.com/gitea/runner/act/common"
 
@@ -186,6 +187,44 @@ func TestHostEnvironmentRemoveCleansWorkdirWhenOwned(t *testing.T) {
 	require.NoError(t, e.Remove()(ctx))
 	_, err := os.Stat(workdir)
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+// TestHostEnvironmentRemoveDoesNotHangOnStuckCleanUp guards against a stalled
+// CleanUp callback (e.g. an os.RemoveAll blocked by an AV/EDR filter driver or
+// an unresponsive mount) wedging the runner slot forever at "Cleaning up
+// container". Remove must time out the callback and complete job teardown.
+func TestHostEnvironmentRemoveDoesNotHangOnStuckCleanUp(t *testing.T) {
+	// Keep the suite fast: shrink the per-phase teardown timeout for this test.
+	orig := hostCleanupTimeout
+	hostCleanupTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { hostCleanupTimeout = orig })
+
+	logger := logrus.New()
+	ctx := common.WithLogger(context.Background(), logrus.NewEntry(logger))
+	base := t.TempDir()
+	path := filepath.Join(base, "misc", "hostexecutor")
+	require.NoError(t, os.MkdirAll(path, 0o700))
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) }) // unblock the leaked goroutine at test end
+
+	e := &HostEnvironment{
+		Path: path,
+		CleanUp: func() {
+			<-release // simulate a delete syscall stuck indefinitely
+		},
+		StdOut: os.Stdout,
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- e.Remove()(ctx) }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Remove() hung on a stuck CleanUp callback")
+	}
 }
 
 func TestBuildWindowsWorkspaceKillScript(t *testing.T) {
