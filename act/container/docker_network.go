@@ -14,7 +14,7 @@ import (
 	"github.com/moby/moby/client"
 )
 
-func NewDockerNetworkCreateExecutor(name string) common.Executor {
+func NewDockerNetworkCreateExecutor(name string, opts client.NetworkCreateOptions) common.Executor {
 	return func(ctx context.Context) error {
 		cli, err := GetDockerClient(ctx)
 		if err != nil {
@@ -36,10 +36,7 @@ func NewDockerNetworkCreateExecutor(name string) common.Executor {
 			}
 		}
 
-		_, err = cli.NetworkCreate(ctx, name, client.NetworkCreateOptions{
-			Driver: "bridge",
-			Scope:  "local",
-		})
+		_, err = cli.NetworkCreate(ctx, name, opts)
 		if err != nil {
 			return err
 		}

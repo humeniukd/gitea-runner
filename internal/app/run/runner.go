@@ -34,6 +34,7 @@ import (
 	"connectrpc.com/connect"
 	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
 	"github.com/moby/moby/api/types/container"
+	container_network "github.com/moby/moby/client"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -379,22 +380,28 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		AllocatePTY:       r.cfg.Runner.AllocatePTY,
 		ActionOfflineMode: r.cfg.Cache.OfflineMode,
 
-		ReuseContainers:       false,
-		ForcePull:             r.cfg.Container.ForcePull,
-		ForceRebuild:          r.cfg.Container.ForceRebuild,
-		LogOutput:             true,
-		JSONLogger:            false,
-		Env:                   envs,
-		Secrets:               task.Secrets,
-		GitHubInstance:        strings.TrimSuffix(r.client.Address(), "/"),
-		AutoRemove:            true,
-		NoSkipCheckout:        true,
-		PresetGitHubContext:   preset,
-		EventJSON:             string(eventJSON),
-		ContainerNamePrefix:   fmt.Sprintf("GITEA-ACTIONS-TASK-%d", task.Id),
-		ContainerMaxLifetime:  maxLifetime,
-		CleanWorkdir:          true,
-		ContainerNetworkMode:  container.NetworkMode(r.cfg.Container.Network),
+		ReuseContainers:      false,
+		ForcePull:            r.cfg.Container.ForcePull,
+		ForceRebuild:         r.cfg.Container.ForceRebuild,
+		LogOutput:            true,
+		JSONLogger:           false,
+		Env:                  envs,
+		Secrets:              task.Secrets,
+		GitHubInstance:       strings.TrimSuffix(r.client.Address(), "/"),
+		AutoRemove:           true,
+		NoSkipCheckout:       true,
+		PresetGitHubContext:  preset,
+		EventJSON:            string(eventJSON),
+		ContainerNamePrefix:  fmt.Sprintf("GITEA-ACTIONS-TASK-%d", task.Id),
+		ContainerMaxLifetime: maxLifetime,
+		CleanWorkdir:         true,
+		ContainerNetworkMode: container.NetworkMode(r.cfg.Container.Network),
+		ContainerNetworkCreateOptions: container_network.NetworkCreateOptions{
+			Driver:     "bridge",
+			Scope:      "local",
+			EnableIPv4: r.cfg.Container.NetworkCreateOptions.EnableIPv4,
+			EnableIPv6: r.cfg.Container.NetworkCreateOptions.EnableIPv6,
+		},
 		ContainerOptions:      r.cfg.Container.Options,
 		ContainerDaemonSocket: r.cfg.Container.DockerHost,
 		Privileged:            r.cfg.Container.Privileged,
