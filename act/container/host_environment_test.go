@@ -191,14 +191,22 @@ func TestHostEnvironmentRemoveCleansWorkdirWhenOwned(t *testing.T) {
 
 func TestRemoveAllWithContextDoesNotHangOnStuckDelete(t *testing.T) {
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
+	stubDone := make(chan struct{})
 
 	orig := removeAll
 	removeAll = func(string) error {
+		defer close(stubDone)
 		<-release
 		return nil
 	}
-	t.Cleanup(func() { removeAll = orig })
+	// removeAllWithContext intentionally leaks the delete goroutine on timeout,
+	// and that goroutine still references removeAll. Unblock it and wait for it
+	// to return before restoring the var, so the restore can't race the read.
+	t.Cleanup(func() {
+		close(release)
+		<-stubDone
+		removeAll = orig
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -255,14 +263,21 @@ func TestHostEnvironmentRemoveDoesNotHangOnStuckPathRemoval(t *testing.T) {
 	t.Cleanup(func() { hostCleanupTimeout = origTimeout })
 
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
+	stubDone := make(chan struct{})
 
 	origRemoveAll := removeAll
 	removeAll = func(string) error {
+		defer close(stubDone)
 		<-release
 		return nil
 	}
-	t.Cleanup(func() { removeAll = origRemoveAll })
+	// The stuck delete goroutine outlives the timed-out Remove and still reads
+	// removeAll; unblock it and wait before restoring to avoid a restore/read race.
+	t.Cleanup(func() {
+		close(release)
+		<-stubDone
+		removeAll = origRemoveAll
+	})
 
 	logger := logrus.New()
 	ctx := common.WithLogger(context.Background(), logrus.NewEntry(logger))
