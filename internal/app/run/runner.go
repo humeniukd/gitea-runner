@@ -22,6 +22,7 @@ import (
 
 	"gitea.com/gitea/runner/act/artifactcache"
 	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/model"
 	"gitea.com/gitea/runner/act/runner"
 	"gitea.com/gitea/runner/internal/pkg/client"
@@ -33,8 +34,7 @@ import (
 
 	"connectrpc.com/connect"
 	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
-	"github.com/moby/moby/api/types/container"
-	container_network "github.com/moby/moby/client"
+	docker_container "github.com/moby/moby/api/types/container"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -395,10 +395,8 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		ContainerNamePrefix:  fmt.Sprintf("GITEA-ACTIONS-TASK-%d", task.Id),
 		ContainerMaxLifetime: maxLifetime,
 		CleanWorkdir:         true,
-		ContainerNetworkMode: container.NetworkMode(r.cfg.Container.Network),
-		ContainerNetworkCreateOptions: container_network.NetworkCreateOptions{
-			Driver:     "bridge",
-			Scope:      "local",
+		ContainerNetworkMode: docker_container.NetworkMode(r.cfg.Container.Network),
+		ContainerNetworkCreateOptions: container.NewDockerNetworkCreateExecutorInput{
 			EnableIPv4: r.cfg.Container.NetworkCreateOptions.EnableIPv4,
 			EnableIPv6: r.cfg.Container.NetworkCreateOptions.EnableIPv6,
 		},

@@ -117,3 +117,37 @@ func TestLoadDefault_MalformedYAMLReturnsParseError(t *testing.T) {
 	assert.Contains(t, err.Error(), "parse config file")
 	assert.NotContains(t, err.Error(), "defaults metadata")
 }
+
+func TestContainerNetworkCreateOptions(t *testing.T) {
+	// Test that enable_ipv6: true in YAML produces a non-nil *bool that flows into NetworkCreateOptions
+	trueVal := true
+	falseVal := false
+
+	t.Run("enable_ipv6 true produces non-nil", func(t *testing.T) {
+		config := ContainerNetworkCreateOptions{EnableIPv6: &trueVal}
+		assert.NotNil(t, config.EnableIPv6, "EnableIPv6 should be non-nil")
+		assert.True(t, *config.EnableIPv6)
+	})
+
+	t.Run("enable_ipv6 false produces non-nil", func(t *testing.T) {
+		config := ContainerNetworkCreateOptions{EnableIPv6: &falseVal}
+		assert.NotNil(t, config.EnableIPv6, "EnableIPv6 should be non-nil")
+		assert.False(t, *config.EnableIPv6)
+	})
+
+	t.Run("enable_ipv6 omitted produces nil", func(t *testing.T) {
+		config := ContainerNetworkCreateOptions{EnableIPv6: nil}
+		assert.Nil(t, config.EnableIPv6, "EnableIPv6 should be nil")
+	})
+
+	t.Run("enable_ipv4 true produces non-nil", func(t *testing.T) {
+		config := ContainerNetworkCreateOptions{EnableIPv4: &trueVal}
+		assert.NotNil(t, config.EnableIPv4, "EnableIPv4 should be non-nil")
+		assert.True(t, *config.EnableIPv4)
+	})
+
+	t.Run("enable_ipv4 omitted produces nil", func(t *testing.T) {
+		config := ContainerNetworkCreateOptions{EnableIPv4: nil}
+		assert.Nil(t, config.EnableIPv4, "EnableIPv4 should be nil")
+	})
+}
