@@ -22,6 +22,7 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/exprparser"
 	"gitea.com/gitea/runner/act/model"
 )
 
@@ -233,6 +234,9 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 		}
 		if !success {
 			result = "failure"
+			// Use a fresh context so an expired job timeout cannot block expression evaluation.
+			evalCtx := common.WithLogger(context.Background(), common.Logger(ctx))
+			job.SetContinueOnError(evaluateJobContinueOnError(evalCtx, rc, job))
 		}
 		info.result(result)
 		return result
@@ -269,6 +273,33 @@ func setJobOutputs(ctx context.Context, rc *RunContext) {
 		defer lockJob(callerJob)()
 		callerJob.Outputs = callerOutputs
 	}
+}
+
+// applyJobTimeout applies the job-level timeout-minutes to ctx, mirroring the
+// step-level evaluateStepTimeout in step.go.
+func applyJobTimeout(ctx context.Context, rc *RunContext, job *model.Job) (context.Context, context.CancelFunc) {
+	if strings.TrimSpace(job.TimeoutMinutes) == "" {
+		return ctx, func() {}
+	}
+	timeout := rc.NewExpressionEvaluator(ctx).Interpolate(ctx, job.TimeoutMinutes)
+	if timeoutMinutes, err := strconv.ParseInt(strings.TrimSpace(timeout), 10, 64); err == nil {
+		return context.WithTimeout(ctx, time.Duration(timeoutMinutes)*time.Minute)
+	}
+	return ctx, func() {}
+}
+
+// evaluateJobContinueOnError evaluates the job-level continue-on-error expression.
+func evaluateJobContinueOnError(ctx context.Context, rc *RunContext, job *model.Job) bool {
+	expr := strings.TrimSpace(job.RawContinueOnError)
+	if expr == "" {
+		return false
+	}
+	continueOnError, err := EvalBool(ctx, rc.NewExpressionEvaluator(ctx), expr, exprparser.DefaultStatusCheckNone)
+	if err != nil {
+		common.Logger(ctx).Warnf("continue-on-error expression %q evaluation failed: %v", expr, err)
+		return false
+	}
+	return continueOnError
 }
 
 func tryUploadJobSummary(ctx context.Context, rc *RunContext) {

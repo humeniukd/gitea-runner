@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 func TestJobExecutor(t *testing.T) {
@@ -673,4 +674,103 @@ func tarArchive(t *testing.T, entries ...tarEntry) []byte {
 	}
 	require.NoError(t, tw.Close())
 	return buf.Bytes()
+}
+
+func makeTestRC(t *testing.T, jobYAML string) *RunContext {
+	t.Helper()
+	var job *model.Job
+	require.NoError(t, yaml.Unmarshal([]byte(jobYAML), &job))
+	return &RunContext{
+		Config: &Config{
+			Workdir: ".",
+			Platforms: map[string]string{
+				"ubuntu-latest": "ubuntu-latest",
+			},
+		},
+		StepResults: map[string]*model.StepResult{},
+		Env:         map[string]string{},
+		Run: &model.Run{
+			JobID: "job1",
+			Workflow: &model.Workflow{
+				Name: "workflow1",
+				Jobs: map[string]*model.Job{
+					"job1": job,
+				},
+			},
+		},
+	}
+}
+
+func TestApplyJobTimeout(t *testing.T) {
+	cases := []struct {
+		name        string
+		yaml        string
+		wantTimeout bool
+	}{
+		{"empty", "runs-on: ubuntu-latest", false},
+		{"integer", "timeout-minutes: 5\nruns-on: ubuntu-latest", true},
+		{"non-numeric ignored", "timeout-minutes: abc\nruns-on: ubuntu-latest", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rc := makeTestRC(t, tc.yaml)
+			ctx := context.Background()
+			newCtx, cancel := applyJobTimeout(ctx, rc, rc.Run.Job())
+			defer cancel()
+			_, hasDeadline := newCtx.Deadline()
+			assert.Equal(t, tc.wantTimeout, hasDeadline)
+		})
+	}
+}
+
+func TestEvaluateJobContinueOnError(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{"absent", "runs-on: ubuntu-latest", false},
+		{"true", "continue-on-error: true\nruns-on: ubuntu-latest", true},
+		{"false", "continue-on-error: false\nruns-on: ubuntu-latest", false},
+		{"expression true", "continue-on-error: ${{ 'x' == 'x' }}\nruns-on: ubuntu-latest", true},
+		{"expression false", "continue-on-error: ${{ 'x' != 'x' }}\nruns-on: ubuntu-latest", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rc := makeTestRC(t, tc.yaml)
+			got := evaluateJobContinueOnError(context.Background(), rc, rc.Run.Job())
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestJobSetContinueOnError(t *testing.T) {
+	t.Run("first call true", func(t *testing.T) {
+		j := &model.Job{}
+		j.SetContinueOnError(true)
+		assert.True(t, j.ContinueOnError)
+	})
+	t.Run("first call false", func(t *testing.T) {
+		j := &model.Job{}
+		j.SetContinueOnError(false)
+		assert.False(t, j.ContinueOnError)
+	})
+	t.Run("true then false locks to false", func(t *testing.T) {
+		j := &model.Job{}
+		j.SetContinueOnError(true)
+		j.SetContinueOnError(false)
+		assert.False(t, j.ContinueOnError)
+	})
+	t.Run("false then true stays false", func(t *testing.T) {
+		j := &model.Job{}
+		j.SetContinueOnError(false)
+		j.SetContinueOnError(true)
+		assert.False(t, j.ContinueOnError)
+	})
+	t.Run("true then true stays true", func(t *testing.T) {
+		j := &model.Job{}
+		j.SetContinueOnError(true)
+		j.SetContinueOnError(true)
+		assert.True(t, j.ContinueOnError)
+	})
 }

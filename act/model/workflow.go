@@ -190,23 +190,40 @@ func (w *Workflow) WorkflowCallConfig() *WorkflowCall {
 
 // Job is the structure of one job in a workflow
 type Job struct {
-	Name           string                    `yaml:"name"`
-	RawNeeds       yaml.Node                 `yaml:"needs"`
-	RawRunsOn      yaml.Node                 `yaml:"runs-on"`
-	Env            yaml.Node                 `yaml:"env"`
-	If             yaml.Node                 `yaml:"if"`
-	Steps          []*Step                   `yaml:"steps"`
-	TimeoutMinutes string                    `yaml:"timeout-minutes"`
-	Services       map[string]*ContainerSpec `yaml:"services"`
-	Strategy       *Strategy                 `yaml:"strategy"`
-	RawContainer   yaml.Node                 `yaml:"container"`
-	Defaults       Defaults                  `yaml:"defaults"`
-	Outputs        map[string]string         `yaml:"outputs"`
-	Uses           string                    `yaml:"uses"`
-	With           map[string]any            `yaml:"with"`
-	RawSecrets     yaml.Node                 `yaml:"secrets"`
-	RawPermissions yaml.Node                 `yaml:"permissions"`
-	Result         string
+	Name               string                    `yaml:"name"`
+	RawNeeds           yaml.Node                 `yaml:"needs"`
+	RawRunsOn          yaml.Node                 `yaml:"runs-on"`
+	Env                yaml.Node                 `yaml:"env"`
+	If                 yaml.Node                 `yaml:"if"`
+	Steps              []*Step                   `yaml:"steps"`
+	TimeoutMinutes     string                    `yaml:"timeout-minutes"`
+	RawContinueOnError string                    `yaml:"continue-on-error"`
+	Services           map[string]*ContainerSpec `yaml:"services"`
+	Strategy           *Strategy                 `yaml:"strategy"`
+	RawContainer       yaml.Node                 `yaml:"container"`
+	Defaults           Defaults                  `yaml:"defaults"`
+	Outputs            map[string]string         `yaml:"outputs"`
+	Uses               string                    `yaml:"uses"`
+	With               map[string]any            `yaml:"with"`
+	RawSecrets         yaml.Node                 `yaml:"secrets"`
+	RawPermissions     yaml.Node                 `yaml:"permissions"`
+	Result             string
+	// Runtime fields set during execution (not from YAML):
+	ContinueOnError bool // true when all failing matrix combinations had continue-on-error=true
+	hasFirmFailure  bool // true once any combination failed without continue-on-error
+}
+
+// SetContinueOnError records whether this combination's failure should not fail the workflow.
+// Must be called under the job lock. Safe across parallel matrix combinations.
+func (j *Job) SetContinueOnError(continueOnErr bool) {
+	if continueOnErr {
+		if !j.hasFirmFailure {
+			j.ContinueOnError = true
+		}
+	} else {
+		j.hasFirmFailure = true
+		j.ContinueOnError = false
+	}
 }
 
 // Strategy for the job
