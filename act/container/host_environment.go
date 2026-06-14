@@ -323,28 +323,28 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 	cmd.Dir = wd
 	cmd.SysProcAttr = getSysProcAttr(cmdline, false)
 
-	// On Windows a step often launches a process tree (a shell that starts a
-	// child which spawns further GUI or background processes). The default
-	// context cancellation only kills the direct child, leaving the rest of the
-	// tree running; and because the orphans inherit cmd's stdout/stderr pipe,
-	// cmd.Wait() would block forever, hanging the runner. Kill the whole tree
-	// via a Job Object on cancellation, and bound the wait so a leftover pipe
-	// writer can never hang Wait indefinitely.
+	// A step often launches a process tree (a shell that starts a child which
+	// spawns further background or GUI processes). The default context
+	// cancellation only kills the direct child, leaving the rest of the tree
+	// running; and because the orphans inherit cmd's stdout/stderr pipe,
+	// cmd.Wait() would block forever, hanging the runner. Kill the whole tree on
+	// cancellation — via a Job Object on Windows and the process group on Unix
+	// (see processKiller) — and bound the wait so a leftover pipe writer can
+	// never hang Wait indefinitely.
 	var killer atomic.Pointer[processKiller]
-	if runtime.GOOS == "windows" {
-		cmd.Cancel = func() error {
-			if k := killer.Load(); k != nil {
-				return k.Kill()
-			}
-			if cmd.Process != nil {
-				return cmd.Process.Kill()
-			}
-			return nil
+	cmd.Cancel = func() error {
+		if k := killer.Load(); k != nil {
+			return k.Kill()
 		}
-		// Once the step process has exited, give its I/O pipes at most this long
-		// to drain before Wait force-closes them and returns (Go's WaitDelay).
-		cmd.WaitDelay = 10 * time.Second
+		if cmd.Process != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
 	}
+	// Once the step process has exited, give its I/O pipes at most this long to
+	// drain before Wait force-closes them and returns (Go's WaitDelay). This
+	// also covers a step that backgrounds a process holding the pipe open.
+	cmd.WaitDelay = 10 * time.Second
 
 	var ppty *os.File
 	var tty *os.File
@@ -375,17 +375,16 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if runtime.GOOS == "windows" {
-		// Assign the started process to a Job Object so cmd.Cancel can kill the
-		// whole descendant tree. Children spawned afterwards are auto-included.
-		// On failure (e.g. nested-job restrictions) we fall back to the default
-		// single-process kill; WaitDelay + end-of-job cleanup still apply.
-		if k, kerr := newProcessKiller(cmd.Process); kerr != nil {
-			common.Logger(ctx).Warnf("process tree kill setup failed, falling back to single-process kill: %v", kerr)
-		} else {
-			killer.Store(k)
-			defer k.Close()
-		}
+	// Capture the started process for tree-kill on cancellation: a Job Object on
+	// Windows (children spawned afterwards are auto-included) and the process
+	// group on Unix. On failure (e.g. Windows nested-job restrictions) we fall
+	// back to the default single-process kill; WaitDelay + end-of-job cleanup
+	// still apply.
+	if k, kerr := newProcessKiller(cmd.Process); kerr != nil {
+		common.Logger(ctx).Warnf("process tree kill setup failed, falling back to single-process kill: %v", kerr)
+	} else {
+		killer.Store(k)
+		defer k.Close()
 	}
 	err = cmd.Wait()
 	if err != nil {
@@ -429,6 +428,24 @@ func (e *HostEnvironment) UpdateFromEnv(srcPath string, env *map[string]string) 
 	return parseEnvFile(e, srcPath, env)
 }
 
+// removeAll is the filesystem delete used by removeAllWithContext. A package
+// var so tests can substitute a blocking stub without patching os.RemoveAll.
+var removeAll = os.RemoveAll
+
+// removeAllWithContext runs removeAll in a goroutine and returns once it
+// finishes or ctx is cancelled. On cancellation the goroutine is left running —
+// a delete blocked inside a syscall cannot be interrupted (see runWithTimeout).
+func removeAllWithContext(ctx context.Context, path string) error {
+	done := make(chan error, 1)
+	go func() { done <- removeAll(path) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func removePathWithRetry(ctx context.Context, path string) error {
 	if path == "" {
 		return nil
@@ -448,9 +465,12 @@ func removePathWithRetry(ctx context.Context, path string) error {
 			case <-time.After(delay):
 			}
 		}
-		lastErr = os.RemoveAll(path)
+		lastErr = removeAllWithContext(ctx, path)
 		if lastErr == nil {
 			return nil
+		}
+		if errors.Is(lastErr, context.DeadlineExceeded) {
+			return lastErr
 		}
 	}
 	return lastErr
@@ -533,23 +553,61 @@ func (e *HostEnvironment) terminateRunningProcesses(ctx context.Context) {
 	}
 }
 
+// hostCleanupTimeout bounds each filesystem-teardown phase of the host
+// environment so a single stalled delete cannot wedge the runner slot forever.
+// A var (not const) so tests can shrink it.
+var hostCleanupTimeout = 30 * time.Second
+
+// runWithTimeout runs fn in a goroutine and returns once it finishes or timeout
+// elapses, whichever comes first. On timeout the goroutine is left running — an
+// os.RemoveAll blocked inside a delete syscall (AV/EDR filter drivers, an
+// unresponsive network mount, a dying disk) cannot be interrupted — and
+// context.DeadlineExceeded is returned. Leaking the goroutine and the scratch
+// state it was deleting is strictly better than blocking the caller forever and
+// permanently losing the runner's capacity slot; the leaked scratch dir is
+// reclaimed later by the runner's idle stale-dir sweep.
+func runWithTimeout(fn func(), timeout time.Duration) error {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return context.DeadlineExceeded
+	}
+}
+
 func (e *HostEnvironment) Remove() common.Executor {
 	return func(ctx context.Context) error {
+		logger := common.Logger(ctx)
+
 		// Ensure any lingering child processes are ended before attempting
 		// to remove the workspace (Windows file locks otherwise prevent cleanup).
 		e.terminateRunningProcesses(ctx)
 
 		// Only removes per-job misc state. Must not remove the cache/toolcache root.
+		// Bound it: CleanUp is a caller-supplied, typically unbounded os.RemoveAll,
+		// and a delete stalled by a filesystem filter driver would otherwise hang
+		// the job forever at "Cleaning up container" and hold the capacity slot.
 		if e.CleanUp != nil {
-			e.CleanUp()
+			logger.Debugf("running host environment cleanup callback")
+			if err := runWithTimeout(e.CleanUp, hostCleanupTimeout); err != nil {
+				logger.Warnf("host environment cleanup did not finish within %s; continuing job completion, scratch state may be leaked and is reclaimed by the idle stale-dir sweep", hostCleanupTimeout)
+			} else {
+				logger.Debugf("host environment cleanup callback finished")
+			}
 		}
 
 		// Detach: a cancelled ctx would skip removePathWithRetry's retries,
 		// which absorb Windows file-handle release lag after the kill above.
-		rmCtx, rmCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		rmCtx, rmCancel := context.WithTimeout(context.Background(), hostCleanupTimeout)
 		defer rmCancel()
 
-		logger := common.Logger(ctx)
 		var errs []error
 		if err := removePathWithRetry(rmCtx, e.Path); err != nil {
 			logger.Warnf("failed to remove host misc state %s: %v", e.Path, err)
@@ -561,7 +619,14 @@ func (e *HostEnvironment) Remove() common.Executor {
 				errs = append(errs, err)
 			}
 		}
-		return errors.Join(errs...)
+		for _, err := range errs {
+			if !errors.Is(err, context.DeadlineExceeded) {
+				return errors.Join(errs...)
+			}
+		}
+		// Bounded teardown timed out; warnings already logged above. Do not
+		// fail job completion — leaked scratch is reclaimed by the idle sweep.
+		return nil
 	}
 }
 
