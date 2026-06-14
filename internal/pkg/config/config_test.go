@@ -119,35 +119,48 @@ func TestLoadDefault_MalformedYAMLReturnsParseError(t *testing.T) {
 }
 
 func TestContainerNetworkCreateOptions(t *testing.T) {
-	// Test that enable_ipv6: true in YAML produces a non-nil *bool that flows into NetworkCreateOptions
-	trueVal := true
-	falseVal := false
+	// Verify that the enable_ipv4/enable_ipv6 YAML keys unmarshal into the *bool fields,
+	// distinguishing an explicit true/false from an omitted key (nil). A nil here is
+	// forwarded as-is to Docker, which applies its own default.
+	loadOptions := func(t *testing.T, yaml string) ContainerNetworkCreateOptions {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
 
-	t.Run("enable_ipv6 true produces non-nil", func(t *testing.T) {
-		config := ContainerNetworkCreateOptions{EnableIPv6: &trueVal}
-		assert.NotNil(t, config.EnableIPv6, "EnableIPv6 should be non-nil")
-		assert.True(t, *config.EnableIPv6)
+		cfg, err := LoadDefault(path)
+		require.NoError(t, err)
+		return cfg.Container.NetworkCreateOptions
+	}
+
+	t.Run("enable_ipv6 true unmarshals to non-nil true", func(t *testing.T) {
+		opts := loadOptions(t, "container:\n  network_create_options:\n    enable_ipv6: true\n")
+		require.NotNil(t, opts.EnableIPv6)
+		assert.True(t, *opts.EnableIPv6)
 	})
 
-	t.Run("enable_ipv6 false produces non-nil", func(t *testing.T) {
-		config := ContainerNetworkCreateOptions{EnableIPv6: &falseVal}
-		assert.NotNil(t, config.EnableIPv6, "EnableIPv6 should be non-nil")
-		assert.False(t, *config.EnableIPv6)
+	t.Run("enable_ipv6 false unmarshals to non-nil false", func(t *testing.T) {
+		opts := loadOptions(t, "container:\n  network_create_options:\n    enable_ipv6: false\n")
+		require.NotNil(t, opts.EnableIPv6)
+		assert.False(t, *opts.EnableIPv6)
 	})
 
-	t.Run("enable_ipv6 omitted produces nil", func(t *testing.T) {
-		config := ContainerNetworkCreateOptions{EnableIPv6: nil}
-		assert.Nil(t, config.EnableIPv6, "EnableIPv6 should be nil")
+	t.Run("enable_ipv4 false unmarshals to non-nil false", func(t *testing.T) {
+		opts := loadOptions(t, "container:\n  network_create_options:\n    enable_ipv4: false\n")
+		require.NotNil(t, opts.EnableIPv4)
+		assert.False(t, *opts.EnableIPv4)
 	})
 
-	t.Run("enable_ipv4 true produces non-nil", func(t *testing.T) {
-		config := ContainerNetworkCreateOptions{EnableIPv4: &trueVal}
-		assert.NotNil(t, config.EnableIPv4, "EnableIPv4 should be non-nil")
-		assert.True(t, *config.EnableIPv4)
+	t.Run("omitted keys stay nil", func(t *testing.T) {
+		opts := loadOptions(t, "container:\n  network_create_options:\n    enable_ipv4: true\n")
+		require.NotNil(t, opts.EnableIPv4)
+		assert.True(t, *opts.EnableIPv4)
+		assert.Nil(t, opts.EnableIPv6, "an omitted enable_ipv6 must remain nil so Docker's default applies")
 	})
 
-	t.Run("enable_ipv4 omitted produces nil", func(t *testing.T) {
-		config := ContainerNetworkCreateOptions{EnableIPv4: nil}
-		assert.Nil(t, config.EnableIPv4, "EnableIPv4 should be nil")
+	t.Run("omitted block leaves both nil", func(t *testing.T) {
+		opts := loadOptions(t, "container:\n  network: \"\"\n")
+		assert.Nil(t, opts.EnableIPv4)
+		assert.Nil(t, opts.EnableIPv6)
 	})
 }
