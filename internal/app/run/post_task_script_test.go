@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gitea.com/gitea/runner/internal/pkg/config"
+	"gitea.com/gitea/runner/internal/pkg/metrics"
 	"gitea.com/gitea/runner/internal/pkg/report"
 
 	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
@@ -60,12 +61,25 @@ func TestRunPostTaskScriptNonZeroExitDoesNotPanic(t *testing.T) {
 	})
 }
 
-func TestJobResultString(t *testing.T) {
-	assert.Equal(t, "success", jobResultString(runnerv1.Result_RESULT_SUCCESS))
-	assert.Equal(t, "failure", jobResultString(runnerv1.Result_RESULT_FAILURE))
-	assert.Equal(t, "cancelled", jobResultString(runnerv1.Result_RESULT_CANCELLED))
-	assert.Equal(t, "skipped", jobResultString(runnerv1.Result_RESULT_SKIPPED))
-	assert.Equal(t, "unknown", jobResultString(runnerv1.Result_RESULT_UNSPECIFIED))
+func TestPostTaskScriptContextUsesFullTimeout(t *testing.T) {
+	const timeout = 5 * time.Minute
+
+	// A task context that finished close to its own deadline must not truncate the
+	// script's budget: the script should still get its full configured timeout.
+	near, cancelNear := context.WithTimeout(context.Background(), time.Second)
+	defer cancelNear()
+	scriptCtx, cancel := postTaskScriptContext(near, timeout)
+	defer cancel()
+	deadline, ok := scriptCtx.Deadline()
+	require.True(t, ok)
+	assert.Greater(t, time.Until(deadline), time.Minute, "script timeout truncated to task deadline")
+
+	// An already-cancelled task context must not cancel the script either.
+	cancelledCtx, cancelIt := context.WithCancel(context.Background())
+	cancelIt()
+	scriptCtx2, cancel2 := postTaskScriptContext(cancelledCtx, timeout)
+	defer cancel2()
+	assert.NoError(t, scriptCtx2.Err(), "script context inherited the cancelled task context")
 }
 
 func TestPostTaskScriptEnv(t *testing.T) {
@@ -137,7 +151,7 @@ func setReporterJobResult(t *testing.T, reporter *report.Reporter, result runner
 		Message: "job finished",
 		Data: log.Fields{
 			"stage":     "Post",
-			"jobResult": jobResultString(result),
+			"jobResult": metrics.ResultToStatusLabel(result),
 		},
 	}))
 }

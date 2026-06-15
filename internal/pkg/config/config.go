@@ -16,6 +16,12 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
+// DefaultPostTaskScriptTimeout is the fallback cap on how long the post-task
+// script may run when post_task_script is set without an explicit timeout. It is
+// applied both at config load (for a configured script) and at the point of use
+// (so a programmatically built config still gets a sane bound).
+const DefaultPostTaskScriptTimeout = 5 * time.Minute
+
 // Log represents the configuration for logging.
 type Log struct {
 	Level string `yaml:"level"` // Level indicates the logging level.
@@ -190,7 +196,7 @@ func LoadDefault(file string) (*Config, error) {
 		cfg.Runner.ReportCloseTimeout = 10 * time.Second
 	}
 	if cfg.Runner.PostTaskScript != "" && cfg.Runner.PostTaskScriptTimeout <= 0 {
-		cfg.Runner.PostTaskScriptTimeout = 5 * time.Minute
+		cfg.Runner.PostTaskScriptTimeout = DefaultPostTaskScriptTimeout
 	}
 	if cfg.Metrics.Addr == "" {
 		cfg.Metrics.Addr = "127.0.0.1:9101"
