@@ -167,18 +167,65 @@ func withStepLogger(ctx context.Context, stepNumber int, stepID, stepName, stage
 
 type entryProcessor func(entry *logrus.Entry) *logrus.Entry
 
+// minMaskLen is the minimum substring length to mask.
+// Shorter substrings would cause excessive false-positive masking.
+const minMaskLen = 3
+
+func reverseString(s string) string {
+	runes := []rune(s)
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
+	}
+	return string(runes)
+}
+
 func AppendSecretMasker(oldnew []string, v string) []string {
 	ret := oldnew
 
 	for l := range strings.SplitSeq(v, "\n") {
 		tm := strings.TrimSpace(l)
-		// formatted JSON secrets could otherwise mask {,[,],} everywhere
-		if len(tm) > 1 {
-			ret = append(ret, tm, "***")
+		if len(tm) < minMaskLen {
+			continue
+		}
+		// Mask the full line and its reverse
+		ret = append(ret, tm, "***")
+		if rev := reverseString(tm); rev != tm {
+			ret = append(ret, rev, "***")
+		}
+		// Mask all contiguous substrings of length >= minMaskLen
+		// to prevent leakage via fold, cut, indexing, etc.
+		runes := []rune(tm)
+		seen := make(map[string]struct{})
+		seen[tm] = struct{}{}
+		for size := minMaskLen; size < len(runes); size++ {
+			for start := 0; start+size <= len(runes); start++ {
+				sub := string(runes[start : start+size])
+				if _, ok := seen[sub]; ok {
+					continue
+				}
+				seen[sub] = struct{}{}
+				ret = append(ret, sub, "***")
+			}
 		}
 	}
 
 	return ret
+}
+
+// secretChars builds a set of all individual characters present in the secrets.
+func secretChars(secrets map[string]string, masks []string) map[rune]struct{} {
+	chars := make(map[rune]struct{})
+	for _, v := range secrets {
+		for _, r := range v {
+			chars[r] = struct{}{}
+		}
+	}
+	for _, v := range masks {
+		for _, r := range v {
+			chars[r] = struct{}{}
+		}
+	}
+	return chars
 }
 
 // valueMasker applies secrets and ::add-mask:: patterns to every log entry, including
@@ -190,6 +237,7 @@ func valueMasker(insecureSecrets bool, secrets map[string]string) entryProcessor
 	}
 	oldnew = slices.Clip(oldnew)
 	defReplacer := strings.NewReplacer(oldnew...)
+	defChars := secretChars(secrets, nil)
 	return func(entry *logrus.Entry) *logrus.Entry {
 		if insecureSecrets {
 			return entry
@@ -197,16 +245,30 @@ func valueMasker(insecureSecrets bool, secrets map[string]string) entryProcessor
 
 		masks := Masks(entry.Context)
 
+		var replacer *strings.Replacer
+		var chars map[rune]struct{}
 		if len(*masks) == 0 {
-			entry.Message = defReplacer.Replace(entry.Message)
+			replacer = defReplacer
+			chars = defChars
 		} else {
 			cmasker := oldnew
-
 			for _, v := range *masks {
 				cmasker = AppendSecretMasker(cmasker, v)
 			}
+			replacer = strings.NewReplacer(cmasker...)
+			chars = secretChars(secrets, *masks)
+		}
 
-			entry.Message = strings.NewReplacer(cmasker...).Replace(entry.Message)
+		entry.Message = replacer.Replace(entry.Message)
+
+		// If the entire message after replacement is a single character that
+		// belongs to a secret, mask it. This prevents char-by-char leakage
+		// via fold -w1, array indexing, etc.
+		if msg := strings.TrimSpace(entry.Message); len([]rune(msg)) == 1 {
+			r := []rune(msg)[0]
+			if _, ok := chars[r]; ok {
+				entry.Message = strings.Replace(entry.Message, msg, "***", 1)
+			}
 		}
 
 		return entry

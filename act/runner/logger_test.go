@@ -33,6 +33,30 @@ func TestValueMasker(t *testing.T) {
 			masks:      []string{"PRIVATE_KEY_BEGIN\ndsdfseffefsefes\ndsdfseffefsefes\ndsdfseffefsefes\ndsdfseffefsefes\ndsdfseffefsefes\ndsdfseffefsefes\ndsdfseffefsefes\ndsdfseffefsefes\ndsdfseffefsefes\nPRIVATE_KEY_END"},
 			disallowed: []string{"KEY", "dsdfseffefsefes", "PRIVATE_KEY_END"},
 		},
+		{
+			name:  "Reversed secret via rev command",
+			lines: "terces_ym",
+			secrets: map[string]string{
+				"MY_SECRET": "my_secret",
+			},
+			disallowed: []string{"terces_ym"},
+		},
+		{
+			name:  "Substring leak via cut or fold",
+			lines: "my_\nsec\nret",
+			secrets: map[string]string{
+				"MY_SECRET": "my_secret",
+			},
+			disallowed: []string{"my_", "sec", "ret"},
+		},
+		{
+			name:  "Single char leak via fold -w1 or array index",
+			lines: "m\ny\n_\ns\ne\nc\nr\ne\nt",
+			secrets: map[string]string{
+				"MY_SECRET": "my_secret",
+			},
+			disallowed: []string{"m", "y", "_", "s", "e", "c", "r", "t"},
+		},
 	}
 	for _, entry := range table {
 		t.Run(entry.name, func(t *testing.T) {
