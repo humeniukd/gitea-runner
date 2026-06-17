@@ -90,9 +90,9 @@ The script environment is **not** a full copy of the job container environment. 
 
 | Timeout | Effect on post-task script |
 | --- | --- |
-| `runner.post_task_script_timeout` | Kills the script if it runs too long. |
-| `runner.timeout` | Caps the **entire** task, including the script. A job near the runner timeout limit may cut the script short. |
-| `runner.shutdown_timeout` | On SIGINT/SIGTERM, in-flight work (including the script) must finish within this window or it is cancelled. |
+| `runner.post_task_script_timeout` | Kills the script if it runs too long. This is the **only** timeout that bounds the script. |
+| `runner.timeout` | Caps the task **up to** the script. The script detaches from the task deadline, so a job near the runner timeout limit does **not** cut the script short — it still gets its full `post_task_script_timeout`. |
+| `runner.shutdown_timeout` | On SIGINT/SIGTERM, bounds how long the runner waits for the **task** to finish. The post-task script detaches from cancellation, so it is **not** interrupted by this window and may extend shutdown until its own `post_task_script_timeout` elapses. |
 
 ## Examples
 
