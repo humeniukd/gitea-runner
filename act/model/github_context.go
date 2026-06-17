@@ -45,7 +45,8 @@ type GithubContext struct {
 	GraphQLURL       string         `json:"graphql_url"`
 
 	// For Gitea
-	RunAttempt string `json:"run_attempt"`
+	RunAttempt  string `json:"run_attempt"`
+	Environment string `json:"environment"`
 }
 
 func asString(v any) string {

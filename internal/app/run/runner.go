@@ -255,6 +255,9 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	}()
 
 	reporter.Logf("%s(version:%s) received task %v of job %v, be triggered by event: %s", r.name, ver.Version(), task.Id, task.Context.Fields["job"].GetStringValue(), task.Context.Fields["event_name"].GetStringValue())
+	if env := task.Context.Fields["environment"].GetStringValue(); env != "" {
+		reporter.Logf("environment: %s", env)
+	}
 
 	workflow, jobID, err := generateWorkflow(task)
 	if err != nil {
@@ -299,6 +302,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		Token:           taskContext["token"].GetStringValue(),
 		RepositoryOwner: taskContext["repository_owner"].GetStringValue(),
 		RetentionDays:   taskContext["retention_days"].GetStringValue(),
+		Environment:     taskContext["environment"].GetStringValue(),
 	}
 	if t := task.Secrets["GITEA_TOKEN"]; t != "" {
 		preset.Token = t
