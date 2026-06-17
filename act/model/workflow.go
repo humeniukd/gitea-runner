@@ -226,6 +226,18 @@ func (j *Job) SetContinueOnError(continueOnErr bool) {
 	}
 }
 
+// NeedsResult returns the job result as seen by dependent jobs through the
+// `needs` context. A job that failed but was tolerated via continue-on-error
+// reports "success" to its dependents, matching GitHub: such a failure must not
+// block jobs gated on the default `if: success()`, even though the overall
+// workflow run is still marked as failed.
+func (j *Job) NeedsResult() string {
+	if j.Result == "failure" && j.ContinueOnError {
+		return "success"
+	}
+	return j.Result
+}
+
 // Strategy for the job
 type Strategy struct {
 	FailFast          bool

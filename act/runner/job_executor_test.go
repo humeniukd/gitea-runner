@@ -348,6 +348,146 @@ func TestNewJobExecutor(t *testing.T) {
 	}
 }
 
+// TestNewJobExecutorRunsPostStepsAfterTimeout guards the timeout-minutes cleanup
+// path: when a job exceeds its timeout the job context is DeadlineExceeded, but
+// the post steps (cleanup hooks like actions/checkout post and cache save) must
+// still run against a fresh, non-expired context, and the job must still be
+// reported as failed.
+func TestNewJobExecutorRunsPostStepsAfterTimeout(t *testing.T) {
+	ctx := common.WithJobErrorContainer(context.Background())
+	// The timeout is generous so the main step (which blocks on ctx.Done below) is
+	// always reached before the deadline fires; otherwise the pipeline would
+	// short-circuit before the step runs and the job error would never be set.
+	ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+
+	jim := &jobInfoMock{}
+	sfm := &stepFactoryMock{}
+	rc := &RunContext{
+		JobContainer: &jobContainerMock{},
+		Run: &model.Run{
+			JobID: "test",
+			Workflow: &model.Workflow{
+				Jobs: map[string]*model.Job{
+					"test": {},
+				},
+			},
+		},
+		Config: &Config{},
+	}
+	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
+
+	stepModel := &model.Step{ID: "1"}
+	jim.On("steps").Return([]*model.Step{stepModel})
+	jim.On("matrix").Return(map[string]any{})
+	jim.On("startContainer").Return(func(ctx context.Context) error { return nil })
+	jim.On("interpolateOutputs").Return(func(ctx context.Context) error { return nil })
+	jim.On("closeContainer").Return(func(ctx context.Context) error { return nil })
+	// The job timed out, so it must be reported as failed. stopContainer is left
+	// unexpected on purpose: a timed-out (failed) job preserves its error state, so
+	// the graceful stop is skipped exactly like any other failure without AutoRemove.
+	jim.On("result", "failure")
+
+	sm := &stepMock{}
+	sfm.On("newStep", stepModel, rc).Return(sm, nil)
+	sm.On("pre").Return(func(ctx context.Context) error { return nil })
+	// The main step runs past the job timeout: it blocks until the job context is
+	// done, mirroring a step that overruns timeout-minutes.
+	sm.On("main").Return(func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	var postRan bool
+	var postCtxErr error
+	sm.On("post").Return(func(ctx context.Context) error {
+		postRan = true
+		postCtxErr = ctx.Err()
+		return nil
+	})
+
+	executor := newJobExecutor(jim, sfm, rc)
+	// The executor itself returns nil on timeout: the failure is surfaced through
+	// the job result ("failure", asserted via the result mock below), not the
+	// return value.
+	require.NoError(t, executor(ctx))
+
+	assert.True(t, postRan, "post step must run after a job timeout")
+	require.NoError(t, postCtxErr, "post step must run against a fresh, non-expired context")
+
+	jim.AssertExpectations(t)
+	sfm.AssertExpectations(t)
+	sm.AssertExpectations(t)
+}
+
+// TestSetJobResultMatrixContinueOnError exercises the parallel-matrix path
+// end-to-end: two combinations share one *model.Job and continue-on-error is
+// keyed on matrix.experimental, so one combination tolerates its failure and the
+// other does not. The job is reported as continue-on-error only when EVERY failing
+// combination was tolerated; a single firm failure makes the whole job firm, and
+// handleFailure then fails the run.
+func TestSetJobResultMatrixContinueOnError(t *testing.T) {
+	const jobYAML = "continue-on-error: ${{ matrix.experimental }}\nruns-on: ubuntu-latest"
+
+	newSharedJob := func(t *testing.T) (*model.Job, *model.Workflow) {
+		t.Helper()
+		var job *model.Job
+		require.NoError(t, yaml.Unmarshal([]byte(jobYAML), &job))
+		wf := &model.Workflow{
+			Name: "workflow1",
+			Jobs: map[string]*model.Job{"job1": job},
+		}
+		return job, wf
+	}
+
+	// mkRC builds a per-combination RunContext that shares the workflow (and thus
+	// the *model.Job), matching how matrix combinations run in the real executor.
+	mkRC := func(wf *model.Workflow, experimental bool) *RunContext {
+		return &RunContext{
+			Config: &Config{
+				Workdir:   ".",
+				Platforms: map[string]string{"ubuntu-latest": "ubuntu-latest"},
+			},
+			StepResults: map[string]*model.StepResult{},
+			Env:         map[string]string{},
+			Matrix:      map[string]any{"experimental": experimental},
+			Run:         &model.Run{JobID: "job1", Workflow: wf},
+		}
+	}
+
+	planFor := func(wf *model.Workflow) *model.Plan {
+		return &model.Plan{Stages: []*model.Stage{{Runs: []*model.Run{{Workflow: wf, JobID: "job1"}}}}}
+	}
+
+	ctx := context.Background()
+
+	// fail drives a single matrix combination through the failure path; each
+	// RunContext is its own jobInfo (rc implements jobInfo) and shares the job.
+	fail := func(rc *RunContext) { setJobResult(ctx, rc, rc, false) }
+
+	t.Run("one tolerated and one firm failure fails the run", func(t *testing.T) {
+		job, wf := newSharedJob(t)
+		// Order is intentional: the tolerated combination finishes first, then the
+		// firm one. The firm-failure latch must still win regardless of order.
+		fail(mkRC(wf, true))
+		fail(mkRC(wf, false))
+
+		assert.Equal(t, "failure", job.Result)
+		assert.False(t, job.ContinueOnError, "a single firm failure must make the whole job firm")
+		assert.Error(t, handleFailure(planFor(wf))(ctx))
+	})
+
+	t.Run("all tolerated failures do not fail the run", func(t *testing.T) {
+		job, wf := newSharedJob(t)
+		fail(mkRC(wf, true))
+		fail(mkRC(wf, true))
+
+		assert.Equal(t, "failure", job.Result)
+		assert.True(t, job.ContinueOnError, "every failing combination was tolerated")
+		assert.NoError(t, handleFailure(planFor(wf))(ctx))
+	})
+}
+
 func TestHasJobSummaryCapability(t *testing.T) {
 	assert.True(t, hasJobSummaryCapability("cache,job-summary artifacts"))
 	assert.True(t, hasJobSummaryCapability("cache,\njob-summary\tartifacts"))

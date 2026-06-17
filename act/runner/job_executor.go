@@ -205,10 +205,20 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 	return common.NewPipelineExecutor(info.startContainer(), common.NewPipelineExecutor(pipeline...).
 		Finally(func(ctx context.Context) error {
 			var cancel context.CancelFunc
-			if ctx.Err() == context.Canceled {
+			switch ctx.Err() {
+			case context.Canceled:
 				// in case of an aborted run, we still should execute the
 				// post steps to allow cleanup.
 				ctx, cancel = context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), 5*time.Minute)
+				defer cancel()
+			case context.DeadlineExceeded:
+				// The job hit its timeout-minutes. Without a fresh context the post
+				// steps would run against the already-expired context and be skipped,
+				// so cleanup post-hooks (e.g. actions/checkout post, cache save) would
+				// not run. Derive the context with WithoutCancel so the new deadline
+				// applies but the job error state is preserved: the job is still
+				// reported as failed and container teardown matches a normal failure.
+				ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 				defer cancel()
 			}
 			return postExecutor(ctx)
