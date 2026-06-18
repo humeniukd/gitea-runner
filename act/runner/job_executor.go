@@ -234,6 +234,12 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 	// read-modify-write of the job result so a failing combination is not lost-updated by a
 	// concurrent succeeding one.
 	job := rc.Run.Job()
+	var continueOnError bool
+	if !success {
+		// Use a fresh context so an expired job timeout cannot block expression evaluation.
+		evalCtx := common.WithLogger(context.Background(), common.Logger(ctx))
+		continueOnError = evaluateJobContinueOnError(evalCtx, rc, job)
+	}
 	jobResult := func() string {
 		defer lockJob(job)()
 		result := "success"
@@ -244,9 +250,7 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 		}
 		if !success {
 			result = "failure"
-			// Use a fresh context so an expired job timeout cannot block expression evaluation.
-			evalCtx := common.WithLogger(context.Background(), common.Logger(ctx))
-			job.SetContinueOnError(evaluateJobContinueOnError(evalCtx, rc, job))
+			job.SetContinueOnError(continueOnError)
 		}
 		info.result(result)
 		return result
@@ -288,12 +292,11 @@ func setJobOutputs(ctx context.Context, rc *RunContext) {
 // applyJobTimeout applies the job-level timeout-minutes to ctx, mirroring the
 // step-level evaluateStepTimeout in step.go.
 func applyJobTimeout(ctx context.Context, rc *RunContext, job *model.Job) (context.Context, context.CancelFunc) {
-	if strings.TrimSpace(job.TimeoutMinutes) == "" {
-		return ctx, func() {}
-	}
-	timeout := rc.NewExpressionEvaluator(ctx).Interpolate(ctx, job.TimeoutMinutes)
-	if timeoutMinutes, err := strconv.ParseInt(strings.TrimSpace(timeout), 10, 64); err == nil {
-		return context.WithTimeout(ctx, time.Duration(timeoutMinutes)*time.Minute)
+	timeout := rc.ExprEval.Interpolate(ctx, job.TimeoutMinutes)
+	if timeout != "" {
+		if timeoutMinutes, err := strconv.ParseInt(timeout, 10, 64); err == nil {
+			return context.WithTimeout(ctx, time.Duration(timeoutMinutes)*time.Minute)
+		}
 	}
 	return ctx, func() {}
 }

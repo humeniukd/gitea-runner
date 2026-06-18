@@ -433,25 +433,9 @@ func TestSetJobResultMatrixContinueOnError(t *testing.T) {
 		t.Helper()
 		var job *model.Job
 		require.NoError(t, yaml.Unmarshal([]byte(jobYAML), &job))
-		wf := &model.Workflow{
+		return job, &model.Workflow{
 			Name: "workflow1",
 			Jobs: map[string]*model.Job{"job1": job},
-		}
-		return job, wf
-	}
-
-	// mkRC builds a per-combination RunContext that shares the workflow (and thus
-	// the *model.Job), matching how matrix combinations run in the real executor.
-	mkRC := func(wf *model.Workflow, experimental bool) *RunContext {
-		return &RunContext{
-			Config: &Config{
-				Workdir:   ".",
-				Platforms: map[string]string{"ubuntu-latest": "ubuntu-latest"},
-			},
-			StepResults: map[string]*model.StepResult{},
-			Env:         map[string]string{},
-			Matrix:      map[string]any{"experimental": experimental},
-			Run:         &model.Run{JobID: "job1", Workflow: wf},
 		}
 	}
 
@@ -463,14 +447,17 @@ func TestSetJobResultMatrixContinueOnError(t *testing.T) {
 
 	// fail drives a single matrix combination through the failure path; each
 	// RunContext is its own jobInfo (rc implements jobInfo) and shares the job.
-	fail := func(rc *RunContext) { setJobResult(ctx, rc, rc, false) }
+	fail := func(wf *model.Workflow, experimental bool) {
+		rc := newTestRC(wf, map[string]any{"experimental": experimental})
+		setJobResult(ctx, rc, rc, false)
+	}
 
 	t.Run("one tolerated and one firm failure fails the run", func(t *testing.T) {
 		job, wf := newSharedJob(t)
 		// Order is intentional: the tolerated combination finishes first, then the
 		// firm one. The firm-failure latch must still win regardless of order.
-		fail(mkRC(wf, true))
-		fail(mkRC(wf, false))
+		fail(wf, true)
+		fail(wf, false)
 
 		assert.Equal(t, "failure", job.Result)
 		assert.False(t, job.ContinueOnError, "a single firm failure must make the whole job firm")
@@ -479,8 +466,8 @@ func TestSetJobResultMatrixContinueOnError(t *testing.T) {
 
 	t.Run("all tolerated failures do not fail the run", func(t *testing.T) {
 		job, wf := newSharedJob(t)
-		fail(mkRC(wf, true))
-		fail(mkRC(wf, true))
+		fail(wf, true)
+		fail(wf, true)
 
 		assert.Equal(t, "failure", job.Result)
 		assert.True(t, job.ContinueOnError, "every failing combination was tolerated")
@@ -816,10 +803,7 @@ func tarArchive(t *testing.T, entries ...tarEntry) []byte {
 	return buf.Bytes()
 }
 
-func makeTestRC(t *testing.T, jobYAML string) *RunContext {
-	t.Helper()
-	var job *model.Job
-	require.NoError(t, yaml.Unmarshal([]byte(jobYAML), &job))
+func newTestRC(wf *model.Workflow, matrix map[string]any) *RunContext {
 	return &RunContext{
 		Config: &Config{
 			Workdir: ".",
@@ -829,16 +813,21 @@ func makeTestRC(t *testing.T, jobYAML string) *RunContext {
 		},
 		StepResults: map[string]*model.StepResult{},
 		Env:         map[string]string{},
-		Run: &model.Run{
-			JobID: "job1",
-			Workflow: &model.Workflow{
-				Name: "workflow1",
-				Jobs: map[string]*model.Job{
-					"job1": job,
-				},
-			},
-		},
+		Matrix:      matrix,
+		Run:         &model.Run{JobID: "job1", Workflow: wf},
 	}
+}
+
+func makeTestRC(t *testing.T, jobYAML string) *RunContext {
+	t.Helper()
+	var job *model.Job
+	require.NoError(t, yaml.Unmarshal([]byte(jobYAML), &job))
+	rc := newTestRC(&model.Workflow{
+		Name: "workflow1",
+		Jobs: map[string]*model.Job{"job1": job},
+	}, nil)
+	rc.ExprEval = rc.NewExpressionEvaluator(context.Background())
+	return rc
 }
 
 func TestApplyJobTimeout(t *testing.T) {
