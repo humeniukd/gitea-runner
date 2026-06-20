@@ -12,3 +12,6 @@ coverage.txt
 __debug_bin
 # gorelease binary folder
 /dist
+
+# Private E2E harness — kept locally, not tracked upstream
+/tests/e2e/
