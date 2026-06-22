@@ -839,14 +839,9 @@ func Test_safeFilename(t *testing.T) {
 	}
 }
 
-// TestStepActionRemoteCloneTokenSurvivesNilSecrets guards against the regression
-// where a nested action inside a composite action failed to clone with
-// "authentication required: Unauthorized". A composite RunContext nils
-// Config.Secrets, so sourcing the clone token from Config.Secrets yielded an empty
-// token and a 401 against the authenticated instance. The token must instead come
-// from github.Token (Config.Token / PresetGitHubContext), which survives the
-// composite config copy, while the host-gate must still prevent leaking it to a
-// foreign host.
+// Regression: a nested action in a composite cloned anonymously (401) because the
+// composite RunContext nils Config.Secrets. The token must come from github.Token,
+// which survives the config copy; the host gate must still withhold it cross-host.
 func TestStepActionRemoteCloneTokenSurvivesNilSecrets(t *testing.T) {
 	const wantToken = "job-token"
 
