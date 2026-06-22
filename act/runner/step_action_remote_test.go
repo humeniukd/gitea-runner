@@ -838,3 +838,88 @@ func Test_safeFilename(t *testing.T) {
 		})
 	}
 }
+
+// TestStepActionRemoteCloneTokenSurvivesNilSecrets guards against the regression
+// where a nested action inside a composite action failed to clone with
+// "authentication required: Unauthorized". A composite RunContext nils
+// Config.Secrets, so sourcing the clone token from Config.Secrets yielded an empty
+// token and a 401 against the authenticated instance. The token must instead come
+// from github.Token (Config.Token / PresetGitHubContext), which survives the
+// composite config copy, while the host-gate must still prevent leaking it to a
+// foreign host.
+func TestStepActionRemoteCloneTokenSurvivesNilSecrets(t *testing.T) {
+	const wantToken = "job-token"
+
+	table := []struct {
+		name                  string
+		gitHubInstance        string
+		defaultActionInstance string
+		wantCloneToken        string
+	}{
+		{
+			name:           "same host forwards token despite nil secrets",
+			gitHubInstance: "gitea.example.com",
+			wantCloneToken: wantToken,
+		},
+		{
+			name:                  "foreign host is not given the token",
+			gitHubInstance:        "gitea.example.com",
+			defaultActionInstance: "github.com",
+			wantCloneToken:        "",
+		},
+	}
+
+	for _, tt := range table {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			var capturedToken string
+			origStepAtionRemoteNewCloneExecutor := stepActionRemoteNewCloneExecutor
+			stepActionRemoteNewCloneExecutor = func(input git.NewGitCloneExecutorInput) common.Executor {
+				capturedToken = input.Token
+				return func(ctx context.Context) error { return nil }
+			}
+			defer (func() {
+				stepActionRemoteNewCloneExecutor = origStepAtionRemoteNewCloneExecutor
+			})()
+
+			sarm := &stepActionRemoteMocks{}
+			sar := &stepActionRemote{
+				Step: &model.Step{Uses: "org/repo@v1"},
+				RunContext: &RunContext{
+					Config: &Config{
+						GitHubInstance:        tt.gitHubInstance,
+						DefaultActionInstance: tt.defaultActionInstance,
+						ActionCacheDir:        "/tmp/test-cache",
+						// Mirrors the state of a composite RunContext: job secrets are
+						// stripped, but the job token is still reachable via Config.Token.
+						Secrets: nil,
+						Token:   wantToken,
+					},
+					Run: &model.Run{
+						JobID: "1",
+						Workflow: &model.Workflow{
+							Jobs: map[string]*model.Job{"1": {}},
+						},
+					},
+					StepResults: map[string]*model.StepResult{},
+				},
+				readAction: sarm.readAction,
+			}
+			sar.RunContext.ExprEval = sar.RunContext.NewExpressionEvaluator(ctx)
+
+			suffixMatcher := func(suffix string) any {
+				return mock.MatchedBy(func(actionDir string) bool {
+					return strings.HasSuffix(actionDir, suffix)
+				})
+			}
+			sarm.On("readAction", sar.Step, suffixMatcher(sar.Step.UsesHash()), "", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
+
+			err := sar.prepareActionExecutor()(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantCloneToken, capturedToken)
+
+			sarm.AssertExpectations(t)
+		})
+	}
+}

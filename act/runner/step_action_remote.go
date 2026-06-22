@@ -114,9 +114,20 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 
 		actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), sar.Step.UsesHash())
 		defaultActionURL := sar.RunContext.Config.DefaultActionURL()
-		token := getGitCloneToken(sar.getRunContext().Config, sar.remoteAction.CloneURL(defaultActionURL))
+		// A composite RunContext nils Config.Secrets, so getGitCloneToken (which reads
+		// the token from Config.Secrets) would yield an empty token and a 401 when the
+		// action is cloned from the authenticated instance. github.Token survives the
+		// composite config copy (it is sourced from Config.Token / PresetGitHubContext)
+		// and is the same token at the top level, so use it here while keeping the
+		// shouldCloneURLUseToken host-gate to avoid leaking it to a foreign host. This
+		// also matches the ActionCache fetch path above, which already uses github.Token.
+		cloneURL := sar.remoteAction.CloneURL(defaultActionURL)
+		token := ""
+		if shouldCloneURLUseToken(sar.RunContext.Config.GitHubInstance, cloneURL) {
+			token = github.Token
+		}
 		gitClone := stepActionRemoteNewCloneExecutor(git.NewGitCloneExecutorInput{
-			URL:         sar.remoteAction.CloneURL(defaultActionURL),
+			URL:         cloneURL,
 			Ref:         sar.remoteAction.Ref,
 			Dir:         actionDir,
 			Token:       token,
