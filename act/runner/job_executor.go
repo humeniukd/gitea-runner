@@ -160,9 +160,11 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 	postExecutor = postExecutor.Finally(func(ctx context.Context) error {
 		jobError := common.JobError(ctx)
 		var err error
-		// Always tear down on cancellation: now that the cancel-path post context carries its
-		// own error container, a failing post step makes jobError non-nil, which must not skip
-		// container cleanup the way a normal failure does.
+		// jobError == nil keeps a failed job's container alive for post-mortem debugging when
+		// AutoRemove is off (the act-CLI --rm behavior; the shipped runner always sets
+		// AutoRemove). A cancelled run is not a failure to inspect, and the cancel-path post
+		// context now carries its own error container so a failing post step makes jobError
+		// non-nil — OR in rc.jobCancelled so cancellation still always tears the container down.
 		if rc.Config.AutoRemove || jobError == nil || rc.jobCancelled {
 			// always allow 1 min for stopping and removing the runner, even if we were cancelled
 			ctx, cancel := context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), time.Minute)
