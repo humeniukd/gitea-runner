@@ -6,6 +6,7 @@ package runner
 import (
 	"context"
 	"testing"
+	"time"
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/exprparser"
@@ -95,4 +96,44 @@ func TestMainStepsExecutorRunsAlwaysStepsAfterCancel(t *testing.T) {
 	assert.Equal(t, []string{"step1", "always-step"}, ran, "the always() step still runs after cancel")
 	require.NoError(t, laterStepCtxErr, "remaining steps run under a fresh, non-cancelled context")
 	assert.True(t, rc.jobCancelled, "the job is marked cancelled")
+}
+
+// TestPostStepsContextCancelledIsUsableForFailingStep guards against a panic: post/cleanup
+// steps run on a context derived from the cancelled job context, and a failing post step
+// records its error via common.SetJobError. If that derived context lacks a job-error container,
+// SetJobError dereferences a nil map and panics. The post context must therefore be detached
+// from cancellation (so the steps run) yet still carry a usable error container.
+func TestPostStepsContextCancelledIsUsableForFailingStep(t *testing.T) {
+	cancelled, cancel := context.WithCancel(common.WithJobErrorContainer(context.Background()))
+	cancel()
+	require.ErrorIs(t, cancelled.Err(), context.Canceled)
+
+	postCtx, done := postStepsContext(cancelled)
+	defer done()
+
+	// Detached from cancellation, so the post steps actually run.
+	require.NoError(t, postCtx.Err(), "post context must not be cancelled")
+
+	// A failing post step records its error instead of panicking.
+	require.NotPanics(t, func() {
+		common.SetJobError(postCtx, assert.AnError)
+	}, "a failing post step must not panic on the cancel path")
+	assert.ErrorIs(t, common.JobError(postCtx), assert.AnError)
+}
+
+// TestPostStepsContextDeadlinePreservesJobError verifies the job-timeout path keeps the original
+// job-error container (via context.WithoutCancel), so the timeout failure and any post-step error
+// survive into the post phase and the job is still reported as failed.
+func TestPostStepsContextDeadlinePreservesJobError(t *testing.T) {
+	base := common.WithJobErrorContainer(context.Background())
+	common.SetJobError(base, assert.AnError)
+	expired, cancel := context.WithDeadline(base, time.Now().Add(-time.Hour))
+	defer cancel()
+	require.ErrorIs(t, expired.Err(), context.DeadlineExceeded)
+
+	postCtx, done := postStepsContext(expired)
+	defer done()
+
+	require.NoError(t, postCtx.Err(), "post context must not carry the expired deadline")
+	assert.ErrorIs(t, common.JobError(postCtx), assert.AnError, "the timeout job error must be preserved")
 }

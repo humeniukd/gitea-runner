@@ -160,7 +160,10 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 	postExecutor = postExecutor.Finally(func(ctx context.Context) error {
 		jobError := common.JobError(ctx)
 		var err error
-		if rc.Config.AutoRemove || jobError == nil {
+		// Always tear down on cancellation: now that the cancel-path post context carries its
+		// own error container, a failing post step makes jobError non-nil, which must not skip
+		// container cleanup the way a normal failure does.
+		if rc.Config.AutoRemove || jobError == nil || rc.jobCancelled {
 			// always allow 1 min for stopping and removing the runner, even if we were cancelled
 			ctx, cancel := context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), time.Minute)
 			defer cancel()
@@ -206,30 +209,41 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 
 	return common.NewPipelineExecutor(info.startContainer(), stepsExecutor.
 		Finally(func(ctx context.Context) error {
-			var cancel context.CancelFunc
-			switch ctx.Err() {
-			case context.Canceled:
-				// in case of an aborted run, we still should execute the
-				// post steps to allow cleanup. Record the cancellation so the
-				// post steps observe the "cancelled" job status (backstop for
-				// cancellations that land outside the main step loop).
+			// Record a cancellation (backstop for cancellations that land outside the
+			// main step loop) so the post steps observe the "cancelled" job status.
+			if errors.Is(ctx.Err(), context.Canceled) {
 				rc.markCancelled()
-				ctx, cancel = context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), 5*time.Minute)
-				defer cancel()
-			case context.DeadlineExceeded:
-				// The job hit its timeout-minutes. Without a fresh context the post
-				// steps would run against the already-expired context and be skipped,
-				// so cleanup post-hooks (e.g. actions/checkout post, cache save) would
-				// not run. Derive the context with WithoutCancel so the new deadline
-				// applies but the job error state is preserved: the job is still
-				// reported as failed and container teardown matches a normal failure.
-				ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
-				defer cancel()
 			}
-			return postExecutor(ctx)
+			postCtx, cancel := postStepsContext(ctx)
+			defer cancel()
+			return postExecutor(postCtx)
 		}).
 		Finally(info.interpolateOutputs()).
 		Finally(info.closeContainer()))
+}
+
+// postStepsContext derives the context used to run the job's post/cleanup steps from the
+// finished main-pipeline context. Cleanup has to run even when the run was interrupted, so the
+// returned context always carries a fresh bounded deadline and is never itself cancelled.
+//
+//   - context.Canceled (server cancel): detach from the cancelled context via a fresh root so
+//     the post steps can run.
+//   - context.DeadlineExceeded (job timeout): detach the deadline with WithoutCancel, which
+//     keeps the original values — including the job-error container — so the timeout failure and
+//     any post-step error are preserved and the job is still reported as failed.
+//   - otherwise: run on the live context unchanged.
+func postStepsContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	switch ctx.Err() {
+	case context.Canceled:
+		// The cancelled context is abandoned for a fresh root, which drops the job-error
+		// container installed at the job root. Re-attach a fresh one so a failing post step
+		// records its error via SetJobError instead of panicking on a nil container.
+		return context.WithTimeout(common.WithJobErrorContainer(common.WithLogger(context.Background(), common.Logger(ctx))), 5*time.Minute)
+	case context.DeadlineExceeded:
+		return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	default:
+		return ctx, func() {}
+	}
 }
 
 // newMainStepsExecutor runs the job's main-stage step executors in order. Unlike a plain
