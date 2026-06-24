@@ -73,6 +73,16 @@ type RunContext struct {
 	// captured before execution so each matrix combo interpolates from the originals rather
 	// than from a sibling's already-resolved values written into the shared Job.Outputs.
 	outputTemplate map[string]string
+	// jobCancelled records that this job's run was cancelled (context.Canceled). It makes
+	// getJobContext report the "cancelled" status so cancelled()/always() evaluate the way
+	// GitHub Actions does, letting cleanup and always() steps run while normal steps skip.
+	jobCancelled bool
+}
+
+// markCancelled flags the job as cancelled so subsequent step `if` evaluations and the
+// job status context observe the "cancelled" state.
+func (rc *RunContext) markCancelled() {
+	rc.jobCancelled = true
 }
 
 func (rc *RunContext) AddMask(mask string) {
@@ -909,6 +919,12 @@ func (rc *RunContext) getJobContext() *model.JobContext {
 			jobStatus = "failure"
 			break
 		}
+	}
+	// A cancelled run takes precedence over success/failure so cancelled() is true and
+	// success()/failure() are false, matching GitHub Actions: on cancellation only
+	// always() and cancelled() steps run.
+	if rc.jobCancelled {
+		jobStatus = "cancelled"
 	}
 	return &model.JobContext{
 		Status: jobStatus,

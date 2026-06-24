@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -198,17 +199,21 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		return err
 	})
 
-	pipeline := make([]common.Executor, 0)
-	pipeline = append(pipeline, preSteps...)
-	pipeline = append(pipeline, steps...)
+	// Pre steps short-circuit on cancellation like a normal pipeline. Main steps go
+	// through newMainStepsExecutor so that a cancellation (or job timeout) does not
+	// abandon the remaining always()/cancelled() steps — they still run for cleanup.
+	stepsExecutor := common.NewPipelineExecutor(preSteps...).Then(newMainStepsExecutor(rc, steps))
 
-	return common.NewPipelineExecutor(info.startContainer(), common.NewPipelineExecutor(pipeline...).
+	return common.NewPipelineExecutor(info.startContainer(), stepsExecutor.
 		Finally(func(ctx context.Context) error {
 			var cancel context.CancelFunc
 			switch ctx.Err() {
 			case context.Canceled:
 				// in case of an aborted run, we still should execute the
-				// post steps to allow cleanup.
+				// post steps to allow cleanup. Record the cancellation so the
+				// post steps observe the "cancelled" job status (backstop for
+				// cancellations that land outside the main step loop).
+				rc.markCancelled()
 				ctx, cancel = context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), 5*time.Minute)
 				defer cancel()
 			case context.DeadlineExceeded:
@@ -225,6 +230,48 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		}).
 		Finally(info.interpolateOutputs()).
 		Finally(info.closeContainer()))
+}
+
+// newMainStepsExecutor runs the job's main-stage step executors in order. Unlike a plain
+// pipeline, an interruption (context.Canceled from a server cancel, or context.DeadlineExceeded
+// from the job timeout) does not abandon the remaining steps: it marks the job cancelled when
+// appropriate and keeps iterating under a fresh, bounded context so steps whose `if` still
+// evaluates true — always() and cancelled() — run for cleanup, mirroring GitHub Actions. Steps
+// that default to success() skip themselves because success() is false once the job is no longer
+// successful. The main-step wrappers report their own errors and return nil, so the loop drives
+// step ordering off the context, not return values.
+func newMainStepsExecutor(rc *RunContext, steps []common.Executor) common.Executor {
+	return func(ctx context.Context) error {
+		for i, step := range steps {
+			if ctx.Err() != nil {
+				return runMainStepsAfterInterrupt(ctx, rc, steps[i:])
+			}
+			_ = step(ctx)
+		}
+		// Cancellation can land during the final step, after the loop's last context
+		// check; record it so the post steps still observe the cancelled status.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			rc.markCancelled()
+		}
+		return nil
+	}
+}
+
+// runMainStepsAfterInterrupt runs the remaining main steps after the job context was cancelled or
+// timed out. It detaches from the interrupted context (keeping its values: logger and job error)
+// and applies a fresh deadline so always()/cancelled() steps run to completion. The original
+// interrupt error is returned so callers up the chain still see the job as cancelled/timed out.
+func runMainStepsAfterInterrupt(ctx context.Context, rc *RunContext, steps []common.Executor) error {
+	interruptErr := ctx.Err()
+	if errors.Is(interruptErr, context.Canceled) {
+		rc.markCancelled()
+	}
+	freshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+	for _, step := range steps {
+		_ = step(freshCtx)
+	}
+	return interruptErr
 }
 
 func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success bool) {
