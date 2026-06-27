@@ -19,6 +19,7 @@ DOCKER_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)
 DOCKER_ROOTLESS_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)-dind-rootless
 
 GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+GOLANGCI_LINT ?= golangci-lint
 GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.3.0
 
 STATIC ?=
@@ -38,12 +39,15 @@ endif
 ifeq ($(OS), Windows_NT)
 	GOFLAGS := -v -buildmode=exe
 	EXECUTABLE ?= $(EXECUTABLE).exe
+	GO_ENV_WINDOWS := set GOOS=windows&&
 else ifeq ($(OS), Windows)
 	GOFLAGS := -v -buildmode=exe
 	EXECUTABLE ?= $(EXECUTABLE).exe
+	GO_ENV_WINDOWS := set GOOS=windows&&
 else
 	GOFLAGS := -v
 	EXECUTABLE ?= $(EXECUTABLE)
+	GO_ENV_WINDOWS := GOOS=windows
 endif
 
 STORED_VERSION_FILE := VERSION
@@ -108,11 +112,16 @@ deps-tools: ## install tool dependencies
 	wait
 
 .PHONY: lint
-lint: lint-go ## lint everything
+lint: lint-go lint-go-windows ## lint everything
 
 .PHONY: lint-go
 lint-go: ## lint go files
 	$(GO) run $(GOLANGCI_LINT_PACKAGE) run
+
+.PHONY: lint-go-windows
+lint-go-windows: ## lint Windows go files
+	$(GO) install $(GOLANGCI_LINT_PACKAGE)
+	$(GO_ENV_WINDOWS) $(GOLANGCI_LINT) run
 
 .PHONY: lint-go-fix
 lint-go-fix: ## lint go files and fix issues
