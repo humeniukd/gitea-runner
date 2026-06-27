@@ -455,3 +455,35 @@ func TestExecAsDockerHoldsCloneLockForRemoteUncached(t *testing.T) {
 		t.Fatal("execAsDocker did not return after inner was released and ctx was canceled")
 	}
 }
+
+func TestDockerActionImageTag(t *testing.T) {
+	// Remote actions already carry a unique, ref-scoped actionName (the uses
+	// hash), so the tag must be left untouched for backwards compatibility.
+	assert.Equal(t,
+		"act-abc123-dockeraction:latest",
+		dockerActionImageTag("owner/repo", "abc123", false),
+	)
+
+	// A self-referencing local action (`uses: ./`) has the same workspace
+	// relative actionName ("./") regardless of the repository it lives in. The
+	// resulting image tag must still differ per repository, otherwise an image
+	// built for one repo is reused for another on a shared docker daemon.
+	// See https://gitea.com/gitea/runner/issues/1039.
+	tagA := dockerActionImageTag("owner/repo-a", "./", true)
+	tagB := dockerActionImageTag("owner/repo-b", "./", true)
+	assert.NotEqual(t, tagA, tagB,
+		"local docker action tags must differ across repositories")
+
+	// Tags must always be valid (lowercase, no leading dash) docker image names.
+	for _, tag := range []string{tagA, tagB} {
+		assert.True(t, strings.HasPrefix(tag, "act-"), "tag %q must start with act-", tag)
+		assert.Equal(t, strings.ToLower(tag), tag, "tag %q must be lowercase", tag)
+		assert.False(t, strings.HasPrefix(tag, "act--"), "tag %q must not have a leading dash", tag)
+	}
+
+	// Distinct local actions within the same repository keep distinct tags.
+	assert.NotEqual(t,
+		dockerActionImageTag("owner/repo", "./", true),
+		dockerActionImageTag("owner/repo", "./sub", true),
+	)
+}

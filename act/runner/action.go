@@ -272,6 +272,29 @@ func removeGitIgnore(ctx context.Context, directory string) error {
 	return nil
 }
 
+// dockerActionImageTag derives the local docker image tag used when an action
+// is built from a Dockerfile.
+//
+// For Gitea: a local action (`uses: ./` or `uses: ./path`) has an actionName
+// that is the workspace-relative path of the action. That path is identical
+// across repositories (e.g. "./" for a self-referencing action), so without
+// namespacing, every repository's local docker action would build and reuse the
+// same `act-dockeraction:latest` image on a shared docker daemon. A subsequent
+// repository would then silently run the image built for an earlier one.
+// Including the repository keeps the tag stable for caching within a repository
+// while preventing cross-repository collisions.
+// See https://gitea.com/gitea/runner/issues/1039.
+func dockerActionImageTag(repository, actionName string, localAction bool) string {
+	name := actionName
+	if localAction {
+		name = path.Join(repository, actionName)
+	}
+	// "-dockeraction" ensures that "./", "./test " won't get converted to "act-:latest", "act-test-:latest" which are invalid docker image names
+	image := fmt.Sprintf("%s-dockeraction:%s", regexp.MustCompile("[^a-zA-Z0-9]").ReplaceAllString(name, "-"), "latest")
+	image = "act-" + strings.TrimLeft(image, "-")
+	return strings.ToLower(image)
+}
+
 // TODO: break out parts of function to reduce complexicity
 func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, basedir string, localAction bool) error {
 	logger := common.Logger(ctx)
@@ -286,10 +309,7 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 		// Apply forcePull only for prebuild docker images
 		forcePull = rc.Config.ForcePull
 	} else {
-		// "-dockeraction" enshures that "./", "./test " won't get converted to "act-:latest", "act-test-:latest" which are invalid docker image names
-		image = fmt.Sprintf("%s-dockeraction:%s", regexp.MustCompile("[^a-zA-Z0-9]").ReplaceAllString(actionName, "-"), "latest")
-		image = "act-" + strings.TrimLeft(image, "-")
-		image = strings.ToLower(image)
+		image = dockerActionImageTag(step.getGithubContext(ctx).Repository, actionName, localAction)
 		contextDir, fileName := filepath.Split(filepath.Join(basedir, action.Runs.Image))
 
 		anyArchExists, err := ContainerImageExistsLocally(ctx, image, "any")
