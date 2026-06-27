@@ -204,10 +204,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		return err
 	})
 
-	// Pre steps short-circuit on cancellation like a normal pipeline. Main steps go
-	// through newMainStepsExecutor so that a cancellation (or job timeout) does not
-	// abandon the remaining always()/cancelled() steps — they still run for cleanup.
-	stepsExecutor := common.NewPipelineExecutor(preSteps...).Then(newMainStepsExecutor(rc, steps))
+	stepsExecutor := newStepsExecutor(rc, preSteps, steps)
 
 	return common.NewPipelineExecutor(info.startContainer(), stepsExecutor.
 		Finally(func(ctx context.Context) error {
@@ -245,6 +242,30 @@ func postStepsContext(ctx context.Context) (context.Context, context.CancelFunc)
 		return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 	default:
 		return ctx, func() {}
+	}
+}
+
+// newStepsExecutor sequences the job's pre steps and main steps.
+//
+// The pre steps run as a normal pipeline that short-circuits on the first failure or
+// cancellation. The main-steps executor then runs unconditionally — even if a pre step failed
+// or the job was interrupted — so always()/cancelled()/failure() main steps still run, mirroring
+// GitHub Actions. This is safe because each main step re-evaluates its own `if` (a pre-step
+// failure flips the job status to failure via SetJobError, so success()-default steps skip) and
+// newMainStepsExecutor detaches from an interrupted context before running the remaining steps.
+//
+// A pre-step failure or interrupt is still propagated so the job is reported with the correct
+// conclusion; the pre error takes precedence since it happened first.
+func newStepsExecutor(rc *RunContext, preSteps, steps []common.Executor) common.Executor {
+	preExecutor := common.NewPipelineExecutor(preSteps...)
+	mainExecutor := newMainStepsExecutor(rc, steps)
+	return func(ctx context.Context) error {
+		preErr := preExecutor(ctx)
+		mainErr := mainExecutor(ctx)
+		if preErr != nil {
+			return preErr
+		}
+		return mainErr
 	}
 }
 

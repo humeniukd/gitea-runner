@@ -98,6 +98,74 @@ func TestMainStepsExecutorRunsAlwaysStepsAfterCancel(t *testing.T) {
 	assert.True(t, rc.jobCancelled, "the job is marked cancelled")
 }
 
+// TestStepsExecutorRunsMainStepsAfterPreCancel verifies that a cancellation landing during the
+// pre phase does not abandon the main steps: newStepsExecutor still runs the main-steps executor,
+// so a main-stage always()/cancelled() step is reached (under a fresh, non-cancelled context),
+// the job is marked cancelled, and the cancellation is propagated. Before the fix the `.Then(...)`
+// short-circuit skipped the main steps entirely when a pre step was cancelled.
+func TestStepsExecutorRunsMainStepsAfterPreCancel(t *testing.T) {
+	rc := createIfTestRunContext(map[string]*model.Job{
+		"job1": createJob(t, `runs-on: ubuntu-latest`, ""),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var ran []string
+	var mainStepCtxErr error
+	preSteps := []common.Executor{
+		func(_ context.Context) error {
+			ran = append(ran, "pre1")
+			cancel() // server cancellation lands during the pre phase
+			return nil
+		},
+	}
+	steps := []common.Executor{
+		func(c context.Context) error {
+			ran = append(ran, "always-step")
+			mainStepCtxErr = c.Err()
+			return nil
+		},
+	}
+
+	err := newStepsExecutor(rc, preSteps, steps)(ctx)
+
+	require.ErrorIs(t, err, context.Canceled, "the cancellation is propagated")
+	assert.Equal(t, []string{"pre1", "always-step"}, ran, "the main always() step runs after a pre-phase cancel")
+	require.NoError(t, mainStepCtxErr, "the main step runs under a fresh, non-cancelled context")
+	assert.True(t, rc.jobCancelled, "the job is marked cancelled")
+}
+
+// TestStepsExecutorRunsMainStepsAfterPreFailure verifies that a failing pre step does not abandon
+// the main steps: they still run (so a main-stage always()/failure() step is reached), and the
+// pre-step error is propagated so the job is reported as failed. The main steps' own `if`
+// evaluation is what skips success()-default steps, so running them here is safe.
+func TestStepsExecutorRunsMainStepsAfterPreFailure(t *testing.T) {
+	rc := createIfTestRunContext(map[string]*model.Job{
+		"job1": createJob(t, `runs-on: ubuntu-latest`, ""),
+	})
+
+	var ran []string
+	preSteps := []common.Executor{
+		func(_ context.Context) error {
+			ran = append(ran, "pre1")
+			return assert.AnError
+		},
+	}
+	steps := []common.Executor{
+		func(_ context.Context) error {
+			ran = append(ran, "always-step")
+			return nil
+		},
+	}
+
+	err := newStepsExecutor(rc, preSteps, steps)(context.Background())
+
+	require.ErrorIs(t, err, assert.AnError, "the pre-step error is propagated")
+	assert.Equal(t, []string{"pre1", "always-step"}, ran, "the main always() step runs after a pre-step failure")
+	assert.False(t, rc.jobCancelled, "a pre-step failure is not a cancellation")
+}
+
 // TestPostStepsContextCancelledIsUsableForFailingStep guards against a panic: post/cleanup
 // steps run on a context derived from the cancelled job context, and a failing post step
 // records its error via common.SetJobError. If that derived context lacks a job-error container,
