@@ -40,11 +40,12 @@ runner:
   # The runner uses exponential backoff when idle, increasing the interval up to this maximum.
   # Set to 0 or same as fetch_interval to disable backoff.
   fetch_interval_max: 5s
-  # While idle, remove stale bind-workdir task directories older than this duration.
-  # Setting either workdir_cleanup_age or idle_cleanup_interval to 0 (or any
-  # non-positive value) disables workdir cleanup entirely.
+  # While idle, remove stale bind-workdir task directories and orphaned host-mode
+  # scratch directories (left behind when a host cleanup delete stalls) older than
+  # this duration. Setting either workdir_cleanup_age or idle_cleanup_interval to 0
+  # (or any non-positive value) disables stale-directory cleanup entirely.
   workdir_cleanup_age: 24h
-  # Cadence for the idle stale bind-workdir cleanup pass.
+  # Cadence for the idle stale-directory cleanup pass.
   idle_cleanup_interval: 10m
   # The base interval for periodic log flush to the Gitea instance.
   # Logs may be sent earlier if the buffer reaches log_report_batch_size
@@ -82,31 +83,47 @@ runner:
   # terminal; tools like `docker build` emit redrawing progress frames into the captured log
   # when a TTY is present.
   allocate_pty: false
+  # Optional executable on the host, run once after each task's built-in cleanup
+  # (post-steps, container teardown, bind-workdir removal). Additive only.
+  #
+  # IMPORTANT: While this script runs the runner stops task heartbeats and stays
+  # offline from Gitea's perspective until the script exits. A script that never
+  # returns blocks new work until post_task_script_timeout kills it (default 5m).
+  # Keep scripts short; set post_task_script_timeout to a safe upper bound.
+  #
+  # Output -> runner process log (not the job log). Non-zero exit -> warning only.
+  # Windows: use .exe, .bat, or .cmd. PowerShell (.ps1) is not supported yet as
+  # the configured path; wrap PowerShell commands in a .cmd file instead.
+  # Full guide: docs/post-task-script.md
+  post_task_script: ''
+  # Hard limit on post_task_script runtime. Default if omitted: 5m.
+  post_task_script_timeout: 5m
 
 cache:
-  # Enable cache server to use actions/cache.
+  # Enable the built-in cache server (used by actions/cache and similar actions).
   enabled: true
-  # The directory to store the cache data.
-  # If it's empty, the cache data will be stored in $HOME/.cache/actcache.
+  # Directory where cache blobs are stored on disk. Default: $HOME/.cache/actcache
+  # Ignored when external_server is set.
   dir: ""
-  # The host of the cache server.
-  # It's not for the address to listen, but the address to connect from job containers.
-  # So 0.0.0.0 is a bad choice, leave it empty to detect automatically.
+  # Outbound IP or hostname that job containers use to reach this runner's cache server.
+  # Leave empty to detect automatically. 0.0.0.0 is not valid here.
+  # Ignored when external_server is set.
   host: ""
-  # The port of the cache server.
-  # 0 means to use a random available port.
+  # Port for the built-in cache server. 0 picks a random free port.
+  # Ignored when external_server is set.
   port: 0
-  # The external cache server URL. Valid only when enable is true.
-  # If it's specified, runner will use this URL as the ACTIONS_CACHE_URL rather than start a server by itself.
-  # The URL should generally end with "/".
-  # Requires external_secret below to be set to the same value on both this runner and the cache-server.
+  # URL of a shared `gitea-runner cache-server` to use instead of starting a local one.
+  # Set on every runner that should share a cache pool. Must end with "/".
+  # Example: "http://cache-host:8088/"
+  # Requires external_secret (below) to match the value on the cache-server.
   external_server: ""
-  # Shared secret between this runner and the external `gitea-runner cache-server`. Required when external_server
-  # (or `gitea-runner cache-server`) is in use: the runner pre-registers each job's ACTIONS_RUNTIME_TOKEN with the
-  # cache-server, and the cache-server enforces bearer auth + per-repo cache isolation.
+  # Shared secret between this runner and the external cache-server.
+  # Required when external_server is set. Must be identical on every runner and the cache-server.
+  # Generate with: openssl rand -hex 32
   external_secret: ""
-  # When true, reuse a cached action instead of fetching from the remote on every job. Note: a moved tag
-  # (e.g. a re-tagged "v6") or an updated branch stays at the cached commit until its cache entry is removed.
+  # When true, reuse a cached action instead of fetching from the remote on every job.
+  # A moved tag (e.g. a re-tagged "v6") or an updated branch stays at the cached commit
+  # until its cache entry expires or is manually removed.
   offline_mode: false
 
 container:
@@ -115,6 +132,13 @@ container:
   # If it's empty, runner will create a network automatically.
   # Deprecated: `network_mode` is still accepted for old configs; use `network` instead.
   network: ""
+  # network_create_options only apply when `network` is left empty and the runner
+  # auto-creates a per-job network that does not already exist. They have no effect
+  # when a custom `network` name is set, because that network is used as-is and never
+  # created by the runner. Omit the entire block to use Docker's defaults.
+  network_create_options:
+    enable_ipv4: true  # Omit to use Docker's default (IPv4 enabled). Set false to disable IPv4.
+    enable_ipv6: false # Omit to use Docker's default (IPv6 disabled). Enabling it requires dockerd started with --ipv6.
   # Whether to use privileged mode or not when launching task containers (privileged mode is required for Docker-in-Docker).
   privileged: false
   # Any other options to be used when the container is started (e.g., --add-host=my.gitea.url:host-gateway).

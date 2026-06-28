@@ -107,6 +107,34 @@ runner:
 // TestLoadDefault_MalformedYAMLReturnsParseError pins the error surfaced for
 // invalid YAML to the canonical "parse config file" message rather than the
 // "for defaults metadata" variant — i.e. the main yaml.Unmarshal runs first.
+func TestLoadDefault_LoadsPostTaskScript(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+runner:
+  post_task_script: /usr/local/bin/post-task.sh
+  post_task_script_timeout: 2m
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, "/usr/local/bin/post-task.sh", cfg.Runner.PostTaskScript)
+	assert.Equal(t, 2*time.Minute, cfg.Runner.PostTaskScriptTimeout)
+}
+
+func TestLoadDefault_DefaultsPostTaskScriptTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+runner:
+  post_task_script: /usr/local/bin/post-task.sh
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, 5*time.Minute, cfg.Runner.PostTaskScriptTimeout)
+}
+
 func TestLoadDefault_MalformedYAMLReturnsParseError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -116,4 +144,51 @@ func TestLoadDefault_MalformedYAMLReturnsParseError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parse config file")
 	assert.NotContains(t, err.Error(), "defaults metadata")
+}
+
+func TestContainerNetworkCreateOptions(t *testing.T) {
+	// Verify that the enable_ipv4/enable_ipv6 YAML keys unmarshal into the *bool fields,
+	// distinguishing an explicit true/false from an omitted key (nil). A nil here is
+	// forwarded as-is to Docker, which applies its own default.
+	loadOptions := func(t *testing.T, yaml string) ContainerNetworkCreateOptions {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+		cfg, err := LoadDefault(path)
+		require.NoError(t, err)
+		return cfg.Container.NetworkCreateOptions
+	}
+
+	t.Run("enable_ipv6 true unmarshals to non-nil true", func(t *testing.T) {
+		opts := loadOptions(t, "container:\n  network_create_options:\n    enable_ipv6: true\n")
+		require.NotNil(t, opts.EnableIPv6)
+		assert.True(t, *opts.EnableIPv6)
+	})
+
+	t.Run("enable_ipv6 false unmarshals to non-nil false", func(t *testing.T) {
+		opts := loadOptions(t, "container:\n  network_create_options:\n    enable_ipv6: false\n")
+		require.NotNil(t, opts.EnableIPv6)
+		assert.False(t, *opts.EnableIPv6)
+	})
+
+	t.Run("enable_ipv4 false unmarshals to non-nil false", func(t *testing.T) {
+		opts := loadOptions(t, "container:\n  network_create_options:\n    enable_ipv4: false\n")
+		require.NotNil(t, opts.EnableIPv4)
+		assert.False(t, *opts.EnableIPv4)
+	})
+
+	t.Run("omitted keys stay nil", func(t *testing.T) {
+		opts := loadOptions(t, "container:\n  network_create_options:\n    enable_ipv4: true\n")
+		require.NotNil(t, opts.EnableIPv4)
+		assert.True(t, *opts.EnableIPv4)
+		assert.Nil(t, opts.EnableIPv6, "an omitted enable_ipv6 must remain nil so Docker's default applies")
+	})
+
+	t.Run("omitted block leaves both nil", func(t *testing.T) {
+		opts := loadOptions(t, "container:\n  network: \"\"\n")
+		assert.Nil(t, opts.EnableIPv4)
+		assert.Nil(t, opts.EnableIPv6)
+	})
 }

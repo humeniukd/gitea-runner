@@ -44,11 +44,13 @@ type Reporter struct {
 	// so the gauge skips no-op Set calls when the buffer size is unchanged.
 	lastLogBufferRows int
 
-	state        *runnerv1.TaskState
-	stateChanged bool
-	stateMu      sync.RWMutex
-	outputs      sync.Map
-	daemon       chan struct{}
+	state             *runnerv1.TaskState
+	stateChanged      bool
+	stateMu           sync.RWMutex
+	outputs           sync.Map
+	daemon            chan struct{}
+	heartbeatStop     chan struct{}
+	heartbeatStopOnce sync.Once
 
 	// Unix-nanos of the last successful UpdateTask. Atomic so the heartbeat
 	// guard in ReportState reads it without contending stateMu.
@@ -99,7 +101,8 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 		state: &runnerv1.TaskState{
 			Id: task.Id,
 		},
-		daemon: make(chan struct{}),
+		daemon:        make(chan struct{}),
+		heartbeatStop: make(chan struct{}),
 	}
 
 	if task.Secrets["ACTIONS_STEP_DEBUG"] == "true" {
@@ -273,6 +276,15 @@ func (r *Reporter) RunDaemon() {
 	go r.runDaemonLoop()
 }
 
+// StopHeartbeats stops periodic UpdateTask heartbeats without cancelling the
+// task context. Close() still delivers the final flush. Safe to call multiple
+// times and when the context is already cancelled.
+func (r *Reporter) StopHeartbeats() {
+	r.heartbeatStopOnce.Do(func() {
+		close(r.heartbeatStop)
+	})
+}
+
 func (r *Reporter) stopLatencyTimer(active *bool, timer *time.Timer) {
 	if *active {
 		if !timer.Stop() {
@@ -339,6 +351,12 @@ func (r *Reporter) runDaemonLoop() {
 			// delivers the final flush on a detached context (flushFinal).
 			close(r.daemon)
 			return
+
+		case <-r.heartbeatStop:
+			// Stop heartbeating during post-task script execution. Close() still
+			// delivers the final flush on a detached context (flushFinal).
+			close(r.daemon)
+			return
 		}
 
 		r.stateMu.RLock()
@@ -391,15 +409,28 @@ func (r *Reporter) Close(lastWords string) error {
 	r.stateMu.Lock()
 	r.closed = true
 	if r.state.Result == runnerv1.Result_RESULT_UNSPECIFIED {
+		// When r.ctx has been cancelled (server returned RESULT_CANCELLED via
+		// rpcCtx/ReportState, see line 590) the job is being torn down on the
+		// cancellation path: surface that explicitly instead of attributing it
+		// to a generic failure.
+		cancelled := errors.Is(r.ctx.Err(), context.Canceled)
 		if lastWords == "" {
-			lastWords = "Early termination"
+			if cancelled {
+				lastWords = "Cancelled"
+			} else {
+				lastWords = "Early termination"
+			}
 		}
 		for _, v := range r.state.Steps {
 			if v.Result == runnerv1.Result_RESULT_UNSPECIFIED {
 				v.Result = runnerv1.Result_RESULT_CANCELLED
 			}
 		}
-		r.state.Result = runnerv1.Result_RESULT_FAILURE
+		if cancelled {
+			r.state.Result = runnerv1.Result_RESULT_CANCELLED
+		} else {
+			r.state.Result = runnerv1.Result_RESULT_FAILURE
+		}
 		r.logRows = append(r.logRows, &runnerv1.LogRow{
 			Time:    timestamppb.Now(),
 			Content: lastWords,
