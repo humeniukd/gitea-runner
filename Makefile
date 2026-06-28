@@ -119,7 +119,8 @@ lint-go: ## lint go files
 
 .PHONY: lint-go-windows
 lint-go-windows: ## lint Windows go files
-	$(GO_ENV_WINDOWS) $(GO) run $(GOLANGCI_LINT_PACKAGE) run
+	$(GO) install $(GOLANGCI_LINT_PACKAGE)
+	$(GO_ENV_WINDOWS) golangci-lint run
 
 .PHONY: lint-go-fix
 lint-go-fix: ## lint go files and fix issues
