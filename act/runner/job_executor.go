@@ -59,9 +59,10 @@ type jobInfo interface {
 
 // reportStepError emits the GitHub Actions ##[error] annotation and records
 // the error against the job so the job is reported as failed.
-func reportStepError(ctx context.Context, err error) {
+func reportStepError(ctx context.Context, rc *RunContext, err error) {
 	common.Logger(ctx).Errorf("##[error]%v", err)
 	common.SetJobError(ctx, err)
+	rc.markFailed()
 }
 
 func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executor {
@@ -119,9 +120,9 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			rc.CurrentStepIndex = stepIdx
 			preErr := preExec(ctx)
 			if preErr != nil {
-				reportStepError(ctx, preErr)
+				reportStepError(ctx, rc, preErr)
 			} else if ctx.Err() != nil {
-				reportStepError(ctx, ctx.Err())
+				reportStepError(ctx, rc, ctx.Err())
 			}
 			return preErr
 		}))
@@ -131,9 +132,9 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			rc.CurrentStepIndex = stepIdx
 			err := stepExec(ctx)
 			if err != nil {
-				reportStepError(ctx, err)
+				reportStepError(ctx, rc, err)
 			} else if ctx.Err() != nil {
-				reportStepError(ctx, ctx.Err())
+				reportStepError(ctx, rc, ctx.Err())
 			}
 			return nil
 		}))
@@ -143,9 +144,9 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			rc.CurrentStepIndex = stepIdx
 			err := postFn(ctx)
 			if err != nil {
-				reportStepError(ctx, err)
+				reportStepError(ctx, rc, err)
 			} else if ctx.Err() != nil {
-				reportStepError(ctx, ctx.Err())
+				reportStepError(ctx, rc, ctx.Err())
 			}
 			return err
 		})
@@ -251,7 +252,7 @@ func postStepsContext(ctx context.Context) (context.Context, context.CancelFunc)
 // cancellation. The main-steps executor then runs unconditionally — even if a pre step failed
 // or the job was interrupted — so always()/cancelled()/failure() main steps still run, mirroring
 // GitHub Actions. This is safe because each main step re-evaluates its own `if` (a pre-step
-// failure flips the job status to failure via SetJobError, so success()-default steps skip) and
+// failure flips the expression job status to failure, so success()-default steps skip) and
 // newMainStepsExecutor detaches from an interrupted context before running the remaining steps.
 //
 // A pre-step failure or interrupt is still propagated so the job is reported with the correct

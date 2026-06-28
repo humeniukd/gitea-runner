@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.yaml.in/yaml/v4"
 )
 
 // TestCancelledJobStatusEnablesAlwaysAndCancelledSteps verifies that once a job is
@@ -164,6 +165,43 @@ func TestStepsExecutorRunsMainStepsAfterPreFailure(t *testing.T) {
 	require.ErrorIs(t, err, assert.AnError, "the pre-step error is propagated")
 	assert.Equal(t, []string{"pre1", "always-step"}, ran, "the main always() step runs after a pre-step failure")
 	assert.False(t, rc.jobCancelled, "a pre-step failure is not a cancellation")
+}
+
+// TestPreStepFailureAffectsMainStepIfStatus verifies the status path used by real
+// main-step `if` evaluation. A pre-step failure is not present in StepResults, so
+// recording only the context job error is not enough: getJobContext must also report
+// failure so success()-default main steps skip and failure() steps run.
+func TestPreStepFailureAffectsMainStepIfStatus(t *testing.T) {
+	rc := createIfTestRunContext(map[string]*model.Job{
+		"job1": createJob(t, `runs-on: ubuntu-latest`, ""),
+	})
+	ctx := common.WithJobErrorContainer(context.Background())
+
+	reportStepError(ctx, rc, assert.AnError)
+
+	assert.Equal(t, "failure", rc.getJobContext().Status)
+	require.ErrorIs(t, common.JobError(ctx), assert.AnError)
+
+	defaultStep := &stepRun{
+		RunContext: rc,
+		Step:       &model.Step{ID: "default-step"},
+		env:        map[string]string{},
+	}
+	defaultEnabled, err := isStepEnabled(ctx, defaultStep.getIfExpression(ctx, stepStageMain), defaultStep, stepStageMain)
+	require.NoError(t, err)
+	assert.False(t, defaultEnabled, "default success() main step must skip after a pre-step failure")
+
+	failureStep := &stepRun{
+		RunContext: rc,
+		Step: &model.Step{
+			ID: "failure-step",
+			If: yaml.Node{Value: "failure()"},
+		},
+		env: map[string]string{},
+	}
+	failureEnabled, err := isStepEnabled(ctx, failureStep.getIfExpression(ctx, stepStageMain), failureStep, stepStageMain)
+	require.NoError(t, err)
+	assert.True(t, failureEnabled, "failure() main step must run after a pre-step failure")
 }
 
 // TestPostStepsContextCancelledIsUsableForFailingStep guards against a panic: post/cleanup
