@@ -95,6 +95,19 @@ func (rc *RunContext) markFailed() {
 	rc.jobFailed = true
 }
 
+// markInterrupted records the job's interruption status from a context error so later step `if` evaluations and the job result observe it,
+// keeping the timeout path symmetric with the cancel path:
+//   - context.Canceled (server cancel) marks the job cancelled, matching GitHub's "only always()/cancelled() run on cancel".
+//   - context.DeadlineExceeded (job timeout-minutes) marks the job failed, matching the "Timeout -> FAILURE" reporting semantics.
+func (rc *RunContext) markInterrupted(err error) {
+	switch {
+	case errors.Is(err, context.Canceled):
+		rc.markCancelled()
+	case errors.Is(err, context.DeadlineExceeded):
+		rc.markFailed()
+	}
+}
+
 func (rc *RunContext) AddMask(mask string) {
 	rc.Masks = append(rc.Masks, mask)
 }

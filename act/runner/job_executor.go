@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -209,11 +208,9 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 
 	return common.NewPipelineExecutor(info.startContainer(), stepsExecutor.
 		Finally(func(ctx context.Context) error {
-			// Record a cancellation (backstop for cancellations that land outside the
-			// main step loop) so the post steps observe the "cancelled" job status.
-			if errors.Is(ctx.Err(), context.Canceled) {
-				rc.markCancelled()
-			}
+			// Record an interrupt (backstop for interrupts that land outside the main
+			// step loop) so the post steps observe the cancelled/failed job status.
+			rc.markInterrupted(ctx.Err())
 			postCtx, cancel := postStepsContext(ctx)
 			defer cancel()
 			return postExecutor(postCtx)
@@ -286,11 +283,9 @@ func newMainStepsExecutor(rc *RunContext, steps []common.Executor) common.Execut
 			}
 			_ = step(ctx)
 		}
-		// Cancellation can land during the final step, after the loop's last context
-		// check; record it so the post steps still observe the cancelled status.
-		if errors.Is(ctx.Err(), context.Canceled) {
-			rc.markCancelled()
-		}
+		// An interrupt can land during the final step, after the loop's last context
+		// check; record it so the post steps still observe the cancelled/failed status.
+		rc.markInterrupted(ctx.Err())
 		return nil
 	}
 }
@@ -301,9 +296,7 @@ func newMainStepsExecutor(rc *RunContext, steps []common.Executor) common.Execut
 // interrupt error is returned so callers up the chain still see the job as cancelled/timed out.
 func runMainStepsAfterInterrupt(ctx context.Context, rc *RunContext, steps []common.Executor) error {
 	interruptErr := ctx.Err()
-	if errors.Is(interruptErr, context.Canceled) {
-		rc.markCancelled()
-	}
+	rc.markInterrupted(interruptErr)
 	freshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 	defer cancel()
 	for _, step := range steps {

@@ -99,6 +99,46 @@ func TestMainStepsExecutorRunsAlwaysStepsAfterCancel(t *testing.T) {
 	assert.True(t, rc.jobCancelled, "the job is marked cancelled")
 }
 
+// TestMainStepsExecutorMarksFailedOnTimeoutBetweenSteps guards the timeout path's symmetry with the cancel path.
+// When the job deadline (timeout-minutes) lands in the gap between two steps, the job must be marked as failed (not cancelled),
+// so always()/failure() cleanup steps run while default success() steps skip, and so the timed-out job is not reported as success.
+func TestMainStepsExecutorMarksFailedOnTimeoutBetweenSteps(t *testing.T) {
+	rc := createIfTestRunContext(map[string]*model.Job{
+		"job1": createJob(t, `runs-on: ubuntu-latest`, ""),
+	})
+
+	// A short deadline that we let elapse between steps, so no step records the error itself.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	var ran []string
+	var laterStepCtxErr error
+	steps := []common.Executor{
+		func(c context.Context) error {
+			ran = append(ran, "step1")
+			// Block until the job deadline elapses, then return cleanly: the interrupt lands in the loop's between-steps check, not inside a step.
+			<-c.Done()
+			return nil
+		},
+		func(c context.Context) error {
+			ran = append(ran, "always-step")
+			laterStepCtxErr = c.Err()
+			return nil
+		},
+	}
+
+	err := newMainStepsExecutor(rc, steps)(ctx)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded, "the timeout error is propagated")
+	assert.Equal(t, []string{"step1", "always-step"}, ran, "the always() step still runs after a timeout")
+	require.NoError(t, laterStepCtxErr, "remaining steps run under a fresh, non-expired context")
+	assert.True(t, rc.jobFailed, "a job timeout marks the job failed")
+	assert.False(t, rc.jobCancelled, "a timeout is not a cancellation")
+
+	// The status the real main-step `if` evaluation sees: "failure", so default success() steps skip while always()/failure() steps run.
+	assert.Equal(t, "failure", rc.getJobContext().Status)
+}
+
 // TestStepsExecutorRunsMainStepsAfterPreCancel verifies that a cancellation landing during the
 // pre phase does not abandon the main steps: newStepsExecutor still runs the main-steps executor,
 // so a main-stage always()/cancelled() step is reached (under a fresh, non-cancelled context),
