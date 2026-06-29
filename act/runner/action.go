@@ -6,7 +6,9 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -289,8 +291,15 @@ func dockerActionImageTag(repository, actionName string, localAction bool) strin
 	if localAction {
 		name = path.Join(repository, actionName)
 	}
+	// The human-readable name is sanitized by collapsing every non-alphanumeric character to "-".
+	sanitized := regexp.MustCompile("[^a-zA-Z0-9]").ReplaceAllString(name, "-")
+	if localAction {
+		// For local actions a short hash of the raw repository and action path is appended so the tag stays unique per repository.
+		sum := sha256.Sum256([]byte(repository + "\x00" + actionName))
+		sanitized += "-" + hex.EncodeToString(sum[:])[:12]
+	}
 	// "-dockeraction" ensures that "./", "./test " won't get converted to "act-:latest", "act-test-:latest" which are invalid docker image names
-	image := fmt.Sprintf("%s-dockeraction:%s", regexp.MustCompile("[^a-zA-Z0-9]").ReplaceAllString(name, "-"), "latest")
+	image := fmt.Sprintf("%s-dockeraction:%s", sanitized, "latest")
 	image = "act-" + strings.TrimLeft(image, "-")
 	return strings.ToLower(image)
 }
