@@ -4,7 +4,6 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ .Values.serviceAccount.name }}
-  namespace: {{ include "gitea-runner.namespace" . }}
   labels:
     {{- include "gitea-runner.labels" . | nindent 4 }}
     app.kubernetes.io/component: runner
@@ -15,5 +14,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: {{ .Values.serviceAccount.name }}
-  namespace: {{ include "gitea-runner.namespace" . }}
 {{- end -}}
