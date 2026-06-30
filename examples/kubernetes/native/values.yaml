@@ -14,13 +14,10 @@
 # ---------------------------------------------------------------------------
 # Namespace
 # ---------------------------------------------------------------------------
-namespace:
-  # Emit a Namespace object. Disable if you manage namespaces out-of-band.
-  create: true
-  # Namespace the runner AND all job pods live in. Must match the
-  # kubernetes.namespace field rendered into config.yaml (the chart wires this
-  # automatically — do not override one without the other).
-  name: gitea-e2e
+# The chart does NOT create a Namespace object — the deployer must provision
+# one (e.g. `kubectl create ns`, or Argo's CreateNamespace=true sync option).
+# All chart resources AND the runner's job pods live in the release namespace
+# (`.Release.Namespace`), so jobs run alongside the runner Deployment.
 
 # ---------------------------------------------------------------------------
 # Runner image & Deployment

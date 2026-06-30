@@ -42,9 +42,10 @@ data:
 
     kubernetes:
       enabled: true
-      # Namespace the runner creates job pods in. Must equal the chart's
-      # namespace (the chart wires this automatically).
-      namespace: {{ include "gitea-runner.namespace" . }}
+      # Namespace the runner creates job pods in. Always the release namespace:
+      # jobs run in the SAME namespace as the runner Deployment. The deployer
+      # must create this namespace (the chart does not).
+      namespace: {{ .Release.Namespace }}
       service_account: {{ .Values.serviceAccount.name }}
 
       # Image for bare `run:` jobs with no `container: image:`.

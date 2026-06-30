@@ -22,12 +22,13 @@ app.kubernetes.io/component: runner
 {{- end -}}
 
 {{/*
-Namespace the chart renders into. When namespace.create=true the Namespace
-object is emitted and every namespaced resource references it explicitly so
-`helm template` (no --namespace) still lands in the right place.
+Namespace the chart renders into = the release namespace. The chart does NOT
+create a Namespace object; it is the deployer's responsibility (e.g. Argo's
+CreateNamespace=true, or an existing namespace). The runner also creates its
+job pods HERE, so jobs run in the same namespace as the runner.
 */}}
 {{- define "gitea-runner.namespace" -}}
-{{- .Values.namespace.name | default .Release.Namespace -}}
+{{- .Release.Namespace -}}
 {{- end -}}
 
 {{/*
