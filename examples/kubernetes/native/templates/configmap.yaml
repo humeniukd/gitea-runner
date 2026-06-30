@@ -1,0 +1,132 @@
+{{/* Copyright 2026 The Gitea Authors. All rights reserved. SPDX-License-Identifier: MIT */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitea-runner-config
+  namespace: {{ include "gitea-runner.namespace" . }}
+  labels:
+    {{- include "gitea-runner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+data:
+  config.yaml: |
+    log:
+      level: {{ .Values.config.log.level }}
+
+    runner:
+      # .runner lives on the PVC so registration survives pod restarts.
+      file: /data/.runner
+      # capacity bounds concurrent jobs for docker/host backends only; it is
+      # BYPASSED in kubernetes mode (use kubernetes.max_concurrent_jobs).
+      capacity: {{ .Values.config.runner.capacity }}
+      timeout: {{ .Values.config.runner.timeout }}
+
+    cache:
+{{- if (include "gitea-runner.embeddedCache" .) | eq "true" }}
+      enabled: true
+      dir: {{ .Values.cache.dir }}
+      # Cluster-routable hostname for the gitea-runner-cache Service.
+      # Must match the Service name + namespace in service.yaml. The Phase 6
+      # startup guard rejects loopback values when kubernetes.enabled is true.
+      host: {{ include "gitea-runner.cacheHost" . }}
+      port: {{ .Values.cache.port }}
+{{- else if .Values.cache.externalServer }}
+      enabled: true
+      external_server: {{ .Values.cache.externalServer | quote }}
+      external_secret: {{ .Values.cache.externalSecret | quote }}
+{{- else }}
+      enabled: false
+{{- end }}
+
+    metrics:
+      addr: {{ include "gitea-runner.metricsAddr" . | quote }}
+
+    kubernetes:
+      enabled: true
+      # Namespace the runner creates job pods in. Must equal the chart's
+      # namespace (the chart wires this automatically).
+      namespace: {{ include "gitea-runner.namespace" . }}
+      service_account: {{ .Values.serviceAccount.name }}
+
+      # Image for bare `run:` jobs with no `container: image:`.
+      default_job_image: {{ .Values.config.kubernetes.defaultJobImage }}
+
+      # Cluster-routable URL job pods use to reach the embedded cache. Must be
+      # non-loopback (Phase 6 startup guard enforces this). Redundant with
+      # cache.host but set explicitly for clarity.
+{{- if (include "gitea-runner.embeddedCache" .) | eq "true" }}
+      connect_back_address: {{ include "gitea-runner.cacheURL" . | quote }}
+{{- else }}
+      # connect_back_address omitted: embedded cache is not running.
+{{- end }}
+
+      pod_ready_timeout: {{ .Values.config.kubernetes.podReadyTimeout }}
+      pod_cleanup: {{ .Values.config.kubernetes.podCleanup }}
+      max_concurrent_jobs: {{ .Values.config.kubernetes.maxConcurrentJobs }}
+
+{{- with .Values.config.kubernetes.runtimeClassName }}
+      # Sandboxed runtime enforced on EVERY job pod (operator policy).
+      runtime_class_name: {{ . | quote }}
+{{- end }}
+
+{{- with .Values.config.kubernetes.imagePullSecrets }}
+      image_pull_secrets:
+{{- range . }}
+        - {{ . | quote }}
+{{- end }}
+{{- end }}
+
+{{- with .Values.config.kubernetes.podLabels }}
+      # Extra labels stamped on every job pod.
+      pod_labels:
+{{- range $k, $v := . }}
+        {{ $k }}: {{ $v | quote }}
+{{- end }}
+{{- end }}
+
+{{- with .Values.config.kubernetes.podAnnotations }}
+      pod_annotations:
+{{- range $k, $v := . }}
+        {{ $k }}: {{ $v | quote }}
+{{- end }}
+{{- end }}
+
+      workspace_volume:
+        type: {{ .Values.config.kubernetes.workspaceVolume.type }}
+{{- with .Values.config.kubernetes.workspaceVolume.size }}
+        size: {{ . | quote }}
+{{- end }}
+{{- with .Values.config.kubernetes.workspaceVolume.storageClassName }}
+        storage_class_name: {{ . | quote }}
+{{- end }}
+        access_modes:
+{{- range .Values.config.kubernetes.workspaceVolume.accessModes }}
+          - {{ . }}
+{{- end }}
+
+      resources:
+        job:
+          requests:
+            cpu: {{ .Values.config.kubernetes.resources.job.requests.cpu }}
+            memory: {{ .Values.config.kubernetes.resources.job.requests.memory }}
+          limits:
+            cpu: {{ .Values.config.kubernetes.resources.job.limits.cpu }}
+            memory: {{ .Values.config.kubernetes.resources.job.limits.memory }}
+        service:
+          requests:
+            cpu: {{ .Values.config.kubernetes.resources.service.requests.cpu }}
+            memory: {{ .Values.config.kubernetes.resources.service.requests.memory }}
+          limits:
+            cpu: {{ .Values.config.kubernetes.resources.service.limits.cpu }}
+            memory: {{ .Values.config.kubernetes.resources.service.limits.memory }}
+        dind:
+          requests:
+            cpu: {{ .Values.config.kubernetes.resources.dind.requests.cpu }}
+            memory: {{ .Values.config.kubernetes.resources.dind.requests.memory }}
+          limits:
+            cpu: {{ .Values.config.kubernetes.resources.dind.limits.cpu }}
+            memory: {{ .Values.config.kubernetes.resources.dind.limits.memory }}
+
+      dind:
+        enabled: {{ .Values.config.kubernetes.dind.enabled }}
+        rootless: {{ .Values.config.kubernetes.dind.rootless }}
+        image: {{ .Values.config.kubernetes.dind.image }}

@@ -1,0 +1,28 @@
+{{/* Copyright 2026 The Gitea Authors. All rights reserved. SPDX-License-Identifier: MIT */}}
+{{- if .Values.networkPolicy.create -}}
+# Allow same-namespace pods (job pods) to reach the embedded cache on the
+# runner pod. Apply only if the namespace enforces a default-deny ingress
+# NetworkPolicy — without one this is unnecessary.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cache-ingress
+  namespace: {{ include "gitea-runner.namespace" . }}
+  labels:
+    {{- include "gitea-runner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cache
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gitea-runner.selectorLabels" . | nindent 6 }}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ include "gitea-runner.namespace" . }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.cache.port }}
+{{- end -}}

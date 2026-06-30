@@ -1,0 +1,144 @@
+{{/* Copyright 2026 The Gitea Authors. All rights reserved. SPDX-License-Identifier: MIT */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea-runner
+  namespace: {{ include "gitea-runner.namespace" . }}
+  labels:
+    {{- include "gitea-runner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+spec:
+  replicas: {{ .Values.runner.replicas }}
+  selector:
+    matchLabels:
+      {{- include "gitea-runner.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gitea-runner.selectorLabels" . | nindent 8 }}
+        {{- with .Values.runner.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.runner.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.runner.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+      {{- if .Values.runner.persistence.enabled }}
+      - name: runner-data
+        persistentVolumeClaim:
+          claimName: {{ .Values.runner.persistence.existingClaim | default "gitea-runner-data" }}
+      {{- end }}
+      - name: runner-config
+        configMap:
+          name: gitea-runner-config
+      - name: cache-data
+        emptyDir: {}
+      containers:
+      - name: runner
+        image: {{ .Values.runner.image }}
+        imagePullPolicy: {{ .Values.runner.imagePullPolicy }}
+        env:
+        # Downward API: runner Pod name and UID. The k8s backend reads these to
+        # set an own-Pod ownerReference on every job pod so cluster GC reaps
+        # them when this runner pod is deleted (and the startup sweep treats
+        # pods missing this owner as out-of-scope).
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        # Tells scripts/run.sh to pass --config /etc/act_runner/config.yaml.
+        - name: CONFIG_FILE
+          value: /etc/act_runner/config.yaml
+        - name: GITEA_INSTANCE_URL
+          value: {{ .Values.runner.giteaInstanceUrl | quote }}
+        - name: GITEA_RUNNER_REGISTRATION_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.runner.registration.secretName }}
+              key: {{ .Values.runner.registration.secretKey }}
+        {{- with .Values.runner.name }}
+        - name: GITEA_RUNNER_NAME
+          value: {{ . | quote }}
+        {{- end }}
+        # Labels route jobs to this runner via runs-on. Defaults to k8s-native.
+        - name: GITEA_RUNNER_LABELS
+          value: {{ include "gitea-runner.labelsEnv" . | quote }}
+        {{- if .Values.runner.ephemeral }}
+        - name: GITEA_RUNNER_EPHEMERAL
+          value: "true"
+        {{- end }}
+        {{- if .Values.runner.once }}
+        - name: GITEA_RUNNER_ONCE
+          value: "true"
+        {{- end }}
+        - name: GITEA_MAX_REG_ATTEMPTS
+          value: {{ .Values.runner.registration.maxAttempts | quote }}
+        {{- with .Values.runner.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        ports:
+        {{- if (include "gitea-runner.embeddedCache" .) | eq "true" }}
+        - name: cache
+          containerPort: {{ .Values.cache.port }}
+          protocol: TCP
+        {{- end }}
+        {{- if .Values.metrics.service.enabled }}
+        - name: metrics
+          containerPort: 9101
+          protocol: TCP
+        {{- end }}
+        volumeMounts:
+        {{- if .Values.runner.persistence.enabled }}
+        - name: runner-data
+          mountPath: /data
+        {{- end }}
+        - name: runner-config
+          mountPath: /etc/act_runner
+          readOnly: true
+        - name: cache-data
+          mountPath: {{ .Values.cache.dir }}
+        {{- if and .Values.runner.probes.enabled (eq (include "gitea-runner.embeddedCache" .) "true") }}
+        readinessProbe:
+          tcpSocket:
+            port: cache
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          tcpSocket:
+            port: cache
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        {{- end }}
+        resources:
+          {{- toYaml .Values.runner.resources | nindent 10 }}
+        {{- with .Values.runner.securityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- with .Values.runner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runner.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

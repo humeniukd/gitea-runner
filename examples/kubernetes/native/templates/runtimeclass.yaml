@@ -1,0 +1,28 @@
+{{/* Copyright 2026 The Gitea Authors. All rights reserved. SPDX-License-Identifier: MIT */}}
+{{- if .Values.runtimeClasses.create -}}
+{{- $root := . -}}
+{{- range $name, $rc := .Values.runtimeClasses }}
+{{- if or (eq $name "gvisor") (eq $name "kata") }}
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "gitea-runner.labels" $root | nindent 4 }}
+# handler must match the containerd/CRI-O runtime name configured on the node.
+handler: {{ $rc.handler | default $name }}
+{{- if or $rc.nodeSelector $rc.tolerations }}
+scheduling:
+{{- with $rc.nodeSelector }}
+  nodeSelector:
+    {{- toYaml . | nindent 4 }}
+{{- end }}
+{{- with $rc.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}

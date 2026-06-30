@@ -1,0 +1,24 @@
+{{/* Copyright 2026 The Gitea Authors. All rights reserved. SPDX-License-Identifier: MIT */}}
+{{- if .Values.runner.persistence.enabled -}}
+{{- if not .Values.runner.persistence.existingClaim -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitea-runner-data
+  namespace: {{ include "gitea-runner.namespace" . }}
+  labels:
+    {{- include "gitea-runner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+spec:
+  accessModes:
+{{- range .Values.runner.persistence.accessModes }}
+    - {{ . }}
+{{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.runner.persistence.storage }}
+{{- with .Values.runner.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+{{- end }}
+{{- end -}}
+{{- end -}}

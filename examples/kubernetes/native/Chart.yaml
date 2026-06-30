@@ -1,0 +1,23 @@
+# Copyright 2026 The Gitea Authors. All rights reserved.
+# SPDX-License-Identifier: MIT
+apiVersion: v2
+name: gitea-runner-native
+description: |
+  Gitea Actions runner using the Kubernetes-native pod backend: each Actions
+  job runs as one Pod (init container for workspace setup, long-lived job
+  container for step execution via remotecommand, native sidecars for
+  services). No Docker daemon is required in the runner pod.
+type: application
+version: 0.1.0
+appVersion: "nightly"
+keywords:
+  - gitea
+  - actions
+  - runner
+  - kubernetes
+  - ci
+home: https://gitea.com/gitea/runner
+sources:
+  - https://gitea.com/gitea/runner
+maintainers:
+  - name: The Gitea Authors

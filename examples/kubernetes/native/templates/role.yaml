@@ -1,0 +1,39 @@
+{{/* Copyright 2026 The Gitea Authors. All rights reserved. SPDX-License-Identifier: MIT */}}
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.serviceAccount.name }}
+  namespace: {{ include "gitea-runner.namespace" . }}
+  labels:
+    {{- include "gitea-runner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+rules:
+# Job-pod lifecycle. `patch` is required for the retain-marker merge-patch
+# (kubernetes_environment.go removeWithPolicy/markRetained); `watch` is kept
+# for parity/future use though not exercised today.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["create", "get", "list", "watch", "delete", "patch"]
+# Step execution via remotecommand (SPDY exec). Log streaming rides the same
+# exec connection.
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+{{- if .Values.rbac.forwardLooking }}
+# pods/log: documented but currently unused (logs stream over pods/exec).
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+{{- end }}
+# Per-job Secret/ConfigMap cleanup. `delete` is exercised today by the
+# dangling-owner sweep (deterministic <pod>-secrets/<pod>-config names).
+# `create`/`get` are forward-looking for the per-job credential feature.
+- apiGroups: [""]
+  resources: ["secrets", "configmaps"]
+{{- if .Values.rbac.forwardLooking }}
+  verbs: ["create", "get", "delete"]
+{{- else }}
+  verbs: ["delete"]
+{{- end }}
+{{- end -}}

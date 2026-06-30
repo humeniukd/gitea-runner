@@ -1,0 +1,49 @@
+Gitea Actions runner (Kubernetes-native pod backend) installed in namespace
+  {{ include "gitea-runner.namespace" . }}.
+
+{{- if eq (include "gitea-runner.embeddedCache" .) "true" }}
+
+The embedded artifact-cache is exposed to job pods at:
+  {{ include "gitea-runner.cacheURL" . }}
+
+job pods reach actions/cache, upload-artifact and download-artifact through
+this address (the Phase 6 startup guard verified it is non-loopback).
+{{- else if .Values.cache.externalServer }}
+
+Cache is served by an EXTERNAL cache-server:
+  {{ .Values.cache.externalServer }}
+Ensure cache.externalSecret matches the secret configured on that server.
+{{- else }}
+
+Cache is DISABLED. actions/cache, upload-artifact and download-artifact will
+not work unless you set cache.externalServer or re-enable cache.enabled.
+{{- end }}
+
+Next steps:
+
+1. Create the registration token Secret (unless the chart created it):
+{{- if and .Values.runner.registration.create .Values.runner.registration.token }}
+   The chart created Secret/{{ .Values.runner.registration.secretName }} from
+   the token you supplied in values. Rotate it before this release is shared.
+{{- else }}
+   kubectl -n {{ include "gitea-runner.namespace" . }} create secret generic \
+     {{ .Values.runner.registration.secretName }} \
+     --from-literal={{ .Values.runner.registration.secretKey }}=<registration-token>
+{{- end }}
+
+2. Watch the runner come online:
+   kubectl -n {{ include "gitea-runner.namespace" . }} get pods \
+     -l app.kubernetes.io/name=gitea-runner
+   kubectl -n {{ include "gitea-runner.namespace" . }} logs \
+     -l app.kubernetes.io/name=gitea-runner --follow
+
+3. Route jobs to this runner with runs-on. Default routing label:
+   {{ include "gitea-runner.labelsEnv" . }}
+   Override with runner.labels in values.yaml.
+
+{{- if gt (int .Values.runner.replicas) 1 }}
+
+WARNING: replicas={{ .Values.runner.replicas }}. The registration-state PVC is
+ReadWriteOnce and the cache Service reaches only one pod's embedded cache.
+Scale horizontally only if you understand these caveats (see README).
+{{- end }}

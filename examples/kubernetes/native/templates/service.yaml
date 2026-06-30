@@ -1,0 +1,22 @@
+{{/* Copyright 2026 The Gitea Authors. All rights reserved. SPDX-License-Identifier: MIT */}}
+{{- if (include "gitea-runner.embeddedCache" .) | eq "true" -}}
+{{- if .Values.cache.service.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea-runner-cache
+  namespace: {{ include "gitea-runner.namespace" . }}
+  labels:
+    {{- include "gitea-runner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cache
+spec:
+  type: {{ .Values.cache.service.type }}
+  selector:
+    {{- include "gitea-runner.selectorLabels" . | nindent 4 }}
+  ports:
+  - name: cache
+    port: {{ .Values.cache.port }}
+    targetPort: cache
+    protocol: TCP
+{{- end -}}
+{{- end -}}

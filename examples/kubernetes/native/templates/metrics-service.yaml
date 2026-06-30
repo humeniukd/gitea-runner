@@ -1,0 +1,29 @@
+{{/* Copyright 2026 The Gitea Authors. All rights reserved. SPDX-License-Identifier: MIT */}}
+{{- if and .Values.metrics.service.enabled (eq (include "gitea-runner.embeddedCache" .) "true") -}}
+{{/* The metrics port is served by the runner container regardless of cache
+     mode; this Service only exists when the operator opts in. The gate above
+     is just a cheap sanity check — drop it if you also disable the cache. */}}
+{{- end -}}
+{{- if .Values.metrics.service.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea-runner-metrics
+  namespace: {{ include "gitea-runner.namespace" . }}
+  labels:
+    {{- include "gitea-runner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+  {{- with .Values.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.metrics.service.type }}
+  selector:
+    {{- include "gitea-runner.selectorLabels" . | nindent 4 }}
+  ports:
+  - name: metrics
+    port: {{ .Values.metrics.service.port }}
+    targetPort: metrics
+    protocol: TCP
+{{- end -}}

@@ -1,0 +1,255 @@
+# Copyright 2026 The Gitea Authors. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# Default values for the Gitea Actions runner (Kubernetes-native pod backend).
+#
+# Defaults reproduce the previous static manifests 1:1, so
+#   helm template examples/kubernetes/native
+# is equivalent to the old `kubectl apply -f examples/kubernetes/native/`.
+#
+# Field names under `config.*` mirror internal/pkg/config/config.go so the
+# rendered config.yaml is valid runner input. See that file (and the README
+# here) for the authoritative field reference.
+
+# ---------------------------------------------------------------------------
+# Namespace
+# ---------------------------------------------------------------------------
+namespace:
+  # Emit a Namespace object. Disable if you manage namespaces out-of-band.
+  create: true
+  # Namespace the runner AND all job pods live in. Must match the
+  # kubernetes.namespace field rendered into config.yaml (the chart wires this
+  # automatically — do not override one without the other).
+  name: gitea-e2e
+
+# ---------------------------------------------------------------------------
+# Runner image & Deployment
+# ---------------------------------------------------------------------------
+runner:
+  # Single image reference. Pin the tag in production (e.g. gitea/runner:0.2.x).
+  image: gitea/runner:nightly
+  imagePullPolicy: IfNotPresent
+  # imagePullSecrets for the RUNNER pod (not job pods — see config.kubernetes.imagePullSecrets).
+  imagePullSecrets: []
+    # - name: registry-credentials
+
+  replicas: 1
+  # NOTE: replicas>1 is not fully supported today:
+  #   - the registration-state PVC is ReadWriteOnce (one writer), and
+  #   - the gitea-runner-cache Service deterministically reaches only one
+  #     pod's embedded cache. Run replicas=1 unless you understand the caveats.
+
+  # Gitea server URL the runner registers against on first start.
+  giteaInstanceUrl: https://gitea.example.com
+
+  # Registration identity. labels is how `runs-on:` routes jobs to this runner.
+  name: ""                 # GITEA_RUNNER_NAME (default: pod hostname)
+  labels: []               # GITEA_RUNNER_LABELS, e.g. ["k8s", "native"]
+  ephemeral: false         # GITEA_RUNNER_EPHEMERAL — de-register after one job
+  once: false              # GITEA_RUNNER_ONCE     — exit after one job
+
+  registration:
+    # The chart does not create the token Secret by default; create it out of
+    # band (see README). These name the Secret so the Deployment can mount it.
+    secretName: gitea-runner-token
+    secretKey: token
+    # Optionally have the chart create the Secret from a literal token.
+    # Leave token empty to skip Secret creation.
+    create: false
+    token: ""
+    # Registration retry attempts (run.sh waits for Gitea to come up).
+    maxAttempts: 10        # GITEA_MAX_REG_ATTEMPTS
+
+  # Persistent registration state (.runner file). Without it the runner
+  # re-registers on every restart, leaking runner entries in Gitea.
+  persistence:
+    enabled: true
+    existingClaim: ""      # use an existing PVC instead of creating one
+    storage: 1Gi
+    storageClassName: ""   # "" = cluster default StorageClass
+    accessModes: [ReadWriteOnce]
+
+  # Runner container resources.
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: "1",  memory: 512Mi }
+
+  # Extra labels/annotations on the runner Pod (selector labels are fixed).
+  podLabels: {}
+  podAnnotations: {}
+  extraEnv: []
+    # - name: HTTP_PROXY
+  #   value: http://proxy:3128
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podSecurityContext: {}
+  securityContext: {}
+
+  # TCP probe against the embedded cache port. Disable if you run an external
+  # cache server (cache.externalServer) — there is no in-pod port to probe.
+  probes:
+    enabled: true
+
+# ---------------------------------------------------------------------------
+# ServiceAccount & RBAC
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: gitea-runner
+  annotations: {}
+
+rbac:
+  create: true
+  # Grant permissions the runner needs today PLUS the documented-but-not-yet-
+  # wired per-job Secret/ConfigMap feature (secrets/configmaps create+get,
+  # pods/log get). Set false for strictest least-privilege: the chart then
+  # grants only what the runtime actually exercises (pods create/get/list/
+  # watch/delete/patch, pods/exec create, secrets/configmaps delete).
+  forwardLooking: true
+
+# ---------------------------------------------------------------------------
+# Embedded artifact cache
+# ---------------------------------------------------------------------------
+cache:
+  # When false, the embedded cache server is disabled entirely and no cache
+  # Service or Deployment port is rendered. job pods must then use an external
+  # cache (set externalServer) or forego actions/cache entirely.
+  enabled: true
+  port: 3000               # listener binds :port on all interfaces
+  dir: /tmp/actcache       # emptyDir-backed by default
+
+  # External cache server mode: point at a standalone gitea-runner cache-server
+  # instead of the embedded one. When externalServer is set, the embedded cache
+  # is NOT started, no cache Service is rendered, and the Deployment omits the
+  # cache port. externalSecret must match the secret configured on that server.
+  externalServer: ""
+  externalSecret: ""
+
+  service:
+    # ClusterIP Service exposing the embedded cache to job pods at a stable
+    # cluster DNS (gitea-runner-cache.<ns>.svc.cluster.local). Required for the
+    # Phase 6 loopback guard to pass when the embedded cache is on.
+    enabled: true
+    type: ClusterIP
+
+# ---------------------------------------------------------------------------
+# Metrics (Prometheus on :9101)
+# ---------------------------------------------------------------------------
+metrics:
+  # Bind address rendered into config.metrics.addr. Code default is
+  # 127.0.0.1:9101 (pod-loopback, unreachable from a Service). When
+  # service.enabled is true the chart forces 0.0.0.0:9101 so the Service can
+  # scrape it; set explicitly here to override.
+  addr: ""
+  service:
+    enabled: false
+    type: ClusterIP
+    port: 9101
+    annotations: {}
+      # prometheus.io/scrape: "true"
+      # prometheus.io/port: "9101"
+
+# ---------------------------------------------------------------------------
+# Runner config (rendered into config.yaml)
+# ---------------------------------------------------------------------------
+config:
+  log:
+    level: info
+
+  runner:
+    # capacity bounds concurrent jobs for docker/host backends ONLY; it is
+    # BYPASSED in kubernetes mode (use kubernetes.maxConcurrentJobs).
+    # Cosmetic here, kept for parity.
+    capacity: 4
+    timeout: 3h
+
+  kubernetes:
+    enabled: true
+    # Image for bare `run:` jobs that declare no `container: image:`.
+    defaultJobImage: node:20-bookworm
+    # How long to wait for a job pod to reach Ready. Code default is 5m.
+    podReadyTimeout: 10m
+    # When to delete a completed job pod: always | on-failure | never.
+    podCleanup: always
+    # 0 = unlimited: kube-scheduler + a ResourceQuota are the real backpressure.
+    maxConcurrentJobs: 0
+    # Enforce a RuntimeClass on EVERY job pod (operator policy; workflows
+    # cannot opt out). Leave "" for node default (runc). See runtimeClasses.
+    runtimeClassName: ""
+
+    # imagePullSecrets injected into each JOB pod (not the runner pod).
+    imagePullSecrets: []
+      # - name: job-registry-credentials
+
+    # Extra labels/annotations the runner stamps on every job pod it creates.
+    podLabels: {}
+    podAnnotations: {}
+
+    # Shared workspace volume across the init/job/service containers.
+    # type: emptyDir | ephemeral | pvc (requires size for ephemeral/pvc).
+    workspaceVolume:
+      type: emptyDir
+      size: ""
+      storageClassName: ""
+      accessModes: [ReadWriteOnce]
+
+    # Per-container-role resource defaults (M3). dind requires >=1Gi memory.
+    resources:
+      job:
+        requests: { cpu: 250m, memory: 256Mi }
+        limits:   { cpu: "2",  memory: 2Gi }
+      service:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits:   { cpu: "1",  memory: 1Gi }
+      dind:
+        requests: { cpu: 500m, memory: 1Gi }
+        limits:   { cpu: "2",  memory: 4Gi }
+
+    dind:
+      # Explicit opt-in for `uses: docker://` steps (no auto-detect).
+      enabled: false
+      # rootless: true (default) = docker:dind-rootless (lower privilege).
+      # false = privileged docker:dind sidecar (weakens isolation).
+      rootless: true
+      image: docker:28-dind-rootless
+
+# ---------------------------------------------------------------------------
+# Sandboxed RuntimeClass objects (cluster-scoped)
+# ---------------------------------------------------------------------------
+runtimeClasses:
+  # Disabled by default. Enable to ship gvisor/kata RuntimeClass objects.
+  # The node must already run the matching handler (runsc/kata) — applying a
+  # RuntimeClass whose handler is absent just yields Pending job pods.
+  create: false
+  gvisor:
+    handler: runsc
+    nodeSelector: {}
+    tolerations: []
+  kata:
+    handler: kata
+    nodeSelector: {}
+    tolerations: []
+
+# ---------------------------------------------------------------------------
+# NetworkPolicy: allow job pods to reach the cache Service
+# ---------------------------------------------------------------------------
+# Apply only if your cluster enforces a default-deny ingress policy in the
+# runner namespace. Selects the runner pod (cache host) for ingress on the
+# cache port from same-namespace pods (job pods).
+networkPolicy:
+  create: false
+
+# ---------------------------------------------------------------------------
+# ResourceQuota: real backpressure for unlimited runners
+# ---------------------------------------------------------------------------
+# Recommended when kubernetes.maxConcurrentJobs=0 so the scheduler — not the
+# runner — bounds the namespace. See README.
+resourceQuota:
+  create: false
+  hard: {}
+    # pods: "50"
+    # requests.cpu: "20"
+    # requests.memory: 40Gi
+    # limits.cpu: "80"
+    # limits.memory: 160Gi

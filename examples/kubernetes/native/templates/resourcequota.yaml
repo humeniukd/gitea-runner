@@ -1,0 +1,16 @@
+{{/* Copyright 2026 The Gitea Authors. All rights reserved. SPDX-License-Identifier: MIT */}}
+{{- if .Values.resourceQuota.create -}}
+# Real backpressure for unlimited runners (kubernetes.max_concurrent_jobs=0):
+# bound the namespace so the kube-scheduler — not the runner — rejects excess
+# job pods. Tune the budget to your cluster.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "gitea-runner.namespace" . }}-quota
+  namespace: {{ include "gitea-runner.namespace" . }}
+  labels:
+    {{- include "gitea-runner.labels" . | nindent 4 }}
+spec:
+  hard:
+    {{- toYaml .Values.resourceQuota.hard | nindent 4 }}
+{{- end -}}
