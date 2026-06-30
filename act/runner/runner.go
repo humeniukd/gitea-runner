@@ -33,6 +33,7 @@ type Config struct {
 	Workdir                            string                                        // path to working directory
 	ActionCacheDir                     string                                        // path used for caching action contents
 	ActionOfflineMode                  bool                                          // when offline, use cached action contents
+	ActionCloneDepth                   int                                           // limit history when cloning an action repo; 0 clones every branch in full
 	BindWorkdir                        bool                                          // bind the workdir to the job container
 	EventName                          string                                        // name of event to run
 	EventPath                          string                                        // path to JSON file to use for event.json in containers
@@ -251,7 +252,10 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 							return err
 						}
 
-						return executor(common.WithJobErrorContainer(WithJobLogger(ctx, rc.Run.JobID, jobName, rc.Config, &rc.Masks, matrix)))
+						jobCtx := common.WithJobErrorContainer(WithJobLogger(ctx, rc.Run.JobID, jobName, rc.Config, &rc.Masks, matrix))
+						jobCtx, cancelTimeout := applyJobTimeout(jobCtx, rc, job)
+						defer cancelTimeout()
+						return executor(jobCtx)
 					})
 				}
 				// Run all matrix combinations of this job, then drop its aggregation mutex: the
@@ -306,7 +310,7 @@ func handleFailure(plan *model.Plan) common.Executor {
 	return func(ctx context.Context) error {
 		for _, stage := range plan.Stages {
 			for _, run := range stage.Runs {
-				if run.Job().Result == "failure" {
+				if run.Job().Result == "failure" && !run.Job().ContinueOnError {
 					return fmt.Errorf("Job '%s' failed", run.String())
 				}
 			}
