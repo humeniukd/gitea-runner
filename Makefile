@@ -3,10 +3,12 @@ EXECUTABLE := gitea-runner
 DIST_DIRS := $(DIST)/binaries $(DIST)/release
 GO ?= go
 SHASUM ?= shasum -a 256
+GIT_CLIFF ?= git-cliff
 HAS_GO = $(shell hash $(GO) > /dev/null 2>&1 && echo "GO" || echo "NOGO" )
 XGO_PACKAGE ?= src.techknowlogick.com/xgo@latest
 XGO_VERSION := go-1.26.x
 GXZ_PACKAGE ?= github.com/ulikunitz/xz/cmd/gxz@v0.5.10
+RELEASE_NOTES ?= $(DIST)/release-notes.md
 
 LINUX_ARCHS ?= linux/amd64,linux/arm64
 DARWIN_ARCHS ?= darwin-12/amd64,darwin-12/arm64
@@ -110,6 +112,13 @@ deps-tools: ## install tool dependencies
 	$(GO) install $(GOVULNCHECK_PACKAGE) & \
 	wait
 
+.PHONY: git-cliff-check
+git-cliff-check:
+	@command -v $(GIT_CLIFF) >/dev/null 2>&1 || { \
+		echo "git-cliff is required. Install it from https://git-cliff.org/docs/installation/"; \
+		exit 1; \
+	}
+
 .PHONY: lint
 lint: lint-go lint-go-windows ## lint everything
 
@@ -146,6 +155,47 @@ tidy-check: tidy
 		printf "%s" "$${diff}"; \
 		exit 1; \
 	fi
+
+.PHONY: next-version
+next-version: git-cliff-check ## print the next version from conventional commits
+	@latest_tag="$$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"; \
+	if [ -n "$$latest_tag" ]; then \
+		$(GIT_CLIFF) --bumped-version "$$latest_tag"..HEAD; \
+	else \
+		$(GIT_CLIFF) --bumped-version; \
+	fi
+
+.PHONY: changelog
+changelog: git-cliff-check ## generate CHANGELOG.md
+	$(GIT_CLIFF) --bump -o CHANGELOG.md
+
+.PHONY: release-notes
+release-notes: git-cliff-check | $(DIST_DIRS) ## generate release notes for the current tag
+	$(GIT_CLIFF) --current --strip header -o $(RELEASE_NOTES)
+
+.PHONY: release-prep
+release-prep: git-cliff-check ## update VERSION and CHANGELOG.md for the next release
+	@latest_tag="$$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"; \
+	if [ -n "$$latest_tag" ] && [ "$$(git rev-list "$$latest_tag"..HEAD --count)" = "0" ]; then \
+		echo "No commits since $$latest_tag; nothing to release"; \
+		exit 1; \
+	fi; \
+	if [ -n "$$latest_tag" ]; then \
+		version="$$( $(GIT_CLIFF) --bumped-version "$$latest_tag"..HEAD )"; \
+	else \
+		version="$$( $(GIT_CLIFF) --bumped-version )"; \
+	fi; \
+	version="$${version#v}"; \
+	if [ -z "$$version" ]; then \
+		echo "Unable to compute the next version"; \
+		exit 1; \
+	fi; \
+	echo "$$version" > $(STORED_VERSION_FILE); \
+	$(GIT_CLIFF) --bump -o CHANGELOG.md; \
+	echo "Prepared release v$$version"; \
+	echo "Review and commit $(STORED_VERSION_FILE) and CHANGELOG.md, then tag with:"; \
+	echo "  git tag -s v$$version -m v$$version"; \
+	echo "  git push origin v$$version"
 
 .PHONY: test
 test: fmt-check security-check ## test everything (integration tests self-skip without docker/network)

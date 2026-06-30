@@ -1,0 +1,74 @@
+# git-cliff configuration for gitea-runner.
+# See https://git-cliff.org/docs/configuration.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+"""
+body = """
+{% if version -%}
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+## [unreleased]
+{% endif %}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+
+{% for commit in commits -%}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{% if commit.breaking %}**Breaking:** {% endif %}{{ commit.message | upper_first }}
+{% endfor -%}
+
+{% endfor %}
+"""
+footer = """
+
+"""
+trim = true
+render_always = true
+postprocessors = [
+    { pattern = '\n{3,}', replace = "\n\n" },
+]
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+require_conventional = false
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+fail_on_unmatched_commit = false
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+topo_order = false
+topo_order_commits = true
+sort_commits = "oldest"
+
+commit_preprocessors = [
+    { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://gitea.com/gitea/runner/pulls/${1}))" },
+]
+
+commit_parsers = [
+    { message = "^feat", group = "<!-- 0 -->Features" },
+    { message = "^enhance", group = "<!-- 1 -->Enhancements" },
+    { message = "^fix", group = "<!-- 2 -->Bug fixes" },
+    { message = "^perf", group = "<!-- 3 -->Performance" },
+    { message = "^refactor", group = "<!-- 4 -->Refactoring" },
+    { message = "^build", group = "<!-- 5 -->Build" },
+    { message = "^ci", group = "<!-- 6 -->CI" },
+    { message = "^docs?", group = "<!-- 7 -->Documentation" },
+    { message = "^style", group = "<!-- 8 -->Style" },
+    { message = "^test", group = "<!-- 9 -->Tests" },
+    { message = "^chore\\(deps.*\\)", group = "<!-- 10 -->Dependencies" },
+    { message = "^fix\\(deps.*\\)", group = "<!-- 10 -->Dependencies" },
+    { message = "^chore", group = "<!-- 11 -->Chores" },
+    { message = "^revert", group = "<!-- 12 -->Reverts" },
+    { message = ".*", group = "<!-- 13 -->Other" },
+]
+
+[bump]
+features_always_bump_minor = true
+breaking_always_bump_major = true
+custom_minor_increment_regex = "^enhance"

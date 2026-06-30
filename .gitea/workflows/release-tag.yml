@@ -15,6 +15,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: "go.mod"
+      - name: Install git-cliff
+        uses: taiki-e/install-action@git-cliff
+      - name: Generate release notes
+        run: make release-notes RELEASE_NOTES=/tmp/release-notes.md
       - name: Import GPG key
         id: import_gpg
         uses: crazy-max/ghaction-import-gpg@v7
@@ -26,7 +30,7 @@ jobs:
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser-pro
-          args: release
+          args: release --release-notes=/tmp/release-notes.md
         env:
           GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
