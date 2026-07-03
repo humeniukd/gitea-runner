@@ -32,6 +32,7 @@ import (
 
 	"github.com/docker/go-connections/nat"
 	"github.com/opencontainers/selinux/go-selinux"
+	"github.com/sirupsen/logrus"
 )
 
 // RunContext contains info about current job
@@ -440,37 +441,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			rc.ServiceContainers = append(rc.ServiceContainers, c)
 		}
 
-		rc.cleanUpJobContainer = func(ctx context.Context) error {
-			reuseJobContainer := func(ctx context.Context) bool {
-				return rc.Config.ReuseContainers
-			}
-
-			if rc.JobContainer != nil {
-				return rc.JobContainer.Remove().IfNot(reuseJobContainer).
-					Then(container.NewDockerVolumeRemoveExecutor(rc.jobContainerName(), false)).IfNot(reuseJobContainer).
-					Then(container.NewDockerVolumeRemoveExecutor(rc.jobContainerName()+"-env", false)).IfNot(reuseJobContainer).
-					Then(func(ctx context.Context) error {
-						if len(rc.ServiceContainers) > 0 {
-							logger.Infof("Cleaning up services for job %s", rc.JobName)
-							if err := rc.stopServiceContainers()(ctx); err != nil {
-								logger.Errorf("Error while cleaning services: %v", err)
-							}
-						}
-						if createAndDeleteNetwork {
-							// clean network if it has been created by act
-							// if using service containers
-							// it means that the network to which containers are connecting is created by `runner`,
-							// so, we should remove the network at last.
-							logger.Infof("Cleaning up network for job %s, and network name is: %s", rc.JobName, networkName)
-							if err := container.NewDockerNetworkRemoveExecutor(networkName)(ctx); err != nil {
-								logger.Errorf("Error while cleaning network: %v", err)
-							}
-						}
-						return nil
-					})(ctx)
-			}
-			return nil
-		}
+		rc.cleanUpJobContainer = rc.cleanupJobContainer(logger, networkName, createAndDeleteNetwork)
 
 		// For Gitea, `jobContainerNetwork` should be the same as `networkName`
 		jobContainerNetwork := networkName
@@ -522,6 +493,40 @@ func (rc *RunContext) startJobContainer() common.Executor {
 				Body: "",
 			}),
 		)(ctx)
+	}
+}
+
+func (rc *RunContext) cleanupJobContainer(logger logrus.FieldLogger, networkName string, createAndDeleteNetwork bool) common.Executor {
+	return func(ctx context.Context) error {
+		reuseJobContainer := func(ctx context.Context) bool {
+			return rc.Config.ReuseContainers
+		}
+
+		cleanup := common.NewPipelineExecutor()
+		if rc.JobContainer != nil {
+			cleanup = rc.JobContainer.Remove().IfNot(reuseJobContainer).
+				Then(container.NewDockerVolumeRemoveExecutor(rc.jobContainerName(), false)).IfNot(reuseJobContainer).
+				Then(container.NewDockerVolumeRemoveExecutor(rc.jobContainerName()+"-env", false)).IfNot(reuseJobContainer)
+		}
+		return cleanup.Then(func(ctx context.Context) error {
+			if len(rc.ServiceContainers) > 0 {
+				logger.Infof("Cleaning up services for job %s", rc.JobName)
+				if err := rc.stopServiceContainers()(ctx); err != nil {
+					logger.Errorf("Error while cleaning services: %v", err)
+				}
+			}
+			if createAndDeleteNetwork {
+				// clean network if it has been created by act
+				// if using service containers
+				// it means that the network to which containers are connecting is created by `runner`,
+				// so, we should remove the network at last.
+				logger.Infof("Cleaning up network for job %s, and network name is: %s", rc.JobName, networkName)
+				if err := container.NewDockerNetworkRemoveExecutor(networkName)(ctx); err != nil {
+					logger.Errorf("Error while cleaning network: %v", err)
+				}
+			}
+			return nil
+		})(ctx)
 	}
 }
 

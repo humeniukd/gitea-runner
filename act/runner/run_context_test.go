@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/exprparser"
 	"gitea.com/gitea/runner/act/model"
 
@@ -361,6 +362,21 @@ func TestRunContextValidVolumes(t *testing.T) {
 	// combinations share one *Config, and the previous in-place append was a data race.
 	assert.Equal(t, []string{"my-vol", "/host/path"}, rc.Config.ValidVolumes)
 	assert.Len(t, rc.validVolumes(), len(got), "repeated calls must be stable, not accumulate")
+}
+
+func TestCleanupJobContainerCleansServicesWithoutJobContainer(t *testing.T) {
+	service := &containerMock{}
+	service.On("Remove").Return(func(context.Context) error { return nil }).Once()
+	service.On("Close").Return(func(context.Context) error { return nil }).Once()
+
+	rc := &RunContext{
+		Config:            &Config{},
+		ServiceContainers: []container.ExecutionsEnvironment{service},
+	}
+
+	err := rc.cleanupJobContainer(log.StandardLogger(), "external-network", false)(context.Background())
+	require.NoError(t, err)
+	service.AssertExpectations(t)
 }
 
 // TestInterpolateOutputsIsPerMatrixCombo guards the matrix-output fix: combinations share one
