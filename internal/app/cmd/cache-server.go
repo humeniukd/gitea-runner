@@ -17,9 +17,10 @@ import (
 )
 
 type cacheServerArgs struct {
-	Dir  string
-	Host string
-	Port uint16
+	Dir         string
+	Host        string
+	Port        uint16
+	ExternalURL string
 }
 
 func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *cobra.Command, args []string) error {
@@ -32,9 +33,10 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 		initLogging(cfg)
 
 		var (
-			dir  = cfg.Cache.Dir
-			host = cfg.Cache.Host
-			port = cfg.Cache.Port
+			dir         = cfg.Cache.Dir
+			host        = cfg.Cache.Host
+			port        = cfg.Cache.Port
+			externalURL = cfg.Cache.ExternalServer
 		)
 
 		// cacheArgs has higher priority
@@ -47,6 +49,9 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 		if cacheArgs.Port != 0 {
 			port = cacheArgs.Port
 		}
+		if cacheArgs.ExternalURL != "" {
+			externalURL = cacheArgs.ExternalURL
+		}
 
 		secret := cfg.Cache.ExternalSecret
 		if secret == "" {
@@ -57,6 +62,7 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 			host,
 			port,
 			secret,
+			externalURL,
 			log.StandardLogger().WithField("module", "cache_request"),
 		)
 		if err != nil {

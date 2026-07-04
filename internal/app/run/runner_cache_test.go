@@ -23,7 +23,7 @@ func emptyCfg() *config.Config { return &config.Config{} }
 
 func TestRunner_registerCacheForTask(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, "", nil)
+	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, "", "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -60,7 +60,7 @@ func TestRunner_registerCacheForTask_NoOps(t *testing.T) {
 
 	t.Run("empty token", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "artifactcache")
-		handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, "", nil)
+		handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, "", "", nil)
 		require.NoError(t, err)
 		defer handler.Close()
 
@@ -75,7 +75,7 @@ func TestRunner_registerCacheForTask_NoOps(t *testing.T) {
 // /find, no auth on the signed archiveLocation download.
 func TestRunner_CacheFullFlow_MatchesToolkit(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, "", nil)
+	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, "", "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -158,7 +158,7 @@ func decodeJSON(resp *http.Response, v any) error {
 func TestRunner_ExternalCacheServer_RegisterRevoke(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "remote-cache")
 	const secret = "shared-secret-for-tests"
-	remote, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, secret, nil)
+	remote, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, secret, "", nil)
 	require.NoError(t, err)
 	defer remote.Close()
 

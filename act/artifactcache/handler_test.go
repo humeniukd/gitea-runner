@@ -50,7 +50,7 @@ func signArtifactURL(h *Handler, id int64) string {
 
 func TestHandler(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(dir, "", 0, "", "", nil)
 	require.NoError(t, err)
 	handler.RegisterJob(testToken, testRepo)
 
@@ -712,7 +712,7 @@ func uploadCacheNormally(t *testing.T, base, key, version string, content []byte
 
 func TestHandler_gcCache(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(dir, "", 0, "", "", nil)
 	require.NoError(t, err)
 
 	defer func() {
@@ -823,7 +823,7 @@ func TestHandler_gcCache(t *testing.T) {
 // unauthenticated access to management endpoints is now refused with 401.
 func TestHandler_RejectsMissingBearer(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(dir, "", 0, "", "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -856,7 +856,7 @@ func TestHandler_RejectsMissingBearer(t *testing.T) {
 // accepted after RegisterJob; stale/forged tokens cannot be replayed.
 func TestHandler_RejectsUnknownBearer(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(dir, "", 0, "", "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -876,7 +876,7 @@ func TestHandler_RejectsUnknownBearer(t *testing.T) {
 // working the moment the job ends instead of living for the runner's lifetime.
 func TestHandler_UnregisterRevokes(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(dir, "", 0, "", "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -907,7 +907,7 @@ func TestHandler_UnregisterRevokes(t *testing.T) {
 // invisible to queries scoped to repoB.
 func TestHandler_CrossRepoIsolation(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(dir, "", 0, "", "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 	handler.RegisterJob("token-a", "owner/repoA")
@@ -973,7 +973,7 @@ func TestHandler_CrossRepoIsolation(t *testing.T) {
 // working after artifactURLTTL even if the bearer token is still registered.
 func TestHandler_ArtifactSignature(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(dir, "", 0, "", "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 	handler.RegisterJob(testToken, testRepo)
@@ -1006,7 +1006,7 @@ func TestHandler_ArtifactSignature(t *testing.T) {
 
 	t.Run("signature from a different server", func(t *testing.T) {
 		dir2 := filepath.Join(t.TempDir(), "artifactcache2")
-		other, err := StartHandler(dir2, "", 0, "", nil)
+		other, err := StartHandler(dir2, "", 0, "", "", nil)
 		require.NoError(t, err)
 		defer other.Close()
 		otherURL := other.signedArtifactURL(1, time.Now().Add(artifactURLTTL))
@@ -1028,13 +1028,13 @@ func TestHandler_ArtifactSignature(t *testing.T) {
 func TestHandler_SecretPersistsAcrossRestarts(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 
-	first, err := StartHandler(dir, "127.0.0.1", 0, "", nil)
+	first, err := StartHandler(dir, "127.0.0.1", 0, "", "", nil)
 	require.NoError(t, err)
 	exp := time.Now().Add(artifactURLTTL).Unix()
 	sig := first.computeSignature(42, exp)
 	require.NoError(t, first.Close())
 
-	second, err := StartHandler(dir, "127.0.0.1", 0, "", nil)
+	second, err := StartHandler(dir, "127.0.0.1", 0, "", "", nil)
 	require.NoError(t, err)
 	defer second.Close()
 
@@ -1046,7 +1046,7 @@ func TestHandler_SecretPersistsAcrossRestarts(t *testing.T) {
 // the auth refactor.
 func TestHandler_ArtifactSignatureDownload(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(dir, "", 0, "", "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 	handler.RegisterJob(testToken, testRepo)
@@ -1086,7 +1086,7 @@ func TestHandler_ArtifactSignatureDownload(t *testing.T) {
 // (restart mid-task, retry), which must not kill the live job's auth.
 func TestHandler_RegisterJob_RefCounted(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(dir, "", 0, "", "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -1118,7 +1118,7 @@ func TestHandler_RegisterJob_RefCounted(t *testing.T) {
 // keepOld window, GC must keep the one from each repo.
 func TestHandler_GC_PerRepoDedup(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(dir, "", 0, "", "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 	handler.RegisterJob("tok-a", "owner/repoA")
@@ -1169,7 +1169,7 @@ func TestHandler_GC_PerRepoDedup(t *testing.T) {
 // register/revoke when the feature is off.
 func TestHandler_InternalAPI_Disabled(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(dir, "", 0, "", "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -1187,7 +1187,7 @@ func TestHandler_InternalAPI_Disabled(t *testing.T) {
 func TestHandler_InternalAPI_AuthAndUsage(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 	const secret = "internal-secret"
-	handler, err := StartHandler(dir, "", 0, secret, nil)
+	handler, err := StartHandler(dir, "", 0, secret, "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -1234,5 +1234,22 @@ func TestHandler_InternalAPI_AuthAndUsage(t *testing.T) {
 		assert.NotEqual(t, http.StatusUnauthorized, probe("via-internal-api"))
 		assert.Equal(t, http.StatusOK, post("/_internal/revoke", secret, `{"token":"via-internal-api"}`))
 		assert.Equal(t, http.StatusUnauthorized, probe("via-internal-api"))
+	})
+}
+
+// TestHandler_CustomExternalURL verifies that the customExternalURL is used
+// to advertise the cache server's URL, and that it overrides the default host
+// and port.
+func TestHandler_CustomExternalURL(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, "", "https://example.com:1234/", nil)
+	require.NoError(t, err)
+
+	defer func() {
+		require.NoError(t, handler.Close())
+	}()
+
+	t.Run("strips tailing slashes", func(t *testing.T) {
+		assert.Equal(t, "https://example.com:1234", handler.ExternalURL())
 	})
 }

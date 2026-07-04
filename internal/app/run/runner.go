@@ -87,6 +87,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 				cfg.Cache.Host,
 				cfg.Cache.Port,
 				"",
+				"",
 				log.StandardLogger().WithField("module", "cache_request"),
 			)
 			if err != nil {

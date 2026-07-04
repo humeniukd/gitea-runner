@@ -76,7 +76,8 @@ type Handler struct {
 	gcing atomic.Bool
 	gcAt  time.Time
 
-	outboundIP string
+	outboundIP  string
+	externalURL string
 
 	// internalSecret guards /_internal/{register,revoke}. When set, a remote
 	// runner can use these endpoints to pre-register per-job
@@ -102,7 +103,7 @@ type Handler struct {
 // per-job ACTIONS_RUNTIME_TOKENs it expects this server to honor. The
 // embedded in-process handler leaves it empty and registers tokens via the
 // in-process RegisterJob method directly.
-func StartHandler(dir, outboundIP string, port uint16, internalSecret string, logger logrus.FieldLogger) (*Handler, error) {
+func StartHandler(dir, outboundIP string, port uint16, internalSecret, externalURL string, logger logrus.FieldLogger) (*Handler, error) {
 	h := &Handler{
 		creds:          make(map[string]*credEntry),
 		internalSecret: internalSecret,
@@ -134,6 +135,10 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret string, lo
 		return nil, err
 	}
 	h.storage = storage
+
+	if externalURL != "" {
+		h.externalURL = strings.TrimSuffix(externalURL, "/")
+	}
 
 	if outboundIP != "" {
 		h.outboundIP = outboundIP
@@ -193,7 +198,9 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret string, lo
 }
 
 func (h *Handler) ExternalURL() string {
-	// TODO: make the external url configurable if necessary
+	if h.externalURL != "" {
+		return h.externalURL
+	}
 	return fmt.Sprintf("http://%s:%d",
 		h.outboundIP,
 		h.listener.Addr().(*net.TCPAddr).Port)
