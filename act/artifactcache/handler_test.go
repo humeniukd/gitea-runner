@@ -1252,4 +1252,9 @@ func TestHandler_CustomExternalURL(t *testing.T) {
 	t.Run("strips tailing slashes", func(t *testing.T) {
 		assert.Equal(t, "https://example.com:1234", handler.ExternalURL())
 	})
+
+	t.Run("returns error on invalid URL", func(t *testing.T) {
+		_, err := StartHandler(dir, "", 0, "", "invalid-url", nil)
+		require.Error(t, err)
+	})
 }

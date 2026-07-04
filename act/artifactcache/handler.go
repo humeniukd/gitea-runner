@@ -77,7 +77,7 @@ type Handler struct {
 	gcAt  time.Time
 
 	outboundIP  string
-	externalURL string
+	externalURL *url.URL
 
 	// internalSecret guards /_internal/{register,revoke}. When set, a remote
 	// runner can use these endpoints to pre-register per-job
@@ -137,7 +137,11 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret, externalU
 	h.storage = storage
 
 	if externalURL != "" {
-		h.externalURL = strings.TrimSuffix(externalURL, "/")
+		parsedURL, err := url.ParseRequestURI(strings.TrimSuffix(externalURL, "/"))
+		if err != nil {
+			return nil, err
+		}
+		h.externalURL = parsedURL
 	}
 
 	if outboundIP != "" {
@@ -198,8 +202,8 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret, externalU
 }
 
 func (h *Handler) ExternalURL() string {
-	if h.externalURL != "" {
-		return h.externalURL
+	if h.externalURL != nil {
+		return h.externalURL.String()
 	}
 	return fmt.Sprintf("http://%s:%d",
 		h.outboundIP,
