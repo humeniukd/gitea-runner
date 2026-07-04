@@ -1025,6 +1025,19 @@ func TestReporter_SetOutputs(t *testing.T) {
 	r.SetOutputs(map[string]string{longKey: "v"})
 	_, ok = r.outputs.Load(longKey)
 	assert.False(t, ok)
+
+	// values longer than 1 MiB are dropped
+	longValue := strings.Repeat("v", 1024*1024+1)
+	r.SetOutputs(map[string]string{"big": longValue})
+	_, ok = r.outputs.Load("big")
+	assert.False(t, ok)
+
+	// a value at exactly the 1 MiB limit is still stored
+	maxValue := strings.Repeat("v", 1024*1024)
+	r.SetOutputs(map[string]string{"atlimit": maxValue})
+	got, ok = r.outputs.Load("atlimit")
+	require.True(t, ok)
+	assert.Equal(t, maxValue, got)
 }
 
 func TestReporter_EffectiveCloseTimeout(t *testing.T) {
