@@ -205,6 +205,10 @@ func (h *Handler) ExternalURL() string {
 	if h.externalURL != nil {
 		return h.externalURL.String()
 	}
+	return h.BoundHostURL()
+}
+
+func (h *Handler) BoundHostURL() string {
 	return fmt.Sprintf("http://%s:%d",
 		h.outboundIP,
 		h.listener.Addr().(*net.TCPAddr).Port)

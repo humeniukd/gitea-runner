@@ -69,7 +69,7 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 			return err
 		}
 
-		log.Infof("cache server is listening on %v", cacheHandler.ExternalURL())
+		log.Infof("cache server is listening on %v, external URL advertised as %v", cacheHandler.BoundHostURL(), cacheHandler.ExternalURL())
 
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, os.Interrupt)
