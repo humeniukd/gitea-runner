@@ -1,0 +1,163 @@
+openapi: 3.0.3
+info:
+  title: Act Artifact Cache API
+  version: 1.0.0
+  description: |
+    This API provides artifact cache support for [nektos/act](https://github.com/nektos/act).
+    Endpoints are exposed under `/_apis/artifactcache`.
+servers:
+  - url: http://localhost:8088/_apis/artifactcache
+paths:
+  /cache:
+    get:
+      summary: Find cache by keys and version
+      description: |
+        Looks up the most recent complete cache matching one of the given keys (case insensitive) and version.
+      parameters:
+        - name: keys
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Comma-separated list of cache keys (prefix match allowed).
+        - name: version
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Version of the cache.
+      responses:
+        '200':
+          description: Cache found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: string
+                    example: hit
+                  archiveLocation:
+                    type: string
+                    format: uri
+                  cacheKey:
+                    type: string
+        '204':
+          description: No cache found
+        '500':
+          description: Internal error
+  /caches:
+    post:
+      summary: Reserve a new cache
+      description: Reserves a cache entry for uploading.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Request'
+      responses:
+        '200':
+          description: Cache reserved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cacheId:
+                    type: integer
+                    format: int64
+        '400':
+          description: Invalid request
+        '500':
+          description: Internal error
+  /caches/{id}:
+    patch:
+      summary: Upload cache data
+      description: Uploads a chunk of data to the reserved cache.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Chunk uploaded
+        '400':
+          description: Bad request (e.g. already complete, invalid Content-Range)
+        '500':
+          description: Internal error
+    post:
+      summary: Commit cache
+      description: Marks the cache as complete and finalizes its size.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Cache committed
+        '400':
+          description: Bad request (e.g. already complete or not reserved)
+        '500':
+          description: Internal error
+  /artifacts/{id}:
+    get:
+      summary: Download cache artifact
+      description: Serves the completed cache archive for a given cache ID.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Cache artifact stream
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Invalid ID
+        '500':
+          description: Internal error
+  /clean:
+    post:
+      summary: Clean old caches
+      description: Triggers cache cleanup according to GC rules (not force delete).
+      responses:
+        '200':
+          description: Cleanup acknowledged
+components:
+  schemas:
+    Request:
+      type: object
+      properties:
+        key:
+          type: string
+          description: Cache key (case insensitive).
+        version:
+          type: string
+          description: Cache version string.
+        cacheSize:
+          type: integer
+          format: int64
+          description: Expected cache size in bytes.
+      required:
+        - key
+        - version

@@ -9,11 +9,13 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -33,6 +35,9 @@ import (
 	"github.com/timshannon/bolthold"
 	"go.etcd.io/bbolt"
 )
+
+//go:embed dist/* swagger.yaml
+var swaggerFS embed.FS
 
 const (
 	apiPath      = "/_apis/artifactcache"
@@ -149,7 +154,10 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret string, lo
 	}
 	h.secret = secret
 
+	sub, _ := fs.Sub(swaggerFS, "dist")
 	router := httprouter.New()
+	router.ServeFiles("/swagger/*filepath", http.FS(sub))
+	router.GET("/swagger.yaml", h.swagger)
 	router.GET(apiPath+"/cache", h.bearerAuth(h.find))
 	router.POST(apiPath+"/caches", h.bearerAuth(h.reserve))
 	router.PATCH(apiPath+"/caches/:id", h.bearerAuth(h.upload))
@@ -859,6 +867,16 @@ func (h *Handler) responseJSON(w http.ResponseWriter, r *http.Request, code int,
 		data, _ = json.Marshal(v[0])
 	}
 	w.WriteHeader(code)
+	_, _ = w.Write(data)
+}
+
+func (h *Handler) swagger(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	data, err := swaggerFS.ReadFile("swagger.yaml")
+	if err != nil {
+		http.Error(w, "swagger.yaml not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/yaml")
 	_, _ = w.Write(data)
 }
 
