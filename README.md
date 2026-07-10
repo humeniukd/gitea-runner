@@ -151,6 +151,8 @@ Earlier releases let a small set of environment variables (`GITEA_DEBUG`, `GITEA
 
 If `runner.labels` is set in the YAML file, those labels are used during `register` and the `--labels` CLI flag is ignored.
 
+> **Note:** A runner that only exposes `host` labels still needs access to a Docker daemon (e.g. a mounted `/var/run/docker.sock`) whenever a job uses a `docker://` action or a service container. `host` labels only change where the job's own steps run; container-based steps and actions are still executed with Docker.
+
 #### Caching (`actions/cache`)
 
 Each runner starts its own cache server automatically. Cache entries are local to that runner — runners do not share a cache by default.
