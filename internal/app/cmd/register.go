@@ -211,14 +211,14 @@ func (r *registerInputs) assignToNext(stage registerStage, value string, cfg *co
 func initInputs(regArgs *registerArgs) (*registerInputs, error) {
 	var token string
 	if regArgs.Token == "" && regArgs.TokenFile == "" {
-		return nil, fmt.Errorf("Missing Token argument. token or token-file should be set.")
+		return nil, errors.New("missing token or token-file argument")
 	}
 	if regArgs.TokenFile != "" {
-		token_bytes, err := os.ReadFile(regArgs.TokenFile)
+		tokenBytes, err := os.ReadFile(regArgs.TokenFile)
 		if err != nil {
-			return nil, fmt.Errorf("Cannot read the token file: %s, %v", regArgs.TokenFile, err)
+			return nil, fmt.Errorf("cannot read the token file: %s, %v", regArgs.TokenFile, err)
 		}
-		token = string(token_bytes)
+		token = string(tokenBytes)
 	} else {
 		token = regArgs.Token
 	}
