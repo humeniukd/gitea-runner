@@ -792,7 +792,13 @@ func (rc *RunContext) Executor() (common.Executor, error) {
 	return func(ctx context.Context) error {
 		res, err := rc.isEnabled(ctx)
 		if err != nil {
-			rc.caller.setReusedWorkflowJobResult(rc.JobName, "failure") // For Gitea
+			// Record the failure so a job whose if-expression fails to evaluate
+			// gets a result (and therefore a stop time) instead of being left
+			// unfinished. rc.caller is only set for reusable workflows.
+			rc.result("failure")
+			if rc.caller != nil { // For Gitea
+				rc.caller.setReusedWorkflowJobResult(rc.JobName, "failure")
+			}
 			return err
 		}
 		if res {
