@@ -139,18 +139,81 @@ func TestRegisterInputsAssignToNext(t *testing.T) {
 }
 
 func TestInitInputs(t *testing.T) {
-	inputs := initInputs(&registerArgs{
-		InstanceAddr: "http://localhost:3000",
-		Token:        "token",
-		RunnerName:   "runner",
-		Ephemeral:    true,
-		Labels:       " ubuntu:host , ubuntu:docker://node:18 ",
+	t.Run("missing token", func(t *testing.T) {
+		_, err := initInputs(&registerArgs{
+			InstanceAddr: "http://localhost:3000",
+			RunnerName:   "runner",
+			Ephemeral:    true,
+			Labels:       " ubuntu:host , ubuntu:docker://node:18 ",
+		})
+		require.EqualError(t, err, "Missing Token argument. token or token-file should be set.")
 	})
-	require.Equal(t, "http://localhost:3000", inputs.InstanceAddr)
-	require.Equal(t, "token", inputs.Token)
-	require.Equal(t, "runner", inputs.RunnerName)
-	require.True(t, inputs.Ephemeral)
-	require.Equal(t, []string{"ubuntu:host ", " ubuntu:docker://node:18"}, inputs.Labels)
 
-	require.Nil(t, initInputs(&registerArgs{Labels: "  "}).Labels)
+	t.Run("empty token", func(t *testing.T) {
+		_, err := initInputs(&registerArgs{
+			InstanceAddr: "http://localhost:3000",
+			Token:        "",
+			TokenFile:    "",
+			RunnerName:   "runner",
+			Ephemeral:    true,
+			Labels:       " ubuntu:host , ubuntu:docker://node:18 ",
+		})
+		require.EqualError(t, err, "Missing Token argument. token or token-file should be set.")
+	})
+
+	t.Run("invalid token file", func(t *testing.T) {
+		_, err := initInputs(&registerArgs{
+			InstanceAddr: "http://localhost:3000",
+			TokenFile:    "/tmp/nonexistent",
+			RunnerName:   "runner",
+			Ephemeral:    true,
+			Labels:       " ubuntu:host , ubuntu:docker://node:18 ",
+		})
+		require.EqualError(t, err, "Cannot read the token file: /tmp/nonexistent, open /tmp/nonexistent: no such file or directory")
+	})
+
+	t.Run("valid token", func(t *testing.T) {
+		inputs, err := initInputs(&registerArgs{
+			InstanceAddr: "http://localhost:3000",
+			Token:        "secret",
+			RunnerName:   "runner",
+			Ephemeral:    true,
+			Labels:       " ubuntu:host , ubuntu:docker://node:18 ",
+		})
+		require.Nil(t, err)
+		require.Equal(t, "http://localhost:3000", inputs.InstanceAddr)
+		require.Equal(t, "secret", inputs.Token)
+		require.Equal(t, "runner", inputs.RunnerName)
+		require.True(t, inputs.Ephemeral)
+		require.Equal(t, []string{"ubuntu:host ", " ubuntu:docker://node:18"}, inputs.Labels)
+	})
+
+	t.Run("valid token file", func(t *testing.T) {
+		tokenFile, _ := os.CreateTemp(t.TempDir(), "token")
+		defer tokenFile.Close()
+		tokenFile.WriteString("secret")
+		tokenFile.Sync()
+
+		inputs, err := initInputs(&registerArgs{
+			InstanceAddr: "http://localhost:3000",
+			TokenFile:    tokenFile.Name(),
+			RunnerName:   "runner",
+			Ephemeral:    true,
+			Labels:       " ubuntu:host , ubuntu:docker://node:18 ",
+		})
+		require.Nil(t, err)
+		require.Equal(t, "http://localhost:3000", inputs.InstanceAddr)
+		require.Equal(t, "secret", inputs.Token)
+		require.Equal(t, "runner", inputs.RunnerName)
+		require.True(t, inputs.Ephemeral)
+		require.Equal(t, []string{"ubuntu:host ", " ubuntu:docker://node:18"}, inputs.Labels)
+	})
+
+	t.Run("empty labels", func(t *testing.T) {
+		inputs, _ := initInputs(&registerArgs{
+			Token:  "secret",
+			Labels: "  ",
+		})
+		require.Nil(t, inputs.Labels)
+	})
 }
