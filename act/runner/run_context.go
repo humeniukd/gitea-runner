@@ -138,7 +138,9 @@ func (rc *RunContext) GetEnv() map[string]string {
 			}
 		}
 	}
-	rc.Env["ACT"] = "true"
+	if !rc.Config.DisableActEnv {
+		rc.Env["ACT"] = "true"
+	}
 
 	if !rc.Config.NoSkipCheckout {
 		rc.Env["ACT_SKIP_CHECKOUT"] = "true"
