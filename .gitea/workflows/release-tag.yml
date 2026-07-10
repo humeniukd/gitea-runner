@@ -47,7 +47,7 @@ jobs:
           # docker:dind base image publishes.
           - target: basic
             tag_suffix: ""
-            platforms: linux/amd64,linux/arm64,linux/riscv64
+            platforms: linux/amd64,linux/arm64,linux/riscv64,linux/s390x
           - target: dind
             tag_suffix: "-dind"
             platforms: linux/amd64,linux/arm64
