@@ -162,7 +162,10 @@ func LoadDefault(file string) (*Config, error) {
 	}
 	if *cfg.Cache.Enabled {
 		if cfg.Cache.Dir == "" {
-			home, _ := os.UserHomeDir()
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, fmt.Errorf("cache.dir is unset and the user home directory could not be determined: %w", err)
+			}
 			cfg.Cache.Dir = filepath.Join(home, ".cache", "actcache")
 		}
 		if cfg.Cache.ExternalServer != "" && cfg.Cache.ExternalSecret == "" {
@@ -173,7 +176,10 @@ func LoadDefault(file string) (*Config, error) {
 		cfg.Container.WorkdirParent = "workspace"
 	}
 	if cfg.Host.WorkdirParent == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("host.workdir_parent is unset and the user home directory could not be determined: %w", err)
+		}
 		cfg.Host.WorkdirParent = filepath.Join(home, ".cache", "act")
 	}
 	if cfg.Runner.FetchTimeout <= 0 {
