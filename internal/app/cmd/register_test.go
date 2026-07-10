@@ -146,7 +146,7 @@ func TestInitInputs(t *testing.T) {
 			Ephemeral:    true,
 			Labels:       " ubuntu:host , ubuntu:docker://node:18 ",
 		})
-		require.EqualError(t, err, "Missing Token argument. token or token-file should be set.")
+		require.EqualError(t, err, "missing token or token-file argument")
 	})
 
 	t.Run("empty token", func(t *testing.T) {
@@ -158,7 +158,7 @@ func TestInitInputs(t *testing.T) {
 			Ephemeral:    true,
 			Labels:       " ubuntu:host , ubuntu:docker://node:18 ",
 		})
-		require.EqualError(t, err, "Missing Token argument. token or token-file should be set.")
+		require.EqualError(t, err, "missing token or token-file argument")
 	})
 
 	t.Run("invalid token file", func(t *testing.T) {
@@ -169,7 +169,7 @@ func TestInitInputs(t *testing.T) {
 			Ephemeral:    true,
 			Labels:       " ubuntu:host , ubuntu:docker://node:18 ",
 		})
-		require.EqualError(t, err, "Cannot read the token file: /tmp/nonexistent, open /tmp/nonexistent: no such file or directory")
+		require.EqualError(t, err, "cannot read the token file: /tmp/nonexistent, open /tmp/nonexistent: no such file or directory")
 	})
 
 	t.Run("valid token", func(t *testing.T) {
@@ -180,7 +180,7 @@ func TestInitInputs(t *testing.T) {
 			Ephemeral:    true,
 			Labels:       " ubuntu:host , ubuntu:docker://node:18 ",
 		})
-		require.Nil(t, err)
+		require.NoError(t, err)
 		require.Equal(t, "http://localhost:3000", inputs.InstanceAddr)
 		require.Equal(t, "secret", inputs.Token)
 		require.Equal(t, "runner", inputs.RunnerName)
@@ -189,10 +189,12 @@ func TestInitInputs(t *testing.T) {
 	})
 
 	t.Run("valid token file", func(t *testing.T) {
-		tokenFile, _ := os.CreateTemp(t.TempDir(), "token")
+		tokenFile, createErr := os.CreateTemp(t.TempDir(), "token")
+		require.NoError(t, createErr)
 		defer tokenFile.Close()
-		tokenFile.WriteString("secret")
-		tokenFile.Sync()
+		_, writeErr := tokenFile.WriteString("secret")
+		require.NoError(t, writeErr)
+		_ = tokenFile.Sync()
 
 		inputs, err := initInputs(&registerArgs{
 			InstanceAddr: "http://localhost:3000",
@@ -201,7 +203,7 @@ func TestInitInputs(t *testing.T) {
 			Ephemeral:    true,
 			Labels:       " ubuntu:host , ubuntu:docker://node:18 ",
 		})
-		require.Nil(t, err)
+		require.NoError(t, err)
 		require.Equal(t, "http://localhost:3000", inputs.InstanceAddr)
 		require.Equal(t, "secret", inputs.Token)
 		require.Equal(t, "runner", inputs.RunnerName)
