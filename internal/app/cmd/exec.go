@@ -498,7 +498,7 @@ func loadExecCmd(ctx context.Context) *cobra.Command {
 	}
 
 	execCmd.Flags().BoolVarP(&execArg.runList, "list", "l", false, "list workflows")
-	execCmd.Flags().StringVarP(&execArg.job, "job", "j", "", "run a specific job ID")
+	execCmd.Flags().StringVarP(&execArg.job, "job", "j", "", "run a specific job ID; when several workflow files define that job, also pass --workflows/-W to select the file")
 	execCmd.Flags().StringVarP(&execArg.event, "event", "E", "", "run a event name")
 	execCmd.Flags().StringVarP(&execArg.eventpath, "eventpath", "e", "", "path to a JSON event payload file exposed as the event that triggered the workflow")
 	execCmd.PersistentFlags().StringVarP(&execArg.workflowsPath, "workflows", "W", "./.gitea/workflows/", "path to workflow file(s)")
