@@ -175,8 +175,9 @@ container:
   # If it's "-", runner will find an available docker host automatically, but the docker host won't be mounted to the job containers and service containers.
   # If it's not empty or "-", the specified docker host will be used. An error will be returned if it doesn't work.
   docker_host: ""
-  # Pull docker image(s) even if already present
-  force_pull: true
+  # Pull docker image(s) even if already present.
+  # Defaults to false when the key is omitted.
+  force_pull: false
   # Rebuild docker image(s) even if already present
   force_rebuild: false
   # Always require a reachable docker daemon, even if not required by runner
