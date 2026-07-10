@@ -94,6 +94,8 @@ const (
 	StageExit
 )
 
+const registerTokenEnvVar = "GITEA_RUNNER_REGISTRATION_TOKEN"
+
 var defaultLabels = []string{
 	"ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest",
 	"ubuntu-24.04:docker://docker.gitea.com/runner-images:ubuntu-24.04",
@@ -210,17 +212,21 @@ func (r *registerInputs) assignToNext(stage registerStage, value string, cfg *co
 
 func initInputs(regArgs *registerArgs) (*registerInputs, error) {
 	var token string
-	if regArgs.Token == "" && regArgs.TokenFile == "" {
-		return nil, errors.New("missing token or token-file argument")
-	}
-	if regArgs.TokenFile != "" {
+	switch {
+	case regArgs.TokenFile != "":
 		tokenBytes, err := os.ReadFile(regArgs.TokenFile)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read the token file: %s, %v", regArgs.TokenFile, err)
 		}
 		token = string(tokenBytes)
-	} else {
+	case regArgs.Token != "":
 		token = regArgs.Token
+	default:
+		envToken, ok := os.LookupEnv(registerTokenEnvVar)
+		if !ok || envToken == "" {
+			return nil, fmt.Errorf("missing token, token-file argument, or %s environment variable", registerTokenEnvVar)
+		}
+		token = envToken
 	}
 	inputs := &registerInputs{
 		InstanceAddr: regArgs.InstanceAddr,
