@@ -15,13 +15,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-git/go-billy/v5"
-	"github.com/go-git/go-billy/v5/memfs"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/cache"
-	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
-	"github.com/go-git/go-git/v5/plumbing/format/index"
-	"github.com/go-git/go-git/v5/storage/filesystem"
+	"github.com/go-git/go-billy/v6"
+	"github.com/go-git/go-billy/v6/memfs"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/cache"
+	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
+	"github.com/go-git/go-git/v6/plumbing/format/index"
+	"github.com/go-git/go-git/v6/storage/filesystem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,7 +37,11 @@ func (mfs *memoryFs) walk(root string, fn filepath.WalkFunc) error {
 	}
 	for i := range dir {
 		filename := filepath.Join(root, dir[i].Name())
-		err = fn(filename, dir[i], nil)
+		info, infoErr := dir[i].Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		err = fn(filename, info, nil)
 		if dir[i].IsDir() {
 			if err == filepath.SkipDir {
 				err = nil
@@ -87,7 +91,7 @@ func TestIgnoredTrackedfile(t *testing.T) {
 	_ = fs.MkdirAll("mygitrepo/.git", 0o777)
 	dotgit, _ := fs.Chroot("mygitrepo/.git")
 	worktree, _ := fs.Chroot("mygitrepo")
-	repo, _ := git.Init(filesystem.NewStorage(dotgit, cache.NewObjectLRUDefault()), worktree)
+	repo, _ := git.Init(filesystem.NewStorage(dotgit, cache.NewObjectLRUDefault()), git.WithWorkTree(worktree))
 	f, _ := worktree.Create(".gitignore")
 	_, _ = f.Write([]byte(".*\n"))
 	f.Close()
@@ -129,7 +133,7 @@ func TestSymlinks(t *testing.T) {
 	_ = fs.MkdirAll("mygitrepo/.git", 0o777)
 	dotgit, _ := fs.Chroot("mygitrepo/.git")
 	worktree, _ := fs.Chroot("mygitrepo")
-	repo, _ := git.Init(filesystem.NewStorage(dotgit, cache.NewObjectLRUDefault()), worktree)
+	repo, _ := git.Init(filesystem.NewStorage(dotgit, cache.NewObjectLRUDefault()), git.WithWorkTree(worktree))
 	// This file shouldn't be in the tar
 	f, err := worktree.Create(".env")
 	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act

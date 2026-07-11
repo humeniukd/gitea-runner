@@ -25,9 +25,9 @@ import (
 	"gitea.com/gitea/runner/act/lookpath"
 	"gitea.com/gitea/runner/internal/pkg/process"
 
-	"github.com/go-git/go-billy/v5/helper/polyfill"
-	"github.com/go-git/go-billy/v5/osfs"
-	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
+	"github.com/go-git/go-billy/v6/helper/polyfill"
+	"github.com/go-git/go-billy/v6/osfs"
+	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 	"golang.org/x/term"
 )
 

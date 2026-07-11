@@ -20,7 +20,7 @@ import (
 
 	"gitea.com/gitea/runner/act/model"
 
-	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
+	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 	"github.com/rhysd/actionlint"
 )
 

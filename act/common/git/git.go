@@ -11,17 +11,25 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 
 	"gitea.com/gitea/runner/act/common"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/storer"
-	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-billy/v6"
+	"github.com/go-git/go-billy/v6/osfs"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/cache"
+	"github.com/go-git/go-git/v6/plumbing/client"
+	"github.com/go-git/go-git/v6/plumbing/storer"
+	"github.com/go-git/go-git/v6/plumbing/transport/http"
+	"github.com/go-git/go-git/v6/storage"
+	"github.com/go-git/go-git/v6/storage/filesystem"
+	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 	"github.com/mattn/go-isatty"
 	log "github.com/sirupsen/logrus"
 )
@@ -73,6 +81,165 @@ func (e *Error) Commit() string {
 // uncontended in production.
 var goGitMu sync.Mutex
 
+// extTolerantStorer wraps a storage.Storer so that go-git accepts the object
+// format extensions Gitea records on SHA256 repositories. go-git's own storer
+// only advertises support for "objectformat", but Gitea additionally sets
+// "compatobjectformat" (SHA1 compatibility). Without this, git.Open rejects the
+// repository with ErrUnknownExtension. This wrapper fully replaces the storer's
+// SupportsExtension, so it must also keep advertising the extensions go-git
+// already supported ("objectformat", "worktreeconfig"). The reads performed in
+// this file (HEAD, ref iteration, remote URL) are hash-agnostic, so tolerating
+// the extension is safe.
+type extTolerantStorer struct {
+	storage.Storer
+}
+
+func (extTolerantStorer) SupportsExtension(name, value string) bool {
+	switch name {
+	case "objectformat", "compatobjectformat":
+		switch value {
+		case "sha1", "sha256", "":
+			return true
+		}
+	case "worktreeconfig":
+		switch value {
+		case "true", "false":
+			return true
+		}
+	}
+	return false
+}
+
+// openRepository opens the git repository at repoPath. It first tries go-git's
+// standard PlainOpen; if that fails only because the repository declares object
+// format extensions go-git does not recognise (a Gitea SHA256 repository), it
+// retries with a storer that tolerates those extensions. go-git v5 could not
+// represent SHA256 hashes at all (plumbing.Hash was a fixed 20-byte array and
+// silently truncated them); v6 uses a variable-length hash, so both SHA1 and
+// SHA256 repositories resolve to correct revisions here.
+func openRepository(repoPath string) (*git.Repository, error) {
+	r, err := git.PlainOpenWithOptions(repoPath, &git.PlainOpenOptions{DetectDotGit: true})
+	if err == nil || !isUnsupportedExtensionErr(err) {
+		return r, err
+	}
+
+	dotGit, worktree, err := resolveGitDir(repoPath)
+	if err != nil {
+		return nil, err
+	}
+
+	st := filesystem.NewStorage(dotGit, cache.NewObjectLRUDefault())
+	return git.Open(extTolerantStorer{Storer: st}, worktree)
+}
+
+// isUnsupportedExtensionErr reports whether err is go-git refusing to open a
+// repository purely because of an extension it does not recognise, as opposed to
+// a genuinely missing or corrupt repository.
+func isUnsupportedExtensionErr(err error) bool {
+	return errors.Is(err, git.ErrUnknownExtension) ||
+		errors.Is(err, git.ErrUnsupportedExtensionRepositoryFormatVersion)
+}
+
+// resolveGitDir mirrors go-git's PlainOpenWithOptions(DetectDotGit) filesystem
+// resolution so the extension-tolerant open behaves identically for every
+// repository layout: plain checkouts, a subdirectory of the worktree, a ".git"
+// file (submodules and linked worktrees) and the commondir indirection.
+func resolveGitDir(repoPath string) (dotGit, worktree billy.Filesystem, err error) {
+	abs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for {
+		worktree = osfs.New(abs, osfs.WithBoundOS())
+
+		fi, statErr := worktree.Stat(git.GitDirName)
+		switch {
+		case statErr == nil && fi.IsDir():
+			if dotGit, err = worktree.Chroot(git.GitDirName); err != nil {
+				return nil, nil, err
+			}
+		case statErr == nil:
+			if dotGit, err = resolveGitFile(abs, worktree); err != nil {
+				return nil, nil, err
+			}
+		case errors.Is(statErr, os.ErrNotExist):
+			// Walk up towards the filesystem root, like DetectDotGit does.
+			if parent := filepath.Dir(abs); parent != abs {
+				abs = parent
+				continue
+			}
+			return nil, nil, git.ErrRepositoryNotExists
+		default:
+			return nil, nil, statErr
+		}
+
+		repoFS, err := repositoryFilesystem(dotGit)
+		if err != nil {
+			return nil, nil, err
+		}
+		return repoFS, worktree, nil
+	}
+}
+
+// resolveGitFile handles a ".git" file (used by submodules and linked worktrees)
+// by following its "gitdir:" pointer to the real git directory.
+func resolveGitFile(dir string, worktree billy.Filesystem) (billy.Filesystem, error) {
+	f, err := worktree.Open(git.GitDirName)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+
+	const prefix = "gitdir: "
+	line := string(b)
+	if !strings.HasPrefix(line, prefix) {
+		return nil, fmt.Errorf(".git file has no %q prefix", prefix)
+	}
+
+	gitdir := strings.TrimSpace(strings.SplitN(line[len(prefix):], "\n", 2)[0])
+	if filepath.IsAbs(gitdir) {
+		return osfs.New(gitdir, osfs.WithBoundOS()), nil
+	}
+	return osfs.New(worktree.Join(dir, gitdir), osfs.WithBoundOS()), nil
+}
+
+// repositoryFilesystem returns the filesystem go-git should read refs and config
+// from for the given ".git" directory. It follows the "commondir" indirection used
+// by linked worktrees; for a plain repository (no commondir) it returns dotGit
+// unchanged, which is what go-git's RepositoryFilesystem does with a nil commondir.
+func repositoryFilesystem(dotGit billy.Filesystem) (billy.Filesystem, error) {
+	f, err := dotGit.Open("commondir")
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return dotGit, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+
+	p := strings.TrimSpace(string(b))
+	if p == "" {
+		return dotGit, nil
+	}
+
+	common := osfs.New(p, osfs.WithBoundOS())
+	if !filepath.IsAbs(p) {
+		common = osfs.New(filepath.Join(dotGit.Root(), p), osfs.WithBoundOS())
+	}
+	return dotgit.NewRepositoryFilesystem(dotGit, common), nil
+}
+
 // FindGitRevision get the current git revision
 func FindGitRevision(ctx context.Context, file string) (shortSha, sha string, err error) {
 	goGitMu.Lock()
@@ -83,13 +250,7 @@ func FindGitRevision(ctx context.Context, file string) (shortSha, sha string, er
 func findGitRevision(ctx context.Context, file string) (shortSha, sha string, err error) {
 	logger := common.Logger(ctx)
 
-	gitDir, err := git.PlainOpenWithOptions(
-		file,
-		&git.PlainOpenOptions{
-			DetectDotGit:          true,
-			EnableDotGitCommonDir: true,
-		},
-	)
+	gitDir, err := openRepository(file)
 	if err != nil {
 		logger.WithError(err).Error("path", file, "not located inside a git repository")
 		return "", "", err
@@ -128,13 +289,7 @@ func FindGitRef(ctx context.Context, file string) (string, error) {
 	// Prefer the git library to iterate over the references and find a matching tag or branch.
 	refTag := ""
 	refBranch := ""
-	repo, err := git.PlainOpenWithOptions(
-		file,
-		&git.PlainOpenOptions{
-			DetectDotGit:          true,
-			EnableDotGitCommonDir: true,
-		},
-	)
+	repo, err := openRepository(file)
 	if err != nil {
 		return "", err
 	}
@@ -205,13 +360,7 @@ func FindGithubRepo(ctx context.Context, file, githubInstance, remoteName string
 }
 
 func findGitRemoteURL(_ context.Context, file, remoteName string) (string, error) {
-	repo, err := git.PlainOpenWithOptions(
-		file,
-		&git.PlainOpenOptions{
-			DetectDotGit:          true,
-			EnableDotGitCommonDir: true,
-		},
-	)
+	repo, err := openRepository(file)
 	if err != nil {
 		return "", err
 	}
@@ -304,13 +453,7 @@ func CloneIfRequired(ctx context.Context, refName plumbing.ReferenceName, input 
 		URL:      input.URL,
 		Progress: progressWriter,
 
-		InsecureSkipTLS: input.InsecureSkipTLS, // For Gitea
-	}
-	if input.Token != "" {
-		cloneOptions.Auth = &http.BasicAuth{
-			Username: "token",
-			Password: input.Token,
-		}
+		ClientOptions: clientOptions(input.Token, input.InsecureSkipTLS), // For Gitea
 	}
 
 	r, err = cloneAtDepth(ctx, input, cloneOptions, logger)
@@ -326,19 +469,31 @@ func CloneIfRequired(ctx context.Context, refName plumbing.ReferenceName, input 
 	return r, false, nil
 }
 
-func gitOptions(token string) (fetchOptions git.FetchOptions, pullOptions git.PullOptions) {
+// clientOptions builds the transport client options shared by clone, fetch and
+// pull. go-git v6 moved authentication and TLS handling out of the operation
+// option structs and into per-operation transport client options.
+func clientOptions(token string, insecureSkipTLS bool) []client.Option {
+	var opts []client.Option
+	if token != "" {
+		opts = append(opts, client.WithHTTPAuth(&http.BasicAuth{
+			Username: "token",
+			Password: token,
+		}))
+	}
+	if insecureSkipTLS { // For Gitea
+		opts = append(opts, client.WithInsecureSkipTLS())
+	}
+	return opts
+}
+
+func gitOptions(token string, insecureSkipTLS bool) (fetchOptions git.FetchOptions, pullOptions git.PullOptions) {
 	fetchOptions.RefSpecs = []config.RefSpec{"refs/*:refs/*", "HEAD:refs/heads/HEAD"}
 	fetchOptions.Force = true
 	pullOptions.Force = true
 
-	if token != "" {
-		auth := &http.BasicAuth{
-			Username: "token",
-			Password: token,
-		}
-		fetchOptions.Auth = auth
-		pullOptions.Auth = auth
-	}
+	opts := clientOptions(token, insecureSkipTLS) // For Gitea
+	fetchOptions.ClientOptions = opts
+	pullOptions.ClientOptions = opts
 
 	return fetchOptions, pullOptions
 }
@@ -361,12 +516,7 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 		isOfflineMode := input.OfflineMode
 
 		// fetch latest changes
-		fetchOptions, pullOptions := gitOptions(input.Token)
-
-		if input.InsecureSkipTLS { // For Gitea
-			fetchOptions.InsecureSkipTLS = true
-			pullOptions.InsecureSkipTLS = true
-		}
+		fetchOptions, pullOptions := gitOptions(input.Token, input.InsecureSkipTLS)
 
 		// Action clones only ever need the tip commit, so keep a shallow cache cheap on update at depth 1 regardless of its original depth
 		// Turning action_shallow_clone off does not convert an existing shallow cache; evict it for a full clone.
@@ -499,7 +649,7 @@ func cloneAtDepth(ctx context.Context, input NewGitCloneExecutorInput, opts git.
 			shallowOpts.ReferenceName = refName
 			shallowOpts.Tags = git.NoTags
 
-			r, err := git.PlainCloneContext(ctx, input.Dir, false, &shallowOpts)
+			r, err := git.PlainCloneContext(ctx, input.Dir, &shallowOpts)
 			if err == nil {
 				return r, nil
 			}
@@ -511,7 +661,7 @@ func cloneAtDepth(ctx context.Context, input NewGitCloneExecutorInput, opts git.
 		logger.Debugf("Falling back to a full clone of %s for ref %q", input.URL, input.Ref)
 	}
 
-	return git.PlainCloneContext(ctx, input.Dir, false, &opts)
+	return git.PlainCloneContext(ctx, input.Dir, &opts)
 }
 
 // isShallow reports whether the local repository was cloned with a limited depth.

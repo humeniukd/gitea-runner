@@ -15,12 +15,12 @@ import (
 	"path"
 	"strings"
 
-	git "github.com/go-git/go-git/v5"
-	config "github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/transport"
-	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	git "github.com/go-git/go-git/v6"
+	config "github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/client"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/transport/http"
 )
 
 type ActionCache interface {
@@ -35,7 +35,7 @@ type GoGitActionCache struct {
 func (c GoGitActionCache) Fetch(ctx context.Context, cacheDir, url, ref, token string) (string, error) {
 	gitPath := path.Join(c.Path, safeFilename(cacheDir)+".git")
 	gogitrepo, err := git.PlainInit(gitPath, true)
-	if errors.Is(err, git.ErrRepositoryAlreadyExists) {
+	if errors.Is(err, git.ErrTargetDirNotEmpty) {
 		gogitrepo, err = git.PlainOpen(gitPath)
 	}
 	if err != nil {
@@ -47,12 +47,12 @@ func (c GoGitActionCache) Fetch(ctx context.Context, cacheDir, url, ref, token s
 	}
 	branchName := hex.EncodeToString(tmpBranch)
 
-	var auth transport.AuthMethod
+	var clientOptions []client.Option
 	if token != "" {
-		auth = &http.BasicAuth{
+		clientOptions = append(clientOptions, client.WithHTTPAuth(&http.BasicAuth{
 			Username: "token",
 			Password: token,
-		}
+		}))
 	}
 	remote, err := gogitrepo.CreateRemoteAnonymous(&config.RemoteConfig{
 		Name: "anonymous",
@@ -66,16 +66,36 @@ func (c GoGitActionCache) Fetch(ctx context.Context, cacheDir, url, ref, token s
 	defer func() {
 		_ = gogitrepo.DeleteBranch(branchName)
 	}()
-	if err := remote.FetchContext(ctx, &git.FetchOptions{
+
+	resolveRef := branchName
+	err = remote.FetchContext(ctx, &git.FetchOptions{
 		RefSpecs: []config.RefSpec{
 			config.RefSpec(ref + ":" + branchName),
 		},
-		Auth:  auth,
-		Force: true,
-	}); err != nil {
+		ClientOptions: clientOptions,
+		Force:         true,
+	})
+	if errors.Is(err, git.ErrExactSHA1NotSupported) {
+		// ref is an exact commit SHA and the server does not advertise
+		// allow-*-sha1-in-want, so it cannot be fetched directly. go-git's own
+		// upload-pack server never advertises it, and not every Gitea instance
+		// enables it either. Fetch the advertised branches and tags instead and
+		// resolve the commit from the local object store; this succeeds whenever
+		// the commit is reachable from a ref, as SHA-pinned actions are.
+		err = remote.FetchContext(ctx, &git.FetchOptions{
+			RefSpecs: []config.RefSpec{
+				"+refs/heads/*:refs/heads/*",
+				"+refs/tags/*:refs/tags/*",
+			},
+			ClientOptions: clientOptions,
+			Force:         true,
+		})
+		resolveRef = ref
+	}
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return "", err
 	}
-	hash, err := gogitrepo.ResolveRevision(plumbing.Revision(branchName))
+	hash, err := gogitrepo.ResolveRevision(plumbing.Revision(resolveRef))
 	if err != nil {
 		return "", err
 	}
