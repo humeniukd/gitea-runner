@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,6 +44,29 @@ type HostEnvironment struct {
 	CleanUp      func()
 	StdOut       io.Writer
 	AllocatePTY  bool // allocate a pseudo-TTY for each step's process
+
+	// procGroup owns every process this job's steps start, so that nothing a
+	// step spawned can outlive the job. Created on first use, torn down in
+	// Remove. See process.Group. It stays nil when the job object is
+	// unavailable, and teardown then falls back to the workspace scan alone.
+	// Atomic because Remove reads it while a step may still be starting.
+	procGroupOnce sync.Once
+	procGroup     atomic.Pointer[process.Group]
+}
+
+// processGroup returns the job-scoped process group, creating it on first use.
+// It returns nil if the job object could not be created; every Group method is
+// nil-safe, so callers do not special-case that.
+func (e *HostEnvironment) processGroup(ctx context.Context) *process.Group {
+	e.procGroupOnce.Do(func() {
+		group, err := process.NewGroup()
+		if err != nil {
+			common.Logger(ctx).Warnf("could not create the job's process group; processes a step leaves behind can only be reclaimed by the workspace scan: %v", err)
+			return
+		}
+		e.procGroup.Store(group)
+	})
+	return e.procGroup.Load()
 }
 
 func (e *HostEnvironment) Create(_, _ []string) common.Executor {
@@ -360,6 +384,14 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	// Hand the process to the job's group before the step's own Killer, so the
+	// step's job nests inside the job's. Cancellation still kills exactly this
+	// step's tree, while anything the step leaves running stays owned by the job
+	// and is terminated when Remove closes the group — including a process that
+	// outlives its parent, which no tree walk could still attribute to the step.
+	if err := e.processGroup(ctx).Assign(cmd.Process); err != nil {
+		common.Logger(ctx).Warnf("could not assign the step's process to the job's process group; a process it leaves behind may outlive the job: %v", err)
+	}
 	if k, kerr := treeKill.Capture(cmd.Process); kerr != nil {
 		common.Logger(ctx).Warnf("process tree kill setup failed, falling back to single-process kill: %v", kerr)
 	} else {
@@ -530,6 +562,19 @@ func (e *HostEnvironment) terminateRunningProcesses(ctx context.Context) {
 	if err != nil {
 		logger.Debugf("workspace process-tree kill via PowerShell failed: %v output=%s", err, strings.TrimSpace(string(out)))
 	}
+
+	// The scan above matches on executable path and command line, but
+	// Win32_Process exposes no working directory. A process merely *started in*
+	// a workspace directory (e.g. a tool resolved from PATH, launched with its
+	// cwd inside the checkout and only relative arguments) references none of
+	// those paths and so survives — while its current directory pins an open
+	// handle that also blocks the workspace deletion below. This native pass
+	// reads each process's cwd from its PEB and terminates the matches.
+	if killed, err := process.KillProcessesWithCWDUnder(dirs); err != nil {
+		logger.Debugf("workspace process kill by working directory reported errors: %v", err)
+	} else if killed > 0 {
+		logger.Debugf("terminated %d leftover process(es) by workspace working directory", killed)
+	}
 }
 
 // hostCleanupTimeout bounds each filesystem-teardown phase of the host
@@ -567,6 +612,16 @@ func (e *HostEnvironment) Remove() common.Executor {
 
 		// Ensure any lingering child processes are ended before attempting
 		// to remove the workspace (Windows file locks otherwise prevent cleanup).
+		//
+		// Closing the group is the deterministic pass: the kernel terminates
+		// every process still assigned to the job object, regardless of its
+		// parentage or where its executable lives. The scan that follows stays
+		// as a best-effort net for processes that never joined the job — one
+		// started through a service or scheduled task, say, which breaks away
+		// from the job by construction.
+		if err := e.procGroup.Load().Close(); err != nil {
+			logger.Debugf("closing the job's process group failed: %v", err)
+		}
 		e.terminateRunningProcesses(ctx)
 
 		// Only removes per-job misc state. Must not remove the cache/toolcache root.
