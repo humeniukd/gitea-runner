@@ -14,31 +14,20 @@ import (
 )
 
 // dirContainsPath reports whether target is dir itself or lives beneath it.
-// Both paths are cleaned first; matching is case-insensitive, as Windows
-// filesystems are. The boundary check appends a separator so a sibling that only
-// shares a name prefix (job1 vs job10) is not considered contained.
+// Matching is case-insensitive, and a sibling sharing a name prefix (job1 vs
+// job10) is not contained.
 func dirContainsPath(dir, target string) bool {
 	return pathWithin(filepath.Clean(dir), filepath.Clean(target), true)
 }
 
-// KillProcessesWithCWDUnder terminates every running process whose current
-// working directory is one of dirs or lives beneath it.
+// KillProcessesWithCWDUnder terminates every process whose current working
+// directory is one of dirs or lives beneath it, and returns how many it killed.
+// This complements the workspace path scan, which cannot see a process that only
+// *runs in* a workspace dir: Win32_Process exposes no working directory. Such a
+// process pins an open handle that blocks the workspace deletion.
 //
-// It complements the workspace path scan (which matches on a process's
-// executable path and command line): Win32_Process exposes neither the working
-// directory, so a process that was merely *started in* a workspace directory —
-// e.g. a compiler or language runtime resolved from PATH, launched with its
-// working directory inside the checkout and only relative arguments — is
-// invisible to that scan. Such a process survives teardown and, because its
-// current directory pins an open handle on that folder, can also block the
-// workspace deletion that follows. Children inherit their parent's working
-// directory, so a whole spawned tree is caught as each member matches in turn.
-//
-// It is best-effort: a process we cannot open (higher integrity level or a
-// different user) is skipped, mirroring the path scan's inability to read the
-// ExecutablePath of such processes. It returns the number of processes
-// terminated and the joined errors from any that matched but could not be
-// killed.
+// Best-effort: a process we cannot open (higher integrity level, another user)
+// is skipped.
 func KillProcessesWithCWDUnder(dirs []string) (int, error) {
 	if len(dirs) == 0 {
 		return 0, nil
@@ -53,9 +42,7 @@ func KillProcessesWithCWDUnder(dirs []string) (int, error) {
 	var killed int
 	var errs []error
 	for _, pid := range pids {
-		// Skip our own process, the System Idle Process (0) and System (4);
-		// none of them can legitimately have a workspace as its cwd and none
-		// can (or should) be terminated here.
+		// Never touch ourselves, System Idle (0) or System (4).
 		if pid == self || pid == 0 || pid == 4 {
 			continue
 		}
@@ -119,12 +106,9 @@ func terminateProcess(pid uint32) error {
 	return windows.TerminateProcess(h, 1)
 }
 
-// processCWD reads the current working directory of another process out of its
-// PEB. It walks PEB -> ProcessParameters -> CurrentDirectory.DosPath, reading
-// each pointer and the final UTF-16 string over the process boundary with
-// ReadProcessMemory. Field offsets come from unsafe.Offsetof on the typed
-// x/sys/windows structs so they stay correct for the build architecture; a
-// 64-bit runner reads the 64-bit PEB of both 32- and 64-bit targets.
+// processCWD reads another process's working directory out of its PEB, walking
+// PEB -> ProcessParameters -> CurrentDirectory.DosPath. Offsets come from
+// unsafe.Offsetof so they stay correct for the build architecture.
 func processCWD(pid uint32) (string, error) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, pid)
 	if err != nil {
@@ -142,15 +126,13 @@ func processCWD(pid uint32) (string, error) {
 	}
 	pebAddr := uintptr(unsafe.Pointer(pbi.PebBaseAddress))
 
-	// PEB.ProcessParameters (a remote pointer).
 	paramsAddr, err := readRemotePtr(h, pebAddr+unsafe.Offsetof(windows.PEB{}.ProcessParameters))
 	if err != nil || paramsAddr == 0 {
 		return "", err
 	}
 
-	// RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath is the leading
-	// NTUnicodeString of the CURDIR, so its address is the CurrentDirectory
-	// address. Read its Length (in bytes) and Buffer pointer.
+	// DosPath is the leading NTUnicodeString of CURDIR, so it shares the
+	// CurrentDirectory address.
 	dosPathAddr := paramsAddr + unsafe.Offsetof(windows.RTL_USER_PROCESS_PARAMETERS{}.CurrentDirectory)
 	length, err := readRemoteU16(h, dosPathAddr+unsafe.Offsetof(windows.NTUnicodeString{}.Length))
 	if err != nil || length == 0 {

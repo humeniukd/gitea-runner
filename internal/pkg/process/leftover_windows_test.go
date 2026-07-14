@@ -12,10 +12,8 @@ import (
 	"time"
 )
 
-// startSleeperIn launches a long-running child whose working directory is dir
-// but whose executable (ping.exe) lives outside dir — the case the Win32_Process
-// path scan cannot see. It returns the started command; the caller is
-// responsible for ensuring it is reaped.
+// startSleeperIn launches a long-running child whose cwd is dir but whose
+// executable (ping.exe) lives outside it — what the path scan cannot see.
 func startSleeperIn(t *testing.T, dir string) *exec.Cmd {
 	t.Helper()
 	ping := filepath.Join(os.Getenv("SystemRoot"), "System32", "ping.exe")

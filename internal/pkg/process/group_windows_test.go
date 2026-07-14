@@ -17,8 +17,7 @@ import (
 )
 
 // startOrphanMaker starts a process that spawns a detached, long-lived child and
-// then exits, leaving the child parentless. It returns the command and the path
-// the child's PID is written to.
+// exits, leaving the child parentless. Returns the cmd and the child's PID file.
 func startOrphanMaker(t *testing.T) (*exec.Cmd, string) {
 	t.Helper()
 
@@ -55,10 +54,9 @@ func awaitChildPID(t *testing.T, pidFile string) int {
 	return childPID
 }
 
-// TestGroupClosePropagatesToOrphan is the case the per-step Killer cannot cover:
-// a step completes normally but leaves behind a process whose parent has already
-// exited. Nothing links that orphan to the step any more, so only the job object
-// can still reach it — closing the group must terminate it.
+// TestGroupClosePropagatesToOrphan covers what the per-step Killer cannot: a step
+// completes but leaves a process whose parent already exited. Nothing links that
+// orphan to the step, so only closing the job object can still reach it.
 func TestGroupClosePropagatesToOrphan(t *testing.T) {
 	group, err := NewGroup()
 	require.NoError(t, err)
@@ -86,9 +84,9 @@ func TestGroupClosePropagatesToOrphan(t *testing.T) {
 	}, 20*time.Second, 200*time.Millisecond, "closing the job must terminate the orphan the step left behind")
 }
 
-// TestGroupNestsWithKiller verifies the two job objects coexist: a process is
-// assigned to the task's group first and to the step's Killer second (nested
-// jobs), and cancelling the step still kills exactly that step's tree.
+// TestGroupNestsWithKiller verifies the two job objects coexist: assigned to the
+// task's group first and the step's Killer second, cancelling the step still
+// kills exactly that step's tree.
 func TestGroupNestsWithKiller(t *testing.T) {
 	group, err := NewGroup()
 	require.NoError(t, err)

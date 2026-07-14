@@ -11,36 +11,17 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Group is a task-scoped Windows Job Object that owns every process a job's
-// steps start, so that nothing a job spawned can outlive it.
-//
-// It closes the gap left by the per-step Killer, which only tears a tree down on
-// cancellation: a step that runs to completion closes its job handle and leaves
-// whatever it spawned still running. A GUI application that re-launches itself,
-// or a tool that detaches a child and exits, therefore survives its own step.
-// Such an orphan has no parent left, so no process-tree walk can find it, and
-// its executable frequently lives outside the workspace (an installed
-// application, e.g. Excel), so the workspace path scan at teardown cannot see it
-// either.
-//
-// The job is created with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: when Close drops
-// the last handle, the kernel terminates every process still assigned to the
-// job, whatever its parentage or executable path. This also holds when the
-// runner dies unexpectedly — the kernel closes the handle on process exit — so
-// a crashed or force-killed runner cannot strand a job's processes on the
-// machine.
-//
-// A process may belong to several jobs (nested jobs, Windows 8+). Assign a
-// process here before handing it to NewKiller so the step's job nests inside the
-// task's job: Killer.Kill then still terminates exactly the step's own tree on
-// cancellation, while Close reaches everything the whole task left behind.
+// Group is a task-scoped Windows Job Object holding every process a job's steps
+// start. Closing it terminates whatever is still assigned, catching orphans the
+// per-step Killer misses: a step that completes leaves its spawn running, with
+// no parent to walk from and often an executable outside the workspace.
 type Group struct {
 	mu  sync.Mutex
 	job windows.Handle
 }
 
-// NewGroup creates the job object. The caller must Close it when the task ends,
-// which is what terminates the leftovers.
+// NewGroup creates the job object. Closing it is what terminates the leftovers,
+// so the caller must Close it when the task ends.
 func NewGroup() (*Group, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
@@ -65,13 +46,9 @@ func NewGroup() (*Group, error) {
 	return &Group{job: job}, nil
 }
 
-// Assign adds an already-started process to the job. Every process it spawns
-// afterwards is assigned automatically, so one call per step process covers the
-// whole tree the step goes on to create.
-//
-// It is safe to call on a nil Group, which is what a caller holds when the job
-// object could not be created; leftover reaping then falls back to the
-// best-effort workspace scan at teardown.
+// Assign adds a started process to the job; anything it spawns afterwards joins
+// automatically. Call it before NewKiller so the step's job nests inside this
+// one. Safe on a nil Group, which is what a caller holds when NewGroup failed.
 func (g *Group) Assign(p *os.Process) error {
 	if g == nil || p == nil {
 		return nil
@@ -92,8 +69,8 @@ func (g *Group) Assign(p *os.Process) error {
 	return windows.AssignProcessToJobObject(g.job, h)
 }
 
-// Close drops the job handle, which terminates every process still assigned to
-// the job. It is safe to call on a nil Group and more than once.
+// Close drops the job handle, terminating every process still assigned to it.
+// Safe on a nil Group and on repeat calls.
 func (g *Group) Close() error {
 	if g == nil {
 		return nil

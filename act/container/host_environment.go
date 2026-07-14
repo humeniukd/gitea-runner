@@ -45,18 +45,14 @@ type HostEnvironment struct {
 	StdOut       io.Writer
 	AllocatePTY  bool // allocate a pseudo-TTY for each step's process
 
-	// procGroup owns every process this job's steps start, so that nothing a
-	// step spawned can outlive the job. Created on first use, torn down in
-	// Remove. See process.Group. It stays nil when the job object is
-	// unavailable, and teardown then falls back to the workspace scan alone.
-	// Atomic because Remove reads it while a step may still be starting.
+	// procGroup owns every process this job's steps start, so nothing outlives
+	// the job. Atomic because Remove reads it while a step may still be starting.
 	procGroupOnce sync.Once
 	procGroup     atomic.Pointer[process.Group]
 }
 
 // processGroup returns the job-scoped process group, creating it on first use.
-// It returns nil if the job object could not be created; every Group method is
-// nil-safe, so callers do not special-case that.
+// Returns nil if the job object could not be created; Group is nil-safe.
 func (e *HostEnvironment) processGroup(ctx context.Context) *process.Group {
 	e.procGroupOnce.Do(func() {
 		group, err := process.NewGroup()
@@ -348,11 +344,8 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 	cmd.Dir = wd
 	cmd.SysProcAttr = process.SysProcAttr(cmdline, false)
 
-	// Kill the step's whole process tree on cancellation (a step often launches a
-	// shell that spawns further background or GUI children) and bound the post-exit
-	// I/O wait, so an orphan inheriting cmd's stdout/stderr pipe can never hang
-	// cmd.Wait() and the runner. See process.TreeKill. The PTY path below may
-	// override SysProcAttr, but never touches Cancel/WaitDelay.
+	// Kills the step's whole tree on cancellation and bounds the post-exit I/O
+	// wait, so an orphan holding cmd's stdout pipe cannot hang cmd.Wait().
 	treeKill := process.NewTreeKill(cmd)
 
 	var ppty *os.File
@@ -384,11 +377,8 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	// Hand the process to the job's group before the step's own Killer, so the
-	// step's job nests inside the job's. Cancellation still kills exactly this
-	// step's tree, while anything the step leaves running stays owned by the job
-	// and is terminated when Remove closes the group — including a process that
-	// outlives its parent, which no tree walk could still attribute to the step.
+	// Assign before the step's own Killer so the step's job nests inside the
+	// job's: cancellation still kills only this step's tree.
 	if err := e.processGroup(ctx).Assign(cmd.Process); err != nil {
 		common.Logger(ctx).Warnf("could not assign the step's process to the job's process group; a process it leaves behind may outlive the job: %v", err)
 	}
@@ -439,13 +429,12 @@ func (e *HostEnvironment) UpdateFromEnv(srcPath string, env *map[string]string) 
 	return parseEnvFile(e, srcPath, env)
 }
 
-// removeAll is the filesystem delete used by removeAllWithContext. A package
-// var so tests can substitute a blocking stub without patching os.RemoveAll.
+// removeAll is a var so tests can substitute a blocking stub.
 var removeAll = os.RemoveAll
 
-// removeAllWithContext runs removeAll in a goroutine and returns once it
-// finishes or ctx is cancelled. On cancellation the goroutine is left running —
-// a delete blocked inside a syscall cannot be interrupted (see runWithTimeout).
+// removeAllWithContext returns once the delete finishes or ctx is cancelled. On
+// cancellation the goroutine leaks: a delete inside a syscall cannot be
+// interrupted (see runWithTimeout).
 func removeAllWithContext(ctx context.Context, path string) error {
 	done := make(chan error, 1)
 	go func() { done <- removeAll(path) }()
@@ -487,17 +476,12 @@ func removePathWithRetry(ctx context.Context, path string) error {
 	return lastErr
 }
 
-// buildWindowsWorkspaceKillScript builds a PowerShell command that `taskkill
-// /T /F`s every process tree whose ExecutablePath or CommandLine references one
-// of the given absolute workspace dirs, releasing file handles for cleanup.
-//
-// Win32_Process is used because it exposes both ExecutablePath and CommandLine
-// (Get-Process doesn't, wmic is deprecated). Both match the dir+separator
-// prefix, so a sibling dir sharing a name prefix (job1 vs job10) is spared.
-// Ordinal String methods, not -like, so path metacharacters ([ ] ? *) stay
-// literal.
-//
-// Pure function so the quote-escaping can be unit-tested without PowerShell.
+// buildWindowsWorkspaceKillScript builds a PowerShell command that taskkills
+// every process tree whose ExecutablePath or CommandLine references one of the
+// given workspace dirs, releasing file handles for cleanup. Win32_Process
+// exposes both fields (Get-Process doesn't, wmic is deprecated); matching is on
+// the dir+separator prefix via ordinal String methods, so a name-prefix sibling
+// (job1 vs job10) is spared and path metacharacters stay literal.
 func buildWindowsWorkspaceKillScript(dirs []string) string {
 	quoted := make([]string, len(dirs))
 	for i, d := range dirs {
@@ -533,9 +517,8 @@ func (e *HostEnvironment) terminateRunningProcesses(ctx context.Context) {
 
 	logger := common.Logger(ctx)
 
-	// Workspace dirs we own. Any process running from or referencing one is a
-	// leftover job process. ToolCache is shared across jobs; Workdir only when
-	// we own it (else it's a caller-provided checkout, e.g. act local mode).
+	// Dirs we own; a process referencing one is a leftover. ToolCache is shared
+	// across jobs, and Workdir may be a caller-owned checkout.
 	owned := []string{e.Path, e.TmpDir}
 	if e.CleanWorkdir {
 		owned = append(owned, e.Workdir)
@@ -563,13 +546,8 @@ func (e *HostEnvironment) terminateRunningProcesses(ctx context.Context) {
 		logger.Debugf("workspace process-tree kill via PowerShell failed: %v output=%s", err, strings.TrimSpace(string(out)))
 	}
 
-	// The scan above matches on executable path and command line, but
-	// Win32_Process exposes no working directory. A process merely *started in*
-	// a workspace directory (e.g. a tool resolved from PATH, launched with its
-	// cwd inside the checkout and only relative arguments) references none of
-	// those paths and so survives — while its current directory pins an open
-	// handle that also blocks the workspace deletion below. This native pass
-	// reads each process's cwd from its PEB and terminates the matches.
+	// Win32_Process exposes no working directory, so the scan above misses a
+	// process that merely *runs in* a workspace dir while pinning a handle on it.
 	if killed, err := process.KillProcessesWithCWDUnder(dirs); err != nil {
 		logger.Debugf("workspace process kill by working directory reported errors: %v", err)
 	} else if killed > 0 {
@@ -577,19 +555,14 @@ func (e *HostEnvironment) terminateRunningProcesses(ctx context.Context) {
 	}
 }
 
-// hostCleanupTimeout bounds each filesystem-teardown phase of the host
-// environment so a single stalled delete cannot wedge the runner slot forever.
-// A var (not const) so tests can shrink it.
+// hostCleanupTimeout bounds each teardown phase so one stalled delete cannot
+// wedge the runner slot. A var so tests can shrink it.
 var hostCleanupTimeout = 30 * time.Second
 
-// runWithTimeout runs fn in a goroutine and returns once it finishes or timeout
-// elapses, whichever comes first. On timeout the goroutine is left running — an
-// os.RemoveAll blocked inside a delete syscall (AV/EDR filter drivers, an
-// unresponsive network mount, a dying disk) cannot be interrupted — and
-// context.DeadlineExceeded is returned. Leaking the goroutine and the scratch
-// state it was deleting is strictly better than blocking the caller forever and
-// permanently losing the runner's capacity slot; the leaked scratch dir is
-// reclaimed later by the runner's idle stale-dir sweep.
+// runWithTimeout returns context.DeadlineExceeded once timeout elapses, leaking
+// the goroutine: a delete blocked in a syscall (AV filter driver, dead network
+// mount) cannot be interrupted, and leaking scratch state beats losing the
+// runner's capacity slot forever. The idle stale-dir sweep reclaims it later.
 func runWithTimeout(fn func(), timeout time.Duration) error {
 	done := make(chan struct{})
 	go func() {
@@ -610,24 +583,16 @@ func (e *HostEnvironment) Remove() common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
 
-		// Ensure any lingering child processes are ended before attempting
-		// to remove the workspace (Windows file locks otherwise prevent cleanup).
-		//
-		// Closing the group is the deterministic pass: the kernel terminates
-		// every process still assigned to the job object, regardless of its
-		// parentage or where its executable lives. The scan that follows stays
-		// as a best-effort net for processes that never joined the job — one
-		// started through a service or scheduled task, say, which breaks away
-		// from the job by construction.
+		// End lingering processes before removing the workspace; on Windows their
+		// file locks block cleanup. Closing the group is the deterministic pass,
+		// the scan below a net for processes that broke away from the job.
 		if err := e.procGroup.Load().Close(); err != nil {
 			logger.Debugf("closing the job's process group failed: %v", err)
 		}
 		e.terminateRunningProcesses(ctx)
 
-		// Only removes per-job misc state. Must not remove the cache/toolcache root.
-		// Bound it: CleanUp is a caller-supplied, typically unbounded os.RemoveAll,
-		// and a delete stalled by a filesystem filter driver would otherwise hang
-		// the job forever at "Cleaning up container" and hold the capacity slot.
+		// Removes per-job misc state only, never the toolcache root. Bounded because
+		// CleanUp is a caller-supplied, typically unbounded os.RemoveAll.
 		if e.CleanUp != nil {
 			logger.Debugf("running host environment cleanup callback")
 			if err := runWithTimeout(e.CleanUp, hostCleanupTimeout); err != nil {
@@ -658,8 +623,7 @@ func (e *HostEnvironment) Remove() common.Executor {
 				return errors.Join(errs...)
 			}
 		}
-		// Bounded teardown timed out; warnings already logged above. Do not
-		// fail job completion — leaked scratch is reclaimed by the idle sweep.
+		// Teardown timed out; warned above. Do not fail job completion over it.
 		return nil
 	}
 }

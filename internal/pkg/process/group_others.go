@@ -7,10 +7,9 @@ package process
 
 import "os"
 
-// Group is a no-op outside Windows, where the task-scoped Job Object has no
-// direct equivalent: a step's tree is already reclaimed through its process
-// group (see SysProcAttr and Killer), and a surviving orphan does not block the
-// workspace deletion at teardown the way an open Windows file handle does.
+// Group is a no-op outside Windows: process groups already reclaim a step's
+// tree, and an orphan does not block workspace deletion as an open Windows file
+// handle does.
 type Group struct{}
 
 // NewGroup returns a Group that owns nothing.
