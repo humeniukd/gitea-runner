@@ -261,8 +261,27 @@ type NewGitCloneExecutorInput struct {
 	// 0 for full clone.
 	Depth int
 
+	// Quiet suppresses the informational clone line for callers that log their own
+	// summary of the fetch, such as the action download report in the setup section.
+	Quiet bool
+
 	// For Gitea
 	InsecureSkipTLS bool
+}
+
+// HeadSHA returns the commit SHA a cloned repository is checked out at.
+func HeadSHA(dir string) (string, error) {
+	defer AcquireCloneLock(dir)()
+
+	r, err := git.PlainOpen(dir)
+	if err != nil {
+		return "", err
+	}
+	head, err := r.Head()
+	if err != nil {
+		return "", err
+	}
+	return head.Hash().String(), nil
 }
 
 // CloneIfRequired returns the repository and a boolean indicating whether an existing local clone was reused.
@@ -347,7 +366,11 @@ func gitOptions(token string) (fetchOptions git.FetchOptions, pullOptions git.Pu
 func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
-		logger.Infof("git clone '%s' # ref=%s", input.URL, input.Ref)
+		if input.Quiet {
+			logger.Debugf("git clone '%s' # ref=%s", input.URL, input.Ref)
+		} else {
+			logger.Infof("git clone '%s' # ref=%s", input.URL, input.Ref)
+		}
 		logger.Debugf("  cloning %s to %s", input.URL, input.Dir)
 
 		defer AcquireCloneLock(input.Dir)()

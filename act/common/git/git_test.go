@@ -17,6 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"gitea.com/gitea/runner/act/common"
+
+	log "github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -402,6 +406,74 @@ func TestGitCloneExecutorOfflineMode(t *testing.T) {
 		})(context.Background())
 		require.Error(t, err)
 	})
+}
+
+func TestHeadSHA(t *testing.T) {
+	remoteDir := t.TempDir()
+	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
+	workDir := t.TempDir()
+	require.NoError(t, gitCmd("clone", remoteDir, workDir))
+	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "main"))
+	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "initial"))
+	require.NoError(t, gitCmd("-C", workDir, "tag", "v1"))
+	require.NoError(t, gitCmd("-C", workDir, "push", "-u", "origin", "main"))
+	require.NoError(t, gitCmd("-C", workDir, "push", "origin", "v1"))
+
+	t.Run("reports the commit the ref resolved to", func(t *testing.T) {
+		cloneDir := t.TempDir()
+		require.NoError(t, NewGitCloneExecutor(NewGitCloneExecutorInput{
+			URL: remoteDir,
+			Ref: "v1",
+			Dir: cloneDir,
+		})(context.Background()))
+
+		sha, err := HeadSHA(cloneDir)
+		require.NoError(t, err)
+		assert.Equal(t, gitRevParse(t, workDir, "v1"), sha)
+	})
+
+	t.Run("errors on a directory that is not a clone", func(t *testing.T) {
+		_, err := HeadSHA(t.TempDir())
+		require.Error(t, err)
+	})
+}
+
+func TestGitCloneExecutorQuietDemotesCloneLine(t *testing.T) {
+	remoteDir := t.TempDir()
+	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
+	workDir := t.TempDir()
+	require.NoError(t, gitCmd("clone", remoteDir, workDir))
+	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "main"))
+	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "initial"))
+	require.NoError(t, gitCmd("-C", workDir, "push", "-u", "origin", "main"))
+
+	// Quiet callers report the download themselves, so the clone line must not reach the job log.
+	for name, quiet := range map[string]bool{"quiet": true, "not quiet": false} {
+		t.Run(name, func(t *testing.T) {
+			logger, hook := logrustest.NewNullLogger()
+			logger.SetLevel(log.InfoLevel)
+			ctx := common.WithLogger(context.Background(), logger.WithField("job", "j1"))
+
+			require.NoError(t, NewGitCloneExecutor(NewGitCloneExecutorInput{
+				URL:   remoteDir,
+				Ref:   "main",
+				Dir:   t.TempDir(),
+				Quiet: quiet,
+			})(ctx))
+
+			var cloneLines int
+			for _, entry := range hook.AllEntries() {
+				if strings.HasPrefix(entry.Message, "git clone ") {
+					cloneLines++
+				}
+			}
+			if quiet {
+				assert.Zero(t, cloneLines)
+			} else {
+				assert.Equal(t, 1, cloneLines)
+			}
+		})
+	}
 }
 
 func TestGitCloneExecutorShallow(t *testing.T) {

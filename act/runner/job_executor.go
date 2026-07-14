@@ -64,9 +64,74 @@ func reportStepError(ctx context.Context, rc *RunContext, err error) {
 	rc.markFailed()
 }
 
+// actionPreparer is implemented by steps that download an action before they can run, so the job
+// executor can fetch all of them up front.
+type actionPreparer interface {
+	prepareActionExecutor() common.Executor
+	actionDownloadInfo() (reference, sha string, ok bool)
+}
+
+// printPrepareActionsGroup downloads every action the job uses before its first step runs and
+// reports them as actions/runner's "Prepare all required actions" section does. The steps keep
+// calling prepareActionExecutor themselves, which is a no-op once the action is resolved here.
+//
+// Downloading up front means an action referenced by a step that never runs is still fetched, and
+// a `uses` interpolated from an expression is resolved before any step could influence it. Both
+// match GitHub, where the download set is decided before the job starts.
+func printPrepareActionsGroup(rc *RunContext, preparers []actionPreparer) common.Executor {
+	return func(ctx context.Context) error {
+		if len(preparers) == 0 {
+			return nil
+		}
+
+		rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+		rawLogger.Infof("::group::Prepare all required actions")
+		defer rawLogger.Infof("::endgroup::")
+
+		for _, preparer := range preparers {
+			if err := preparer.prepareActionExecutor()(ctx); err != nil {
+				// The failure belongs to the job, not to a step: no step has run yet.
+				reportStepError(ctx, rc, err)
+				return err
+			}
+			reference, sha, ok := preparer.actionDownloadInfo()
+			if !ok {
+				continue
+			}
+			if sha == "" {
+				rawLogger.Infof("Download action repository '%s'", reference)
+			} else {
+				rawLogger.Infof("Download action repository '%s' (SHA: %s)", reference, sha)
+			}
+		}
+		return nil
+	}
+}
+
+// printCompleteJobName closes the setup section with the job's name, the way actions/runner ends
+// its "Set up job" step.
+func printCompleteJobName(rc *RunContext) common.Executor {
+	return func(ctx context.Context) error {
+		// A matrix job carries its combination in Name; JobName holds the name shared by the
+		// combinations, which is the one GitHub reports.
+		name := rc.JobName
+		if name == "" {
+			name = rc.Name
+		}
+		if name == "" && rc.Run != nil {
+			name = rc.Run.JobID
+		}
+		common.Logger(ctx).WithField(rawOutputField, true).Infof("Complete job name: %s", name)
+		return nil
+	}
+}
+
 func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executor {
 	steps := make([]common.Executor, 0)
 	preSteps := make([]common.Executor, 0)
+	// Collected separately: every action is downloaded before the first pre step runs.
+	stepPreSteps := make([]common.Executor, 0)
+	preparers := make([]actionPreparer, 0)
 	var postExecutor common.Executor
 
 	steps = append(steps, func(ctx context.Context) error {
@@ -113,9 +178,13 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			return common.NewErrorExecutor(err)
 		}
 
+		if preparer, ok := step.(actionPreparer); ok {
+			preparers = append(preparers, preparer)
+		}
+
 		stepIdx := stepModel.Number
 		preExec := step.pre()
-		preSteps = append(preSteps, useStepLogger(rc, stepModel, stepStagePre, func(ctx context.Context) error {
+		stepPreSteps = append(stepPreSteps, useStepLogger(rc, stepModel, stepStagePre, func(ctx context.Context) error {
 			rc.CurrentStepIndex = stepIdx
 			preErr := preExec(ctx)
 			if preErr != nil {
@@ -156,6 +225,11 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			postExecutor = postExec
 		}
 	}
+
+	// The setup section of the job log: download the actions, run the pre steps, then name the job.
+	preSteps = append(preSteps, printPrepareActionsGroup(rc, preparers))
+	preSteps = append(preSteps, stepPreSteps...)
+	preSteps = append(preSteps, printCompleteJobName(rc))
 
 	postExecutor = postExecutor.Finally(func(ctx context.Context) error {
 		jobError := common.JobError(ctx)
