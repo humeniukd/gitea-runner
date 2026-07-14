@@ -201,6 +201,12 @@ release-prep: git-cliff-check ## update VERSION and CHANGELOG.md for the next re
 test: fmt-check security-check ## test everything (integration tests self-skip without docker/network)
 	@$(GO) test -race -timeout 20m -v -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
 
+.PHONY: coverage-report
+coverage-report: ## turn coverage.txt from `make test` into .tmp/coverage.md
+	@mkdir -p .tmp
+	@node ./tools/coverage-report.ts -i coverage.txt -o .tmp/coverage.md
+	@echo "Wrote .tmp/coverage.md"
+
 .PHONY: test-dind
 test-dind: ## run the daemon-facing tests against the built dind image (TARGET=dind|dind-rootless)
 	@./scripts/test-dind.sh $(TARGET)
@@ -268,7 +274,7 @@ docker: ## build the docker image
 .PHONY: clean
 clean: ## delete binary and coverage files
 	$(GO) clean -x -i ./...
-	rm -rf coverage.txt $(EXECUTABLE) $(DIST)
+	rm -rf coverage.txt .tmp $(EXECUTABLE) $(DIST)
 
 .PHONY: version
 version: ## print the version
