@@ -66,6 +66,14 @@ type Runner struct {
 	runningCount            atomic.Int64
 	lastIdleCleanupUnixNano atomic.Int64
 	now                     func() time.Time
+	healthCheckMu           sync.Mutex
+	healthCheckLast         time.Time
+	healthCheckReady        bool
+	healthCheckReason       string
+	healthStatusSet         bool
+	healthStatusReady       bool
+	healthStatusReason      string
+	runHealthCheck          func(context.Context, string, time.Duration, map[string]string) error
 }
 
 func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) *Runner {
@@ -109,13 +117,14 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	envs["GITEA_ACTIONS_RUNNER_VERSION"] = ver.Version()
 
 	runner := &Runner{
-		name:         reg.Name,
-		cfg:          cfg,
-		client:       cli,
-		labels:       ls,
-		envs:         envs,
-		cacheHandler: cacheHandler,
-		now:          time.Now,
+		name:           reg.Name,
+		cfg:            cfg,
+		client:         cli,
+		labels:         ls,
+		envs:           envs,
+		cacheHandler:   cacheHandler,
+		now:            time.Now,
+		runHealthCheck: executeHealthCheck,
 	}
 	return runner
 }
@@ -253,7 +262,12 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 	r.runningTasks.Store(task.Id, struct{}{})
 	defer r.runningTasks.Delete(task.Id)
 
+	// Synchronize the transition to an active job with the configurable health
+	// check. This prevents a readiness request from starting the executable at
+	// the same time as a task begins.
+	r.healthCheckMu.Lock()
 	r.runningCount.Add(1)
+	r.healthCheckMu.Unlock()
 
 	start := time.Now()
 
@@ -577,6 +591,73 @@ func postInternalCache(url, secret string, body map[string]string) error {
 
 func (r *Runner) RunningCount() int64 {
 	return r.runningCount.Load()
+}
+
+// CanAcceptTask checks local admission conditions without consuming a task.
+func (r *Runner) CanAcceptTask(ctx context.Context) (bool, string) {
+	if !r.cfg.HealthCheck.Enabled {
+		return true, "ok"
+	}
+
+	r.healthCheckMu.Lock()
+	defer r.healthCheckMu.Unlock()
+	if r.RunningCount() > 0 {
+		if !r.healthStatusSet {
+			return true, "health checks deferred while jobs are running"
+		}
+		return r.healthStatusReady, r.healthStatusReason
+	}
+
+	if ready, reason := CheckFreeDisk(r.cfg); !ready {
+		r.setHealthStatus(ready, reason)
+		return false, reason
+	}
+	ready, reason := r.checkConfiguredHealth(ctx)
+	r.setHealthStatus(ready, reason)
+	return ready, reason
+}
+
+func (r *Runner) setHealthStatus(ready bool, reason string) {
+	r.healthStatusSet = true
+	r.healthStatusReady = ready
+	r.healthStatusReason = reason
+}
+
+// CheckFreeDisk evaluates the configured task-admission disk threshold.
+func CheckFreeDisk(cfg *config.Config) (bool, string) {
+	minimumMB := cfg.HealthCheck.MinFreeDiskSpaceMB
+	root := cfg.Host.WorkdirParent
+	if cfg.Container.BindWorkdir {
+		root = filepath.FromSlash("/" + strings.TrimLeft(cfg.Container.WorkdirParent, "/"))
+	}
+	root = nearestExistingPath(root)
+	available, err := freeDiskBytes(root)
+	if err != nil {
+		return false, fmt.Sprintf("cannot determine free disk space for %s: %v", root, err)
+	}
+	const bytesPerMiB = uint64(1024 * 1024)
+	if uint64(minimumMB) > ^uint64(0)/bytesPerMiB {
+		return false, "configured minimum free disk space is too large"
+	}
+	minimum := uint64(minimumMB) * bytesPerMiB
+	if available < minimum {
+		return false, fmt.Sprintf("low disk space on %s: %d MiB available, %d MiB required", root, available/(1024*1024), minimumMB)
+	}
+	return true, "ok"
+}
+
+func nearestExistingPath(path string) string {
+	for path != "" {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return parent
+		}
+		path = parent
+	}
+	return "."
 }
 
 func (r *Runner) Declare(ctx context.Context, labels []string) (*connect.Response[runnerv1.DeclareResponse], error) {

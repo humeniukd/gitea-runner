@@ -32,6 +32,12 @@ type IdleRunner interface {
 	OnIdle(ctx context.Context)
 }
 
+// AvailabilityRunner can temporarily pause task fetching for local resource
+// conditions such as low disk space without changing server-side scheduling.
+type AvailabilityRunner interface {
+	CanAcceptTask(ctx context.Context) (bool, string)
+}
+
 type Poller struct {
 	client       client.Client
 	runner       TaskRunner
@@ -48,7 +54,11 @@ type Poller struct {
 
 	// unregistered is set when the server rejects the runner with an
 	// Unauthenticated response, meaning the runner is no longer registered.
-	unregistered atomic.Bool
+	unregistered      atomic.Bool
+	lastHealthyPoll   atomic.Int64
+	consecutiveErrors atomic.Int64
+	availabilityMu    sync.Mutex
+	availabilityError string
 }
 
 // workerState holds the single poller's backoff state. Consecutive empty or
@@ -70,7 +80,7 @@ func New(cfg *config.Config, client client.Client, runner TaskRunner) *Poller {
 
 	done := make(chan struct{})
 
-	return &Poller{
+	p := &Poller{
 		client: client,
 		runner: runner,
 		cfg:    cfg,
@@ -83,6 +93,8 @@ func New(cfg *config.Config, client client.Client, runner TaskRunner) *Poller {
 
 		done: done,
 	}
+	p.lastHealthyPoll.Store(time.Now().UnixNano())
+	return p
 }
 
 func (p *Poller) Poll() {
@@ -101,6 +113,17 @@ func (p *Poller) Poll() {
 		case <-p.pollingCtx.Done():
 			return
 		}
+
+		if ready, reason := p.localAvailability(p.pollingCtx); !ready {
+			p.reportAvailability(false, reason)
+			p.runIdleMaintenance()
+			<-sem
+			if !p.waitBackoff(s) {
+				return
+			}
+			continue
+		}
+		p.reportAvailability(true, "")
 
 		task, ok := p.fetchTask(p.pollingCtx, s)
 		if !ok {
@@ -127,6 +150,15 @@ func (p *Poller) PollOnce() {
 	defer close(p.done)
 	s := &workerState{}
 	for {
+		if ready, reason := p.localAvailability(p.pollingCtx); !ready {
+			p.reportAvailability(false, reason)
+			p.runIdleMaintenance()
+			if !p.waitBackoff(s) {
+				return
+			}
+			continue
+		}
+		p.reportAvailability(true, "")
 		task, ok := p.fetchTask(p.pollingCtx, s)
 		if !ok {
 			p.runIdleMaintenance()
@@ -152,6 +184,48 @@ func (p *Poller) Done() <-chan struct{} {
 // runner as unregistered (an Unauthenticated response).
 func (p *Poller) Unregistered() bool {
 	return p.unregistered.Load()
+}
+
+// Ready reports whether the daemon can currently communicate with Gitea and
+// accept work. Transient transport failures are tolerated for grace.
+func (p *Poller) Ready(grace time.Duration) (bool, string) {
+	if p.unregistered.Load() {
+		return false, "runner is no longer registered"
+	}
+	if ready, reason := p.localAvailability(p.pollingCtx); !ready {
+		return false, reason
+	}
+	if p.consecutiveErrors.Load() == 0 {
+		return true, "ok"
+	}
+	last := time.Unix(0, p.lastHealthyPoll.Load())
+	if time.Since(last) <= grace {
+		return true, "polling errors within grace period"
+	}
+	return false, "unable to poll Gitea"
+}
+
+func (p *Poller) localAvailability(ctx context.Context) (bool, string) {
+	if available, ok := p.runner.(AvailabilityRunner); ok {
+		return available.CanAcceptTask(ctx)
+	}
+	return true, "ok"
+}
+
+func (p *Poller) reportAvailability(ready bool, reason string) {
+	p.availabilityMu.Lock()
+	defer p.availabilityMu.Unlock()
+	if !ready {
+		if p.availabilityError == "" {
+			log.Warnf("runner temporarily unavailable: %s", reason)
+		}
+		p.availabilityError = reason
+		return
+	}
+	if p.availabilityError != "" {
+		log.Info("runner local health recovered, resuming task polling")
+		p.availabilityError = ""
+	}
 }
 
 func (p *Poller) runIdleMaintenance() {
@@ -273,6 +347,7 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 	// found no work within FetchTimeout. Treat it as an empty response and do
 	// not record the duration — the timeout value would swamp the histogram.
 	if errors.Is(err, context.DeadlineExceeded) {
+		p.markHealthyPoll()
 		s.consecutiveEmpty++
 		s.consecutiveErrors = 0 // timeout is a healthy idle response
 		metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultEmpty).Inc()
@@ -291,11 +366,13 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 			return nil, false
 		}
 		log.WithError(err).Error("failed to fetch task")
+		p.consecutiveErrors.Add(1)
 		s.consecutiveErrors++
 		metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultError).Inc()
 		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodFetchTask).Inc()
 		return nil, false
 	}
+	p.markHealthyPoll()
 
 	// Successful response — reset error counter.
 	s.consecutiveErrors = 0
@@ -321,4 +398,9 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 
 	metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultTask).Inc()
 	return resp.Msg.Task, true
+}
+
+func (p *Poller) markHealthyPoll() {
+	p.lastHealthyPoll.Store(time.Now().UnixNano())
+	p.consecutiveErrors.Store(0)
 }
