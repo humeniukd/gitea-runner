@@ -498,11 +498,7 @@ func getEvaluatorInputs(ctx context.Context, rc *RunContext, step step, ghc *mod
 				if value == nil {
 					value = v.Default
 				}
-				if v.Type == "boolean" {
-					inputs[k] = value == "true"
-				} else {
-					inputs[k] = value
-				}
+				inputs[k] = coerceInputValue(value, v.Type)
 			}
 		}
 	}
@@ -515,15 +511,24 @@ func getEvaluatorInputs(ctx context.Context, rc *RunContext, step step, ghc *mod
 				if value == nil {
 					value = v.Default
 				}
-				if v.Type == "boolean" {
-					inputs[k] = value == "true"
-				} else {
-					inputs[k] = value
-				}
+				inputs[k] = coerceInputValue(value, v.Type)
 			}
 		}
 	}
 	return inputs
+}
+
+// coerceInputValue converts an input value to the type declared by the workflow.
+// The event payload carries natively typed JSON values on newer Gitea versions,
+// while defaults and older servers provide strings.
+func coerceInputValue(value any, inputType string) any {
+	if inputType != "boolean" {
+		return value
+	}
+	if b, ok := value.(bool); ok {
+		return b
+	}
+	return value == "true"
 }
 
 func setupWorkflowInputs(ctx context.Context, inputs *map[string]any, rc *RunContext) {
@@ -549,7 +554,7 @@ func setupWorkflowInputs(ctx context.Context, inputs *map[string]any, rc *RunCon
 				}
 			}
 
-			(*inputs)[name] = value
+			(*inputs)[name] = coerceInputValue(value, input.Type)
 		}
 	}
 }
