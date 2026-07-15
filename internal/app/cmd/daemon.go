@@ -204,8 +204,7 @@ type daemonArgs struct {
 	Labels string
 }
 
-// resolveLabels picks the labels to run with, most explicit source first:
-// --labels flag (defaults to GITEA_RUNNER_LABELS) > config file > registration file.
+// resolveLabels picks the labels to run with: --labels/GITEA_RUNNER_LABELS > config > .runner.
 // The flag lets a registered runner change its labels without deleting the .runner file.
 func resolveLabels(argLabels string, cfgLabels, regLabels []string) []string {
 	if lbls := splitLabels(argLabels); len(lbls) > 0 {
@@ -217,9 +216,8 @@ func resolveLabels(argLabels string, cfgLabels, regLabels []string) []string {
 	return regLabels
 }
 
-// splitLabels splits a comma separated label list, dropping empty entries.
 func splitLabels(s string) []string {
-	lbls := make([]string, 0)
+	var lbls []string
 	for l := range strings.SplitSeq(s, ",") {
 		if l = strings.TrimSpace(l); l != "" {
 			lbls = append(lbls, l)

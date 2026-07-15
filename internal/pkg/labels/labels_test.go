@@ -44,7 +44,6 @@ func TestParse(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			// A colon that is not followed by a supported schema is part of the name.
 			args: "pool:e57e18d4-10d4-406f-93bf-60f127221bdd",
 			want: &Label{
 				Name:   "pool:e57e18d4-10d4-406f-93bf-60f127221bdd",

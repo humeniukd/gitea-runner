@@ -74,8 +74,7 @@ func TestNewRunnerInitializesLabelsAndEnvironment(t *testing.T) {
 	cfg.Cache.Enabled = &cacheEnabled
 	cfg.Runner.Envs = map[string]string{"EXISTING": "value"}
 	reg := &config.Registration{
-		Name: "runner",
-		// the empty label is invalid and skipped, the colon-containing name is kept
+		Name:   "runner",
 		Labels: []string{"ubuntu:host", "", "pool:e57e18d4"},
 	}
 	cli := clientmocks.NewClient(t)

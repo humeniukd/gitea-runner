@@ -19,7 +19,7 @@ func TestRegisterNonInteractiveReturnsLabelValidationError(t *testing.T) {
 		Token:        "token",
 		InstanceAddr: "http://localhost:3000",
 	})
-	assert.Error(t, err, "empty label")
+	assert.ErrorContains(t, err, "empty label")
 }
 
 func TestRegisterInputsValidate(t *testing.T) {
@@ -111,7 +111,6 @@ func TestRegisterInputsAssignToNext(t *testing.T) {
 		cfg.Runner.Labels = []string{"ubuntu:host", "", "pool:e57e18d4"}
 		inputs := &registerInputs{}
 		require.Equal(t, StageWaitingForRegistration, inputs.assignToNext(StageInputRunnerName, "runner", cfg))
-		// the empty label is dropped, the colon-containing name is kept
 		require.Equal(t, []string{"ubuntu:host", "pool:e57e18d4"}, inputs.Labels)
 	})
 

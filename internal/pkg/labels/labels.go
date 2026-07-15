@@ -71,7 +71,7 @@ func (l Labels) PickPlatform(runsOn []string) string {
 		case SchemeHost:
 			platforms[label.Name] = "-self-hosted"
 		default:
-			// It should not happen, because Parse has checked it.
+			// unreachable: Parse only produces host or docker schemas
 			continue
 		}
 	}
