@@ -848,10 +848,13 @@ func TestStepActionRemotePreResolvesDownloadedCommit(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(actionDir, "action.yml"),
 		[]byte("name: setup-go\nruns:\n  using: node20\n  main: index.js\n"), 0o600))
 
+	// Supply an identity on the commit so the test does not depend on a
+	// git identity being configured in the environment; a CI runner without
+	// user.name/user.email would otherwise fail "commit" with exit code 128.
 	for _, args := range [][]string{
 		{"init", "--initial-branch=main", actionDir},
 		{"-C", actionDir, "add", "action.yml"},
-		{"-C", actionDir, "commit", "-m", "action"},
+		{"-C", actionDir, "-c", "user.name=runner", "-c", "user.email=runner@example.com", "-c", "commit.gpgsign=false", "commit", "-m", "action"},
 	} {
 		cmd := exec.Command("git", args...)
 		require.NoError(t, cmd.Run(), "git %v", args)
