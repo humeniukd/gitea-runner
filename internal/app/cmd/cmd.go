@@ -51,10 +51,14 @@ func Execute(ctx context.Context) {
 		RunE:  runDaemon(ctx, &daemArgs, &configFile),
 	}
 	daemonCmd.Flags().BoolVar(&daemArgs.Once, "once", false, "Run one job then exit")
+	daemonCmd.Flags().StringVar(&daemArgs.Labels, "labels", os.Getenv("GITEA_RUNNER_LABELS"), "Runner labels, comma separated. Overrides the labels of an already registered runner")
 	rootCmd.AddCommand(daemonCmd)
 
 	// ./gitea-runner exec
 	rootCmd.AddCommand(loadExecCmd(ctx))
+
+	// ./gitea-runner bug-report
+	rootCmd.AddCommand(loadBugReportCmd())
 
 	// ./gitea-runner config
 	rootCmd.AddCommand(&cobra.Command{

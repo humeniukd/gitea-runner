@@ -138,7 +138,9 @@ func (rc *RunContext) GetEnv() map[string]string {
 			}
 		}
 	}
-	rc.Env["ACT"] = "true"
+	if !rc.Config.DisableActEnv {
+		rc.Env["ACT"] = "true"
+	}
 
 	if !rc.Config.NoSkipCheckout {
 		rc.Env["ACT_SKIP_CHECKOUT"] = "true"
@@ -337,6 +339,9 @@ func printStartJobContainerGroup(ctx context.Context, image, name, network strin
 	}
 }
 
+// newContainer is a variable so tests can substitute a container that needs no Docker daemon.
+var newContainer = container.NewContainer
+
 func (rc *RunContext) startJobContainer() common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
@@ -400,7 +405,9 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			for _, v := range spec.Cmd {
 				interpolatedCmd = append(interpolatedCmd, rc.ExprEval.Interpolate(ctx, v))
 			}
-			username, password, err = rc.handleServiceCredentials(ctx, spec.Credentials)
+			// keep these local: reusing username/password would overwrite the
+			// credentials the job container is pulled with further down
+			serviceUsername, servicePassword, err := rc.handleServiceCredentials(ctx, spec.Credentials)
 			if err != nil {
 				return fmt.Errorf("failed to handle service %s credentials: %w", serviceID, err)
 			}
@@ -421,12 +428,12 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			}
 
 			serviceContainerName := createContainerName(rc.jobContainerName(), serviceID)
-			c := container.NewContainer(&container.NewContainerInput{
+			c := newContainer(&container.NewContainerInput{
 				Name:           serviceContainerName,
 				WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
 				Image:          serviceImage,
-				Username:       username,
-				Password:       password,
+				Username:       serviceUsername,
+				Password:       servicePassword,
 				Cmd:            interpolatedCmd,
 				Env:            envs,
 				Mounts:         serviceMounts,
@@ -482,7 +489,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		// For Gitea, `jobContainerNetwork` should be the same as `networkName`
 		jobContainerNetwork := networkName
 
-		rc.JobContainer = container.NewContainer(&container.NewContainerInput{
+		rc.JobContainer = newContainer(&container.NewContainerInput{
 			Cmd:            nil,
 			Entrypoint:     []string{"/bin/sleep", fmt.Sprint(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds())},
 			WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
@@ -790,7 +797,13 @@ func (rc *RunContext) Executor() (common.Executor, error) {
 	return func(ctx context.Context) error {
 		res, err := rc.isEnabled(ctx)
 		if err != nil {
-			rc.caller.setReusedWorkflowJobResult(rc.JobName, "failure") // For Gitea
+			// Record the failure so a job whose if-expression fails to evaluate
+			// gets a result (and therefore a stop time) instead of being left
+			// unfinished. rc.caller is only set for reusable workflows.
+			rc.result("failure")
+			if rc.caller != nil { // For Gitea
+				rc.caller.setReusedWorkflowJobResult(rc.JobName, "failure")
+			}
 			return err
 		}
 		if res {
