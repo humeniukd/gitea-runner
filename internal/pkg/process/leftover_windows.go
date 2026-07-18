@@ -26,6 +26,10 @@ func dirContainsPath(dir, target string) bool {
 // *runs in* a workspace dir: Win32_Process exposes no working directory. Such a
 // process pins an open handle that blocks the workspace deletion.
 //
+// Only processes in the runner's own session are considered: leftovers we
+// spawned inherit it, and skipping the rest avoids reading the memory of
+// system and other-user processes we could never open anyway.
+//
 // Best-effort: a process we cannot open (higher integrity level, another user)
 // is skipped.
 func KillProcessesWithCWDUnder(dirs []string) (int, error) {
@@ -39,6 +43,11 @@ func KillProcessesWithCWDUnder(dirs []string) (int, error) {
 	}
 
 	self := uint32(os.Getpid())
+	var ownSession uint32
+	if err := windows.ProcessIdToSessionId(self, &ownSession); err != nil {
+		return 0, fmt.Errorf("look up own session: %w", err)
+	}
+
 	var killed int
 	var errs []error
 	for _, pid := range pids {
@@ -47,30 +56,57 @@ func KillProcessesWithCWDUnder(dirs []string) (int, error) {
 			continue
 		}
 
-		cwd, err := processCWD(pid)
-		if err != nil || cwd == "" {
+		// Restrict the memory-reading scan to our own session.
+		var session uint32
+		if err := windows.ProcessIdToSessionId(pid, &session); err != nil || session != ownSession {
 			continue
 		}
 
-		matched := false
-		for _, d := range dirs {
-			if dirContainsPath(d, cwd) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
+		ok, err := terminateIfCWDUnder(pid, dirs)
+		if err != nil {
+			errs = append(errs, err)
 			continue
 		}
-
-		if err := terminateProcess(pid); err != nil {
-			errs = append(errs, fmt.Errorf("terminate pid %d: %w", pid, err))
-			continue
+		if ok {
+			killed++
 		}
-		killed++
 	}
 
 	return killed, errors.Join(errs...)
+}
+
+// terminateIfCWDUnder opens pid once and both reads the cwd and terminates
+// through that one handle. The shared handle binds to this exact process, so a
+// PID recycled onto a new process between reading and killing cannot be hit.
+// Returns true when it terminated the process.
+func terminateIfCWDUnder(pid uint32, dirs []string) (bool, error) {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ|windows.PROCESS_TERMINATE, false, pid)
+	if err != nil {
+		// Best-effort: cannot open (gone, higher integrity, another user).
+		return false, nil
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+
+	cwd, err := processCWDHandle(h)
+	if err != nil || cwd == "" {
+		return false, nil
+	}
+
+	matched := false
+	for _, d := range dirs {
+		if dirContainsPath(d, cwd) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return false, nil
+	}
+
+	if err := windows.TerminateProcess(h, 1); err != nil {
+		return false, fmt.Errorf("terminate pid %d: %w", pid, err)
+	}
+	return true, nil
 }
 
 // listProcessIDs returns the PIDs of every process in a Toolhelp snapshot.
@@ -96,26 +132,22 @@ func listProcessIDs() ([]uint32, error) {
 	return pids, nil
 }
 
-// terminateProcess force-terminates a single process by PID.
-func terminateProcess(pid uint32) error {
-	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, pid)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = windows.CloseHandle(h) }()
-	return windows.TerminateProcess(h, 1)
-}
-
-// processCWD reads another process's working directory out of its PEB, walking
-// PEB -> ProcessParameters -> CurrentDirectory.DosPath. Offsets come from
-// unsafe.Offsetof so they stay correct for the build architecture.
+// processCWD opens pid and reads its working directory. It exists for tests;
+// the reaper uses processCWDHandle so it can share one handle with the kill.
 func processCWD(pid uint32) (string, error) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, pid)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
+	return processCWDHandle(h)
+}
 
+// processCWDHandle reads a process's working directory out of its PEB, walking
+// PEB -> ProcessParameters -> CurrentDirectory.DosPath. Offsets come from
+// unsafe.Offsetof so they stay correct for the build architecture. h must carry
+// PROCESS_QUERY_INFORMATION|PROCESS_VM_READ.
+func processCWDHandle(h windows.Handle) (string, error) {
 	var pbi windows.PROCESS_BASIC_INFORMATION
 	var retLen uint32
 	if err := windows.NtQueryInformationProcess(h, windows.ProcessBasicInformation, unsafe.Pointer(&pbi), uint32(unsafe.Sizeof(pbi)), &retLen); err != nil {
