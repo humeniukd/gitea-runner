@@ -405,7 +405,8 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 		stepContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 		stepContainer.Start(true),
 	).Finally(
-		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
+		// Start(true) awaited exit, so the daemon already reaps AutoRemove containers.
+		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers && !rc.Config.AutoRemove),
 	).Finally(stepContainer.Close())(ctx)
 }
 

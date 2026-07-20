@@ -18,7 +18,8 @@ import (
 	"github.com/stretchr/testify/mock"
 )
 
-func TestStepDockerMain(t *testing.T) {
+// runStepDockerMain reports how many times the step container was actually removed.
+func runStepDockerMain(t *testing.T, autoRemove bool) (int, *container.NewContainerInput) {
 	cm := &containerMock{}
 
 	var input *container.NewContainerInput
@@ -39,6 +40,7 @@ func TestStepDockerMain(t *testing.T) {
 		RunContext: &RunContext{
 			StepResults: map[string]*model.StepResult{},
 			Config: &Config{
+				AutoRemove: autoRemove,
 				Secrets: map[string]string{
 					"DOCKER_USERNAME": "docker-user",
 					"DOCKER_PASSWORD": "docker-password",
@@ -72,7 +74,10 @@ func TestStepDockerMain(t *testing.T) {
 		return nil
 	})
 
+	// Count executions, not calls: IfBool gates the executor, not the Remove() that builds it.
+	removes := 0
 	cm.On("Remove").Return(func(ctx context.Context) error {
+		removes++
 		return nil
 	})
 
@@ -109,13 +114,29 @@ func TestStepDockerMain(t *testing.T) {
 	err := sd.main()(ctx)
 	assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
 
+	cm.AssertExpectations(t)
+	return removes, input
+}
+
+func TestStepDockerMain(t *testing.T) {
+	removes, input := runStepDockerMain(t, false)
+
 	assert.Equal(t, "node:14", input.Image)
 
 	// DOCKER_USERNAME/DOCKER_PASSWORD secrets should not be used as implicit pull credentials for docker:// action containers.
 	assert.Empty(t, input.Username)
 	assert.Empty(t, input.Password)
 
-	cm.AssertExpectations(t)
+	// act owns removal: stale container before create, then after the run.
+	assert.Equal(t, 2, removes)
+}
+
+// With AutoRemove the daemon reaps the container on exit, so act must not remove it
+// afterwards and race that teardown.
+func TestStepDockerMainAutoRemove(t *testing.T) {
+	removes, _ := runStepDockerMain(t, true)
+
+	assert.Equal(t, 1, removes)
 }
 
 func TestStepDockerNewStepContainerAllocatePTY(t *testing.T) {

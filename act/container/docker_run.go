@@ -376,6 +376,12 @@ func (cr *containerReference) find() common.Executor {
 	}
 }
 
+// isContainerGone reports whether a remove lost the race against the daemon's own
+// AutoRemove teardown, which leaves the container removed either way.
+func isContainerGone(err error) bool {
+	return cerrdefs.IsNotFound(err) || cerrdefs.IsConflict(err)
+}
+
 func (cr *containerReference) remove() common.Executor {
 	return func(ctx context.Context) error {
 		if cr.id == "" {
@@ -387,7 +393,7 @@ func (cr *containerReference) remove() common.Executor {
 			RemoveVolumes: true,
 			Force:         true,
 		})
-		if err != nil {
+		if err != nil && !isContainerGone(err) {
 			logger.Error(fmt.Errorf("failed to remove container: %w", err))
 		}
 
