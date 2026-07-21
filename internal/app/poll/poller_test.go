@@ -175,21 +175,20 @@ func (r *availabilityRunner) CanAcceptTask(_ context.Context) (bool, string) {
 func TestPollerReady(t *testing.T) {
 	cfg, err := config.LoadDefault("")
 	require.NoError(t, err)
-	runner := &availabilityRunner{reason: "low disk space"}
-	runner.ready.Store(true)
-	poller := New(cfg, nil, runner)
+	poller := New(cfg, nil, &availabilityRunner{})
 
+	// /readyz reuses the availability the poll loop last recorded.
 	ready, reason := poller.Ready(time.Second)
 	assert.True(t, ready)
 	assert.Equal(t, "ok", reason)
 
-	runner.ready.Store(false)
+	poller.reportAvailability(false, "low disk space")
 	ready, reason = poller.Ready(time.Second)
 	assert.False(t, ready)
 	assert.Equal(t, "low disk space", reason)
 
-	runner.ready.Store(true)
-	poller.consecutiveErrors.Store(1)
+	poller.reportAvailability(true, "ok")
+	poller.lastPollFailed.Store(true)
 	poller.lastHealthyPoll.Store(time.Now().UnixNano())
 	ready, _ = poller.Ready(time.Second)
 	assert.True(t, ready, "transient polling errors should remain ready during grace")

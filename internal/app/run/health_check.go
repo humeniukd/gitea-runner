@@ -28,11 +28,7 @@ func (r *Runner) checkConfiguredHealth(ctx context.Context) (bool, string) {
 	if r.now != nil {
 		now = r.now()
 	}
-	interval := r.cfg.HealthCheck.Interval
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	if !r.healthCheckLast.IsZero() && now.Sub(r.healthCheckLast) < interval {
+	if !r.healthCheckLast.IsZero() && now.Sub(r.healthCheckLast) < r.cfg.HealthCheck.Interval {
 		return r.healthCheckReady, r.healthCheckReason
 	}
 
@@ -49,11 +45,7 @@ func (r *Runner) checkConfiguredHealth(ctx context.Context) (bool, string) {
 	if runner == nil {
 		runner = executeHealthCheck
 	}
-	timeout := r.cfg.HealthCheck.Timeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	err := runner(ctx, script, timeout, env)
+	err := runner(ctx, script, r.cfg.HealthCheck.Timeout, env)
 	r.healthCheckLast = now
 	r.healthCheckReady = err == nil
 	if err != nil {
@@ -103,8 +95,9 @@ func executeHealthCheck(ctx context.Context, script string, timeout time.Duratio
 }
 
 func processEnvironment() map[string]string {
-	env := make(map[string]string, len(os.Environ()))
-	for _, value := range os.Environ() {
+	environ := os.Environ()
+	env := make(map[string]string, len(environ))
+	for _, value := range environ {
 		if key, item, ok := strings.Cut(value, "="); ok {
 			env[key] = item
 		}

@@ -66,7 +66,6 @@ type Runner struct {
 	runningCount            atomic.Int64
 	lastIdleCleanupUnixNano atomic.Int64
 	now                     func() time.Time
-	healthCheckMu           sync.Mutex
 	healthCheckLast         time.Time
 	healthCheckReady        bool
 	healthCheckReason       string
@@ -262,12 +261,7 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 	r.runningTasks.Store(task.Id, struct{}{})
 	defer r.runningTasks.Delete(task.Id)
 
-	// Synchronize the transition to an active job with the configurable health
-	// check. This prevents a readiness request from starting the executable at
-	// the same time as a task begins.
-	r.healthCheckMu.Lock()
 	r.runningCount.Add(1)
-	r.healthCheckMu.Unlock()
 
 	start := time.Now()
 
@@ -593,14 +587,13 @@ func (r *Runner) RunningCount() int64 {
 	return r.runningCount.Load()
 }
 
-// CanAcceptTask checks local admission conditions without consuming a task.
+// CanAcceptTask checks local admission conditions without consuming a task. It is
+// called only from the poll loop, so the cached health fields need no lock.
 func (r *Runner) CanAcceptTask(ctx context.Context) (bool, string) {
 	if !r.cfg.HealthCheck.Enabled {
 		return true, "ok"
 	}
 
-	r.healthCheckMu.Lock()
-	defer r.healthCheckMu.Unlock()
 	if r.RunningCount() > 0 {
 		if !r.healthStatusSet {
 			return true, "health checks deferred while jobs are running"
@@ -608,7 +601,7 @@ func (r *Runner) CanAcceptTask(ctx context.Context) (bool, string) {
 		return r.healthStatusReady, r.healthStatusReason
 	}
 
-	if ready, reason := CheckFreeDisk(r.cfg); !ready {
+	if ready, reason := checkFreeDisk(r.cfg); !ready {
 		r.setHealthStatus(ready, reason)
 		return false, reason
 	}
@@ -623,9 +616,8 @@ func (r *Runner) setHealthStatus(ready bool, reason string) {
 	r.healthStatusReason = reason
 }
 
-// CheckFreeDisk evaluates the configured task-admission disk threshold.
-func CheckFreeDisk(cfg *config.Config) (bool, string) {
-	minimumMB := cfg.HealthCheck.MinFreeDiskSpaceMB
+// checkFreeDisk evaluates the configured task-admission disk threshold.
+func checkFreeDisk(cfg *config.Config) (bool, string) {
 	root := cfg.Host.WorkdirParent
 	if cfg.Container.BindWorkdir {
 		root = filepath.FromSlash("/" + strings.TrimLeft(cfg.Container.WorkdirParent, "/"))
@@ -635,13 +627,9 @@ func CheckFreeDisk(cfg *config.Config) (bool, string) {
 	if err != nil {
 		return false, fmt.Sprintf("cannot determine free disk space for %s: %v", root, err)
 	}
-	const bytesPerMiB = uint64(1024 * 1024)
-	if uint64(minimumMB) > ^uint64(0)/bytesPerMiB {
-		return false, "configured minimum free disk space is too large"
-	}
-	minimum := uint64(minimumMB) * bytesPerMiB
-	if available < minimum {
-		return false, fmt.Sprintf("low disk space on %s: %d MiB available, %d MiB required", root, available/(1024*1024), minimumMB)
+	availableMB := available / (1024 * 1024)
+	if availableMB < uint64(cfg.HealthCheck.MinFreeDiskSpaceMB) {
+		return false, fmt.Sprintf("low disk space on %s: %d MiB available, %d MiB required", root, availableMB, cfg.HealthCheck.MinFreeDiskSpaceMB)
 	}
 	return true, "ok"
 }

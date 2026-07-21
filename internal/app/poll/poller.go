@@ -54,11 +54,12 @@ type Poller struct {
 
 	// unregistered is set when the server rejects the runner with an
 	// Unauthenticated response, meaning the runner is no longer registered.
-	unregistered      atomic.Bool
-	lastHealthyPoll   atomic.Int64
-	consecutiveErrors atomic.Int64
-	availabilityMu    sync.Mutex
-	availabilityError string
+	unregistered       atomic.Bool
+	lastHealthyPoll    atomic.Int64
+	lastPollFailed     atomic.Bool
+	availabilityMu     sync.Mutex
+	availabilityReady  bool
+	availabilityReason string
 }
 
 // workerState holds the single poller's backoff state. Consecutive empty or
@@ -94,6 +95,8 @@ func New(cfg *config.Config, client client.Client, runner TaskRunner) *Poller {
 		done: done,
 	}
 	p.lastHealthyPoll.Store(time.Now().UnixNano())
+	p.availabilityReady = true
+	p.availabilityReason = "ok"
 	return p
 }
 
@@ -114,8 +117,9 @@ func (p *Poller) Poll() {
 			return
 		}
 
-		if ready, reason := p.localAvailability(p.pollingCtx); !ready {
-			p.reportAvailability(false, reason)
+		ready, reason := p.localAvailability(p.pollingCtx)
+		p.reportAvailability(ready, reason)
+		if !ready {
 			p.runIdleMaintenance()
 			<-sem
 			if !p.waitBackoff(s) {
@@ -123,7 +127,6 @@ func (p *Poller) Poll() {
 			}
 			continue
 		}
-		p.reportAvailability(true, "")
 
 		task, ok := p.fetchTask(p.pollingCtx, s)
 		if !ok {
@@ -150,15 +153,15 @@ func (p *Poller) PollOnce() {
 	defer close(p.done)
 	s := &workerState{}
 	for {
-		if ready, reason := p.localAvailability(p.pollingCtx); !ready {
-			p.reportAvailability(false, reason)
+		ready, reason := p.localAvailability(p.pollingCtx)
+		p.reportAvailability(ready, reason)
+		if !ready {
 			p.runIdleMaintenance()
 			if !p.waitBackoff(s) {
 				return
 			}
 			continue
 		}
-		p.reportAvailability(true, "")
 		task, ok := p.fetchTask(p.pollingCtx, s)
 		if !ok {
 			p.runIdleMaintenance()
@@ -187,19 +190,22 @@ func (p *Poller) Unregistered() bool {
 }
 
 // Ready reports whether the daemon can currently communicate with Gitea and
-// accept work. Transient transport failures are tolerated for grace.
+// accept work, reusing the availability the poll loop last observed rather than
+// re-running the check. Transient transport failures are tolerated for grace.
 func (p *Poller) Ready(grace time.Duration) (bool, string) {
 	if p.unregistered.Load() {
 		return false, "runner is no longer registered"
 	}
-	if ready, reason := p.localAvailability(p.pollingCtx); !ready {
+	p.availabilityMu.Lock()
+	ready, reason := p.availabilityReady, p.availabilityReason
+	p.availabilityMu.Unlock()
+	if !ready {
 		return false, reason
 	}
-	if p.consecutiveErrors.Load() == 0 {
+	if !p.lastPollFailed.Load() {
 		return true, "ok"
 	}
-	last := time.Unix(0, p.lastHealthyPoll.Load())
-	if time.Since(last) <= grace {
+	if time.Since(time.Unix(0, p.lastHealthyPoll.Load())) <= grace {
 		return true, "polling errors within grace period"
 	}
 	return false, "unable to poll Gitea"
@@ -215,17 +221,14 @@ func (p *Poller) localAvailability(ctx context.Context) (bool, string) {
 func (p *Poller) reportAvailability(ready bool, reason string) {
 	p.availabilityMu.Lock()
 	defer p.availabilityMu.Unlock()
-	if !ready {
-		if p.availabilityError == "" {
-			log.Warnf("runner temporarily unavailable: %s", reason)
-		}
-		p.availabilityError = reason
-		return
-	}
-	if p.availabilityError != "" {
+	switch {
+	case !ready && p.availabilityReady:
+		log.Warnf("runner temporarily unavailable: %s", reason)
+	case ready && !p.availabilityReady:
 		log.Info("runner local health recovered, resuming task polling")
-		p.availabilityError = ""
 	}
+	p.availabilityReady = ready
+	p.availabilityReason = reason
 }
 
 func (p *Poller) runIdleMaintenance() {
@@ -366,7 +369,7 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 			return nil, false
 		}
 		log.WithError(err).Error("failed to fetch task")
-		p.consecutiveErrors.Add(1)
+		p.lastPollFailed.Store(true)
 		s.consecutiveErrors++
 		metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultError).Inc()
 		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodFetchTask).Inc()
@@ -402,5 +405,5 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 
 func (p *Poller) markHealthyPoll() {
 	p.lastHealthyPoll.Store(time.Now().UnixNano())
-	p.consecutiveErrors.Store(0)
+	p.lastPollFailed.Store(false)
 }

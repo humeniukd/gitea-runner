@@ -15,10 +15,10 @@ import (
 // StartServer starts an HTTP server that serves Prometheus metrics on /metrics
 // and health checks. The server shuts down when ctx is cancelled.
 // Call Init() before StartServer to register metrics with the Registry.
-func StartServer(ctx context.Context, addr string, readiness ...func() (bool, string)) {
+func StartServer(ctx context.Context, addr string, readiness func() (bool, string)) {
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           NewHTTPHandler(readiness...),
+		Handler:           NewHTTPHandler(readiness),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -43,7 +43,7 @@ func StartServer(ctx context.Context, addr string, readiness ...func() (bool, st
 }
 
 // NewHTTPHandler returns the metrics and health endpoints used by StartServer.
-func NewHTTPHandler(readiness ...func() (bool, string)) http.Handler {
+func NewHTTPHandler(readiness func() (bool, string)) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(Registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -52,8 +52,8 @@ func NewHTTPHandler(readiness ...func() (bool, string)) http.Handler {
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 		ready, reason := true, "ok"
-		if len(readiness) > 0 && readiness[0] != nil {
-			ready, reason = readiness[0]()
+		if readiness != nil {
+			ready, reason = readiness()
 		}
 		if !ready {
 			w.WriteHeader(http.StatusServiceUnavailable)
