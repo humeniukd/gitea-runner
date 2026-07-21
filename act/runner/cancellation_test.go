@@ -287,7 +287,7 @@ func TestPostStepsContextDeadlinePreservesJobError(t *testing.T) {
 // reportStepError must treat a context.Canceled (e.g. a teardown-cancelled read) as an
 // interruption, never a job failure.
 func TestReportStepErrorTreatsCancelAsInterruption(t *testing.T) {
-	rc := createIfTestRunContext(map[string]*model.Job{"job1": createJob(t, `runs-on: ubuntu-latest`, "")})
+	rc := &RunContext{}
 
 	// stray read cancellation while the job context is live: ignored, not a failure
 	live := common.WithJobErrorContainer(context.Background())
