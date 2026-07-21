@@ -85,7 +85,6 @@ func (sd *stepDocker) runUsesContainer() common.Executor {
 			stepContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 			stepContainer.Start(true),
 		).Finally(
-			// Start(true) awaited exit, so the daemon already reaps AutoRemove containers.
 			stepContainer.Remove().IfBool(!rc.Config.ReuseContainers && !rc.Config.AutoRemove),
 		).Finally(stepContainer.Close())(ctx)
 	}
