@@ -136,7 +136,6 @@ func TestStepDockerAutoRemove(t *testing.T) {
 
 		sd := &stepDocker{
 			RunContext: &RunContext{
-				StepResults:  map[string]*model.StepResult{},
 				Config:       &Config{AutoRemove: tc.autoRemove},
 				Run:          &model.Run{JobID: "1", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}}},
 				JobContainer: cm,

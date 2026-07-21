@@ -169,13 +169,11 @@ func TestExecAsDockerAutoRemove(t *testing.T) {
 		step := &stepActionRemote{
 			Step: &model.Step{ID: "1", Uses: "org/action@v1"},
 			RunContext: &RunContext{
-				StepResults:  map[string]*model.StepResult{},
 				Config:       &Config{AutoRemove: tc.autoRemove},
 				Run:          &model.Run{JobID: "1", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}}},
 				JobContainer: cm,
 			},
 			action: &model.Action{Runs: model.ActionRuns{Using: "docker", Image: "docker://node:14"}},
-			env:    map[string]string{},
 		}
 
 		removes := 0
