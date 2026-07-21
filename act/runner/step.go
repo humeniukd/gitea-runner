@@ -203,8 +203,7 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		if orgerr != nil {
 			return orgerr
 		}
-		// context.Canceled reading these files back is the docker client torn down at
-		// finalization, not a step failure (a real cancel is still caught by the ctx.Err() wrapper).
+		// context.Canceled here is the docker client torn down at finalization; a real cancel is still caught by ctx.Err().
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
