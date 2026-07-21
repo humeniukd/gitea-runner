@@ -13,6 +13,7 @@ import (
 	"gitea.com/gitea/runner/act/model"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.yaml.in/yaml/v4"
 )
@@ -282,4 +283,24 @@ func TestPostStepsContextDeadlinePreservesJobError(t *testing.T) {
 
 	require.NoError(t, postCtx.Err(), "post context must not carry the expired deadline")
 	assert.ErrorIs(t, common.JobError(postCtx), assert.AnError, "the timeout job error must be preserved")
+}
+
+// A context.Canceled reading a finished step's file commands back out of the job container
+// (docker client torn down at finalization) must not fail a step whose work already succeeded.
+func TestRunStepExecutorToleratesFileCommandCancel(t *testing.T) {
+	noop := func(context.Context) error { return nil }
+	cm := &containerMock{}
+	cm.On("Copy", mock.Anything, mock.Anything).Return(noop)
+	cm.On("UpdateFromEnv", mock.Anything, mock.Anything).Return(func(context.Context) error { return context.Canceled })
+
+	rc := createIfTestRunContext(map[string]*model.Job{"job1": createJob(t, `runs-on: ubuntu-latest`, "")})
+	rc.JobContainer = cm
+	rc.StepResults = map[string]*model.StepResult{}
+	sr := &stepRun{RunContext: rc, Step: &model.Step{ID: "1", If: yaml.Node{Value: "always()"}}, env: map[string]string{}}
+
+	// step work succeeds; the container read fails while the step ctx stays live
+	err := runStepExecutor(sr, stepStageMain, noop)(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, model.StepStatusSuccess, rc.StepResults["1"].Conclusion)
 }
