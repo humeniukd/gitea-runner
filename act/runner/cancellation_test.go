@@ -305,8 +305,8 @@ func TestReportStepErrorTreatsCancelAsInterruption(t *testing.T) {
 	assert.True(t, rc.jobCancelled)
 
 	// a real error still fails the job
-	real := common.WithJobErrorContainer(context.Background())
-	reportStepError(real, rc, assert.AnError)
-	assert.ErrorIs(t, common.JobError(real), assert.AnError)
+	failed := common.WithJobErrorContainer(context.Background())
+	reportStepError(failed, rc, assert.AnError)
+	require.ErrorIs(t, common.JobError(failed), assert.AnError)
 	assert.True(t, rc.jobFailed)
 }
