@@ -132,7 +132,7 @@ func (apm *actionPreparerMock) actionDownloadInfo() (string, string, bool) {
 	return apm.reference, apm.sha, apm.ok
 }
 
-func TestPrintPrepareActionsGroupGolden(t *testing.T) {
+func TestPrintPrepareActionsGolden(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := log.New()
 	logger.SetOutput(buf)
@@ -147,31 +147,30 @@ func TestPrintPrepareActionsGroupGolden(t *testing.T) {
 		// A step that downloads nothing, such as the checkout of the workflow's own repository.
 		&actionPreparerMock{ok: false},
 	}
-	require.NoError(t, printPrepareActionsGroup(&RunContext{}, preparers)(ctx))
+	require.NoError(t, printPrepareActions(&RunContext{}, preparers)(ctx))
 
 	want := strings.Join([]string{
-		"[j1]   | ::group::Prepare all required actions",
-		"[j1]   | Download action repository 'actions/checkout@v7' (SHA: 9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0)",
+		"[j1]   | Prepare all required actions",
+		"[j1]   | Download action repository 'actions/checkout@v7' (SHA:9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0)",
 		"[j1]   | Download action repository 'actions/setup-go@v6'",
-		"[j1]   | ::endgroup::",
 		"",
 	}, "\n")
 	assert.Equal(t, want, buf.String())
 }
 
-func TestPrintPrepareActionsGroupSkipsGroupWithoutActions(t *testing.T) {
+func TestPrintPrepareActionsSkipsWithoutActions(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := log.New()
 	logger.SetOutput(buf)
 	logger.SetFormatter(&jobLogFormatter{color: cyan})
 	ctx := common.WithLogger(context.Background(), logger.WithFields(log.Fields{"job": "j1"}))
 
-	require.NoError(t, printPrepareActionsGroup(&RunContext{}, nil)(ctx))
+	require.NoError(t, printPrepareActions(&RunContext{}, nil)(ctx))
 
 	assert.Empty(t, buf.String())
 }
 
-func TestPrintPrepareActionsGroupFailsJobOnDownloadError(t *testing.T) {
+func TestPrintPrepareActionsFailsJobOnDownloadError(t *testing.T) {
 	logger, _ := logrustest.NewNullLogger()
 	ctx := common.WithJobErrorContainer(common.WithLogger(context.Background(), logger.WithField("job", "j1")))
 
@@ -179,7 +178,7 @@ func TestPrintPrepareActionsGroupFailsJobOnDownloadError(t *testing.T) {
 	rc := &RunContext{}
 	remaining := &actionPreparerMock{reference: "actions/setup-go@v6", ok: true}
 
-	err := printPrepareActionsGroup(rc, []actionPreparer{
+	err := printPrepareActions(rc, []actionPreparer{
 		&actionPreparerMock{err: downloadErr},
 		remaining,
 	})(ctx)
@@ -276,13 +275,13 @@ func TestNewJobExecutorDownloadsAllActionsBeforeTheFirstStep(t *testing.T) {
 
 	setup := make([]string, 0)
 	for _, entry := range hook.AllEntries() {
-		if strings.HasPrefix(entry.Message, "::group::") || strings.HasPrefix(entry.Message, "Download action") ||
+		if strings.HasPrefix(entry.Message, "Prepare all required actions") || strings.HasPrefix(entry.Message, "Download action") ||
 			strings.HasPrefix(entry.Message, "Complete job name") {
 			setup = append(setup, entry.Message)
 		}
 	}
 	assert.Equal(t, []string{
-		"::group::Prepare all required actions",
+		"Prepare all required actions",
 		"Download action repository 'actions/checkout@v1'",
 		"Download action repository 'actions/checkout@v2'",
 		"Complete job name: test",

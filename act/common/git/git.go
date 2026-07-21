@@ -261,27 +261,12 @@ type NewGitCloneExecutorInput struct {
 	// 0 for full clone.
 	Depth int
 
-	// Quiet suppresses the informational clone line for callers that log their own
-	// summary of the fetch, such as the action download report in the setup section.
+	// Quiet drops the informational clone line to debug level, for callers that log their own
+	// download summary (the setup section's action report).
 	Quiet bool
 
 	// For Gitea
 	InsecureSkipTLS bool
-}
-
-// HeadSHA returns the commit SHA a cloned repository is checked out at.
-func HeadSHA(dir string) (string, error) {
-	defer AcquireCloneLock(dir)()
-
-	r, err := git.PlainOpen(dir)
-	if err != nil {
-		return "", err
-	}
-	head, err := r.Head()
-	if err != nil {
-		return "", err
-	}
-	return head.Hash().String(), nil
 }
 
 // CloneIfRequired returns the repository and a boolean indicating whether an existing local clone was reused.

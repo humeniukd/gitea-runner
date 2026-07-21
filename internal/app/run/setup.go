@@ -16,21 +16,20 @@ import (
 	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
 )
 
-// osReleasePath describes the host distribution on Linux. It does not exist on other systems,
-// where the reported platform falls back to the Go runtime alone.
+// osReleasePath describes the host distribution on Linux; absent elsewhere, where the platform
+// falls back to the Go runtime alone. A var so tests can point it at a fixture.
 var osReleasePath = "/etc/os-release"
 
-// reportSetup opens the job log the way actions/runner opens its "Set up job" step. The rest of
-// that section — the job container, the action downloads and the closing job name — is written by
-// the act runner as the job starts.
+// reportSetup opens the job log the way actions/runner opens its "Set up job" step. The action
+// downloads and the closing job name are written later, as the job starts.
 func (r *Runner) reportSetup(reporter *report.Reporter, task *runnerv1.Task) {
 	for _, line := range r.setupLines(task) {
 		reporter.Logf("%s", line)
 	}
 }
 
-// setupLines names the runner on the first line, then reports what it was asked to run and the
-// host it runs on, each collapsed into its own group.
+// setupLines names the runner, then reports what it was asked to run and the host it runs on, each
+// in its own group.
 func (r *Runner) setupLines(task *runnerv1.Task) []string {
 	fields := task.Context.Fields
 	lines := []string{
@@ -62,8 +61,7 @@ func osInfo() []string {
 	return append(lines, fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH))
 }
 
-// prettyOSName reads PRETTY_NAME (e.g. "Ubuntu 24.04.4 LTS") from os-release, and returns an
-// empty string when the host has no such file or no such entry.
+// prettyOSName reads PRETTY_NAME (e.g. "Ubuntu 24.04.4 LTS") from os-release, or "" when absent.
 func prettyOSName() string {
 	data, err := os.ReadFile(osReleasePath)
 	if err != nil {

@@ -408,36 +408,6 @@ func TestGitCloneExecutorOfflineMode(t *testing.T) {
 	})
 }
 
-func TestHeadSHA(t *testing.T) {
-	remoteDir := t.TempDir()
-	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
-	workDir := t.TempDir()
-	require.NoError(t, gitCmd("clone", remoteDir, workDir))
-	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "main"))
-	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "initial"))
-	require.NoError(t, gitCmd("-C", workDir, "tag", "v1"))
-	require.NoError(t, gitCmd("-C", workDir, "push", "-u", "origin", "main"))
-	require.NoError(t, gitCmd("-C", workDir, "push", "origin", "v1"))
-
-	t.Run("reports the commit the ref resolved to", func(t *testing.T) {
-		cloneDir := t.TempDir()
-		require.NoError(t, NewGitCloneExecutor(NewGitCloneExecutorInput{
-			URL: remoteDir,
-			Ref: "v1",
-			Dir: cloneDir,
-		})(context.Background()))
-
-		sha, err := HeadSHA(cloneDir)
-		require.NoError(t, err)
-		assert.Equal(t, gitRevParse(t, workDir, "v1"), sha)
-	})
-
-	t.Run("errors on a directory that is not a clone", func(t *testing.T) {
-		_, err := HeadSHA(t.TempDir())
-		require.Error(t, err)
-	})
-}
-
 func TestGitCloneExecutorQuietDemotesCloneLine(t *testing.T) {
 	remoteDir := t.TempDir()
 	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
