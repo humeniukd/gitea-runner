@@ -376,8 +376,8 @@ func (cr *containerReference) find() common.Executor {
 	}
 }
 
-// isContainerGone reports whether a remove lost the race against the daemon's own
-// AutoRemove teardown, which leaves the container removed either way.
+// isContainerGone reports whether a failed remove still left the container gone: already removed
+// (NotFound) or mid-removal by the daemon's AutoRemove (Conflict).
 func isContainerGone(err error) bool {
 	return cerrdefs.IsNotFound(err) || cerrdefs.IsConflict(err)
 }
