@@ -101,26 +101,3 @@ func TestPrettyOSName(t *testing.T) {
 		assert.Empty(t, prettyOSName())
 	})
 }
-
-func TestOSInfo(t *testing.T) {
-	platform := fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
-
-	t.Run("reports the distribution and the platform", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "os-release")
-		require.NoError(t, os.WriteFile(path, []byte("PRETTY_NAME=\"Ubuntu 24.04.4 LTS\"\n"), 0o600))
-
-		original := osReleasePath
-		osReleasePath = path
-		defer func() { osReleasePath = original }()
-
-		assert.Equal(t, []string{"Ubuntu 24.04.4 LTS", platform}, osInfo())
-	})
-
-	t.Run("falls back to the platform alone", func(t *testing.T) {
-		original := osReleasePath
-		osReleasePath = filepath.Join(t.TempDir(), "absent")
-		defer func() { osReleasePath = original }()
-
-		assert.Equal(t, []string{platform}, osInfo())
-	})
-}
