@@ -13,7 +13,6 @@ import (
 	"gitea.com/gitea/runner/act/model"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.yaml.in/yaml/v4"
 )
@@ -285,22 +284,29 @@ func TestPostStepsContextDeadlinePreservesJobError(t *testing.T) {
 	assert.ErrorIs(t, common.JobError(postCtx), assert.AnError, "the timeout job error must be preserved")
 }
 
-// A context.Canceled reading a finished step's file commands back out of the job container
-// (docker client torn down at finalization) must not fail a step whose work already succeeded.
-func TestRunStepExecutorToleratesFileCommandCancel(t *testing.T) {
-	noop := func(context.Context) error { return nil }
-	cm := &containerMock{}
-	cm.On("Copy", mock.Anything, mock.Anything).Return(noop)
-	cm.On("UpdateFromEnv", mock.Anything, mock.Anything).Return(func(context.Context) error { return context.Canceled })
-
+// reportStepError must treat a context.Canceled (e.g. a teardown-cancelled read) as an
+// interruption, never a job failure.
+func TestReportStepErrorTreatsCancelAsInterruption(t *testing.T) {
 	rc := createIfTestRunContext(map[string]*model.Job{"job1": createJob(t, `runs-on: ubuntu-latest`, "")})
-	rc.JobContainer = cm
-	rc.StepResults = map[string]*model.StepResult{}
-	sr := &stepRun{RunContext: rc, Step: &model.Step{ID: "1", If: yaml.Node{Value: "always()"}}, env: map[string]string{}}
 
-	// step work succeeds; the container read fails while the step ctx stays live
-	err := runStepExecutor(sr, stepStageMain, noop)(context.Background())
+	// stray read cancellation while the job context is live: ignored, not a failure
+	live := common.WithJobErrorContainer(context.Background())
+	reportStepError(live, rc, context.Canceled)
+	require.NoError(t, common.JobError(live))
+	assert.False(t, rc.jobFailed)
+	assert.False(t, rc.jobCancelled)
 
-	require.NoError(t, err)
-	assert.Equal(t, model.StepStatusSuccess, rc.StepResults["1"].Conclusion)
+	// genuine job cancellation: recorded as cancelled, still not a failure
+	cancelled, cancel := context.WithCancel(common.WithJobErrorContainer(context.Background()))
+	cancel()
+	reportStepError(cancelled, rc, context.Canceled)
+	require.NoError(t, common.JobError(cancelled))
+	assert.False(t, rc.jobFailed)
+	assert.True(t, rc.jobCancelled)
+
+	// a real error still fails the job
+	real := common.WithJobErrorContainer(context.Background())
+	reportStepError(real, rc, assert.AnError)
+	assert.ErrorIs(t, common.JobError(real), assert.AnError)
+	assert.True(t, rc.jobFailed)
 }
