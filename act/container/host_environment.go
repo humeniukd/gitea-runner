@@ -45,8 +45,8 @@ type HostEnvironment struct {
 	StdOut       io.Writer
 	AllocatePTY  bool // allocate a pseudo-TTY for each step's process
 
-	// procGroup owns every process this job's steps start, so nothing outlives
-	// the job. Atomic because Remove reads it while a step may still be starting.
+	// procGroup owns every process the job's steps start. Atomic: Remove may read
+	// it while a step is still starting.
 	procGroupOnce sync.Once
 	procGroup     atomic.Pointer[process.Group]
 }
@@ -377,8 +377,8 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	// Assign before the step's own Killer so the step's job nests inside the
-	// job's: cancellation still kills only this step's tree.
+	// Assign before the step's Killer so the step's job nests inside the group's;
+	// cancellation still scopes to this step's tree.
 	if err := e.processGroup(ctx).Assign(cmd.Process); err != nil {
 		common.Logger(ctx).Warnf("could not assign the step's process to the job's process group; a process it leaves behind may outlive the job: %v", err)
 	}
@@ -547,8 +547,8 @@ func (e *HostEnvironment) terminateRunningProcesses(ctx context.Context) {
 	}
 
 	// Win32_Process exposes no working directory, so the scan above misses a
-	// process that merely *runs in* a workspace dir while pinning a handle on it.
-	if killed, err := process.KillProcessesWithCWDUnder(dirs); err != nil {
+	// process that merely runs in a workspace dir while pinning a handle on it.
+	if killed, err := process.KillProcessesWithCWDUnder(killCtx, dirs); err != nil {
 		logger.Debugf("workspace process kill by working directory reported errors: %v", err)
 	} else if killed > 0 {
 		logger.Debugf("terminated %d leftover process(es) by workspace working directory", killed)
@@ -584,8 +584,7 @@ func (e *HostEnvironment) Remove() common.Executor {
 		logger := common.Logger(ctx)
 
 		// End lingering processes before removing the workspace; on Windows their
-		// file locks block cleanup. Closing the group is the deterministic pass,
-		// the scan below a net for processes that broke away from the job.
+		// file locks block cleanup. Closing the group is deterministic, the scan a net.
 		if err := e.procGroup.Load().Close(); err != nil {
 			logger.Debugf("closing the job's process group failed: %v", err)
 		}

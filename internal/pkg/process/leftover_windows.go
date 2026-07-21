@@ -4,6 +4,7 @@
 package process
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -13,26 +14,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// dirContainsPath reports whether target is dir itself or lives beneath it.
-// Matching is case-insensitive, and a sibling sharing a name prefix (job1 vs
-// job10) is not contained.
+// dirContainsPath reports whether target is dir or lives beneath it,
+// case-insensitively, so a name-prefix sibling (job1 vs job10) is not a match.
 func dirContainsPath(dir, target string) bool {
 	return pathWithin(filepath.Clean(dir), filepath.Clean(target), true)
 }
 
-// KillProcessesWithCWDUnder terminates every process whose current working
-// directory is one of dirs or lives beneath it, and returns how many it killed.
-// This complements the workspace path scan, which cannot see a process that only
-// *runs in* a workspace dir: Win32_Process exposes no working directory. Such a
-// process pins an open handle that blocks the workspace deletion.
-//
-// Only processes in the runner's own session are considered: leftovers we
-// spawned inherit it, and skipping the rest avoids reading the memory of
-// system and other-user processes we could never open anyway.
-//
-// Best-effort: a process we cannot open (higher integrity level, another user)
-// is skipped.
-func KillProcessesWithCWDUnder(dirs []string) (int, error) {
+// KillProcessesWithCWDUnder terminates every process in the runner's session
+// whose cwd is one of dirs or below, catching leftovers the path scan misses
+// (Win32_Process exposes no cwd) that still pin a handle. Best-effort.
+func KillProcessesWithCWDUnder(ctx context.Context, dirs []string) (int, error) {
 	if len(dirs) == 0 {
 		return 0, nil
 	}
@@ -51,17 +42,17 @@ func KillProcessesWithCWDUnder(dirs []string) (int, error) {
 	var killed int
 	var errs []error
 	for _, pid := range pids {
+		if ctx.Err() != nil {
+			break
+		}
 		// Never touch ourselves, System Idle (0) or System (4).
 		if pid == self || pid == 0 || pid == 4 {
 			continue
 		}
-
-		// Restrict the memory-reading scan to our own session.
 		var session uint32
 		if err := windows.ProcessIdToSessionId(pid, &session); err != nil || session != ownSession {
 			continue
 		}
-
 		ok, err := terminateIfCWDUnder(pid, dirs)
 		if err != nil {
 			errs = append(errs, err)
@@ -75,15 +66,12 @@ func KillProcessesWithCWDUnder(dirs []string) (int, error) {
 	return killed, errors.Join(errs...)
 }
 
-// terminateIfCWDUnder opens pid once and both reads the cwd and terminates
-// through that one handle. The shared handle binds to this exact process, so a
-// PID recycled onto a new process between reading and killing cannot be hit.
-// Returns true when it terminated the process.
+// terminateIfCWDUnder opens pid once and both reads its cwd and terminates it
+// through that one handle, so a PID recycled between the two cannot be hit.
 func terminateIfCWDUnder(pid uint32, dirs []string) (bool, error) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ|windows.PROCESS_TERMINATE, false, pid)
 	if err != nil {
-		// Best-effort: cannot open (gone, higher integrity, another user).
-		return false, nil
+		return false, nil // best-effort: gone, higher integrity, or another user
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 
@@ -92,21 +80,15 @@ func terminateIfCWDUnder(pid uint32, dirs []string) (bool, error) {
 		return false, nil
 	}
 
-	matched := false
 	for _, d := range dirs {
 		if dirContainsPath(d, cwd) {
-			matched = true
-			break
+			if err := windows.TerminateProcess(h, 1); err != nil {
+				return false, fmt.Errorf("terminate pid %d: %w", pid, err)
+			}
+			return true, nil
 		}
 	}
-	if !matched {
-		return false, nil
-	}
-
-	if err := windows.TerminateProcess(h, 1); err != nil {
-		return false, fmt.Errorf("terminate pid %d: %w", pid, err)
-	}
-	return true, nil
+	return false, nil
 }
 
 // listProcessIDs returns the PIDs of every process in a Toolhelp snapshot.
@@ -132,20 +114,8 @@ func listProcessIDs() ([]uint32, error) {
 	return pids, nil
 }
 
-// processCWD opens pid and reads its working directory. It exists for tests;
-// the reaper uses processCWDHandle so it can share one handle with the kill.
-func processCWD(pid uint32) (string, error) {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, pid)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = windows.CloseHandle(h) }()
-	return processCWDHandle(h)
-}
-
-// processCWDHandle reads a process's working directory out of its PEB, walking
-// PEB -> ProcessParameters -> CurrentDirectory.DosPath. Offsets come from
-// unsafe.Offsetof so they stay correct for the build architecture. h must carry
+// processCWDHandle reads a process's working directory from its PEB (walking
+// PEB -> ProcessParameters -> CurrentDirectory.DosPath). h must carry
 // PROCESS_QUERY_INFORMATION|PROCESS_VM_READ.
 func processCWDHandle(h windows.Handle) (string, error) {
 	var pbi windows.PROCESS_BASIC_INFORMATION
@@ -163,8 +133,7 @@ func processCWDHandle(h windows.Handle) (string, error) {
 		return "", err
 	}
 
-	// DosPath is the leading NTUnicodeString of CURDIR, so it shares the
-	// CurrentDirectory address.
+	// DosPath is the leading NTUnicodeString of CURDIR, so it shares CurrentDirectory's address.
 	dosPathAddr := paramsAddr + unsafe.Offsetof(windows.RTL_USER_PROCESS_PARAMETERS{}.CurrentDirectory)
 	length, err := readRemoteU16(h, dosPathAddr+unsafe.Offsetof(windows.NTUnicodeString{}.Length))
 	if err != nil || length == 0 {
@@ -175,7 +144,7 @@ func processCWDHandle(h windows.Handle) (string, error) {
 		return "", err
 	}
 
-	u16 := make([]uint16, length/2)
+	u16 := make([]uint16, (length+1)/2) // round up so an odd Length cannot overflow the buffer
 	var n uintptr
 	if err := windows.ReadProcessMemory(h, bufAddr, (*byte)(unsafe.Pointer(&u16[0])), uintptr(length), &n); err != nil {
 		return "", err

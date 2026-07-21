@@ -54,9 +54,8 @@ func awaitChildPID(t *testing.T, pidFile string) int {
 	return childPID
 }
 
-// TestGroupClosePropagatesToOrphan covers what the per-step Killer cannot: a step
-// completes but leaves a process whose parent already exited. Nothing links that
-// orphan to the step, so only closing the job object can still reach it.
+// TestGroupClosePropagatesToOrphan covers what the per-step Killer cannot: a
+// completed step's orphan, reachable only by closing the job object.
 func TestGroupClosePropagatesToOrphan(t *testing.T) {
 	group, err := NewGroup()
 	require.NoError(t, err)
@@ -67,26 +66,21 @@ func TestGroupClosePropagatesToOrphan(t *testing.T) {
 
 	childPID := awaitChildPID(t, pidFile)
 
-	// The step's own process finishes successfully, as a passing step would.
-	require.NoError(t, cmd.Wait())
+	require.NoError(t, cmd.Wait()) // the step process exits cleanly, like a passing step
 	require.Eventually(t, func() bool {
 		return !processAlive(cmd.Process.Pid)
 	}, 20*time.Second, 200*time.Millisecond, "the step process should have exited on its own")
 
-	// The orphan outlived its parent, exactly like a leftover GUI application.
-	require.True(t, processAlive(childPID), "orphan should still be running before the job ends")
+	require.True(t, processAlive(childPID), "orphan should outlive its parent")
 
-	// Ending the task must take it down.
 	require.NoError(t, group.Close())
-
 	require.Eventually(t, func() bool {
 		return !processAlive(childPID)
-	}, 20*time.Second, 200*time.Millisecond, "closing the job must terminate the orphan the step left behind")
+	}, 20*time.Second, 200*time.Millisecond, "closing the job must terminate the orphan")
 }
 
-// TestGroupNestsWithKiller verifies the two job objects coexist: assigned to the
-// task's group first and the step's Killer second, cancelling the step still
-// kills exactly that step's tree.
+// TestGroupNestsWithKiller: assigned to the group first and the step's Killer
+// second, cancelling the step still kills exactly that step's tree.
 func TestGroupNestsWithKiller(t *testing.T) {
 	group, err := NewGroup()
 	require.NoError(t, err)
@@ -98,10 +92,9 @@ func TestGroupNestsWithKiller(t *testing.T) {
 
 	require.NoError(t, group.Assign(cmd.Process))
 
-	// Nesting the step's job inside the task's job must be accepted, otherwise
-	// cancellation would silently fall back to a single-process kill.
+	// Nesting must be accepted, else cancellation falls back to a single-process kill.
 	killer, err := NewKiller(cmd.Process)
-	require.NoError(t, err, "the step's job object must nest inside the task's job object")
+	require.NoError(t, err, "the step's job object must nest inside the group's")
 	defer killer.Close()
 
 	require.NoError(t, killer.Kill())

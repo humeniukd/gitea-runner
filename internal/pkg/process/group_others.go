@@ -8,7 +8,7 @@ package process
 import "os"
 
 // Group is a no-op outside Windows: process groups already reclaim a step's
-// tree, and an orphan does not block workspace deletion as an open Windows file
+// tree, and an orphan does not block workspace deletion the way an open Windows
 // handle does.
 type Group struct{}
 

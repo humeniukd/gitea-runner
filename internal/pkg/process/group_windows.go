@@ -11,17 +11,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Group is a task-scoped Windows Job Object holding every process a job's steps
-// start. Closing it terminates whatever is still assigned, catching orphans the
-// per-step Killer misses: a step that completes leaves its spawn running, with
-// no parent to walk from and often an executable outside the workspace.
+// Group is a job-scoped Windows Job Object holding every process the job's steps
+// start; closing it terminates whatever is still assigned, reaching orphans the
+// per-step Killer misses (a completed step's leftover has no parent to walk from).
 type Group struct {
 	mu  sync.Mutex
 	job windows.Handle
 }
 
 // NewGroup creates the job object. Closing it is what terminates the leftovers,
-// so the caller must Close it when the task ends.
+// so the caller must Close it when the job ends.
 func NewGroup() (*Group, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
@@ -47,8 +46,7 @@ func NewGroup() (*Group, error) {
 }
 
 // Assign adds a started process to the job; anything it spawns afterwards joins
-// automatically. Call it before NewKiller so the step's job nests inside this
-// one. Safe on a nil Group, which is what a caller holds when NewGroup failed.
+// too. Call before NewKiller so the step's job nests inside this one. Nil-safe.
 func (g *Group) Assign(p *os.Process) error {
 	if g == nil || p == nil {
 		return nil
@@ -70,7 +68,7 @@ func (g *Group) Assign(p *os.Process) error {
 }
 
 // Close drops the job handle, terminating every process still assigned to it.
-// Safe on a nil Group and on repeat calls.
+// Nil-safe and idempotent.
 func (g *Group) Close() error {
 	if g == nil {
 		return nil

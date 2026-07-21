@@ -8,8 +8,8 @@ import (
 	"strings"
 )
 
-// pathWithin is the OS-agnostic core of dirContainsPath. dir and target must
-// already be cleaned; fold makes the comparison case-insensitive.
+// pathWithin is the OS-agnostic core of dirContainsPath: dir and target must
+// already be cleaned, and fold folds case.
 func pathWithin(dir, target string, fold bool) bool {
 	if dir == "" || target == "" || dir == "." || target == "." {
 		return false

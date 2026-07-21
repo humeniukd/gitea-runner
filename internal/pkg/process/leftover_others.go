@@ -5,8 +5,10 @@
 
 package process
 
-// KillProcessesWithCWDUnder is a no-op outside Windows: on Unix an open handle
-// does not block os.RemoveAll, so there is no workspace to unblock.
-func KillProcessesWithCWDUnder(_ []string) (int, error) {
+import "context"
+
+// KillProcessesWithCWDUnder is a no-op outside Windows: an open handle does not
+// block os.RemoveAll there.
+func KillProcessesWithCWDUnder(_ context.Context, _ []string) (int, error) {
 	return 0, nil
 }
