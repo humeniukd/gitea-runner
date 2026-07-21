@@ -6,6 +6,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	maps0 "maps"
 	"path"
@@ -190,23 +191,22 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		// Process Runner File Commands
 		orgerr := err
 		err = processRunnerEnvFileCommand(ctx, envFileCommand, rc, rc.setEnv)
-		if err != nil {
-			return err
+		if err == nil {
+			err = processRunnerEnvFileCommand(ctx, stateFileCommand, rc, rc.saveState)
 		}
-		err = processRunnerEnvFileCommand(ctx, stateFileCommand, rc, rc.saveState)
-		if err != nil {
-			return err
+		if err == nil {
+			err = processRunnerEnvFileCommand(ctx, outputFileCommand, rc, rc.setOutput)
 		}
-		err = processRunnerEnvFileCommand(ctx, outputFileCommand, rc, rc.setOutput)
-		if err != nil {
-			return err
-		}
-		err = rc.UpdateExtraPath(ctx, path.Join(actPath, pathFileCommand))
-		if err != nil {
-			return err
+		if err == nil {
+			err = rc.UpdateExtraPath(ctx, path.Join(actPath, pathFileCommand))
 		}
 		if orgerr != nil {
 			return orgerr
+		}
+		// context.Canceled reading these files back is the docker client torn down at
+		// finalization, not a step failure (a real cancel is still caught by the ctx.Err() wrapper).
+		if errors.Is(err, context.Canceled) {
+			return nil
 		}
 		return err
 	}
