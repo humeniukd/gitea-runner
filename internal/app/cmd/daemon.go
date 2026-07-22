@@ -22,6 +22,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/config"
 	"gitea.com/gitea/runner/internal/pkg/envcheck"
 	"gitea.com/gitea/runner/internal/pkg/labels"
+	"gitea.com/gitea/runner/internal/pkg/lock"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
@@ -48,6 +49,18 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		} else if err != nil {
 			return fmt.Errorf("failed to load registration file: %w", err)
 		}
+
+		// Guard against a second runner process sharing this runner file: two
+		// processes with the same identity are indistinguishable to Gitea and
+		// end up cancelling each other's jobs.
+		releaseLock, err := lock.TryLock(cfg.Runner.File)
+		if errors.Is(err, lock.ErrLocked) {
+			log.Errorf("another gitea-runner process is already using %q; each runner process needs its own runner file (runner.file)", cfg.Runner.File)
+			return err
+		} else if err != nil {
+			return fmt.Errorf("failed to lock runner file: %w", err)
+		}
+		defer func() { _ = releaseLock() }()
 
 		lbls := resolveLabels(daemArgs.Labels, cfg.Runner.Labels, reg.Labels)
 

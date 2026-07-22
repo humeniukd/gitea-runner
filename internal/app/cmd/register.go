@@ -18,6 +18,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/client"
 	"gitea.com/gitea/runner/internal/pkg/config"
 	"gitea.com/gitea/runner/internal/pkg/labels"
+	"gitea.com/gitea/runner/internal/pkg/lock"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"connectrpc.com/connect"
@@ -346,6 +347,15 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
 }
 
 func doRegister(ctx context.Context, cfg *config.Config, inputs *registerInputs) error {
+	// Refuse to rewrite the runner file while a daemon is running with it.
+	releaseLock, err := lock.TryLock(cfg.Runner.File)
+	if errors.Is(err, lock.ErrLocked) {
+		return fmt.Errorf("a runner daemon is already running with %q; stop it before re-registering", cfg.Runner.File)
+	} else if err != nil {
+		return fmt.Errorf("failed to lock runner file: %w", err)
+	}
+	defer func() { _ = releaseLock() }()
+
 	// initial http client
 	cli := client.New(
 		inputs.InstanceAddr,
