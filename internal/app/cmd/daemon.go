@@ -58,9 +58,16 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			log.Errorf("another gitea-runner process is already using %q; each runner process needs its own runner file (runner.file)", cfg.Runner.File)
 			return err
 		} else if err != nil {
-			return fmt.Errorf("failed to lock runner file: %w", err)
+			// Best-effort guard: if the lock file can't be created (e.g. a
+			// read-only runner-file mount), warn and start anyway rather than
+			// refusing to run.
+			log.Warnf("could not lock runner file %q, continuing without the single-process guard: %v", cfg.Runner.File, err)
+		} else {
+			// Held until shutdown finishes: the draining runner still owns this
+			// identity on the server, so releasing early would let a restart
+			// reintroduce the duplicate-identity job cancellations.
+			defer func() { _ = releaseLock() }()
 		}
-		defer func() { _ = releaseLock() }()
 
 		lbls := resolveLabels(daemArgs.Labels, cfg.Runner.Labels, reg.Labels)
 

@@ -37,3 +37,18 @@ func TestTryLock(t *testing.T) {
 		t.Fatalf("second release failed: %v", err)
 	}
 }
+
+// TestTryLockUncreatable ensures a lock file that cannot be created reports a
+// non-ErrLocked error, so callers can tell "already locked by another process"
+// apart from "couldn't lock" and degrade gracefully (e.g. a read-only mount).
+func TestTryLockUncreatable(t *testing.T) {
+	runnerFile := filepath.Join(t.TempDir(), "missing-dir", ".runner")
+
+	_, err := TryLock(runnerFile)
+	if err == nil {
+		t.Fatal("TryLock on an uncreatable lock file: want error, got nil")
+	}
+	if errors.Is(err, ErrLocked) {
+		t.Fatal("TryLock on an uncreatable lock file: want non-ErrLocked error, got ErrLocked")
+	}
+}
