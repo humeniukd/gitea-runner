@@ -151,6 +151,7 @@ type containerOptions struct {
 	autoRemove          bool
 	init                bool
 	annotations         *opts.MapOpts
+	platform            string
 
 	Image string
 	Args  []string
@@ -220,6 +221,7 @@ func addFlags(flags *pflag.FlagSet) *containerOptions {
 	flags.StringVarP(&copts.user, "user", "u", "", "Username or UID (format: <name|uid>[:<group|gid>])")
 	flags.StringVarP(&copts.workingDir, "workdir", "w", "", "Working directory inside the container")
 	flags.BoolVar(&copts.autoRemove, "rm", false, "Automatically remove the container and its associated anonymous volumes when it exits")
+	flags.StringVar(&copts.platform, "platform", "", "Set platform (e.g. linux/arm/v7)")
 
 	// Security
 	flags.Var(&copts.capAdd, "cap-add", "Add Linux capabilities")
