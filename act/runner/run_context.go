@@ -17,6 +17,7 @@ import (
 	"io"
 	maps0 "maps"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -298,7 +299,7 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 			AllocatePTY: rc.Config.AllocatePTY,
 		}
 		rc.cleanUpJobContainer = rc.JobContainer.Remove()
-		for k, v := range rc.JobContainer.GetRunnerContext(ctx) {
+		for k, v := range rc.getRunnerContext(ctx) {
 			if v, ok := v.(string); ok {
 				rc.Env["RUNNER_"+strings.ToUpper(k)] = v
 			}
@@ -372,6 +373,11 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
 		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
 		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
+		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_NAME", rc.runnerName()))
+		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ENVIRONMENT", "self-hosted"))
+		if rc.Config.RunnerDebug() {
+			envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_DEBUG", "1"))
+		}
 		envList = append(envList, fmt.Sprintf("%s=%s", "LANG", "C.UTF-8")) // Use same locale as GitHub Actions
 
 		ext := container.LinuxContainerEnvironmentExtensions{}
@@ -986,6 +992,35 @@ func (rc *RunContext) getStepsContext() map[string]*model.StepResult {
 	return rc.StepResults
 }
 
+// getRunnerContext returns the `runner` context: the values the execution environment
+// knows (os, arch, temp, tool_cache) plus the ones only the runner process knows.
+// GitHub exposes name/environment/debug there too, and workflows commonly gate on
+// `runner.debug == '1'`.
+func (rc *RunContext) getRunnerContext(ctx context.Context) map[string]any {
+	runnerContext := map[string]any{}
+	if rc.JobContainer != nil {
+		maps0.Copy(runnerContext, rc.JobContainer.GetRunnerContext(ctx))
+	}
+	runnerContext["name"] = rc.runnerName()
+	runnerContext["environment"] = "self-hosted"
+	if rc.Config.RunnerDebug() {
+		runnerContext["debug"] = "1"
+	}
+	return runnerContext
+}
+
+// runnerName is the registered runner name, falling back to the hostname so that
+// `runner.name` is never empty for callers that do not register (such as `exec`).
+func (rc *RunContext) runnerName() string {
+	if rc.Config.RunnerName != "" {
+		return rc.Config.RunnerName
+	}
+	if host, err := os.Hostname(); err == nil && host != "" {
+		return host
+	}
+	return "self-hosted"
+}
+
 func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext {
 	logger := common.Logger(ctx)
 	ghc := &model.GithubContext{
@@ -1170,7 +1205,7 @@ func nestedMapLookup(m map[string]any, ks ...string) (rval any) {
 	}
 }
 
-func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubContext, env map[string]string) map[string]string { //nolint:unparam // pre-existing issue from nektos/act
+func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubContext, env map[string]string) map[string]string {
 	env["CI"] = "true"
 	env["GITHUB_WORKFLOW"] = github.Workflow
 	env["GITHUB_RUN_ID"] = github.RunID
@@ -1212,23 +1247,93 @@ func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubCon
 		env["GITHUB_RUN_ATTEMPT"] = github.RunAttempt
 	}
 
+	env["RUNNER_NAME"] = rc.runnerName()
+	env["RUNNER_ENVIRONMENT"] = "self-hosted"
+	if workspace := parentDir(github.Workspace); workspace != "" {
+		env["RUNNER_WORKSPACE"] = workspace
+	}
+	if rc.Config.RunnerDebug() {
+		env["RUNNER_DEBUG"] = "1"
+	}
+
 	if rc.Config.ArtifactServerPath != "" {
 		setActionRuntimeVars(rc, env)
 	}
 
-	for _, platformName := range rc.runsOnPlatformNames(ctx) {
-		if platformName != "" {
-			if platformName == "ubuntu-latest" {
-				// hardcode current ubuntu-latest since we have no way to check that 'on the fly'
-				env["ImageOS"] = "ubuntu20"
-			} else {
-				platformName = strings.SplitN(strings.Replace(platformName, `-`, ``, 1), `.`, 2)[0]
-				env["ImageOS"] = platformName
-			}
-		}
+	if imageOS := rc.imageOS(ctx); imageOS != "" {
+		env["ImageOS"] = imageOS
 	}
 
 	return env
+}
+
+// parentDir returns the directory containing p, keeping the separator style of p so
+// that a Windows host path is not rewritten with slashes and a container path is not
+// rewritten with backslashes when the runner itself runs on Windows.
+func parentDir(p string) string {
+	if p == "" {
+		return ""
+	}
+	// Do not use filepath here: the path may describe a container while the runner
+	// itself runs on Windows, or the other way round.
+	windows := strings.ContainsRune(p, '\\')
+	dir := path.Dir(strings.ReplaceAll(p, `\`, "/"))
+	if windows {
+		return strings.ReplaceAll(dir, "/", `\`)
+	}
+	return dir
+}
+
+// imageOS returns the value of the ImageOS environment variable, which workflows and
+// setup-* actions use to tell one runner image release from another. The tag of the
+// resolved container image names a concrete release even when the runs-on label is a
+// rolling one such as ubuntu-latest, so it is preferred over the label.
+func (rc *RunContext) imageOS(ctx context.Context) string {
+	if imageOS := imageOSFromImage(rc.platformImage(ctx)); imageOS != "" {
+		return imageOS
+	}
+
+	imageOS := ""
+	for _, platformName := range rc.runsOnPlatformNames(ctx) {
+		if platformName == "" {
+			continue
+		}
+		if platformName == "ubuntu-latest" {
+			// A rolling label with an image that carries no release in its tag: there is
+			// no way to check the release 'on the fly', so keep the historical value.
+			imageOS = "ubuntu20"
+		} else {
+			imageOS = normalizeImageOS(platformName)
+		}
+	}
+	return imageOS
+}
+
+// imageOSVersionedTag matches image tags that name an OS and its release, such as
+// "ubuntu-24.04" or "ubuntu24.04". Tags carrying only a version ("22.04") or only a
+// name ("latest") say nothing about the release and are left to the label fallback.
+var imageOSVersionedTag = regexp.MustCompile(`^[a-zA-Z]+-?[0-9]`)
+
+// imageOSFromImage derives ImageOS from the tag of an image reference, e.g.
+// "docker.gitea.com/runner-images:ubuntu-24.04" yields "ubuntu24".
+func imageOSFromImage(image string) string {
+	if image == "" {
+		return ""
+	}
+	// Strip any registry host, whose port would otherwise look like a tag.
+	if slash := strings.LastIndex(image, "/"); slash >= 0 {
+		image = image[slash+1:]
+	}
+	_, tag, ok := strings.Cut(image, ":")
+	if !ok || !imageOSVersionedTag.MatchString(tag) {
+		return ""
+	}
+	return normalizeImageOS(tag)
+}
+
+// normalizeImageOS turns a release name such as "ubuntu-24.04" into "ubuntu24".
+func normalizeImageOS(name string) string {
+	return strings.SplitN(strings.Replace(name, `-`, ``, 1), `.`, 2)[0]
 }
 
 func setActionRuntimeVars(rc *RunContext, env map[string]string) {

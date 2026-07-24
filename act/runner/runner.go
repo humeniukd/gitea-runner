@@ -92,6 +92,14 @@ type Config struct {
 	InsecureSkipTLS                   bool                         // whether to skip verifying TLS certificate of the Gitea instance
 	MaxParallel                       int                          // max parallel jobs to run across all workflows (0 = no limit, uses CPU count)
 	AllocatePTY                       bool                         // allocate a pseudo-TTY for each step's process
+	RunnerName                        string                       // the name this runner registered with, reported as `runner.name`
+}
+
+// RunnerDebug reports whether debug logging is enabled for this run, which GitHub
+// exposes as the `runner.debug` context and the RUNNER_DEBUG environment variable.
+// The reporter reads the same secret to decide whether ::debug:: output is kept.
+func (c Config) RunnerDebug() bool {
+	return c.Secrets["ACTIONS_STEP_DEBUG"] == "true" || c.Env["ACTIONS_STEP_DEBUG"] == "true"
 }
 
 // GetToken: Adapt to Gitea
