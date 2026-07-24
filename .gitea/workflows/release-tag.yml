@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # all history for all branches and tags
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: "go.mod"
       - name: Import GPG key
@@ -42,12 +42,18 @@ jobs:
     strategy:
       matrix:
         variant:
+          # The basic image is built from source and can target any arch the
+          # toolchain supports. The dind variants are limited to the arches the
+          # docker:dind base image publishes.
           - target: basic
             tag_suffix: ""
+            platforms: linux/amd64,linux/arm64,linux/riscv64,linux/s390x
           - target: dind
             tag_suffix: "-dind"
+            platforms: linux/amd64,linux/arm64
           - target: dind-rootless
             tag_suffix: "-dind-rootless"
+            platforms: linux/amd64,linux/arm64
     container:
       image: catthehacker/ubuntu:act-latest
     env:
@@ -91,9 +97,7 @@ jobs:
           context: .
           file: ./Dockerfile
           target: ${{ matrix.variant.target }}
-          platforms: |
-            linux/amd64
-            linux/arm64
+          platforms: ${{ matrix.variant.platforms }}
           push: true
           tags: ${{ steps.docker_meta.outputs.tags }}
           build-args: |

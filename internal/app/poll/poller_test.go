@@ -78,6 +78,35 @@ func TestPoller_FetchErrorIncrementsErrorsOnly(t *testing.T) {
 	assert.Equal(t, int64(0), s.consecutiveEmpty)
 }
 
+// TestPoller_FetchUnauthenticatedStopsPolling verifies that an Unauthenticated
+// response marks the runner as unregistered and cancels the polling context so
+// the daemon can exit instead of retrying forever.
+func TestPoller_FetchUnauthenticatedStopsPolling(t *testing.T) {
+	client := mocks.NewClient(t)
+	client.On("FetchTask", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ *connect_go.Request[runnerv1.FetchTaskRequest]) (*connect_go.Response[runnerv1.FetchTaskResponse], error) {
+			return nil, connect_go.NewError(connect_go.CodeUnauthenticated, errors.New("unregistered runner"))
+		},
+	)
+
+	cfg, err := config.LoadDefault("")
+	require.NoError(t, err)
+	p := New(cfg, client, nil)
+
+	s := &workerState{}
+	_, ok := p.fetchTask(context.Background(), s)
+	require.False(t, ok)
+
+	assert.True(t, p.Unregistered(), "runner should be marked unregistered")
+	assert.Equal(t, int64(0), s.consecutiveErrors, "unauthenticated must not drive error backoff")
+
+	select {
+	case <-p.pollingCtx.Done():
+	default:
+		t.Fatal("expected polling context to be cancelled after an Unauthenticated response")
+	}
+}
+
 // TestPoller_CalculateInterval verifies the exponential backoff math is
 // correctly driven by the workerState counters.
 func TestPoller_CalculateInterval(t *testing.T) {
@@ -128,6 +157,81 @@ type mockRunner struct {
 type idleAwareRunner struct {
 	mockRunner
 	idleCalls atomic.Int64
+}
+
+type availabilityRunner struct {
+	mockRunner
+	ready  atomic.Bool
+	reason string
+}
+
+func (r *availabilityRunner) CanAcceptTask(_ context.Context) (bool, string) {
+	if r.ready.Load() {
+		return true, "ok"
+	}
+	return false, r.reason
+}
+
+func TestPollerReady(t *testing.T) {
+	cfg, err := config.LoadDefault("")
+	require.NoError(t, err)
+	poller := New(cfg, nil, &availabilityRunner{})
+
+	// /readyz reuses the availability the poll loop last recorded.
+	ready, reason := poller.Ready(time.Second)
+	assert.True(t, ready)
+	assert.Equal(t, "ok", reason)
+
+	poller.reportAvailability(false, "low disk space")
+	ready, reason = poller.Ready(time.Second)
+	assert.False(t, ready)
+	assert.Equal(t, "low disk space", reason)
+
+	poller.reportAvailability(true, "ok")
+	poller.lastPollFailed.Store(true)
+	poller.lastHealthyPoll.Store(time.Now().UnixNano())
+	ready, _ = poller.Ready(time.Second)
+	assert.True(t, ready, "transient polling errors should remain ready during grace")
+
+	poller.lastHealthyPoll.Store(time.Now().Add(-2 * time.Second).UnixNano())
+	ready, reason = poller.Ready(time.Second)
+	assert.False(t, ready)
+	assert.Equal(t, "unable to poll Gitea", reason)
+
+	poller.unregistered.Store(true)
+	ready, reason = poller.Ready(time.Second)
+	assert.False(t, ready)
+	assert.Equal(t, "runner is no longer registered", reason)
+}
+
+func TestPollerPausesAndResumesForLocalAvailability(t *testing.T) {
+	var fetches atomic.Int64
+	cli := mocks.NewClient(t)
+	cli.On("FetchTask", mock.Anything, mock.Anything).Maybe().Run(func(mock.Arguments) {
+		fetches.Add(1)
+	}).Return(connect_go.NewResponse(&runnerv1.FetchTaskResponse{}), nil)
+
+	cfg, err := config.LoadDefault("")
+	require.NoError(t, err)
+	cfg.Runner.FetchInterval = 10 * time.Millisecond
+	cfg.Runner.FetchIntervalMax = 10 * time.Millisecond
+	runner := &availabilityRunner{reason: "low disk space"}
+	poller := New(cfg, cli, runner)
+
+	var wg sync.WaitGroup
+	wg.Go(poller.Poll)
+	time.Sleep(40 * time.Millisecond)
+	assert.Zero(t, fetches.Load(), "an unavailable runner must not fetch a task")
+
+	runner.ready.Store(true)
+	require.Eventually(t, func() bool {
+		return fetches.Load() > 0
+	}, time.Second, 10*time.Millisecond, "polling should resume after local recovery")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, poller.Shutdown(shutdownCtx))
+	wg.Wait()
 }
 
 func (m *mockRunner) Run(ctx context.Context, _ *runnerv1.Task) error {

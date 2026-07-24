@@ -49,10 +49,7 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			return fmt.Errorf("failed to load registration file: %w", err)
 		}
 
-		lbls := reg.Labels
-		if len(cfg.Runner.Labels) > 0 {
-			lbls = cfg.Runner.Labels
-		}
+		lbls := resolveLabels(daemArgs.Labels, cfg.Runner.Labels, reg.Labels)
 
 		ls := labels.Labels{}
 		for _, l := range lbls {
@@ -150,16 +147,18 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		}
 		runner.SetCapabilitiesFromDeclare(resp)
 
+		poller := poll.New(cfg, cli, runner)
+
 		if cfg.Metrics.Enabled {
 			metrics.Init()
 			metrics.RunnerInfo.WithLabelValues(ver.Version(), resp.Msg.Runner.Name).Set(1)
 			metrics.RunnerCapacity.Set(float64(cfg.Runner.Capacity))
 			metrics.RegisterUptimeFunc(time.Now())
 			metrics.RegisterRunningJobsFunc(runner.RunningCount, cfg.Runner.Capacity)
-			metrics.StartServer(ctx, cfg.Metrics.Addr)
+			metrics.StartServer(ctx, cfg.Metrics.Addr, func() (bool, string) {
+				return poller.Ready(cfg.Metrics.ReadinessGrace)
+			})
 		}
-
-		poller := poll.New(cfg, cli, runner)
 
 		if daemArgs.Once || reg.Ephemeral {
 			done := make(chan struct{})
@@ -176,7 +175,12 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		} else {
 			go poller.Poll()
 
-			<-ctx.Done()
+			// Stop either on an external cancellation or when the poller shuts
+			// itself down (e.g. after the runner has been unregistered).
+			select {
+			case <-ctx.Done():
+			case <-poller.Done():
+			}
 		}
 
 		log.Infof("runner: %s shutdown initiated, waiting %s for running jobs to complete before shutting down", resp.Msg.Runner.Name, cfg.Runner.ShutdownTimeout)
@@ -189,12 +193,39 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			log.Warnf("runner: %s cancelled in progress jobs during shutdown", resp.Msg.Runner.Name)
 		}
 
+		if poller.Unregistered() {
+			return errors.New("runner is no longer registered with the server; please register it again")
+		}
+
 		return nil
 	}
 }
 
 type daemonArgs struct {
-	Once bool
+	Once   bool
+	Labels string
+}
+
+// resolveLabels picks the labels to run with: --labels/GITEA_RUNNER_LABELS > config > .runner.
+// The flag lets a registered runner change its labels without deleting the .runner file.
+func resolveLabels(argLabels string, cfgLabels, regLabels []string) []string {
+	if lbls := splitLabels(argLabels); len(lbls) > 0 {
+		return lbls
+	}
+	if len(cfgLabels) > 0 {
+		return cfgLabels
+	}
+	return regLabels
+}
+
+func splitLabels(s string) []string {
+	var lbls []string
+	for l := range strings.SplitSeq(s, ",") {
+		if l = strings.TrimSpace(l); l != "" {
+			lbls = append(lbls, l)
+		}
+	}
+	return lbls
 }
 
 // initLogging setup the global logrus logger.
