@@ -683,7 +683,7 @@ func (r *Reporter) parseResult(result any) (runnerv1.Result, bool) {
 
 var cmdRegex = regexp.MustCompile(`^::([^ :]+)( .*)?::(.*)$`)
 
-func (r *Reporter) handleCommand(originalContent, command, value string) *string {
+func (r *Reporter) handleCommand(originalContent, command, properties, value string) *string {
 	if r.stopCommandEndToken != "" && command != r.stopCommandEndToken {
 		return &originalContent
 	}
@@ -698,15 +698,12 @@ func (r *Reporter) handleCommand(originalContent, command, value string) *string
 		}
 		return nil
 
-	case "notice":
-		// Not implemented yet, so just return the original content.
-		return &originalContent
-	case "warning":
-		// Not implemented yet, so just return the original content.
-		return &originalContent
-	case "error":
-		// Not implemented yet, so just return the original content.
-		return &originalContent
+	case "notice", "warning", "error":
+		// Gitea has no annotation store, so the annotation is rendered into the log with
+		// its source location instead of being dropped: that location is the whole point
+		// of the command for compiler and linter output.
+		annotation := formatAnnotation(command, properties, value)
+		return &annotation
 	case "group":
 		// Returning the original content, because I think the frontend
 		// will use it when rendering the output.
@@ -724,12 +721,61 @@ func (r *Reporter) handleCommand(originalContent, command, value string) *string
 	return &originalContent
 }
 
+// formatAnnotation renders ::notice::, ::warning:: and ::error:: as one log line, keeping
+// the file, line, column and title the command carries:
+//
+//	::error file=main.go,line=12,col=5,title=vet::undefined: x
+//	##[error]main.go:12:5: vet: undefined: x
+func formatAnnotation(level, properties, value string) string {
+	props := parseCommandProperties(properties)
+
+	var b strings.Builder
+	b.WriteString("##[" + level + "]")
+	if file := props["file"]; file != "" {
+		b.WriteString(file)
+		if line := props["line"]; line != "" {
+			b.WriteString(":" + line)
+			if col := props["col"]; col != "" {
+				b.WriteString(":" + col)
+			}
+		}
+		b.WriteString(": ")
+	}
+	if title := props["title"]; title != "" {
+		b.WriteString(title + ": ")
+	}
+	b.WriteString(value)
+	return b.String()
+}
+
+// parseCommandProperties parses the `file=main.go,line=12` part of a workflow command.
+func parseCommandProperties(properties string) map[string]string {
+	properties = strings.TrimSpace(properties)
+	if properties == "" {
+		return nil
+	}
+
+	props := map[string]string{}
+	for pair := range strings.SplitSeq(properties, ",") {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		props[strings.TrimSpace(key)] = runner.UnescapeCommandProperty(value)
+	}
+	// GitHub documents `col`, but its own actions have used `column` as well.
+	if props["col"] == "" && props["column"] != "" {
+		props["col"] = props["column"]
+	}
+	return props
+}
+
 func (r *Reporter) parseLogRow(entry *log.Entry) *runnerv1.LogRow {
 	content := strings.TrimRight(entry.Message, "\r\n")
 
 	matches := cmdRegex.FindStringSubmatch(content)
 	if matches != nil {
-		if output := r.handleCommand(content, matches[1], runner.UnescapeCommandData(matches[3])); output != nil {
+		if output := r.handleCommand(content, matches[1], matches[2], runner.UnescapeCommandData(matches[3])); output != nil {
 			content = *output
 		} else {
 			return nil

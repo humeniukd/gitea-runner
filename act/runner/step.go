@@ -165,9 +165,18 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		}
 		_ = rc.JobContainer.Copy(actPath, files...)(ctx)
 
+		// The command handler runs on the container's log-writer goroutine and needs the
+		// step's environment to judge ACTIONS_ALLOW_UNSECURE_COMMANDS.
+		rc.setCurrentStepEnv(step.getEnv())
+		defer rc.setCurrentStepEnv(nil)
+
 		timeoutctx, cancelTimeOut := evaluateStepTimeout(ctx, rc.ExprEval, stepModel)
 		defer cancelTimeOut()
 		err = executor(timeoutctx)
+		if err == nil {
+			// A refused ::set-env::/::add-path:: fails the step, as it does on GitHub.
+			err = rc.takeUnsecureCommandError()
+		}
 
 		if err == nil {
 			logger.WithField("stepResult", stepResult.Outcome).Infof("Success - %s %s", stage, stepString)

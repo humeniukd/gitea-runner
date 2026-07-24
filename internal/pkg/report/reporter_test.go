@@ -85,27 +85,39 @@ func TestReporter_parseLogRow(t *testing.T) {
 			"notice", false,
 			[]string{
 				"::notice file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"::notice::Gosh, that's not going to work",
+				"::notice file=file.name,line=42,col=7::Gosh, that's not going to work",
 			},
 			[]string{
-				"::notice file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"##[notice]file.name:42: Cool Title: Gosh, that's not going to work",
+				"##[notice]Gosh, that's not going to work",
+				"##[notice]file.name:42:7: Gosh, that's not going to work",
 			},
 		},
 		{
 			"warning", false,
 			[]string{
 				"::warning file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"::warning::Gosh, that's not going to work",
+				"::warning file=file.name,line=42,col=7::Gosh, that's not going to work",
 			},
 			[]string{
-				"::warning file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"##[warning]file.name:42: Cool Title: Gosh, that's not going to work",
+				"##[warning]Gosh, that's not going to work",
+				"##[warning]file.name:42:7: Gosh, that's not going to work",
 			},
 		},
 		{
 			"error", false,
 			[]string{
 				"::error file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"::error::Gosh, that's not going to work",
+				"::error file=file.name,line=42,col=7::Gosh, that's not going to work",
 			},
 			[]string{
-				"::error file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"##[error]file.name:42: Cool Title: Gosh, that's not going to work",
+				"##[error]Gosh, that's not going to work",
+				"##[error]file.name:42:7: Gosh, that's not going to work",
 			},
 		},
 		{

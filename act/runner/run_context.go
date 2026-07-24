@@ -81,6 +81,30 @@ type RunContext struct {
 	// failures. Those failures must still make success() false and failure() true for later
 	// main-step if evaluation.
 	jobFailed bool
+	// stepEnv is the environment of the step currently running, so that workflow commands
+	// parsed out of the container's output can be judged against it. It is written by
+	// runStepExecutor and read by the command handler, which runs on the log-writer
+	// goroutine, so it is guarded by unsecureCommandMu.
+	stepEnv *map[string]string
+	// unsecureCommandErr holds the error of a refused ::set-env::/::add-path::, which the
+	// step executor turns into a step failure. unsecureCommandWarned keeps the deprecation
+	// warning to one line per job.
+	unsecureCommandErr    error
+	unsecureCommandWarned bool
+	unsecureCommandMu     sync.Mutex
+}
+
+// setCurrentStepEnv records the environment of the step about to run.
+func (rc *RunContext) setCurrentStepEnv(env *map[string]string) {
+	rc.unsecureCommandMu.Lock()
+	defer rc.unsecureCommandMu.Unlock()
+	rc.stepEnv = env
+}
+
+func (rc *RunContext) currentStepEnv() *map[string]string {
+	rc.unsecureCommandMu.Lock()
+	defer rc.unsecureCommandMu.Unlock()
+	return rc.stepEnv
 }
 
 // markCancelled flags the job as cancelled so subsequent step `if` evaluations and the

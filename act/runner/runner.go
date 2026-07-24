@@ -92,6 +92,10 @@ type Config struct {
 	InsecureSkipTLS                   bool                         // whether to skip verifying TLS certificate of the Gitea instance
 	MaxParallel                       int                          // max parallel jobs to run across all workflows (0 = no limit, uses CPU count)
 	AllocatePTY                       bool                         // allocate a pseudo-TTY for each step's process
+	// AllowUnsecureCommands keeps the deprecated ::set-env:: and ::add-path:: workflow
+	// commands working for workflows that never set ACTIONS_ALLOW_UNSECURE_COMMANDS. It is
+	// a pointer to distinguish false from not set; nil still allows them, with a warning.
+	AllowUnsecureCommands *bool
 }
 
 // GetToken: Adapt to Gitea

@@ -9,6 +9,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"gitea.com/gitea/runner/act/common"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSetEnv(t *testing.T) {
@@ -213,4 +215,74 @@ func TestSaveState(t *testing.T) {
 	handler("::save-state name=state-name::state-value\n")
 
 	assert.Equal(t, "state-value", rc.IntraActionState["step"]["state-name"])
+}
+
+func TestUnsecureCommandsAreRefusedWhenDisabled(t *testing.T) {
+	a := assert.New(t)
+	ctx := context.Background()
+	disallow := false
+	rc := &RunContext{Config: &Config{AllowUnsecureCommands: &disallow}}
+	handler := rc.commandHandler(ctx)
+
+	handler("::set-env name=x::valz\n")
+	handler("::add-path::/opt/bin\n")
+
+	a.Empty(rc.Env["x"])
+	a.Empty(rc.ExtraPath)
+
+	// The refusal fails the step that produced it, once.
+	err := rc.takeUnsecureCommandError()
+	require.ErrorContains(t, err, "set-env")
+	a.NoError(rc.takeUnsecureCommandError())
+}
+
+func TestUnsecureCommandsOptIn(t *testing.T) {
+	disallow := false
+
+	t.Run("through the step environment", func(t *testing.T) {
+		a := assert.New(t)
+		rc := &RunContext{Config: &Config{AllowUnsecureCommands: &disallow}}
+		env := map[string]string{"ACTIONS_ALLOW_UNSECURE_COMMANDS": "true"}
+		rc.setCurrentStepEnv(&env)
+
+		rc.commandHandler(context.Background())("::set-env name=x::valz\n")
+
+		a.Equal("valz", rc.Env["x"])
+		a.NoError(rc.takeUnsecureCommandError())
+	})
+
+	t.Run("through the job environment", func(t *testing.T) {
+		a := assert.New(t)
+		rc := &RunContext{
+			Config: &Config{AllowUnsecureCommands: &disallow},
+			Env:    map[string]string{"ACTIONS_ALLOW_UNSECURE_COMMANDS": "1"},
+		}
+
+		rc.commandHandler(context.Background())("::add-path::/opt/bin\n")
+
+		a.Equal([]string{"/opt/bin"}, rc.ExtraPath)
+		a.NoError(rc.takeUnsecureCommandError())
+	})
+}
+
+// Until the default flips, the commands still run, but the job log says so exactly once.
+func TestUnsecureCommandsWarnOnceWhenAllowed(t *testing.T) {
+	a := assert.New(t)
+	logger, hook := test.NewNullLogger()
+	ctx := common.WithLogger(context.Background(), logger.WithField("test", true))
+
+	rc := &RunContext{Config: &Config{}}
+	handler := rc.commandHandler(ctx)
+	handler("::set-env name=x::valz\n")
+	handler("::add-path::/opt/bin\n")
+
+	a.Equal("valz", rc.Env["x"])
+
+	warnings := 0
+	for _, entry := range hook.AllEntries() {
+		if strings.Contains(entry.Message, "##[warning]") {
+			warnings++
+		}
+	}
+	a.Equal(1, warnings)
 }
