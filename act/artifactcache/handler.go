@@ -163,6 +163,7 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret string, lo
 	// handlers themselves 401 when internalSecret is unset.
 	router.POST(internalPath+"/register", h.internalAuth(h.internalRegister))
 	router.POST(internalPath+"/revoke", h.internalAuth(h.internalRevoke))
+	h.registerV2Routes(router)
 
 	h.router = router
 
@@ -544,6 +545,10 @@ func (h *Handler) bearerAuth(handler httprouter.Handle) httprouter.Handle {
 }
 
 func (h *Handler) signedURLAuth(handler httprouter.Handle) httprouter.Handle {
+	return h.signedAuth(handler, h.computeSignature)
+}
+
+func (h *Handler) signedAuth(handler httprouter.Handle, sign func(cacheID, exp int64) string) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 		h.logger.Debugf("%s %s", r.Method, r.URL.Path)
 		id, err := strconv.ParseInt(params.ByName("id"), 10, 64)
@@ -566,7 +571,7 @@ func (h *Handler) signedURLAuth(handler httprouter.Handle) httprouter.Handle {
 			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("signature expired"))
 			return
 		}
-		expected := h.computeSignature(id, exp)
+		expected := sign(id, exp)
 		if !hmac.Equal([]byte(sig), []byte(expected)) {
 			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("bad signature"))
 			return
@@ -654,6 +659,21 @@ func (h *Handler) computeSignature(cacheID, exp int64) string {
 	mac := hmac.New(sha256.New, h.secret)
 	fmt.Fprintf(mac, "%d:%d", cacheID, exp)
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// computeUploadSignature signs a cache service v2 upload URL. Uploads are signed with a
+// distinct message so that a URL handed out for writing an entry cannot be replayed to
+// read one, and the other way round.
+func (h *Handler) computeUploadSignature(cacheID, exp int64) string {
+	mac := hmac.New(sha256.New, h.secret)
+	fmt.Fprintf(mac, "upload:%d:%d", cacheID, exp)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// signedUploadAuth authenticates a signed blob upload URL, the write counterpart of
+// signedURLAuth.
+func (h *Handler) signedUploadAuth(handler httprouter.Handle) httprouter.Handle {
+	return h.signedAuth(handler, h.computeUploadSignature)
 }
 
 func (h *Handler) signedArtifactURL(cacheID uint64, exp time.Time) string {
