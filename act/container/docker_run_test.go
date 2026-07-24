@@ -23,6 +23,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	mobyclient "github.com/moby/moby/client"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
@@ -659,4 +660,62 @@ func TestCheckVolumesRejectsEscapingHostPaths(t *testing.T) {
 		Binds: []string{filepath.Join(linkPath, "missing") + ":/mnt"},
 	})
 	assert.Empty(t, hostConf.Binds)
+}
+
+func TestContainerInfoFromInspect(t *testing.T) {
+	t.Run("reports no healthcheck when the image declares none", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{
+			ID:    "abc123",
+			State: &container.State{Status: "running", Running: true},
+		})
+
+		assert.Equal(t, "abc123", info.ID)
+		assert.Equal(t, "running", info.State)
+		assert.Equal(t, HealthNone, info.Health)
+		assert.Empty(t, info.Ports)
+	})
+
+	t.Run("reports the health status and the last probe output", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{
+			State: &container.State{
+				Status: "running",
+				Health: &container.Health{
+					Status: container.Unhealthy,
+					Log: []*container.HealthcheckResult{
+						{Output: "first\n"},
+						{Output: "connection refused\n"},
+					},
+				},
+			},
+		})
+
+		assert.Equal(t, HealthUnhealthy, info.Health)
+		assert.Equal(t, "connection refused", info.HealthOutput)
+	})
+
+	t.Run("reports the published ports and networks", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{
+			State: &container.State{Status: "running"},
+			NetworkSettings: &container.NetworkSettings{
+				Ports: network.PortMap{
+					network.MustParsePort("5432/tcp"): []network.PortBinding{{HostPort: "49153"}},
+					network.MustParsePort("6379/tcp"): nil,
+				},
+				Networks: map[string]*network.EndpointSettings{
+					"job-network": {},
+					"bridge":      {},
+				},
+			},
+		})
+
+		assert.Equal(t, map[string]string{"5432/tcp": "49153"}, info.Ports)
+		assert.Equal(t, []string{"bridge", "job-network"}, info.Networks)
+	})
+
+	t.Run("tolerates a container without state", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{ID: "abc123"})
+
+		assert.Equal(t, "abc123", info.ID)
+		assert.Equal(t, HealthNone, info.Health)
+	})
 }

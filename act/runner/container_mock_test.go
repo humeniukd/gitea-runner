@@ -78,3 +78,10 @@ func (cm *containerMock) GetContainerArchive(ctx context.Context, srcPath string
 	}
 	return args.Get(0).(io.ReadCloser), err
 }
+
+func (cm *containerMock) Inspect(ctx context.Context) (*container.Info, error) {
+	args := cm.Called(ctx)
+	info, _ := args.Get(0).(*container.Info)
+	err, _ := args.Get(1).(error)
+	return info, err
+}

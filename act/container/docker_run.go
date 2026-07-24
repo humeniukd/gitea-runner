@@ -204,6 +204,70 @@ func (cr *containerReference) GetContainerArchive(ctx context.Context, srcPath s
 	return result.Content, nil
 }
 
+// Inspect reports the container's current state. It is used to wait for a service
+// container to become healthy and to fill the `job` context, so it resolves the
+// container by name when the id is not known yet rather than failing.
+func (cr *containerReference) Inspect(ctx context.Context) (*Info, error) {
+	if common.Dryrun(ctx) {
+		return &Info{Health: HealthNone}, nil
+	}
+	if err := cr.connect()(ctx); err != nil {
+		return nil, err
+	}
+	if err := cr.find()(ctx); err != nil {
+		return nil, err
+	}
+	if cr.id == "" {
+		return nil, cr.missingContainerError("inspect it")
+	}
+
+	result, err := cr.cli.ContainerInspect(ctx, cr.id, client.ContainerInspectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return containerInfoFromInspect(result.Container), nil
+}
+
+func containerInfoFromInspect(inspect container.InspectResponse) *Info {
+	info := &Info{
+		ID:     inspect.ID,
+		Health: HealthNone,
+	}
+
+	if state := inspect.State; state != nil {
+		info.State = string(state.Status)
+		info.ExitCode = state.ExitCode
+		if health := state.Health; health != nil {
+			info.Health = string(health.Status)
+			if len(health.Log) > 0 {
+				info.HealthOutput = strings.TrimSpace(health.Log[len(health.Log)-1].Output)
+			}
+		}
+	}
+
+	if settings := inspect.NetworkSettings; settings != nil {
+		for port, bindings := range settings.Ports {
+			// The last binding wins, matching how a workflow reads a single host port
+			// for a service port.
+			for _, binding := range bindings {
+				if binding.HostPort == "" {
+					continue
+				}
+				if info.Ports == nil {
+					info.Ports = map[string]string{}
+				}
+				info.Ports[port.String()] = binding.HostPort
+			}
+		}
+		for name := range settings.Networks {
+			info.Networks = append(info.Networks, name)
+		}
+		slices.Sort(info.Networks)
+	}
+
+	return info
+}
+
 func (cr *containerReference) UpdateFromEnv(srcPath string, env *map[string]string) common.Executor {
 	return parseEnvFile(cr, srcPath, env).IfNot(common.Dryrun)
 }

@@ -209,6 +209,28 @@ Whenever the resulting labels differ from the ones in the registration file, the
 
 > **Note:** A runner that only exposes `host` labels still needs access to a Docker daemon (e.g. a mounted `/var/run/docker.sock`) whenever a job uses a `docker://` action or a service container. `host` labels only change where the job's own steps run; container-based steps and actions are still executed with Docker.
 
+#### Service containers
+
+A job's `services` are started before its steps run. When a service's image or its `options` declare a healthcheck, the runner waits for it to report healthy, so a workflow does not have to poll for its own services:
+
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    options: >-
+      --health-cmd pg_isready
+      --health-interval 5s
+      --health-retries 10
+```
+
+A service that reports unhealthy or exits fails the job right away. One that never becomes healthy fails it after `container.service_ready_timeout` (default `5m`); set that to a negative value to start the steps immediately instead.
+
+Once started, services are described by the `job` context:
+
+```yaml
+- run: psql -h localhost -p ${{ job.services.postgres.ports['5432'] }} -U postgres -c 'select 1'
+```
+
 #### Caching (`actions/cache`)
 
 Each runner starts its own cache server automatically. Cache entries are local to that runner — runners do not share a cache by default.

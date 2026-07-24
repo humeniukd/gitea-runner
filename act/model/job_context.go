@@ -5,12 +5,23 @@
 package model
 
 type JobContext struct {
-	Status    string `json:"status"`
-	Container struct {
-		ID      string `json:"id"`
-		Network string `json:"network"`
-	} `json:"container"`
-	Services map[string]struct {
-		ID string `json:"id"`
-	} `json:"services"`
+	Status    string                `json:"status"`
+	Container JobContainerContext   `json:"container"`
+	Services  map[string]JobService `json:"services"`
+}
+
+// JobContainerContext describes the container a job's steps run in. Both fields are
+// empty when the job runs on the host instead of in a container.
+type JobContainerContext struct {
+	ID      string `json:"id"`
+	Network string `json:"network"`
+}
+
+// JobService describes one of a job's service containers. Ports maps a container port
+// ("5432/tcp") to the host port it was published on, which is how a workflow finds the
+// port docker picked for it.
+type JobService struct {
+	ID      string            `json:"id"`
+	Network string            `json:"network"`
+	Ports   map[string]string `json:"ports"`
 }

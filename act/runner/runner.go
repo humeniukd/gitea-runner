@@ -92,6 +92,7 @@ type Config struct {
 	InsecureSkipTLS                   bool                         // whether to skip verifying TLS certificate of the Gitea instance
 	MaxParallel                       int                          // max parallel jobs to run across all workflows (0 = no limit, uses CPU count)
 	AllocatePTY                       bool                         // allocate a pseudo-TTY for each step's process
+	ServiceReadyTimeout               time.Duration                // how long a job waits for its service containers to report healthy (0 uses the default)
 }
 
 // GetToken: Adapt to Gitea

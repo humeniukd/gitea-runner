@@ -83,6 +83,7 @@ type Container struct {
 	RequireDocker        bool                          `yaml:"require_docker"`         // Always require a reachable docker daemon, even if not required by runner
 	DockerTimeout        time.Duration                 `yaml:"docker_timeout"`         // Timeout to wait for the docker daemon to be reachable, if docker is required by require_docker or runner
 	BindWorkdir          bool                          `yaml:"bind_workdir"`           // BindWorkdir binds the workspace to the host filesystem instead of using Docker volumes. Required for DinD when jobs use docker compose with bind mounts.
+	ServiceReadyTimeout  time.Duration                 `yaml:"service_ready_timeout"`  // ServiceReadyTimeout bounds how long a job waits for a service container that declares a healthcheck to report healthy. Negative disables waiting.
 }
 
 type ContainerNetworkCreateOptions struct {
@@ -197,6 +198,9 @@ func LoadDefault(file string) (*Config, error) {
 	}
 	if cfg.Container.WorkdirParent == "" {
 		cfg.Container.WorkdirParent = "workspace"
+	}
+	if cfg.Container.ServiceReadyTimeout == 0 {
+		cfg.Container.ServiceReadyTimeout = 5 * time.Minute
 	}
 	if cfg.Host.WorkdirParent == "" {
 		home, err := os.UserHomeDir()

@@ -57,6 +57,33 @@ type FileEntry struct {
 	Body string
 }
 
+// Health states of a container, as reported by its healthcheck. A container whose image
+// and options declare no healthcheck reports HealthNone.
+const (
+	HealthNone      = "none"
+	HealthStarting  = "starting"
+	HealthHealthy   = "healthy"
+	HealthUnhealthy = "unhealthy"
+)
+
+// Info describes a created container. It carries what the `job` context needs
+// (the id, the networks and the published ports) plus the state the runner waits on
+// before it lets a job's steps talk to a service.
+type Info struct {
+	ID string
+	// State is the docker container state: "created", "running", "exited", ...
+	State    string
+	ExitCode int
+	// Health is one of the Health* constants, HealthNone when nothing is declared.
+	Health string
+	// HealthOutput is the output of the last healthcheck probe, for reporting failures.
+	HealthOutput string
+	// Ports maps a container port ("5432/tcp") to the host port it is published on.
+	Ports map[string]string
+	// Networks are the names of the networks the container is attached to.
+	Networks []string
+}
+
 // Container for managing docker run containers
 type Container interface {
 	Create(capAdd, capDrop []string) common.Executor
@@ -65,6 +92,7 @@ type Container interface {
 	CopyTarStream(ctx context.Context, destPath string, tarStream io.Reader) error
 	CopyDir(destPath, srcPath string, useGitIgnore bool) common.Executor
 	GetContainerArchive(ctx context.Context, srcPath string) (io.ReadCloser, error)
+	Inspect(ctx context.Context) (*Info, error)
 	Pull(forcePull bool) common.Executor
 	Start(attach bool) common.Executor
 	Exec(command []string, env map[string]string, user, workdir string) common.Executor
