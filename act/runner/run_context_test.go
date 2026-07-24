@@ -226,6 +226,12 @@ func (fakeContainer) Copy(string, ...*container.FileEntry) common.Executor {
 	return func(context.Context) error { return nil }
 }
 
+// A container that declares no healthcheck is ready as soon as it runs, so the
+// readiness wait passes straight through.
+func (fakeContainer) Inspect(context.Context) (*container.Info, error) {
+	return &container.Info{ID: "fake", State: "running", Health: container.HealthNone}, nil
+}
+
 // Regression test: a service without a `credentials:` block resolves to empty
 // credentials, which used to overwrite the job container's own credentials.
 func TestStartJobContainerKeepsJobCredentialsWithServices(t *testing.T) {
