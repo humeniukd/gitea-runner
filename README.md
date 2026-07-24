@@ -209,6 +209,21 @@ Whenever the resulting labels differ from the ones in the registration file, the
 
 > **Note:** A runner that only exposes `host` labels still needs access to a Docker daemon (e.g. a mounted `/var/run/docker.sock`) whenever a job uses a `docker://` action or a service container. `host` labels only change where the job's own steps run; container-based steps and actions are still executed with Docker.
 
+#### Proxy
+
+If the runner sits behind an HTTP proxy, configure it once and both the runner and the jobs it runs will use it:
+
+```yaml
+proxy:
+  http_proxy: "http://proxy.example:3128"
+  https_proxy: "http://proxy.example:3128"
+  no_proxy: "gitea.internal,.example.local"
+```
+
+Jobs receive both the lower and upper case spellings of each variable, and the runner's own servers (cache server, results proxy) are appended to `no_proxy` automatically, so a job container never tries to reach them through the proxy. Environment variables already set for the runner process win over these settings.
+
+Image pulls are made by the Docker daemon rather than by the runner, so they follow [the daemon's own proxy configuration](https://docs.docker.com/engine/daemon/proxy/).
+
 #### Caching (`actions/cache`)
 
 Each runner starts its own cache server automatically. Cache entries are local to that runner — runners do not share a cache by default.

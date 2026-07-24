@@ -38,6 +38,10 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			return fmt.Errorf("invalid configuration: %w", err)
 		}
 
+		// Before the first outbound request: the standard library resolves the proxy
+		// environment once.
+		run.ApplyProcessProxyEnv(cfg.Proxy)
+
 		initLogging(cfg)
 		log.Infoln("Starting runner daemon")
 

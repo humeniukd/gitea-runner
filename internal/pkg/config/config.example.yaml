@@ -142,6 +142,20 @@ cache:
   # until its cache entry expires or is manually removed.
   offline_mode: false
 
+# Outbound HTTP proxy for the runner process and for every job it runs.
+# Leave empty to use whatever the runner's own environment already defines; an
+# environment variable that is already set always wins over these settings.
+#
+# Jobs get both the lower and upper case spellings of each variable, and the runner's own
+# servers (cache server, results proxy) are appended to no_proxy so a job container never
+# tries to reach them through the proxy. Note that image pulls are made by the docker
+# daemon rather than by the runner, so they follow the daemon's own proxy configuration.
+proxy:
+  http_proxy: ""
+  https_proxy: ""
+  # Comma separated hosts to reach directly.
+  no_proxy: ""
+
 container:
   # Specifies the network to which the container will connect.
   # Could be host, bridge or the name of a custom network.
