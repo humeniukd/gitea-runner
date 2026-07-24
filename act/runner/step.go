@@ -173,9 +173,12 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		timeoutctx, cancelTimeOut := evaluateStepTimeout(ctx, rc.ExprEval, stepModel)
 		defer cancelTimeOut()
 		err = executor(timeoutctx)
-		if err == nil {
+		// Always consume the refusal so the job-scoped flag is cleared at every step
+		// boundary and cannot leak onto a later step; when the executor itself failed its
+		// error wins and the refusal is only cleared.
+		if unsecureErr := rc.takeUnsecureCommandError(); err == nil {
 			// A refused ::set-env::/::add-path:: fails the step, as it does on GitHub.
-			err = rc.takeUnsecureCommandError()
+			err = unsecureErr
 		}
 
 		if err == nil {
