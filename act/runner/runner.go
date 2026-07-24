@@ -92,6 +92,12 @@ type Config struct {
 	InsecureSkipTLS                   bool                         // whether to skip verifying TLS certificate of the Gitea instance
 	MaxParallel                       int                          // max parallel jobs to run across all workflows (0 = no limit, uses CPU count)
 	AllocatePTY                       bool                         // allocate a pseudo-TTY for each step's process
+	// JobPreScript and JobPostScript are scripts run inside the job environment before its
+	// first step and after its last one, the equivalent of GitHub's
+	// ACTIONS_RUNNER_HOOK_JOB_STARTED and ACTIONS_RUNNER_HOOK_JOB_COMPLETED, which are also
+	// read from Env when these are empty.
+	JobPreScript  string
+	JobPostScript string
 }
 
 // GetToken: Adapt to Gitea

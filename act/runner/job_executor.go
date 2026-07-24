@@ -161,6 +161,9 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		}
 		return nil
 	})
+	// Before anything the workflow asked for, so that whatever it sets up is in place for
+	// the first action download and the first step.
+	preSteps = append(preSteps, rc.runJobScript(rc.jobPreScript(), "job pre", true))
 
 	for i, stepModel := range infoSteps {
 		if stepModel == nil {
@@ -230,6 +233,11 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 	preSteps = append(preSteps, printPrepareActions(rc, preparers))
 	preSteps = append(preSteps, stepPreSteps...)
 	preSteps = append(preSteps, printCompleteJobName(rc))
+
+	// After the post steps, while the job environment is still up.
+	postExecutor = postExecutor.Finally(func(ctx context.Context) error {
+		return rc.runJobScript(rc.jobPostScript(), "job post", false)(ctx)
+	})
 
 	postExecutor = postExecutor.Finally(func(ctx context.Context) error {
 		jobError := common.JobError(ctx)
