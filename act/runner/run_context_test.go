@@ -955,6 +955,12 @@ func TestImageOSFromImage(t *testing.T) {
 		{"node:20", ""},
 		{"ubuntu:22.04", ""},
 		{"ubuntu", ""},
+		// A version-style tag that does not name an OS must fall back to the label rather
+		// than yield a bogus OS such as "v2" or "release1".
+		{"myco/ubuntu:v2.1", ""},
+		{"myco/ubuntu:v22.04", ""},
+		{"app:release-1", ""},
+		{"app:1.2.3", ""},
 		// The registry port must not be mistaken for a tag.
 		{"registry.example.com:5000/runner-images", ""},
 		{"registry.example.com:5000/runner-images:ubuntu-24.04", "ubuntu24"},

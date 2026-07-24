@@ -1310,9 +1310,11 @@ func (rc *RunContext) imageOS(ctx context.Context) string {
 }
 
 // imageOSVersionedTag matches image tags that name an OS and its release, such as
-// "ubuntu-24.04" or "ubuntu24.04". Tags carrying only a version ("22.04") or only a
-// name ("latest") say nothing about the release and are left to the label fallback.
-var imageOSVersionedTag = regexp.MustCompile(`^[a-zA-Z]+-?[0-9]`)
+// "ubuntu-24.04" or "ubuntu24.04". It requires two or more leading letters and a dotted
+// release, so a plain version tag ("v2.1", "22.04", "release-1") or a name without a
+// release ("latest") says nothing about the release and is left to the label fallback
+// instead of producing a bogus OS.
+var imageOSVersionedTag = regexp.MustCompile(`^[a-zA-Z]{2,}-?[0-9]+\.[0-9]`)
 
 // imageOSFromImage derives ImageOS from the tag of an image reference, e.g.
 // "docker.gitea.com/runner-images:ubuntu-24.04" yields "ubuntu24".
