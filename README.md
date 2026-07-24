@@ -213,6 +213,19 @@ Whenever the resulting labels differ from the ones in the registration file, the
 
 Each runner starts its own cache server automatically. Cache entries are local to that runner — runners do not share a cache by default.
 
+**Cache API versions**
+
+`actions/cache@v4.2` and later (including everything the `v4` tag now points at, and `v5`) stopped calling the old cache endpoints and use the *cache service v2* API instead. Serving it requires one setting, because the client looks that service up under `ACTIONS_RESULTS_URL` — the same URL artifacts are uploaded to:
+
+```yaml
+cache:
+  service_v2: true
+```
+
+With it enabled the runner starts a small proxy and hands it to jobs as `ACTIONS_RESULTS_URL`: cache calls are answered by the runner's cache server, everything else — artifacts above all — is forwarded to Gitea unchanged. It works with `external_server` as well; the proxy simply points at that server. Older `actions/cache` versions keep using the v1 API, and both versions share the same store, so nothing is lost when a workflow moves between them.
+
+Leave it off if your workflows pin an `actions/cache` version below 4.2.
+
 **Shared cache across multiple runners**
 
 Run one dedicated `gitea-runner cache-server` that all runners point at.

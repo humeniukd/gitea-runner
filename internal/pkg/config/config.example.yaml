@@ -141,6 +141,21 @@ cache:
   # A moved tag (e.g. a re-tagged "v6") or an updated branch stays at the cached commit
   # until its cache entry expires or is manually removed.
   offline_mode: false
+  # Serve the actions cache service v2 API, which actions/cache@v4.2 and later require.
+  # Those versions no longer call the old cache endpoints, so without this they cache
+  # nothing. Older versions keep using the v1 API either way.
+  #
+  # The v2 client looks the cache service up under ACTIONS_RESULTS_URL, which is also
+  # where artifacts are uploaded. Enabling this therefore starts a small proxy that job
+  # containers get as ACTIONS_RESULTS_URL: it answers cache calls from this runner's
+  # cache server (local or external_server) and forwards everything else to Gitea.
+  # Artifact uploads and downloads are unaffected other than passing through it.
+  service_v2: false
+  # Outbound IP or hostname job containers use to reach that proxy. Leave empty to detect
+  # it, with the same caveats as cache.host above.
+  service_v2_host: ""
+  # Port for the proxy. 0 picks a random free port.
+  service_v2_port: 0
 
 container:
   # Specifies the network to which the container will connect.
