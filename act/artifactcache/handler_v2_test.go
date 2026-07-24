@@ -181,6 +181,21 @@ func TestCacheServiceV2Misses(t *testing.T) {
 	})
 }
 
+// Reserving a key that is only a prefix of an existing completed key is a different entry
+// and must succeed: the reservation is an exact (key, version) check, not a restore-key
+// prefix match, or the shorter key would be reported as existing and silently never saved.
+func TestCacheServiceV2ReservesPrefixOfExistingKey(t *testing.T) {
+	handler := startTestHandler(t)
+
+	created := v2Call(t, handler, "CreateCacheEntry", map[string]any{"key": "deps-abc", "version": "v1"})
+	putBlob(t, created["signedUploadUrl"].(string), []byte("x"))
+	v2Call(t, handler, "FinalizeCacheEntryUpload", map[string]any{"key": "deps-abc", "version": "v1", "sizeBytes": 1})
+
+	reserved := v2Call(t, handler, "CreateCacheEntry", map[string]any{"key": "deps", "version": "v1"})
+	require.Equal(t, true, reserved["ok"])
+	require.NotEmpty(t, reserved["signedUploadUrl"])
+}
+
 // The cache of one repository must stay invisible to another, as it does for the v1 API.
 func TestCacheServiceV2IsScopedPerRepository(t *testing.T) {
 	handler := startTestHandler(t)

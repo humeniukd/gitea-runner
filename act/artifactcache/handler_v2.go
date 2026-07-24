@@ -71,7 +71,10 @@ func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ h
 	}
 	defer db.Close()
 
-	if existing, err := findCache(db, cred.Repo, []string{key}, version); err != nil {
+	// An exact (key, version) match means the entry is already cached; the client then skips
+	// the upload. A prefix match must not count here, or a shorter key would be reported as
+	// existing and silently never saved.
+	if existing, err := findExactCache(db, cred.Repo, key, version); err != nil {
 		h.twirpError(w, r, http.StatusInternalServerError, "internal", err)
 		return
 	} else if existing != nil {

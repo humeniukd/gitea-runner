@@ -722,6 +722,27 @@ func findCache(db *bolthold.Store, repo string, keys []string, version string) (
 	return nil, nil //nolint:nilnil // pre-existing issue from nektos/act
 }
 
+// findExactCache returns the completed entry for exactly this key and version, or (nil, nil)
+// if there is none. Unlike findCache it never falls back to a prefix (restore-key) match,
+// which is what a reservation needs: a new key that is only a prefix of an existing key is
+// not the same entry and must still be allowed to upload.
+func findExactCache(db *bolthold.Store, repo, key, version string) (*Cache, error) {
+	cache := &Cache{}
+	err := db.FindOne(cache,
+		bolthold.Where("Repo").Eq(repo).
+			And("Key").Eq(key).
+			And("Version").Eq(version).
+			And("Complete").Eq(true).
+			SortBy("CreatedAt").Reverse())
+	if errors.Is(err, bolthold.ErrNotFound) {
+		return nil, nil //nolint:nilnil // absence is not an error here
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find cache: %w", err)
+	}
+	return cache, nil
+}
+
 func insertCache(db *bolthold.Store, cache *Cache) error {
 	if err := db.Insert(bolthold.NextSequence(), cache); err != nil {
 		return fmt.Errorf("insert cache: %w", err)
