@@ -112,8 +112,12 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	envs["ACTIONS_RUNTIME_URL"] = artifactGiteaAPI
 	envs["ACTIONS_RESULTS_URL"] = strings.TrimSuffix(cli.Address(), "/")
 
-	// The runner's own servers are reached directly, never through the proxy.
-	maps.Copy(envs, jobProxyEnv(cfg.Proxy, envs["ACTIONS_CACHE_URL"], envs["ACTIONS_RESULTS_URL"]))
+	// The runner's own cache server has an ephemeral address the operator cannot list in
+	// advance, so it is always reached directly. ACTIONS_RESULTS_URL points at Gitea, which
+	// must stay reachable however the runner reaches it — through the proxy unless the
+	// operator's own no_proxy exempts it, exactly as ApplyProcessProxyEnv treats the runner
+	// process — so it is deliberately not forced into the jobs' no_proxy.
+	maps.Copy(envs, jobProxyEnv(cfg.Proxy, envs["ACTIONS_CACHE_URL"]))
 
 	// Set specific environments to distinguish between Gitea and GitHub
 	envs["GITEA_ACTIONS"] = "true"
