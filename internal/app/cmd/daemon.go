@@ -193,6 +193,11 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			log.Warnf("runner: %s cancelled in progress jobs during shutdown", resp.Msg.Runner.Name)
 		}
 
+		// After the jobs are done: nothing is left to serve them.
+		if err := runner.Close(); err != nil {
+			log.Warnf("runner: %s failed to shut down its job-facing servers: %v", resp.Msg.Runner.Name, err)
+		}
+
 		if poller.Unregistered() {
 			return errors.New("runner is no longer registered with the server; please register it again")
 		}
