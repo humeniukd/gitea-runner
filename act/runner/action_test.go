@@ -603,6 +603,46 @@ func TestExecAsDockerStageEntrypoint(t *testing.T) {
 	}
 }
 
+// The env an action declares in runs.env applies to every stage, so the pre-entrypoint
+// container must receive it too, the way GitHub sets it for all stages.
+func TestExecAsDockerStageAppliesRunsEnv(t *testing.T) {
+	orig := ContainerNewContainer
+	defer func() { ContainerNewContainer = orig }()
+
+	cm := &containerMock{}
+	var input *container.NewContainerInput
+	ContainerNewContainer = func(in *container.NewContainerInput) container.ExecutionsEnvironment {
+		input = in
+		return cm
+	}
+
+	step := &stepActionRemote{
+		Step: &model.Step{ID: "1", Uses: "org/action@v1"},
+		RunContext: &RunContext{
+			Config:       &Config{},
+			Run:          &model.Run{JobID: "1", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}}},
+			JobContainer: cm,
+		},
+		action: &model.Action{Runs: model.ActionRuns{
+			Using:         "docker",
+			Image:         "docker://node:14",
+			PreEntrypoint: "pre.sh",
+			Env:           map[string]string{"MY_VAR": "hello"},
+		}},
+		env: map[string]string{},
+	}
+
+	cm.On("Pull", false).Return(func(context.Context) error { return nil })
+	cm.On("Remove").Return(func(context.Context) error { return nil })
+	cm.On("Create", []string(nil), []string(nil)).Return(func(context.Context) error { return nil })
+	cm.On("Start", true).Return(func(context.Context) error { return nil })
+	cm.On("Close").Return(func(context.Context) error { return nil })
+
+	require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, "pre.sh"))
+	require.NotNil(t, input)
+	assert.Contains(t, input.Env, "MY_VAR=hello")
+}
+
 func TestDockerActionHasPreAndPostStep(t *testing.T) {
 	newStep := func(runs model.ActionRuns) actionStep {
 		return &stepActionRemote{

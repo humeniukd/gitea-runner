@@ -392,6 +392,8 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 		if err != nil {
 			return err
 		}
+		// runs.env applies to every stage; the main stage gets it via evalDockerArgs.
+		mergeStageRunsEnv(ctx, step, action)
 	} else {
 		eval := rc.NewStepExpressionEvaluator(ctx, step)
 		cmd, err = shellquote.Split(eval.Interpolate(ctx, step.getStepModel().With["args"]))
@@ -449,6 +451,22 @@ func evalDockerArgs(ctx context.Context, step step, action *model.Action, cmd *[
 	}
 	mergeIntoMap(step, step.getEnv(), action.Runs.Env)
 
+	ee := rc.NewStepExpressionEvaluator(ctx, step)
+	for k, v := range *step.getEnv() {
+		(*step.getEnv())[k] = ee.Interpolate(ctx, v)
+	}
+}
+
+// mergeStageRunsEnv adds the action's runs.env to the pre/post stage environment,
+// interpolated. The main stage gets runs.env through evalDockerArgs; without this the
+// pre-entrypoint and post-entrypoint containers would miss the variables the action
+// declares, unlike on GitHub.
+func mergeStageRunsEnv(ctx context.Context, step step, action *model.Action) {
+	if len(action.Runs.Env) == 0 {
+		return
+	}
+	rc := step.getRunContext()
+	mergeIntoMap(step, step.getEnv(), action.Runs.Env)
 	ee := rc.NewStepExpressionEvaluator(ctx, step)
 	for k, v := range *step.getEnv() {
 		(*step.getEnv())[k] = ee.Interpolate(ctx, v)
