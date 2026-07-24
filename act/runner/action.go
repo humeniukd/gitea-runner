@@ -207,7 +207,7 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 			if remoteAction == nil {
 				location = containerActionDir
 			}
-			return execAsDocker(ctx, step, actionName, actionDir, location, remoteAction == nil)
+			return execAsDocker(ctx, step, actionName, actionDir, location, remoteAction == nil, "")
 		case x.IsComposite():
 			if err := maybeCopyToActionDir(ctx, step, actionDir, actionPath, containerActionDir); err != nil {
 				return err
@@ -304,8 +304,12 @@ func dockerActionImageTag(repository, actionName string, localAction bool) strin
 	return strings.ToLower(image)
 }
 
+// execAsDocker runs a docker action's image. stageEntrypoint overrides the image's
+// entrypoint for the pre and post stage (runs.pre-entrypoint / runs.post-entrypoint);
+// it is empty for the main stage, which is the only one that passes the action's args.
+//
 // TODO: break out parts of function to reduce complexicity
-func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, basedir string, localAction bool) error {
+func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, basedir string, localAction bool, stageEntrypoint string) error {
 	logger := common.Logger(ctx)
 	rc := step.getRunContext()
 	action := step.getActionModel()
@@ -377,24 +381,37 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 			logger.Debugf("image '%s' for architecture '%s' already exists", image, rc.Config.ContainerArchitecture)
 		}
 	}
-	eval := rc.NewStepExpressionEvaluator(ctx, step)
-	cmd, err := shellquote.Split(eval.Interpolate(ctx, step.getStepModel().With["args"]))
-	if err != nil {
-		return err
-	}
-	if len(cmd) == 0 {
-		cmd = action.Runs.Args
-		evalDockerArgs(ctx, step, action, &cmd)
-	}
-	entrypoint := strings.Fields(eval.Interpolate(ctx, step.getStepModel().With["entrypoint"]))
-	if len(entrypoint) == 0 {
-		if action.Runs.Entrypoint != "" {
-			entrypoint, err = shellquote.Split(action.Runs.Entrypoint)
-			if err != nil {
-				return err
+	var (
+		cmd, entrypoint []string
+		err             error
+	)
+	if stageEntrypoint != "" {
+		// The pre and post stage run the image with their own entrypoint and without args,
+		// so neither `with.args` nor `with.entrypoint` (which target the main stage) apply.
+		entrypoint, err = shellquote.Split(stageEntrypoint)
+		if err != nil {
+			return err
+		}
+	} else {
+		eval := rc.NewStepExpressionEvaluator(ctx, step)
+		cmd, err = shellquote.Split(eval.Interpolate(ctx, step.getStepModel().With["args"]))
+		if err != nil {
+			return err
+		}
+		if len(cmd) == 0 {
+			cmd = action.Runs.Args
+			evalDockerArgs(ctx, step, action, &cmd)
+		}
+		entrypoint = strings.Fields(eval.Interpolate(ctx, step.getStepModel().With["entrypoint"]))
+		if len(entrypoint) == 0 {
+			if action.Runs.Entrypoint != "" {
+				entrypoint, err = shellquote.Split(action.Runs.Entrypoint)
+				if err != nil {
+					return err
+				}
+			} else {
+				entrypoint = nil
 			}
-		} else {
-			entrypoint = nil
 		}
 	}
 	stepContainer := newStepContainer(ctx, step, image, cmd, entrypoint)
@@ -559,9 +576,41 @@ func hasPreStep(step actionStep) common.Conditional {
 		return action.Runs.Using.IsComposite() ||
 			(action.Runs.Using.IsNode() &&
 				action.Runs.Pre != "") ||
+			(action.Runs.Using.IsDocker() &&
+				action.Runs.PreEntrypoint != "") ||
 			(action.Runs.Using == model.ActionRunsUsingGo &&
 				action.Runs.Pre != "")
 	}
+}
+
+// actionStageLocation resolves where a step's action lives, for the pre and post stage.
+// The main stage gets the same values from runActionImpl, which knows the remote action.
+func actionStageLocation(step actionStep) (actionDir, actionPath string, remote bool) {
+	rc := step.getRunContext()
+	stepModel := step.getStepModel()
+
+	if _, remote = step.(*stepActionRemote); remote {
+		return fmt.Sprintf("%s/%s", rc.ActionCacheDir(), stepModel.UsesHash()), newRemoteAction(stepModel.Uses).Path, true
+	}
+	return filepath.Join(rc.Config.Workdir, stepModel.Uses), "", false
+}
+
+// execDockerActionStage runs a docker action's image for its pre or post stage.
+func execDockerActionStage(ctx context.Context, step actionStep, entrypoint string) error {
+	rc := step.getRunContext()
+	actionDir, actionPath, remote := actionStageLocation(step)
+
+	actionLocation := actionDir
+	if actionPath != "" {
+		actionLocation = path.Join(actionDir, actionPath)
+	}
+	actionName, containerActionDir := getContainerActionPaths(step.getStepModel(), actionLocation, rc)
+
+	location := actionLocation
+	if !remote {
+		location = containerActionDir
+	}
+	return execAsDocker(ctx, step, actionName, actionDir, location, !remote, entrypoint)
 }
 
 func runPreStep(step actionStep) common.Executor {
@@ -608,6 +657,12 @@ func runPreStep(step actionStep) common.Executor {
 			rc.ApplyExtraPath(ctx, step.getEnv())
 
 			return rc.execJobContainer(containerArgs, *step.getEnv(), "", "")(ctx)
+
+		case x.IsDocker():
+			// defaults in pre steps were missing, however provided inputs are available
+			populateEnvsFromInput(ctx, step.getEnv(), action, rc)
+
+			return execDockerActionStage(ctx, step, action.Runs.PreEntrypoint)
 
 		case x.IsComposite():
 			if step.getCompositeSteps() == nil {
@@ -693,6 +748,8 @@ func hasPostStep(step actionStep) common.Conditional {
 		return action.Runs.Using.IsComposite() ||
 			(action.Runs.Using.IsNode() &&
 				action.Runs.Post != "") ||
+			(action.Runs.Using.IsDocker() &&
+				action.Runs.PostEntrypoint != "") ||
 			(action.Runs.Using == model.ActionRunsUsingGo &&
 				action.Runs.Post != "")
 	}
@@ -739,6 +796,11 @@ func runPostStep(step actionStep) common.Executor {
 			rc.ApplyExtraPath(ctx, step.getEnv())
 
 			return rc.execJobContainer(containerArgs, *step.getEnv(), "", "")(ctx)
+
+		case x.IsDocker():
+			populateEnvsFromSavedState(step.getEnv(), step, rc)
+
+			return execDockerActionStage(ctx, step, action.Runs.PostEntrypoint)
 
 		case x.IsComposite():
 			if err := maybeCopyToActionDir(ctx, step, actionDir, actionPath, containerActionDir); err != nil {

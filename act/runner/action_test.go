@@ -183,7 +183,7 @@ func TestExecAsDockerAutoRemove(t *testing.T) {
 		cm.On("Start", true).Return(func(context.Context) error { return nil })
 		cm.On("Close").Return(func(context.Context) error { return nil })
 
-		require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false))
+		require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, ""))
 		cm.AssertExpectations(t)
 		assert.Equal(t, tc.removes, removes)
 	}
@@ -465,7 +465,7 @@ func TestExecAsDockerHoldsCloneLockForRemoteUncached(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- execAsDocker(ctx, step, "test-action", actionDir, actionDir, false) }()
+	go func() { done <- execAsDocker(ctx, step, "test-action", actionDir, actionDir, false, "") }()
 
 	select {
 	case <-innerEntered:
@@ -540,4 +540,83 @@ func TestDockerActionImageTag(t *testing.T) {
 		dockerActionImageTag("owner/repo", "./", true),
 		dockerActionImageTag("owner/repo", "./sub", true),
 	)
+}
+
+// The pre and post stage of a docker action run its image with the stage entrypoint and
+// without the action's args, the way GitHub runs pre-entrypoint/post-entrypoint.
+func TestExecAsDockerStageEntrypoint(t *testing.T) {
+	orig := ContainerNewContainer
+	defer func() { ContainerNewContainer = orig }()
+
+	for _, tc := range []struct {
+		name            string
+		stageEntrypoint string
+		wantEntrypoint  []string
+		wantCmd         []string
+	}{
+		{
+			name:           "main stage keeps the entrypoint and args",
+			wantEntrypoint: []string{"main.sh"},
+			wantCmd:        []string{"hello"},
+		},
+		{
+			name:            "pre stage overrides the entrypoint and drops the args",
+			stageEntrypoint: "pre.sh --verbose",
+			wantEntrypoint:  []string{"pre.sh", "--verbose"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cm := &containerMock{}
+			var input *container.NewContainerInput
+			ContainerNewContainer = func(in *container.NewContainerInput) container.ExecutionsEnvironment {
+				input = in
+				return cm
+			}
+
+			step := &stepActionRemote{
+				Step: &model.Step{ID: "1", Uses: "org/action@v1"},
+				RunContext: &RunContext{
+					Config:       &Config{},
+					Run:          &model.Run{JobID: "1", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}}},
+					JobContainer: cm,
+				},
+				action: &model.Action{Runs: model.ActionRuns{
+					Using:      "docker",
+					Image:      "docker://node:14",
+					Entrypoint: "main.sh",
+					Args:       []string{"hello"},
+				}},
+				env: map[string]string{},
+			}
+
+			cm.On("Pull", false).Return(func(context.Context) error { return nil })
+			cm.On("Remove").Return(func(context.Context) error { return nil })
+			cm.On("Create", []string(nil), []string(nil)).Return(func(context.Context) error { return nil })
+			cm.On("Start", true).Return(func(context.Context) error { return nil })
+			cm.On("Close").Return(func(context.Context) error { return nil })
+
+			require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, tc.stageEntrypoint))
+			require.NotNil(t, input)
+			assert.Equal(t, tc.wantEntrypoint, input.Entrypoint)
+			assert.Equal(t, tc.wantCmd, input.Cmd)
+		})
+	}
+}
+
+func TestDockerActionHasPreAndPostStep(t *testing.T) {
+	newStep := func(runs model.ActionRuns) actionStep {
+		return &stepActionRemote{
+			Step:       &model.Step{ID: "1", Uses: "org/action@v1"},
+			RunContext: &RunContext{Config: &Config{}},
+			action:     &model.Action{Runs: runs},
+		}
+	}
+	ctx := context.Background()
+
+	assert.False(t, hasPreStep(newStep(model.ActionRuns{Using: "docker", Image: "Dockerfile"}))(ctx))
+	assert.False(t, hasPostStep(newStep(model.ActionRuns{Using: "docker", Image: "Dockerfile"}))(ctx))
+
+	withStages := model.ActionRuns{Using: "docker", Image: "Dockerfile", PreEntrypoint: "pre.sh", PostEntrypoint: "post.sh"}
+	assert.True(t, hasPreStep(newStep(withStages))(ctx))
+	assert.True(t, hasPostStep(newStep(withStages))(ctx))
 }
