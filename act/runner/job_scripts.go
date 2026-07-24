@@ -64,10 +64,14 @@ func (rc *RunContext) runJobScript(scriptPath, name string, failJob bool) common
 		if err == nil {
 			return nil
 		}
+		err = fmt.Errorf("the %s script %q failed: %w", name, scriptPath, err)
 		if failJob {
-			return fmt.Errorf("the %s script %q failed: %w", name, scriptPath, err)
+			// Flip the job status the way a failing pre step does, so success()-default main
+			// steps skip and the task is reported failed, then short-circuit the pre pipeline.
+			reportStepError(ctx, rc, err)
+			return err
 		}
-		logger.Errorf("##[error]the %s script %q failed: %v", name, scriptPath, err)
+		logger.Errorf("##[error]%v", err)
 		return nil
 	}
 }

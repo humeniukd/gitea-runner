@@ -78,10 +78,15 @@ func TestRunJobScript(t *testing.T) {
 	t.Run("a failing started hook fails the job", func(t *testing.T) {
 		container := &scriptContainer{err: errors.New("boom")}
 		rc := newScriptRunContext(t, container, &Config{})
+		ctx := common.WithJobErrorContainer(context.Background())
 
-		err := rc.runJobScript("/hooks/setup.sh", "job pre", true)(context.Background())
+		err := rc.runJobScript("/hooks/setup.sh", "job pre", true)(ctx)
 		require.ErrorContains(t, err, "the job pre script")
 		require.ErrorContains(t, err, "boom")
+		// The failure has to flip the job status, or success()-default steps would still
+		// run and the task would be reported successful despite the missing setup.
+		assert.Equal(t, "failure", rc.getJobContext().Status)
+		require.ErrorContains(t, common.JobError(ctx), "boom")
 	})
 
 	t.Run("a failing completed hook is only reported", func(t *testing.T) {
