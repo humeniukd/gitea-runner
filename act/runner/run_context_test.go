@@ -1008,6 +1008,34 @@ func TestWaitForServiceContainers(t *testing.T) {
 		assert.Contains(t, err.Error(), "the service 'postgres' exited with code 2")
 	})
 
+	// With several services, a failing one must fail the job immediately, not after a
+	// still-starting sibling reaches the full timeout.
+	t.Run("fails right away when one service fails while another is still starting", func(t *testing.T) {
+		failing := &containerMock{}
+		failing.On("Inspect", mock.Anything).
+			Return(&container.Info{State: "exited", ExitCode: 2}, nil)
+		starting := &containerMock{}
+		starting.On("Inspect", mock.Anything).
+			Return(&container.Info{State: "running", Health: container.HealthStarting}, nil)
+
+		// A long timeout: without fail-fast the call would block on the starting service
+		// for the whole timeout instead of returning the exit error at once.
+		rc := newRunContext(10*time.Second,
+			&serviceContainer{name: "failing", container: failing},
+			&serviceContainer{name: "starting", container: starting})
+
+		done := make(chan error, 1)
+		go func() { done <- rc.waitForServiceContainers()(context.Background()) }()
+
+		select {
+		case err := <-done:
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "the service 'failing' exited with code 2")
+		case <-time.After(2 * time.Second):
+			t.Fatal("waitForServiceContainers did not fail fast; it waited for the starting service")
+		}
+	})
+
 	t.Run("gives up once the timeout expires", func(t *testing.T) {
 		service := &containerMock{}
 		service.On("Inspect", mock.Anything).

@@ -32,6 +32,7 @@ import (
 
 	"github.com/docker/go-connections/nat"
 	"github.com/opencontainers/selinux/go-selinux"
+	"golang.org/x/sync/errgroup"
 )
 
 // RunContext contains info about current job
@@ -703,11 +704,18 @@ func (rc *RunContext) waitForServiceContainers() common.Executor {
 			timeout = defaultServiceReadyTimeout
 		}
 
-		execs := make([]common.Executor, 0, len(rc.serviceContainers))
+		// Wait for every service in parallel, but stop as soon as one fails: errgroup
+		// cancels the derived context on the first error, so a service that exits or turns
+		// unhealthy fails the job right away instead of waiting for a slower sibling to time
+		// out. group.Wait returns that first error; the siblings' cancellation errors are
+		// discarded.
+		group, groupCtx := errgroup.WithContext(ctx)
 		for _, svc := range rc.serviceContainers {
-			execs = append(execs, rc.waitForServiceContainer(svc, timeout))
+			group.Go(func() error {
+				return rc.waitForServiceContainer(svc, timeout)(groupCtx)
+			})
 		}
-		return common.NewParallelExecutor(len(execs), execs...)(ctx)
+		return group.Wait()
 	}
 }
 
