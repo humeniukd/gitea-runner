@@ -167,6 +167,10 @@ func TestSetupEnv(t *testing.T) {
 	delete((env), "GITHUB_REPOSITORY")
 	delete((env), "GITHUB_REPOSITORY_OWNER")
 	delete((env), "GITHUB_ACTOR")
+	// Derived from the hostname and from GITHUB_WORKSPACE, asserted in
+	// TestRunContextWithGithubEnvRunnerValues instead.
+	delete((env), "RUNNER_NAME")
+	delete((env), "RUNNER_WORKSPACE")
 
 	assert.Equal(t, map[string]string{
 		"ACT":                      "true",
@@ -192,6 +196,7 @@ func TestSetupEnv(t *testing.T) {
 		"GITHUB_WORKFLOW":          "",
 		"INPUT_STEP_WITH":          "with-value",
 		"RC_KEY":                   "rcvalue",
+		"RUNNER_ENVIRONMENT":       "self-hosted",
 		"RUNNER_PERFLOG":           "/dev/null",
 		"RUNNER_TRACKING_ID":       "",
 	}, env)
