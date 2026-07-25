@@ -228,6 +228,17 @@ func (h *Handler) v2UploadBlob(w http.ResponseWriter, r *http.Request, params ht
 		return
 	}
 
+	// The upload URL outlives the finalize call, so refuse to write over an entry that is
+	// already complete: its blob is what other jobs restore, and its recorded size would
+	// no longer describe it. This is the guard the v1 upload route applies.
+	if complete, err := h.cacheComplete(id); err != nil {
+		h.responseJSON(w, r, http.StatusInternalServerError, err)
+		return
+	} else if complete {
+		h.responseJSON(w, r, http.StatusBadRequest, fmt.Errorf("cache %d: already complete", id))
+		return
+	}
+
 	switch strings.ToLower(r.URL.Query().Get("comp")) {
 	case "block":
 		blockID := r.URL.Query().Get("blockid")
@@ -269,6 +280,26 @@ func (h *Handler) v2UploadBlob(w http.ResponseWriter, r *http.Request, params ht
 
 	h.useCache(int64(id))
 	w.WriteHeader(http.StatusCreated)
+}
+
+// cacheComplete reports whether the entry has already been finalized. An entry that is
+// not in the store at all is not complete: the signature already proves the id was handed
+// out, and the write is harmless once the reservation is gone.
+func (h *Handler) cacheComplete(id uint64) (bool, error) {
+	db, err := h.openDB()
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+
+	cache := &Cache{}
+	if err := db.Get(id, cache); err != nil {
+		if errors.Is(err, bolthold.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return cache.Complete, nil
 }
 
 // findReservedCache returns the entry a finalize call refers to: the newest reservation

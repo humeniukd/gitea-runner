@@ -244,6 +244,44 @@ func TestCacheServiceV2RejectsUnsignedBlobRequests(t *testing.T) {
 	})
 }
 
+// The signed upload URL stays valid for the rest of its TTL after the entry is finalized,
+// so a second upload must not be able to replace the archive other jobs restore.
+func TestCacheServiceV2UploadRefusedAfterFinalize(t *testing.T) {
+	handler := startTestHandler(t)
+	content := []byte("the cached archive")
+
+	created := v2Call(t, handler, "CreateCacheEntry", map[string]any{"key": "deps-v1", "version": "abc123"})
+	uploadURL, _ := created["signedUploadUrl"].(string)
+	require.NotEmpty(t, uploadURL)
+
+	putBlob(t, uploadURL, content)
+	finalized := v2Call(t, handler, "FinalizeCacheEntryUpload", map[string]any{
+		"key":       "deps-v1",
+		"version":   "abc123",
+		"sizeBytes": strconv.Itoa(len(content)),
+	})
+	require.Equal(t, true, finalized["ok"])
+
+	// Replaying the still-valid upload URL is refused.
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, uploadURL, bytes.NewReader([]byte("poisoned")))
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	// The entry still serves what was finalized.
+	got := v2Call(t, handler, "GetCacheEntryDownloadURL", map[string]any{"key": "deps-v1", "version": "abc123"})
+	require.Equal(t, true, got["ok"])
+	downloadURL, _ := got["signedDownloadUrl"].(string)
+	download, err := http.Get(downloadURL) //nolint:noctx // the URL is the server under test
+	require.NoError(t, err)
+	defer download.Body.Close()
+	downloaded, err := io.ReadAll(download.Body)
+	require.NoError(t, err)
+	assert.Equal(t, content, downloaded)
+}
+
 func TestTwirpRequestFieldNames(t *testing.T) {
 	req := twirpRequest{
 		"key":         json.RawMessage(`"k"`),
