@@ -116,6 +116,17 @@ publishers:
       - R2_ACCESS_KEY_ID={{ index .Env "R2_ACCESS_KEY_ID" }}
       - R2_SECRET_ACCESS_KEY={{ index .Env "R2_SECRET_ACCESS_KEY" }}
 
+# Known issue: this publisher fires 109 times for 73 distinct object
+# keys, because release.extra_files (release.go:143-157) already
+# registers the `.xz`/`.xz.sha256` files as UploadableFile artifacts,
+# and exec.go's filterArtifacts (exec.go:44-67,122-134) unconditionally
+# includes those plus this block's own extra_files, with no
+# de-duplication. Can't be globbed away: gobwas/glob has no
+# substring-exclusion matcher to match `*.sha256` while excluding
+# `*.xz.sha256`. Harmless: PUT to R2 is idempotent. The `./**.xz` glob
+# below is kept on purpose, so this publisher declares its own complete
+# file set rather than implicitly depending on `release:`'s globs.
+
 archives:
   - format: binary
     name_template: "{{ .Binary }}"
