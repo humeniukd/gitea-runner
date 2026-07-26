@@ -93,16 +93,24 @@ blobs:
       - glob: ./**.xz
       - glob: ./**.sha256
 
-# Mirrors the S3 upload above into Cloudflare R2, during the parallel
-# S3+R2 upload period (AWS S3 will be removed once the migration to R2
-# is complete). A second `blobs:` entry cannot be used here because
-# the blobs pipe authenticates from the global AWS_* environment and
-# has no per-entry credential fields, so two different credential
-# sets (S3 vs R2) cannot coexist in `blobs:`. `publishers:` supports
-# per-entry `env:`, so it is used instead, invoking scripts/upload-r2.sh
-# once per artifact. Custom publishers only inherit
-# HOME/USER/USERPROFILE/TMPDIR/TMP/TEMP/PATH from the environment, so
-# the R2 credentials must be forwarded explicitly below.
+# Mirrors the S3 `blobs:` upload above into Cloudflare R2 during the
+# parallel S3+R2 period (S3 will be removed once migration completes).
+# A second `blobs:` entry is impossible here since the blob pipe
+# authenticates from the global AWS_* env with no per-entry
+# credentials; `publishers:` supports per-entry `env:` instead, so
+# it's used to invoke scripts/upload-r2.sh once per artifact. Custom
+# publishers inherit almost nothing from the environment, hence the
+# explicit R2_* forwarding below.
+#
+# This publisher fires 109 times for 73 distinct keys because
+# goreleaser's release pipe already registers `release.extra_files`
+# as UploadableFile artifacts, and `internal/exec`'s filterArtifacts
+# appends this block's own extra_files with no de-duplication. It
+# can't be globbed away, since gobwas/glob (via goreleaser/fileglob)
+# has no substring-exclusion matcher. It's harmless: PUT is
+# idempotent, and the `./**.xz` glob below is kept deliberately so
+# this publisher declares its own complete file set rather than
+# implicitly depending on the `release:` block's globs.
 publishers:
   - name: cloudflare-r2
     checksum: true
@@ -115,17 +123,6 @@ publishers:
       - R2_BUCKET={{ index .Env "R2_BUCKET" }}
       - R2_ACCESS_KEY_ID={{ index .Env "R2_ACCESS_KEY_ID" }}
       - R2_SECRET_ACCESS_KEY={{ index .Env "R2_SECRET_ACCESS_KEY" }}
-
-# Known issue: this publisher fires 109 times for 73 distinct object
-# keys, because release.extra_files (release.go:143-157) already
-# registers the `.xz`/`.xz.sha256` files as UploadableFile artifacts,
-# and exec.go's filterArtifacts (exec.go:44-67,122-134) unconditionally
-# includes those plus this block's own extra_files, with no
-# de-duplication. Can't be globbed away: gobwas/glob has no
-# substring-exclusion matcher to match `*.sha256` while excluding
-# `*.xz.sha256`. Harmless: PUT to R2 is idempotent. The `./**.xz` glob
-# below is kept on purpose, so this publisher declares its own complete
-# file set rather than implicitly depending on `release:`'s globs.
 
 archives:
   - format: binary
