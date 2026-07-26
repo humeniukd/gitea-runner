@@ -93,6 +93,29 @@ blobs:
       - glob: ./**.xz
       - glob: ./**.sha256
 
+# Mirrors the S3 upload above into Cloudflare R2, during the parallel
+# S3+R2 upload period (AWS S3 will be removed once the migration to R2
+# is complete). A second `blobs:` entry cannot be used here because
+# the blobs pipe authenticates from the global AWS_* environment and
+# has no per-entry credential fields, so two different credential
+# sets (S3 vs R2) cannot coexist in `blobs:`. `publishers:` supports
+# per-entry `env:`, so it is used instead, invoking scripts/upload-r2.sh
+# once per artifact. Custom publishers only inherit
+# HOME/USER/USERPROFILE/TMPDIR/TMP/TEMP/PATH from the environment, so
+# the R2 credentials must be forwarded explicitly below.
+publishers:
+  - name: cloudflare-r2
+    checksum: true
+    extra_files:
+      - glob: ./**.xz
+      - glob: ./**.sha256
+    cmd: sh scripts/upload-r2.sh {{ abs .ArtifactPath }} gitea-runner/{{ .Version }}/{{ .ArtifactName }}
+    env:
+      - R2_ENDPOINT={{ index .Env "R2_ENDPOINT" }}
+      - R2_BUCKET={{ index .Env "R2_BUCKET" }}
+      - R2_ACCESS_KEY_ID={{ index .Env "R2_ACCESS_KEY_ID" }}
+      - R2_SECRET_ACCESS_KEY={{ index .Env "R2_SECRET_ACCESS_KEY" }}
+
 archives:
   - format: binary
     name_template: "{{ .Binary }}"
