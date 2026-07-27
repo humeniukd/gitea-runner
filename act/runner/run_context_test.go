@@ -950,18 +950,15 @@ func TestImageOSFromImage(t *testing.T) {
 		{"docker.gitea.com/runner-images:ubuntu-24.04", "ubuntu24"},
 		{"docker.gitea.com/runner-images:ubuntu-latest", ""},
 		{"runner-images:ubuntu22.04", "ubuntu22"},
-		{"catthehacker/ubuntu:act-22.04", "act22"},
-		// A tag without a release, or none at all, says nothing about the image.
 		{"node:20", ""},
 		{"ubuntu:22.04", ""},
 		{"ubuntu", ""},
-		// A version-style tag that does not name an OS must fall back to the label rather
-		// than yield a bogus OS such as "v2" or "release1".
+		{"catthehacker/ubuntu:act-22.04", ""},
 		{"myco/ubuntu:v2.1", ""},
 		{"myco/ubuntu:v22.04", ""},
 		{"app:release-1", ""},
 		{"app:1.2.3", ""},
-		// The registry port must not be mistaken for a tag.
+		{"app:build-2.1", ""},
 		{"registry.example.com:5000/runner-images", ""},
 		{"registry.example.com:5000/runner-images:ubuntu-24.04", "ubuntu24"},
 	} {
@@ -971,13 +968,17 @@ func TestImageOSFromImage(t *testing.T) {
 	}
 }
 
+func createRunsOnRunContext(t *testing.T, runsOn string) *RunContext {
+	return createIfTestRunContext(map[string]*model.Job{
+		"job1": createJob(t, "runs-on: "+runsOn, ""),
+	})
+}
+
 func TestRunContextImageOS(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("prefers the release in the resolved image tag", func(t *testing.T) {
-		rc := createIfTestRunContext(map[string]*model.Job{
-			"job1": createJob(t, `runs-on: ubuntu-latest`, ""),
-		})
+		rc := createRunsOnRunContext(t, "ubuntu-latest")
 		rc.Config.Platforms = map[string]string{
 			"ubuntu-latest": "docker.gitea.com/runner-images:ubuntu-24.04",
 		}
@@ -985,18 +986,18 @@ func TestRunContextImageOS(t *testing.T) {
 	})
 
 	t.Run("falls back to the runs-on label", func(t *testing.T) {
-		rc := createIfTestRunContext(map[string]*model.Job{
-			"job1": createJob(t, `runs-on: ubuntu-22.04`, ""),
-		})
+		rc := createRunsOnRunContext(t, "ubuntu-22.04")
 		rc.Config.Platforms = map[string]string{"ubuntu-22.04": "some-image"}
 		assert.Equal(t, "ubuntu22", rc.imageOS(ctx))
 	})
 
 	t.Run("keeps the historical value for a rolling label with no release", func(t *testing.T) {
-		rc := createIfTestRunContext(map[string]*model.Job{
-			"job1": createJob(t, `runs-on: ubuntu-latest`, ""),
-		})
-		assert.Equal(t, "ubuntu20", rc.imageOS(ctx))
+		assert.Equal(t, "ubuntu20", createRunsOnRunContext(t, "ubuntu-latest").imageOS(ctx))
+	})
+
+	t.Run("is empty for the synthetic job of a composite action", func(t *testing.T) {
+		rc := createIfTestRunContext(map[string]*model.Job{"job1": {}})
+		assert.Empty(t, rc.imageOS(ctx))
 	})
 }
 
@@ -1004,9 +1005,7 @@ func TestRunContextGetRunnerContext(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("adds the runner values the container cannot know", func(t *testing.T) {
-		rc := createIfTestRunContext(map[string]*model.Job{
-			"job1": createJob(t, `runs-on: ubuntu-latest`, ""),
-		})
+		rc := createRunsOnRunContext(t, "ubuntu-latest")
 		rc.Config.RunnerName = "runner-1"
 
 		runnerContext := rc.getRunnerContext(ctx)
@@ -1016,28 +1015,14 @@ func TestRunContextGetRunnerContext(t *testing.T) {
 	})
 
 	t.Run("reports debug when step debugging is on", func(t *testing.T) {
-		rc := createIfTestRunContext(map[string]*model.Job{
-			"job1": createJob(t, `runs-on: ubuntu-latest`, ""),
-		})
+		rc := createRunsOnRunContext(t, "ubuntu-latest")
 		rc.Config.Secrets = map[string]string{"ACTIONS_STEP_DEBUG": "true"}
 
 		assert.Equal(t, "1", rc.getRunnerContext(ctx)["debug"])
 	})
 
-	t.Run("falls back to the hostname when unregistered", func(t *testing.T) {
-		rc := createIfTestRunContext(map[string]*model.Job{
-			"job1": createJob(t, `runs-on: ubuntu-latest`, ""),
-		})
-
-		name, ok := rc.getRunnerContext(ctx)["name"].(string)
-		assert.True(t, ok)
-		assert.NotEmpty(t, name)
-	})
-
 	t.Run("keeps the execution environment values", func(t *testing.T) {
-		rc := createIfTestRunContext(map[string]*model.Job{
-			"job1": createJob(t, `runs-on: ubuntu-latest`, ""),
-		})
+		rc := createRunsOnRunContext(t, "ubuntu-latest")
 		rc.JobContainer = &container.HostEnvironment{TmpDir: "/tmp/act", ToolCache: "/tmp/tool_cache"}
 
 		runnerContext := rc.getRunnerContext(ctx)
@@ -1049,19 +1034,20 @@ func TestRunContextGetRunnerContext(t *testing.T) {
 
 func TestParentDir(t *testing.T) {
 	assert.Empty(t, parentDir(""))
+	assert.Empty(t, parentDir("repo"))
+	assert.Empty(t, parentDir("/repo"))
 	assert.Equal(t, "/workspace/owner", parentDir("/workspace/owner/repo"))
 	assert.Equal(t, `C:\workspace\owner`, parentDir(`C:\workspace\owner\repo`))
 }
 
 func TestRunContextWithGithubEnvRunnerValues(t *testing.T) {
 	ctx := context.Background()
-	rc := createIfTestRunContext(map[string]*model.Job{
-		"job1": createJob(t, `runs-on: ubuntu-latest`, ""),
-	})
+	rc := createRunsOnRunContext(t, "ubuntu-latest")
 	rc.Config.RunnerName = "runner-1"
 	rc.Config.Secrets = map[string]string{"ACTIONS_STEP_DEBUG": "true"}
 
-	env := rc.withGithubEnv(ctx, &model.GithubContext{Workspace: "/workspace/owner/repo"}, map[string]string{})
+	env := map[string]string{}
+	rc.withGithubEnv(ctx, &model.GithubContext{Workspace: "/workspace/owner/repo"}, env)
 
 	assert.Equal(t, "runner-1", env["RUNNER_NAME"])
 	assert.Equal(t, "self-hosted", env["RUNNER_ENVIRONMENT"])
