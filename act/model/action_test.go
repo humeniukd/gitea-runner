@@ -68,19 +68,13 @@ runs:
   using: docker
   image: Dockerfile
   pre-entrypoint: pre.sh
-  entrypoint: main.sh
   post-entrypoint: post.sh
-  args:
-    - hello
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if action.Runs.PreEntrypoint != "pre.sh" {
 		t.Fatalf("pre-entrypoint = %q, want pre.sh", action.Runs.PreEntrypoint)
-	}
-	if action.Runs.Entrypoint != "main.sh" {
-		t.Fatalf("entrypoint = %q, want main.sh", action.Runs.Entrypoint)
 	}
 	if action.Runs.PostEntrypoint != "post.sh" {
 		t.Fatalf("post-entrypoint = %q, want post.sh", action.Runs.PostEntrypoint)

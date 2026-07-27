@@ -183,7 +183,7 @@ func TestExecAsDockerAutoRemove(t *testing.T) {
 		cm.On("Start", true).Return(func(context.Context) error { return nil })
 		cm.On("Close").Return(func(context.Context) error { return nil })
 
-		require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, ""))
+		require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, stepStageMain))
 		cm.AssertExpectations(t)
 		assert.Equal(t, tc.removes, removes)
 	}
@@ -465,7 +465,7 @@ func TestExecAsDockerHoldsCloneLockForRemoteUncached(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- execAsDocker(ctx, step, "test-action", actionDir, actionDir, false, "") }()
+	go func() { done <- execAsDocker(ctx, step, "test-action", actionDir, actionDir, false, stepStageMain) }()
 
 	select {
 	case <-innerEntered:
@@ -542,27 +542,31 @@ func TestDockerActionImageTag(t *testing.T) {
 	)
 }
 
-// The pre and post stage of a docker action run its image with the stage entrypoint and
-// without the action's args, the way GitHub runs pre-entrypoint/post-entrypoint.
+// Only the entrypoint is stage specific: every stage of a docker action receives runs.args
+// and runs.env, and the `entrypoint` input applies to the main stage alone.
 func TestExecAsDockerStageEntrypoint(t *testing.T) {
 	orig := ContainerNewContainer
 	defer func() { ContainerNewContainer = orig }()
 
 	for _, tc := range []struct {
-		name            string
-		stageEntrypoint string
-		wantEntrypoint  []string
-		wantCmd         []string
+		name           string
+		stage          stepStage
+		wantEntrypoint []string
 	}{
 		{
-			name:           "main stage keeps the entrypoint and args",
-			wantEntrypoint: []string{"main.sh"},
-			wantCmd:        []string{"hello"},
+			name:           "main stage prefers the entrypoint input",
+			stage:          stepStageMain,
+			wantEntrypoint: []string{"input.sh"},
 		},
 		{
-			name:            "pre stage overrides the entrypoint and drops the args",
-			stageEntrypoint: "pre.sh --verbose",
-			wantEntrypoint:  []string{"pre.sh", "--verbose"},
+			name:           "pre stage uses runs.pre-entrypoint",
+			stage:          stepStagePre,
+			wantEntrypoint: []string{"pre.sh", "--verbose"},
+		},
+		{
+			name:           "post stage uses runs.post-entrypoint",
+			stage:          stepStagePost,
+			wantEntrypoint: []string{"post.sh"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -574,17 +578,20 @@ func TestExecAsDockerStageEntrypoint(t *testing.T) {
 			}
 
 			step := &stepActionRemote{
-				Step: &model.Step{ID: "1", Uses: "org/action@v1"},
+				Step: &model.Step{ID: "1", Uses: "org/action@v1", With: map[string]string{"entrypoint": "input.sh"}},
 				RunContext: &RunContext{
 					Config:       &Config{},
 					Run:          &model.Run{JobID: "1", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}}},
 					JobContainer: cm,
 				},
 				action: &model.Action{Runs: model.ActionRuns{
-					Using:      "docker",
-					Image:      "docker://node:14",
-					Entrypoint: "main.sh",
-					Args:       []string{"hello"},
+					Using:          "docker",
+					Image:          "docker://node:14",
+					PreEntrypoint:  "pre.sh --verbose",
+					Entrypoint:     "main.sh",
+					PostEntrypoint: "post.sh",
+					Args:           []string{"hello"},
+					Env:            map[string]string{"MY_VAR": "world"},
 				}},
 				env: map[string]string{},
 			}
@@ -595,61 +602,18 @@ func TestExecAsDockerStageEntrypoint(t *testing.T) {
 			cm.On("Start", true).Return(func(context.Context) error { return nil })
 			cm.On("Close").Return(func(context.Context) error { return nil })
 
-			require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, tc.stageEntrypoint))
+			require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, tc.stage))
 			require.NotNil(t, input)
 			assert.Equal(t, tc.wantEntrypoint, input.Entrypoint)
-			assert.Equal(t, tc.wantCmd, input.Cmd)
+			assert.Equal(t, []string{"hello"}, input.Cmd)
+			assert.Contains(t, input.Env, "MY_VAR=world")
 		})
 	}
 }
 
-// The env an action declares in runs.env applies to every stage, so the pre-entrypoint
-// container must receive it too, the way GitHub sets it for all stages.
-func TestExecAsDockerStageAppliesRunsEnv(t *testing.T) {
-	orig := ContainerNewContainer
-	defer func() { ContainerNewContainer = orig }()
-
-	cm := &containerMock{}
-	var input *container.NewContainerInput
-	ContainerNewContainer = func(in *container.NewContainerInput) container.ExecutionsEnvironment {
-		input = in
-		return cm
-	}
-
-	step := &stepActionRemote{
-		Step: &model.Step{ID: "1", Uses: "org/action@v1"},
-		RunContext: &RunContext{
-			Config:       &Config{},
-			Run:          &model.Run{JobID: "1", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}}},
-			JobContainer: cm,
-		},
-		action: &model.Action{Runs: model.ActionRuns{
-			Using:         "docker",
-			Image:         "docker://node:14",
-			PreEntrypoint: "pre.sh",
-			Env:           map[string]string{"MY_VAR": "hello"},
-		}},
-		env: map[string]string{},
-	}
-
-	cm.On("Pull", false).Return(func(context.Context) error { return nil })
-	cm.On("Remove").Return(func(context.Context) error { return nil })
-	cm.On("Create", []string(nil), []string(nil)).Return(func(context.Context) error { return nil })
-	cm.On("Start", true).Return(func(context.Context) error { return nil })
-	cm.On("Close").Return(func(context.Context) error { return nil })
-
-	require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, "pre.sh"))
-	require.NotNil(t, input)
-	assert.Contains(t, input.Env, "MY_VAR=hello")
-}
-
 func TestDockerActionHasPreAndPostStep(t *testing.T) {
 	newStep := func(runs model.ActionRuns) actionStep {
-		return &stepActionRemote{
-			Step:       &model.Step{ID: "1", Uses: "org/action@v1"},
-			RunContext: &RunContext{Config: &Config{}},
-			action:     &model.Action{Runs: runs},
-		}
+		return &stepActionRemote{action: &model.Action{Runs: runs}}
 	}
 	ctx := context.Background()
 
