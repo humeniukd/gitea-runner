@@ -21,6 +21,9 @@ DOCKER_ROOTLESS_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)-dind-rootless
 GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.3.0
 
+# how many parallel tests to run, set explicitly because the default is the core count
+TEST_PARALLEL ?= 8
+
 STATIC ?=
 EXTLDFLAGS ?=
 ifneq ($(STATIC),)
@@ -152,7 +155,7 @@ tidy-check: tidy
 
 .PHONY: test
 test: ## test everything (integration tests self-skip without docker/network)
-	@$(GO) test -race -timeout 20m -parallel 8 -v -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
+	@$(GO) test -race -timeout 20m -parallel $(TEST_PARALLEL) -v -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
 
 .PHONY: coverage-report
 coverage-report: ## turn coverage.txt from `make test` into .tmp/coverage.md
