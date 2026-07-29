@@ -17,26 +17,11 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
-// DefaultHostPostScriptTimeout is the fallback cap on how long the host post
-// script may run when host_post_script is set without an explicit timeout. It is
+// DefaultPostTaskScriptTimeout is the fallback cap on how long the post-task
+// script may run when post_task_script is set without an explicit timeout. It is
 // applied both at config load (for a configured script) and at the point of use
 // (so a programmatically built config still gets a sane bound).
-const DefaultHostPostScriptTimeout = 5 * time.Minute
-
-// adoptDeprecatedTaskScriptKeys carries the pre-rename post_task_script keys over to
-// their host_post_script replacements. The scripts around a task are now named
-// <where>_<when>_script, so that the host one and the ones running inside the job
-// environment can be told apart; an existing config keeps working, with a warning.
-func adoptDeprecatedTaskScriptKeys(cfg *Config) {
-	if cfg.Runner.PostTaskScript != "" && cfg.Runner.HostPostScript == "" {
-		log.Warn("runner.post_task_script is deprecated, rename it to runner.host_post_script")
-		cfg.Runner.HostPostScript = cfg.Runner.PostTaskScript
-	}
-	if cfg.Runner.PostTaskScriptTimeout > 0 && cfg.Runner.HostPostScriptTimeout <= 0 {
-		log.Warn("runner.post_task_script_timeout is deprecated, rename it to runner.host_post_script_timeout")
-		cfg.Runner.HostPostScriptTimeout = cfg.Runner.PostTaskScriptTimeout
-	}
-}
+const DefaultPostTaskScriptTimeout = 5 * time.Minute
 
 // Log represents the configuration for logging.
 type Log struct {
@@ -45,40 +30,37 @@ type Log struct {
 
 // Runner represents the configuration for the runner.
 type Runner struct {
-	File                string            `yaml:"file"`                   // File specifies the file path for the runner.
-	Capacity            int               `yaml:"capacity"`               // Capacity specifies the capacity of the runner.
-	Envs                map[string]string `yaml:"envs"`                   // Envs stores environment variables for the runner.
-	EnvFile             string            `yaml:"env_file"`               // EnvFile specifies the path to the file containing environment variables for the runner.
-	Timeout             time.Duration     `yaml:"timeout"`                // Timeout specifies the duration for runner timeout.
-	ShutdownTimeout     time.Duration     `yaml:"shutdown_timeout"`       // ShutdownTimeout specifies the duration to wait for running jobs to complete during a shutdown of the runner.
-	Insecure            bool              `yaml:"insecure"`               // Insecure indicates whether the runner operates in an insecure mode.
-	FetchTimeout        time.Duration     `yaml:"fetch_timeout"`          // FetchTimeout specifies the timeout duration for fetching resources.
-	FetchInterval       time.Duration     `yaml:"fetch_interval"`         // FetchInterval specifies the interval duration for fetching resources.
-	FetchIntervalMax    time.Duration     `yaml:"fetch_interval_max"`     // FetchIntervalMax specifies the maximum backoff interval when idle.
-	WorkdirCleanupAge   time.Duration     `yaml:"workdir_cleanup_age"`    // WorkdirCleanupAge removes stale bind-workdir task directories and orphaned host-mode scratch dirs older than this duration during idle cleanup.
-	IdleCleanupInterval time.Duration     `yaml:"idle_cleanup_interval"`  // IdleCleanupInterval runs stale-directory cleanup periodically while the runner is idle. Set to 0 to disable cleanup cadence.
-	LogReportInterval   time.Duration     `yaml:"log_report_interval"`    // LogReportInterval specifies the base interval for periodic log flush.
-	LogReportMaxLatency time.Duration     `yaml:"log_report_max_latency"` // LogReportMaxLatency specifies the max time a log row can wait before being sent.
-	LogReportBatchSize  int               `yaml:"log_report_batch_size"`  // LogReportBatchSize triggers immediate log flush when buffer reaches this size.
-	StateReportInterval time.Duration     `yaml:"state_report_interval"`  // StateReportInterval specifies the interval for state reporting.
-	ReportCloseTimeout  time.Duration     `yaml:"report_close_timeout"`   // ReportCloseTimeout caps each RPC attempt when flushing the final logs and task state at job completion, on a detached context so a server cancel can't block the acknowledgement.
-	Labels              []string          `yaml:"labels"`                 // Labels specify the labels of the runner. Labels are declared on each startup
-	GithubMirror        string            `yaml:"github_mirror"`          // GithubMirror defines what mirrors should be used when using github
-	ActionShallowClone  *bool             `yaml:"action_shallow_clone"`   // ActionShallowClone fetches only the requested ref of an action repository at depth 1 instead of cloning every branch's full history. It is a pointer to distinguish between false and not set; if not set, it defaults to true.
-	SetActEnv           *bool             `yaml:"set_act_env"`            // SetActEnv controls whether the ACT=true environment variable is injected into jobs. It is a pointer to distinguish between false and not set; if not set, it defaults to true. Set it to false so workflows gated on `if: ${{ !env.ACT }}` behave like on GitHub.
-	AllocatePTY         bool              `yaml:"allocate_pty"`           // AllocatePTY allocates a pseudo-TTY for each step's process. Default is false, matching GitHub's actions/runner. Enable only for jobs that need an interactive terminal; tools like docker build emit redrawing progress frames into the captured log when a TTY is present. Applies to both host and docker backends.
-	// The scripts the runner can run around a task, named <where>_<when>_script:
-	//   - job_*  run inside the job environment (the job container, or the host in host mode)
-	//   - host_* run on the runner's host
-	JobPreScript          string        `yaml:"job_pre_script"`           // JobPreScript is the path of a script run inside the job environment before the job's first step. A failure fails the job. Also read from the ACTIONS_RUNNER_HOOK_JOB_STARTED environment variable.
-	JobPostScript         string        `yaml:"job_post_script"`          // JobPostScript is the path of a script run inside the job environment after the job's last step, while the environment is still up. A failure is reported but does not change the job result. Also read from the ACTIONS_RUNNER_HOOK_JOB_COMPLETED environment variable.
-	HostPostScript        string        `yaml:"host_post_script"`         // HostPostScript is the path of an executable run on the host after each task's cleanup completes. Empty disables it. On Windows use .exe/.bat/.cmd; PowerShell (.ps1) is not supported yet as the configured path.
-	HostPostScriptTimeout time.Duration `yaml:"host_post_script_timeout"` // HostPostScriptTimeout caps how long the host post script may run. Default is 5m when host_post_script is set.
+	File                  string            `yaml:"file"`                     // File specifies the file path for the runner.
+	Capacity              int               `yaml:"capacity"`                 // Capacity specifies the capacity of the runner.
+	Envs                  map[string]string `yaml:"envs"`                     // Envs stores environment variables for the runner.
+	EnvFile               string            `yaml:"env_file"`                 // EnvFile specifies the path to the file containing environment variables for the runner.
+	Timeout               time.Duration     `yaml:"timeout"`                  // Timeout specifies the duration for runner timeout.
+	ShutdownTimeout       time.Duration     `yaml:"shutdown_timeout"`         // ShutdownTimeout specifies the duration to wait for running jobs to complete during a shutdown of the runner.
+	Insecure              bool              `yaml:"insecure"`                 // Insecure indicates whether the runner operates in an insecure mode.
+	FetchTimeout          time.Duration     `yaml:"fetch_timeout"`            // FetchTimeout specifies the timeout duration for fetching resources.
+	FetchInterval         time.Duration     `yaml:"fetch_interval"`           // FetchInterval specifies the interval duration for fetching resources.
+	FetchIntervalMax      time.Duration     `yaml:"fetch_interval_max"`       // FetchIntervalMax specifies the maximum backoff interval when idle.
+	WorkdirCleanupAge     time.Duration     `yaml:"workdir_cleanup_age"`      // WorkdirCleanupAge removes stale bind-workdir task directories and orphaned host-mode scratch dirs older than this duration during idle cleanup.
+	IdleCleanupInterval   time.Duration     `yaml:"idle_cleanup_interval"`    // IdleCleanupInterval runs stale-directory cleanup periodically while the runner is idle. Set to 0 to disable cleanup cadence.
+	LogReportInterval     time.Duration     `yaml:"log_report_interval"`      // LogReportInterval specifies the base interval for periodic log flush.
+	LogReportMaxLatency   time.Duration     `yaml:"log_report_max_latency"`   // LogReportMaxLatency specifies the max time a log row can wait before being sent.
+	LogReportBatchSize    int               `yaml:"log_report_batch_size"`    // LogReportBatchSize triggers immediate log flush when buffer reaches this size.
+	StateReportInterval   time.Duration     `yaml:"state_report_interval"`    // StateReportInterval specifies the interval for state reporting.
+	ReportCloseTimeout    time.Duration     `yaml:"report_close_timeout"`     // ReportCloseTimeout caps each RPC attempt when flushing the final logs and task state at job completion, on a detached context so a server cancel can't block the acknowledgement.
+	Labels                []string          `yaml:"labels"`                   // Labels specify the labels of the runner. Labels are declared on each startup
+	GithubMirror          string            `yaml:"github_mirror"`            // GithubMirror defines what mirrors should be used when using github
+	ActionShallowClone    *bool             `yaml:"action_shallow_clone"`     // ActionShallowClone fetches only the requested ref of an action repository at depth 1 instead of cloning every branch's full history. It is a pointer to distinguish between false and not set; if not set, it defaults to true.
+	SetActEnv             *bool             `yaml:"set_act_env"`              // SetActEnv controls whether the ACT=true environment variable is injected into jobs. It is a pointer to distinguish between false and not set; if not set, it defaults to true. Set it to false so workflows gated on `if: ${{ !env.ACT }}` behave like on GitHub.
+	AllocatePTY           bool              `yaml:"allocate_pty"`             // AllocatePTY allocates a pseudo-TTY for each step's process. Default is false, matching GitHub's actions/runner. Enable only for jobs that need an interactive terminal; tools like docker build emit redrawing progress frames into the captured log when a TTY is present. Applies to both host and docker backends.
+	PostTaskScript        string            `yaml:"post_task_script"`         // PostTaskScript is the path to an executable script run on the host after each task's cleanup completes. Empty disables the hook. On Windows use .exe/.bat/.cmd; PowerShell (.ps1) is not supported yet as the configured path.
+	PostTaskScriptTimeout time.Duration     `yaml:"post_task_script_timeout"` // PostTaskScriptTimeout caps how long the post-task script may run. Default is 5m when post_task_script is set.
+	Hooks                 RunnerHooks       `yaml:"hooks"`                    // Hooks are scripts run inside the job environment around the job's steps.
+}
 
-	// Deprecated: renamed to HostPostScript / HostPostScriptTimeout. Still read so an
-	// existing config keeps working; LoadDefault copies them over and warns.
-	PostTaskScript        string        `yaml:"post_task_script"`
-	PostTaskScriptTimeout time.Duration `yaml:"post_task_script_timeout"`
+// RunnerHooks represents the scripts run inside the job environment around the job's steps.
+type RunnerHooks struct {
+	JobStarted   string `yaml:"job_started"`   // JobStarted is the path of a script run before the job's first step. Falls back to ACTIONS_RUNNER_HOOK_JOB_STARTED; a failure fails the job.
+	JobCompleted string `yaml:"job_completed"` // JobCompleted is the path of a script run after the job's last step, while the job environment is still up. Falls back to ACTIONS_RUNNER_HOOK_JOB_COMPLETED; a failure fails the job.
 }
 
 // Cache represents the configuration for caching.
@@ -260,9 +242,8 @@ func LoadDefault(file string) (*Config, error) {
 	if cfg.Runner.ReportCloseTimeout <= 0 {
 		cfg.Runner.ReportCloseTimeout = 10 * time.Second
 	}
-	adoptDeprecatedTaskScriptKeys(cfg)
-	if cfg.Runner.HostPostScript != "" && cfg.Runner.HostPostScriptTimeout <= 0 {
-		cfg.Runner.HostPostScriptTimeout = DefaultHostPostScriptTimeout
+	if cfg.Runner.PostTaskScript != "" && cfg.Runner.PostTaskScriptTimeout <= 0 {
+		cfg.Runner.PostTaskScriptTimeout = DefaultPostTaskScriptTimeout
 	}
 	if cfg.HealthCheck.MinFreeDiskSpaceMB <= 0 {
 		cfg.HealthCheck.MinFreeDiskSpaceMB = 1024

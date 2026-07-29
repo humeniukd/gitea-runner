@@ -34,7 +34,7 @@ func TestRunPostTaskScriptSkippedWhenEmpty(t *testing.T) {
 	reporter := report.NewReporter(ctx, cancel, nil, task, r.cfg)
 
 	require.NotPanics(t, func() {
-		r.runHostPostScript(ctx, reporter, task, "/workspace/owner/repo")
+		r.runPostTaskScript(ctx, reporter, task, "/workspace/owner/repo")
 	})
 }
 
@@ -45,7 +45,7 @@ func TestRunPostTaskScriptNonZeroExitDoesNotPanic(t *testing.T) {
 
 	cfg, err := config.LoadDefault("")
 	require.NoError(t, err)
-	cfg.Runner.HostPostScript = scriptPath
+	cfg.Runner.PostTaskScript = scriptPath
 
 	r := &Runner{cfg: cfg}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -57,7 +57,7 @@ func TestRunPostTaskScriptNonZeroExitDoesNotPanic(t *testing.T) {
 	reporter := report.NewReporter(ctx, cancel, nil, task, cfg)
 
 	require.NotPanics(t, func() {
-		r.runHostPostScript(ctx, reporter, task, "/workspace/owner/repo")
+		r.runPostTaskScript(ctx, reporter, task, "/workspace/owner/repo")
 	})
 }
 
@@ -68,7 +68,7 @@ func TestPostTaskScriptContextUsesFullTimeout(t *testing.T) {
 	// script's budget: the script should still get its full configured timeout.
 	near, cancelNear := context.WithTimeout(context.Background(), time.Second)
 	defer cancelNear()
-	scriptCtx, cancel := hostPostScriptContext(near, timeout)
+	scriptCtx, cancel := postTaskScriptContext(near, timeout)
 	defer cancel()
 	deadline, ok := scriptCtx.Deadline()
 	require.True(t, ok)
@@ -77,7 +77,7 @@ func TestPostTaskScriptContextUsesFullTimeout(t *testing.T) {
 	// An already-cancelled task context must not cancel the script either.
 	cancelledCtx, cancelIt := context.WithCancel(context.Background())
 	cancelIt()
-	scriptCtx2, cancel2 := hostPostScriptContext(cancelledCtx, timeout)
+	scriptCtx2, cancel2 := postTaskScriptContext(cancelledCtx, timeout)
 	defer cancel2()
 	assert.NoError(t, scriptCtx2.Err(), "script context inherited the cancelled task context")
 }
@@ -103,7 +103,7 @@ func TestPostTaskScriptEnv(t *testing.T) {
 	reporter := report.NewReporter(ctx, cancel, nil, task, cfg)
 	setReporterJobResult(t, reporter, runnerv1.Result_RESULT_FAILURE)
 
-	env := r.hostPostScriptEnv(reporter, task, "/tmp/workspace")
+	env := r.postTaskScriptEnv(reporter, task, "/tmp/workspace")
 	assert.Equal(t, "1", env["BASE"])
 	assert.Equal(t, "3", env["GITEA_TASK_ID"])
 	assert.Equal(t, "99", env["GITEA_RUN_ID"])
@@ -121,7 +121,7 @@ func TestRunPostTaskScriptIntegration(t *testing.T) {
 
 	cfg, err := config.LoadDefault("")
 	require.NoError(t, err)
-	cfg.Runner.HostPostScript = scriptPath
+	cfg.Runner.PostTaskScript = scriptPath
 
 	r := &Runner{
 		cfg:  cfg,
@@ -137,7 +137,7 @@ func TestRunPostTaskScriptIntegration(t *testing.T) {
 	reporter := report.NewReporter(ctx, cancel, nil, task, cfg)
 	setReporterJobResult(t, reporter, runnerv1.Result_RESULT_SUCCESS)
 
-	r.runHostPostScript(ctx, reporter, task, "/workspace/acme/repo")
+	r.runPostTaskScript(ctx, reporter, task, "/workspace/acme/repo")
 
 	content, err := os.ReadFile(outFile)
 	require.NoError(t, err)

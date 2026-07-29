@@ -1,35 +1,8 @@
-# Task scripts
+# Post-task script
 
-The runner can run three optional scripts around every task. They are named
-`<where>_<when>_script`, after where they run:
+The post-task script is an optional host hook that runs **once after every task**, after the runner has already finished its normal per-task cleanup. Typical uses include pruning Docker images, vacuuming ephemeral disks, or resetting VM state between jobs.
 
-| Setting | Runs | Failure |
-| --- | --- | --- |
-| `runner.job_pre_script` | Inside the job environment, before the job's first step | Fails the job |
-| `runner.job_post_script` | Inside the job environment, after the job's last step | Reported only |
-| `runner.host_post_script` | On the runner's host, after the task is fully torn down | Reported only |
-
-The `job_*` scripts are the equivalent of GitHub's `ACTIONS_RUNNER_HOOK_JOB_STARTED` and
-`ACTIONS_RUNNER_HOOK_JOB_COMPLETED`, and those environment variables are honored too.
-They run where the steps run and see the job's environment, so they are the place for
-per-job setup no workflow should have to carry: registry logins, mirror configuration,
-credential files. Their paths are resolved *inside* the job environment, so the script has
-to exist in the job image or on the host in host mode. A `.sh` script runs with bash, a
-`.ps1` with pwsh, anything else is executed directly and needs its own shebang and
-executable bit.
-
-The rest of this document is about `host_post_script`, the one with operational
-consequences for the runner process.
-
-> Renamed in a recent release: `post_task_script` and `post_task_script_timeout` are now
-> `host_post_script` and `host_post_script_timeout`. The old keys are still read, with a
-> warning at startup.
-
-## Host post script
-
-The host post script is an optional host hook that runs **once after every task**, after the runner has already finished its normal per-task cleanup. Typical uses include pruning Docker images, vacuuming ephemeral disks, or resetting VM state between jobs.
-
-It is configured under `runner.host_post_script` in the runner YAML config (see [config.example.yaml](../internal/pkg/config/config.example.yaml)).
+It is configured under `runner.post_task_script` in the runner YAML config (see [config.example.yaml](../internal/pkg/config/config.example.yaml)).
 
 ## When it runs
 
@@ -39,7 +12,7 @@ For each task, execution order is:
 2. In-job cleanup (action `post:` steps, container stop/remove).
 3. Job outputs are reported to Gitea.
 4. Bind-workdir workspace removal, when `container.bind_workdir` is enabled.
-5. **Host post script** (this hook).
+5. **Post-task script** (this hook).
 6. Final task acknowledgement to Gitea (`reporter.Close()`).
 
 The script is **additive**: it does not replace any built-in cleanup. When `container.bind_workdir` is enabled, the task workspace directory has usually already been deleted before the script starts. `GITEA_WORKSPACE` is still set to the path the job used, for reference.
@@ -59,9 +32,9 @@ While the script runs:
 - **The runner capacity slot stays occupied** locally — with `capacity: 1`, the poller will not start another task until the script completes.
 - **Runner shutdown** (`shutdown_timeout`) counts this phase as part of the in-flight task; a long or stuck script delays graceful shutdown.
 
-If the script **never exits**, the runner remains in this state until `runner.host_post_script_timeout` elapses (default **5 minutes** when a script is configured). The runner then kills the script process and proceeds to the final acknowledgement. Until that timeout fires, **the runner effectively stays offline**.
+If the script **never exits**, the runner remains in this state until `runner.post_task_script_timeout` elapses (default **5 minutes** when a script is configured). The runner then kills the script process and proceeds to the final acknowledgement. Until that timeout fires, **the runner effectively stays offline**.
 
-Set `host_post_script_timeout` to a value that matches how long your housekeeping is allowed to take — not how long you wish it could take. Prefer short, bounded scripts.
+Set `post_task_script_timeout` to a value that matches how long your housekeeping is allowed to take — not how long you wish it could take. Prefer short, bounded scripts.
 
 ### Recommendations
 
@@ -70,26 +43,26 @@ Set `host_post_script_timeout` to a value that matches how long your housekeepin
 - Use **idempotent** operations (the script may run after success, failure, or cancellation).
 - Test failure modes: hung script, non-zero exit, missing executable.
 - Watch the **runner process log** for script output (it is not written to the Gitea job log).
-- On shutdown, ensure scripts respond to process termination within `host_post_script_timeout`.
+- On shutdown, ensure scripts respond to process termination within `post_task_script_timeout`.
 
 ## Configuration
 
 ```yaml
 runner:
   # Path to an executable on the host. Empty or omitted disables the hook.
-  host_post_script: /usr/local/bin/gitea-post-task.sh
+  post_task_script: /usr/local/bin/gitea-post-task.sh
 
-  # Hard limit on script runtime. Default when host_post_script is set: 5m.
+  # Hard limit on script runtime. Default when post_task_script is set: 5m.
   # If the script exceeds this, it is killed and the runner continues.
-  host_post_script_timeout: 2m
+  post_task_script_timeout: 2m
 ```
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `runner.host_post_script` | *(disabled)* | Host path to the script or binary. Relative paths are resolved from the runner process working directory. |
-| `runner.host_post_script_timeout` | `5m` (only when script is set) | Maximum time the script may run before the runner kills it and moves on. |
+| `runner.post_task_script` | *(disabled)* | Host path to the script or binary. Relative paths are resolved from the runner process working directory. |
+| `runner.post_task_script_timeout` | `5m` (only when script is set) | Maximum time the script may run before the runner kills it and moves on. |
 
-The script must be **executable** on the host (shebang on Linux/macOS, or a native `.exe` / `.bat` / `.cmd` on Windows). **PowerShell (`.ps1`) is not supported yet** as the value of `host_post_script`; the runner executes the configured path directly and does not invoke `powershell.exe` for you.
+The script must be **executable** on the host (shebang on Linux/macOS, or a native `.exe` / `.bat` / `.cmd` on Windows). **PowerShell (`.ps1`) is not supported yet** as the value of `post_task_script`; the runner executes the configured path directly and does not invoke `powershell.exe` for you.
 
 `gitea-runner exec` does **not** load runner YAML and will not run this hook.
 
@@ -117,9 +90,9 @@ The script environment is **not** a full copy of the job container environment. 
 
 | Timeout | Effect on post-task script |
 | --- | --- |
-| `runner.host_post_script_timeout` | Kills the script if it runs too long. This is the **only** timeout that bounds the script. |
-| `runner.timeout` | Caps the task **up to** the script. The script detaches from the task deadline, so a job near the runner timeout limit does **not** cut the script short — it still gets its full `host_post_script_timeout`. |
-| `runner.shutdown_timeout` | On SIGINT/SIGTERM, bounds how long the runner waits for the **task** to finish. The post-task script detaches from cancellation, so it is **not** interrupted by this window and may extend shutdown until its own `host_post_script_timeout` elapses. |
+| `runner.post_task_script_timeout` | Kills the script if it runs too long. This is the **only** timeout that bounds the script. |
+| `runner.timeout` | Caps the task **up to** the script. The script detaches from the task deadline, so a job near the runner timeout limit does **not** cut the script short — it still gets its full `post_task_script_timeout`. |
+| `runner.shutdown_timeout` | On SIGINT/SIGTERM, bounds how long the runner waits for the **task** to finish. The post-task script detaches from cancellation, so it is **not** interrupted by this window and may extend shutdown until its own `post_task_script_timeout` elapses. |
 
 ## Examples
 
@@ -138,13 +111,13 @@ docker builder prune -f --filter 'until=24h'
 
 ```yaml
 runner:
-  host_post_script: /usr/local/bin/gitea-post-task.sh
-  host_post_script_timeout: 3m
+  post_task_script: /usr/local/bin/gitea-post-task.sh
+  post_task_script_timeout: 3m
 ```
 
 ### Windows — batch file (`.cmd`)
 
-Use a `.cmd` or `.bat` file. PowerShell scripts are **not supported yet** as `host_post_script`; call PowerShell from a batch wrapper if needed:
+Use a `.cmd` or `.bat` file. PowerShell scripts are **not supported yet** as `post_task_script`; call PowerShell from a batch wrapper if needed:
 
 `C:\gitea-runner\scripts\post-task.cmd`:
 
@@ -155,8 +128,8 @@ docker image prune -f
 
 ```yaml
 runner:
-  host_post_script: C:\gitea-runner\scripts\post-task.cmd
-  host_post_script_timeout: 3m
+  post_task_script: C:\gitea-runner\scripts\post-task.cmd
+  post_task_script_timeout: 3m
 ```
 
 PowerShell workaround until native `.ps1` support exists:
@@ -170,13 +143,14 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0po
 
 ## Windows notes
 
-- Supported as `host_post_script`: `.exe`, `.bat`, `.cmd`.
+- Supported as `post_task_script`: `.exe`, `.bat`, `.cmd`.
 - **Not supported yet:** `.ps1` as the configured path (use a `.cmd` wrapper; see above).
-- `.sh` files require a Unix shell on the PATH unless you point `host_post_script` at the interpreter.
+- `.sh` files require a Unix shell on the PATH unless you point `post_task_script` at the interpreter.
 - Use backslashes or forward slashes in YAML paths; both work in Go on Windows.
 
 ## See also
 
+- [Job hooks](job-hooks.md) — scripts running inside the job environment, around its steps
 - [Configuration](../README.md#configuration) — generating and loading `config.yaml`
 - [config.example.yaml](../internal/pkg/config/config.example.yaml) — all runner options
 - Bind-workdir idle cleanup (`runner.workdir_cleanup_age`) — separate from this hook; runs only when the runner is idle

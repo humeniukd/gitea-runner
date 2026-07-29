@@ -139,31 +139,7 @@ runner:
 	assert.Equal(t, -1*time.Second, cfg.Runner.IdleCleanupInterval)
 }
 
-// TestLoadDefault_MalformedYAMLReturnsParseError pins the error surfaced for
-// invalid YAML to the canonical "parse config file" message rather than the
-// "for defaults metadata" variant — i.e. the main yaml.Unmarshal runs first.
-func TestLoadDefault_LoadsTaskScripts(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte(`
-runner:
-  job_pre_script: /hooks/setup.sh
-  job_post_script: /hooks/teardown.sh
-  host_post_script: /usr/local/bin/post-task.sh
-  host_post_script_timeout: 2m
-`), 0o600))
-
-	cfg, err := LoadDefault(path)
-	require.NoError(t, err)
-	assert.Equal(t, "/hooks/setup.sh", cfg.Runner.JobPreScript)
-	assert.Equal(t, "/hooks/teardown.sh", cfg.Runner.JobPostScript)
-	assert.Equal(t, "/usr/local/bin/post-task.sh", cfg.Runner.HostPostScript)
-	assert.Equal(t, 2*time.Minute, cfg.Runner.HostPostScriptTimeout)
-}
-
-// The pre-rename keys keep working, so an existing config does not silently stop running
-// its cleanup script.
-func TestLoadDefault_AdoptsDeprecatedPostTaskScript(t *testing.T) {
+func TestLoadDefault_LoadsPostTaskScript(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
@@ -174,38 +150,42 @@ runner:
 
 	cfg, err := LoadDefault(path)
 	require.NoError(t, err)
-	assert.Equal(t, "/usr/local/bin/post-task.sh", cfg.Runner.HostPostScript)
-	assert.Equal(t, 2*time.Minute, cfg.Runner.HostPostScriptTimeout)
+	assert.Equal(t, "/usr/local/bin/post-task.sh", cfg.Runner.PostTaskScript)
+	assert.Equal(t, 2*time.Minute, cfg.Runner.PostTaskScriptTimeout)
 }
 
-// The new key wins when both are set, so a half-migrated config is not surprising.
-func TestLoadDefault_NewTaskScriptKeyWins(t *testing.T) {
+func TestLoadDefault_DefaultsPostTaskScriptTimeout(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 runner:
-  post_task_script: /old.sh
-  host_post_script: /new.sh
+  post_task_script: /usr/local/bin/post-task.sh
 `), 0o600))
 
 	cfg, err := LoadDefault(path)
 	require.NoError(t, err)
-	assert.Equal(t, "/new.sh", cfg.Runner.HostPostScript)
+	assert.Equal(t, 5*time.Minute, cfg.Runner.PostTaskScriptTimeout)
 }
 
-func TestLoadDefault_DefaultsHostPostScriptTimeout(t *testing.T) {
+func TestLoadDefault_LoadsJobHooks(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 runner:
-  host_post_script: /usr/local/bin/post-task.sh
+  hooks:
+    job_started: /hooks/started.sh
+    job_completed: /hooks/completed.sh
 `), 0o600))
 
 	cfg, err := LoadDefault(path)
 	require.NoError(t, err)
-	assert.Equal(t, 5*time.Minute, cfg.Runner.HostPostScriptTimeout)
+	assert.Equal(t, "/hooks/started.sh", cfg.Runner.Hooks.JobStarted)
+	assert.Equal(t, "/hooks/completed.sh", cfg.Runner.Hooks.JobCompleted)
 }
 
+// TestLoadDefault_MalformedYAMLReturnsParseError pins the error surfaced for
+// invalid YAML to the canonical "parse config file" message rather than the
+// "for defaults metadata" variant — i.e. the main yaml.Unmarshal runs first.
 func TestLoadDefault_MalformedYAMLReturnsParseError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

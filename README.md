@@ -260,18 +260,25 @@ When `container.bind_workdir` is enabled, stale task workspace directories can b
 - only purely numeric subdirectories under `container.workdir_parent` are treated as task workspaces and may be removed
 - cleanup assumes `container.workdir_parent` is not shared across multiple runners
 
-#### Task scripts (`runner.job_pre_script`, `runner.job_post_script`, `runner.host_post_script`)
+#### Post-task script (`runner.post_task_script`)
 
-The runner can run three optional scripts around every task, named after where they run:
+Optional host script that runs **after** each task's built-in cleanup (post-steps, container teardown, bind-workdir removal). Use it for extra machine housekeeping — Docker pruning, disk cleanup, and similar.
 
-- `runner.job_pre_script` / `runner.job_post_script` run **inside the job environment** (the job container, or the host in host mode), before the first step and after the last one. They see the job's environment and are the place for per-job setup no workflow should have to carry: registry logins, mirror configuration, credential files. GitHub's `ACTIONS_RUNNER_HOOK_JOB_STARTED` / `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` environment variables are honored as well. A failing pre script fails the job; a failing post script is only reported.
-- `runner.host_post_script` runs **on the runner's host** after each task's built-in cleanup (post-steps, container teardown, bind-workdir removal). Use it for machine housekeeping — Docker pruning, disk cleanup, and similar. It was called `post_task_script`; the old key still works, with a deprecation warning.
+**While the script runs, the runner stops task heartbeats and stays offline from Gitea's perspective until the script exits (or hits `runner.post_task_script_timeout`, default `5m`).** A script that blocks without exiting keeps the runner from taking new work for up to that timeout. Script output goes to the runner log, not the job log; a non-zero exit is warned but does not change the job result.
 
-**While `host_post_script` runs, the runner stops task heartbeats and stays offline from Gitea's perspective until the script exits (or hits `runner.host_post_script_timeout`, default `5m`).** A script that blocks without exiting keeps the runner from taking new work for up to that timeout. Script output goes to the runner log, not the job log; a non-zero exit is warned but does not change the job result.
+On Windows, use `.exe`, `.bat`, or `.cmd` paths; **PowerShell (`.ps1`) is not supported yet** as the configured path — wrap commands in a `.cmd` file instead.
 
-On Windows, use `.exe`, `.bat`, or `.cmd` paths for `host_post_script`; **PowerShell (`.ps1`) is not supported yet** as that path — wrap commands in a `.cmd` file instead.
+See **[docs/post-task-script.md](docs/post-task-script.md)** for lifecycle details, environment variables, timeout interaction, and platform notes.
 
-See **[docs/task-scripts.md](docs/task-scripts.md)** for lifecycle details, environment variables, timeout interaction, and platform notes.
+#### Job hooks (`runner.hooks.job_started`, `runner.hooks.job_completed`)
+
+Optional scripts that run **inside the job environment** (the job container, or the host in host mode), before the job's first step and after its last one. They are the equivalent of GitHub's `ACTIONS_RUNNER_HOOK_JOB_STARTED` / `ACTIONS_RUNNER_HOOK_JOB_COMPLETED`, which are read when the settings are unset.
+
+Because they run where the steps run and see the job's environment, they are the place for per-job setup no workflow should have to carry: registry logins, mirror configuration, or masking runner-wide secrets with `::add-mask::`. Their output is part of the job log and is scanned for workflow commands, and they can export to the job through `$GITHUB_ENV` and `$GITHUB_PATH`.
+
+Both hooks are synchronous and block the job while they run. Either one exiting non-zero fails the job, and there is no per-hook timeout.
+
+See **[docs/job-hooks.md](docs/job-hooks.md)** for the execution order, environment, and platform notes.
 
 ### Example Deployments
 

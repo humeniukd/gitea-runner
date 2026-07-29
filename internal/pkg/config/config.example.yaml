@@ -89,39 +89,29 @@ runner:
   # terminal; tools like `docker build` emit redrawing progress frames into the captured log
   # when a TTY is present.
   allocate_pty: false
-  # Scripts the runner can run around a task, named <where>_<when>_script.
-  # Full guide: docs/task-scripts.md
-  #
-  # job_* run *inside* the job environment (the job container, or the host in host mode),
-  # before the first step and after the last one, and see the job's environment. Use them
-  # for per-job setup no workflow should have to carry: registry logins, mirror
-  # configuration, credential files.
-  # The paths are resolved inside that environment, so the script has to exist in the image
-  # or on the host; .sh runs with bash, .ps1 with pwsh, anything else is executed directly.
-  # A failing job_pre_script fails the job; a failing job_post_script is only reported,
-  # since the job result is already decided by then.
-  # The ACTIONS_RUNNER_HOOK_JOB_STARTED / ACTIONS_RUNNER_HOOK_JOB_COMPLETED environment
-  # variables are honored as well, so a GitHub setup keeps working.
-  job_pre_script: ''
-  job_post_script: ''
-  #
-  # host_post_script runs on the runner's *host*, once after each task's built-in cleanup
-  # (post-steps, container teardown, bind-workdir removal). Additive only. Use it for
-  # machine housekeeping: docker pruning, disk cleanup.
+  # Optional executable on the host, run once after each task's built-in cleanup
+  # (post-steps, container teardown, bind-workdir removal). Additive only.
   #
   # IMPORTANT: While this script runs the runner stops task heartbeats and stays
   # offline from Gitea's perspective until the script exits. A script that never
-  # returns blocks new work until host_post_script_timeout kills it (default 5m).
-  # Keep scripts short; set host_post_script_timeout to a safe upper bound.
+  # returns blocks new work until post_task_script_timeout kills it (default 5m).
+  # Keep scripts short; set post_task_script_timeout to a safe upper bound.
   #
   # Output -> runner process log (not the job log). Non-zero exit -> warning only.
   # Windows: use .exe, .bat, or .cmd. PowerShell (.ps1) is not supported yet as
   # the configured path; wrap PowerShell commands in a .cmd file instead.
-  #
-  # Renamed from post_task_script / post_task_script_timeout, which are still read.
-  host_post_script: ''
-  # Hard limit on host_post_script runtime. Default if omitted: 5m.
-  host_post_script_timeout: 5m
+  # Full guide: docs/post-task-script.md
+  post_task_script: ''
+  # Hard limit on post_task_script runtime. Default if omitted: 5m.
+  post_task_script_timeout: 5m
+  # Scripts run inside the job environment before the job's first step and after its last
+  # one, the equivalent of GitHub's ACTIONS_RUNNER_HOOK_JOB_STARTED and
+  # ACTIONS_RUNNER_HOOK_JOB_COMPLETED, which are read when these are unset. The paths are
+  # resolved inside the job environment. Either one failing fails the job.
+  # Full guide: docs/job-hooks.md
+  hooks:
+    job_started: ''
+    job_completed: ''
 
 cache:
   # Enable the built-in cache server (used by actions/cache and similar actions).

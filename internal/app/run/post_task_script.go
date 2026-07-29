@@ -23,29 +23,29 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (r *Runner) runHostPostScript(ctx context.Context, reporter *report.Reporter, task *runnerv1.Task, workdir string) {
-	script := r.cfg.Runner.HostPostScript
+func (r *Runner) runPostTaskScript(ctx context.Context, reporter *report.Reporter, task *runnerv1.Task, workdir string) {
+	script := r.cfg.Runner.PostTaskScript
 	if script == "" {
 		return
 	}
 
-	timeout := r.cfg.Runner.HostPostScriptTimeout
+	timeout := r.cfg.Runner.PostTaskScriptTimeout
 	if timeout <= 0 {
-		timeout = config.DefaultHostPostScriptTimeout
+		timeout = config.DefaultPostTaskScriptTimeout
 	}
 
-	scriptCtx, cancel := hostPostScriptContext(ctx, timeout)
+	scriptCtx, cancel := postTaskScriptContext(ctx, timeout)
 	defer cancel()
 
-	env := r.hostPostScriptEnv(reporter, task, workdir)
-	log.Infof("running host post script %q for task %d", script, task.Id)
+	env := r.postTaskScriptEnv(reporter, task, workdir)
+	log.Infof("running post-task script %q for task %d", script, task.Id)
 
 	cmd := exec.CommandContext(scriptCtx, script)
 	cmd.Env = envListFromMap(env)
 	cmd.SysProcAttr = process.SysProcAttr(script, false)
 
-	stdout := hostPostScriptLogWriter("stdout")
-	stderr := hostPostScriptLogWriter("stderr")
+	stdout := postTaskScriptLogWriter("stdout")
+	stderr := postTaskScriptLogWriter("stderr")
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -55,11 +55,11 @@ func (r *Runner) runHostPostScript(ctx context.Context, reporter *report.Reporte
 	treeKill := process.NewTreeKill(cmd)
 
 	if err := cmd.Start(); err != nil {
-		log.Warnf("host post script %q for task %d: %v", script, task.Id, err)
+		log.Warnf("post-task script %q for task %d: %v", script, task.Id, err)
 		return
 	}
 	if k, kerr := treeKill.Capture(cmd.Process); kerr != nil {
-		log.Warnf("host post script %q for task %d: process tree kill setup failed, falling back to single-process kill: %v", script, task.Id, kerr)
+		log.Warnf("post-task script %q for task %d: process tree kill setup failed, falling back to single-process kill: %v", script, task.Id, kerr)
 	} else {
 		defer k.Close()
 	}
@@ -71,21 +71,21 @@ func (r *Runner) runHostPostScript(ctx context.Context, reporter *report.Reporte
 	common.FlushWriter(stderr)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			log.Warnf("host post script %q for task %d: %v", script, task.Id, err)
+			log.Warnf("post-task script %q for task %d: %v", script, task.Id, err)
 			return
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			log.Warnf("host post script %q for task %d exited with code %d", script, task.Id, exitErr.ExitCode())
+			log.Warnf("post-task script %q for task %d exited with code %d", script, task.Id, exitErr.ExitCode())
 			return
 		}
-		log.Warnf("host post script %q for task %d: %v", script, task.Id, err)
+		log.Warnf("post-task script %q for task %d: %v", script, task.Id, err)
 	}
 }
 
-func hostPostScriptContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+func postTaskScriptContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	// Detach from the task context's deadline and cancellation: the task has
-	// already finished by the time the host post script runs, so the script must
+	// already finished by the time the post-task script runs, so the script must
 	// get its full configured timeout. Inheriting the task deadline would silently
 	// truncate that budget when the job completed close to its own timeout (and an
 	// already-cancelled task context would skip the script entirely).
@@ -93,7 +93,7 @@ func hostPostScriptContext(ctx context.Context, timeout time.Duration) (context.
 	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
 }
 
-func (r *Runner) hostPostScriptEnv(reporter *report.Reporter, task *runnerv1.Task, workdir string) map[string]string {
+func (r *Runner) postTaskScriptEnv(reporter *report.Reporter, task *runnerv1.Task, workdir string) map[string]string {
 	env := r.cloneEnvs()
 	env["GITEA_TASK_ID"] = strconv.FormatInt(task.Id, 10)
 	env["GITEA_WORKSPACE"] = workdir
@@ -118,15 +118,15 @@ func envListFromMap(env map[string]string) []string {
 	return envList
 }
 
-// hostPostScriptLogWriter returns an io.Writer that logs the script's output one
+// postTaskScriptLogWriter returns an io.Writer that logs the script's output one
 // line at a time, tagged with the stream name. It is passed as cmd.Stdout/Stderr
 // (rather than a StdoutPipe) so that cmd.WaitDelay governs the copying goroutine:
 // a backgrounded process holding the pipe open can never block cmd.Wait()
 // indefinitely. Flush any trailing partial line with common.FlushWriter after
 // cmd.Wait() returns.
-func hostPostScriptLogWriter(stream string) io.Writer {
+func postTaskScriptLogWriter(stream string) io.Writer {
 	return common.NewLineWriter(func(line string) bool {
-		log.Infof("host post script %s: %s", stream, strings.TrimRight(line, "\r\n"))
+		log.Infof("post-task script %s: %s", stream, strings.TrimRight(line, "\r\n"))
 		return true
 	})
 }

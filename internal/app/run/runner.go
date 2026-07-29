@@ -471,8 +471,8 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		DefaultActionInstance:             r.getDefaultActionsURL(task),
 		DefaultActionInstanceIsSelfHosted: r.isSelfHostedActionsURL(task),
 		PlatformPicker:                    r.labels.PickPlatform,
-		JobPreScript:                      r.cfg.Runner.JobPreScript,
-		JobPostScript:                     r.cfg.Runner.JobPostScript,
+		JobStartedHook:                    r.cfg.Runner.Hooks.JobStarted,
+		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
 		Vars:                              task.Vars,
 		ValidVolumes:                      r.cfg.Container.ValidVolumes,
 		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
@@ -505,7 +505,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	}
 
 	reporter.StopHeartbeats()
-	r.runHostPostScript(ctx, reporter, task, workdir)
+	r.runPostTaskScript(ctx, reporter, task, workdir)
 
 	return execErr
 }
