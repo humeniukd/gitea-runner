@@ -28,6 +28,7 @@ import (
 	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/exprparser"
 	"gitea.com/gitea/runner/act/model"
+	"gitea.com/gitea/runner/internal/pkg/lock"
 
 	"github.com/docker/cli/cli/compose/loader"
 	"github.com/docker/go-connections/nat"
@@ -714,7 +715,7 @@ func (rc *RunContext) ActionCacheDir() string {
 // jobMutexes serializes per-job result/output aggregation across the matrix combinations that
 // share one *model.Job and run in parallel. Keyed by the shared *model.Job (mirrors the
 // per-directory AcquireCloneLock pattern).
-var jobMutexes common.KeyedMutex[*model.Job]
+var jobMutexes lock.Keyed[*model.Job]
 
 func lockJob(job *model.Job) func() {
 	return jobMutexes.Lock(job)

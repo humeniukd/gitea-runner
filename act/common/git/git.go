@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/internal/pkg/lock"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -32,7 +33,7 @@ var (
 	githubHTTPRegex     = regexp.MustCompile(`^https?://.*github.com.*/(.+)/(.+?)(?:.git)?$`)
 	githubSSHRegex      = regexp.MustCompile(`github.com[:/](.+)/(.+?)(?:.git)?$`)
 
-	cloneLocks common.KeyedMutex[string] // key: clone target directory
+	cloneLocks lock.Keyed[string] // key: clone target directory
 
 	ErrShortRef = errors.New("short SHA references are not supported")
 	ErrNoRepo   = errors.New("unable to find git repo")
