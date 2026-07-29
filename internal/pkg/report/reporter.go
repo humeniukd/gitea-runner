@@ -32,6 +32,12 @@ const (
 	maxOutputValueLen = 1024 * 1024 // 1 MiB
 )
 
+// output is a job output on its way to the server, sent once the server has acknowledged it.
+type output struct {
+	value string
+	sent  bool
+}
+
 type Reporter struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -53,7 +59,8 @@ type Reporter struct {
 	state             *runnerv1.TaskState
 	stateChanged      bool
 	stateMu           sync.RWMutex
-	outputs           sync.Map
+	outputsMu         sync.Mutex
+	outputs           map[string]output
 	daemon            chan struct{}
 	heartbeatStop     chan struct{}
 	heartbeatStopOnce sync.Once
@@ -406,10 +413,14 @@ func (r *Reporter) SetOutputs(outputs map[string]string) {
 			r.logf("ignore output %q because the value is too long: %d > %d", k, l, maxOutputValueLen)
 			continue
 		}
-		if _, ok := r.outputs.Load(k); ok {
-			continue
+		r.outputsMu.Lock()
+		if r.outputs == nil {
+			r.outputs = map[string]output{}
 		}
-		r.outputs.Store(k, v)
+		if _, ok := r.outputs[k]; !ok {
+			r.outputs[k] = output{value: v}
+		}
+		r.outputsMu.Unlock()
 	}
 }
 
@@ -574,14 +585,15 @@ func (r *Reporter) ReportState(reportResult bool) error {
 	r.clientM.Lock()
 	defer r.clientM.Unlock()
 
-	// Build the outputs map first (single Range pass instead of two).
+	// Build the outputs map first (single pass instead of two).
 	outputs := make(map[string]string)
-	r.outputs.Range(func(k, v any) bool {
-		if val, ok := v.(string); ok {
-			outputs[k.(string)] = val
+	r.outputsMu.Lock()
+	for key, out := range r.outputs {
+		if !out.sent {
+			outputs[key] = out.value
 		}
-		return true
-	})
+	}
+	r.outputsMu.Unlock()
 
 	// Consume stateChanged atomically with the snapshot; restored on error
 	// below so a concurrent Fire() during UpdateTask isn't silently lost.
@@ -594,7 +606,12 @@ func (r *Reporter) ReportState(reportResult bool) error {
 		r.stateMu.Unlock()
 		return nil
 	}
-	state := proto.Clone(r.state).(*runnerv1.TaskState)
+	clone := proto.Clone(r.state)
+	state, ok := clone.(*runnerv1.TaskState)
+	if !ok {
+		r.stateMu.Unlock()
+		return fmt.Errorf("cloning the task state produced %T", clone)
+	}
 	r.stateChanged = false
 	r.stateMu.Unlock()
 
@@ -622,21 +639,27 @@ func (r *Reporter) ReportState(reportResult bool) error {
 	metrics.ReportStateTotal.WithLabelValues(metrics.LabelResultSuccess).Inc()
 	r.lastReportedAtNanos.Store(time.Now().UnixNano())
 
-	for _, k := range resp.Msg.SentOutputs {
-		r.outputs.Store(k, struct{}{})
+	r.outputsMu.Lock()
+	if r.outputs == nil {
+		r.outputs = map[string]output{}
 	}
+	for _, k := range resp.Msg.SentOutputs {
+		r.outputs[k] = output{sent: true}
+	}
+	r.outputsMu.Unlock()
 
 	if resp.Msg.State != nil && resp.Msg.State.Result == runnerv1.Result_RESULT_CANCELLED {
 		r.cancel()
 	}
 
 	var noSent []string
-	r.outputs.Range(func(k, v any) bool {
-		if _, ok := v.(string); ok {
-			noSent = append(noSent, k.(string))
+	r.outputsMu.Lock()
+	for key, out := range r.outputs {
+		if !out.sent {
+			noSent = append(noSent, key)
 		}
-		return true
-	})
+	}
+	r.outputsMu.Unlock()
 	if len(noSent) > 0 {
 		return fmt.Errorf("there are still outputs that have not been sent: %v", noSent)
 	}

@@ -22,7 +22,6 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
@@ -672,13 +671,10 @@ func (rc *RunContext) ActionCacheDir() string {
 // jobMutexes serializes per-job result/output aggregation across the matrix combinations that
 // share one *model.Job and run in parallel. Keyed by the shared *model.Job (mirrors the
 // per-directory AcquireCloneLock pattern).
-var jobMutexes sync.Map // key: *model.Job; value: *sync.Mutex
+var jobMutexes common.KeyedMutex[*model.Job]
 
 func lockJob(job *model.Job) func() {
-	v, _ := jobMutexes.LoadOrStore(job, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	return jobMutexes.Lock(job)
 }
 
 func (rc *RunContext) interpolateOutputs() common.Executor {

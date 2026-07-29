@@ -1011,33 +1011,32 @@ func TestReporter_SetOutputs(t *testing.T) {
 	r := &Reporter{state: &runnerv1.TaskState{}}
 
 	r.SetOutputs(map[string]string{"foo": "bar"})
-	got, ok := r.outputs.Load("foo")
+	got, ok := r.outputs["foo"]
 	require.True(t, ok)
-	assert.Equal(t, "bar", got)
+	assert.Equal(t, "bar", got.value)
 
 	// first value wins: a later write to the same key is ignored
 	r.SetOutputs(map[string]string{"foo": "baz"})
-	got, _ = r.outputs.Load("foo")
-	assert.Equal(t, "bar", got)
+	assert.Equal(t, "bar", r.outputs["foo"].value)
 
 	// keys longer than maxOutputKeyLen are dropped
 	longKey := strings.Repeat("k", maxOutputKeyLen+1)
 	r.SetOutputs(map[string]string{longKey: "v"})
-	_, ok = r.outputs.Load(longKey)
+	_, ok = r.outputs[longKey]
 	assert.False(t, ok)
 
 	// values longer than maxOutputValueLen are dropped
 	longValue := strings.Repeat("v", maxOutputValueLen+1)
 	r.SetOutputs(map[string]string{"big": longValue})
-	_, ok = r.outputs.Load("big")
+	_, ok = r.outputs["big"]
 	assert.False(t, ok)
 
 	// a value at exactly the limit is still stored
 	maxValue := strings.Repeat("v", maxOutputValueLen)
 	r.SetOutputs(map[string]string{"atlimit": maxValue})
-	got, ok = r.outputs.Load("atlimit")
+	got, ok = r.outputs["atlimit"]
 	require.True(t, ok)
-	assert.Len(t, got, maxOutputValueLen)
+	assert.Len(t, got.value, maxOutputValueLen)
 }
 
 func TestReporter_EffectiveCloseTimeout(t *testing.T) {

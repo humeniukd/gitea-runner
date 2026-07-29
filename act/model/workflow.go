@@ -86,11 +86,17 @@ func (w *Workflow) OnSchedule() []string {
 	case []any:
 		allSchedules := []string{}
 		for _, v := range val {
-			for k, cron := range v.(map[string]any) {
+			entry, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			for k, cron := range entry {
 				if k != "cron" {
 					continue
 				}
-				allSchedules = append(allSchedules, cron.(string))
+				if schedule, ok := cron.(string); ok {
+					allSchedules = append(allSchedules, schedule)
+				}
 			}
 		}
 		return allSchedules
@@ -489,31 +495,37 @@ func (j *Job) GetMatrixes() ([]map[string]any, error) {
 				switch t := v.(type) {
 				case []any:
 					for _, i := range t {
-						i := i.(map[string]any)
+						include, ok := i.(map[string]any)
+						if !ok {
+							return nil, fmt.Errorf("the workflow is not valid. Matrix include %v is not a map of matrix keys to values", i)
+						}
 						extraInclude := true
-						for k := range i {
+						for k := range include {
 							if _, ok := m[k]; ok {
-								includes = append(includes, i)
+								includes = append(includes, include)
 								extraInclude = false
 								break
 							}
 						}
 						if extraInclude {
-							extraIncludes = append(extraIncludes, i)
+							extraIncludes = append(extraIncludes, include)
 						}
 					}
 				case any:
-					v := v.(map[string]any)
+					include, ok := v.(map[string]any)
+					if !ok {
+						return nil, fmt.Errorf("the workflow is not valid. Matrix include %v is not a map of matrix keys to values", v)
+					}
 					extraInclude := true
-					for k := range v {
+					for k := range include {
 						if _, ok := m[k]; ok {
-							includes = append(includes, v)
+							includes = append(includes, include)
 							extraInclude = false
 							break
 						}
 					}
 					if extraInclude {
-						extraIncludes = append(extraIncludes, v)
+						extraIncludes = append(extraIncludes, include)
 					}
 				}
 			}
@@ -521,10 +533,13 @@ func (j *Job) GetMatrixes() ([]map[string]any, error) {
 
 			excludes := make([]map[string]any, 0)
 			for _, e := range m["exclude"] {
-				e := e.(map[string]any)
-				for k := range e {
+				exclude, ok := e.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("the workflow is not valid. Matrix exclude %v is not a map of matrix keys to values", e)
+				}
+				for k := range exclude {
 					if _, ok := m[k]; ok {
-						excludes = append(excludes, e)
+						excludes = append(excludes, exclude)
 					} else {
 						// We fail completely here because that's what GitHub does for non-existing matrix keys, fail on exclude, silent skip on include
 						return nil, fmt.Errorf("the workflow is not valid. Matrix exclude key %q does not match any key within the matrix", k)

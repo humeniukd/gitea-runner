@@ -147,7 +147,10 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir, actio
 	}
 
 	if rc.Config != nil && rc.Config.ActionCache != nil {
-		raction := step.(*stepActionRemote)
+		raction, ok := step.(*stepActionRemote)
+		if !ok {
+			return fmt.Errorf("action %q is a remote action but runs as %T", stepModel.Uses, step)
+		}
 		ta, err := rc.Config.ActionCache.GetTarArchive(ctx, raction.cacheDir, raction.resolvedSha, "")
 		if err != nil {
 			return err
@@ -351,7 +354,10 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 				}
 				defer buildContext.Close()
 			} else if rc.Config.ActionCache != nil {
-				rstep := step.(*stepActionRemote)
+				rstep, ok := step.(*stepActionRemote)
+				if !ok {
+					return fmt.Errorf("action %q is a remote action but runs as %T", actionName, step)
+				}
 				buildContext, err = rc.Config.ActionCache.GetTarArchive(ctx, rstep.cacheDir, rstep.resolvedSha, contextDir)
 				if err != nil {
 					return err
