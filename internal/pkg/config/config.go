@@ -112,13 +112,6 @@ type HealthCheck struct {
 	Timeout            time.Duration `yaml:"timeout"`                // Timeout caps one health-check script invocation.
 }
 
-// Proxy represents the outbound HTTP proxy the runner and its jobs use.
-type Proxy struct {
-	HTTPProxy  string `yaml:"http_proxy"`  // HTTPProxy is the proxy for plain HTTP requests, given to the runner process and to every job.
-	HTTPSProxy string `yaml:"https_proxy"` // HTTPSProxy is the proxy for HTTPS requests, given to the runner process and to every job.
-	NoProxy    string `yaml:"no_proxy"`    // NoProxy lists the hosts to reach directly, comma separated. The runner's own servers are added to it for jobs.
-}
-
 // Config represents the overall configuration.
 type Config struct {
 	Log         Log         `yaml:"log"`          // Log represents the configuration for logging.
@@ -126,7 +119,6 @@ type Config struct {
 	Cache       Cache       `yaml:"cache"`        // Cache represents the configuration for caching.
 	Container   Container   `yaml:"container"`    // Container represents the configuration for the container.
 	Host        Host        `yaml:"host"`         // Host represents the configuration for the host.
-	Proxy       Proxy       `yaml:"proxy"`        // Proxy represents the outbound HTTP proxy the runner and its jobs use.
 	Metrics     Metrics     `yaml:"metrics"`      // Metrics represents the configuration for the Prometheus metrics endpoint.
 	HealthCheck HealthCheck `yaml:"health_check"` // HealthCheck controls opt-in local task-admission checks.
 }

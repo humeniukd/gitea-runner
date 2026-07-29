@@ -211,18 +211,32 @@ Whenever the resulting labels differ from the ones in the registration file, the
 
 #### Proxy
 
-If the runner sits behind an HTTP proxy, configure it once and both the runner and the jobs it runs will use it:
+Set these variables in the runner's environment, with systemd `Environment=`, `docker run -e`, or Kubernetes `env:`:
 
-```yaml
-proxy:
-  http_proxy: "http://proxy.example:3128"
-  https_proxy: "http://proxy.example:3128"
-  no_proxy: "gitea.internal,.example.local"
+```sh
+http_proxy=http://proxy.example:3128
+https_proxy=http://proxy.example:3128
+no_proxy=gitea.internal,.example.local
 ```
 
-Jobs receive both the lower and upper case spellings of each variable, and the runner's own servers (cache server, results proxy) are appended to `no_proxy` automatically, so a job container never tries to reach them through the proxy. Environment variables already set for the runner process win over these settings.
+The runner uses them for its own requests and gives them to every job, in lower and upper case.
 
-Image pulls are made by the Docker daemon rather than by the runner, so they follow [the daemon's own proxy configuration](https://docs.docker.com/engine/daemon/proxy/).
+These hosts are added to `no_proxy` for jobs, so they are always reached directly:
+
+- the cache server
+- `localhost`, `127.0.0.1` and `::1`
+- the job's service containers
+- the Docker daemon, when it is reached over `tcp://`
+
+Gitea is not added. Add it to `no_proxy` yourself if it should be reached directly.
+
+To change a value for one job, set it in a step's `env:` or in the job's `container.env`. Setting it at workflow or job level has no effect. To change it for the whole runner, set it in `runner.envs`. A `no_proxy` set there is added to the list above instead of replacing it.
+
+Images are pulled by the Docker daemon, which needs its own proxy setting. In the `dind` images the daemon runs in the same container and reads the variables above. For any other daemon, see [the Docker documentation](https://docs.docker.com/engine/daemon/proxy/). The runner logs a warning at startup if it has a proxy and the daemon does not.
+
+Dockerfile actions are built with these variables as build arguments, so their `RUN` steps can reach the network.
+
+A password in a proxy URL is hidden in job logs. Any step can still read it, because the step is given the proxy URL in its environment.
 
 #### Caching (`actions/cache`)
 

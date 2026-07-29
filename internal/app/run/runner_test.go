@@ -93,24 +93,22 @@ func TestNewRunnerInitializesLabelsAndEnvironment(t *testing.T) {
 	require.Nil(t, r.cacheHandler)
 }
 
-// A proxied runner must force only its own cache server into the jobs' no_proxy. Gitea
-// (ACTIONS_RESULTS_URL) is reached through the proxy like everything else, so job steps
-// that upload artifacts to it keep working when Gitea is only reachable via the proxy.
-func TestNewRunnerDoesNotForceGiteaDirectForJobs(t *testing.T) {
+// Proxy variables are assembled per task, because a job's service containers have to be
+// reached directly and they are only known once the workflow is parsed.
+func TestNewRunnerLeavesProxyToTheTask(t *testing.T) {
+	clearProxyEnv(t)
+	t.Setenv("http_proxy", "http://proxy:3128")
+
 	cfg := &config.Config{}
 	cfg.Cache.ExternalServer = "http://cache.local:8088/"
-	cfg.Proxy = config.Proxy{HTTPProxy: "http://proxy:3128", NoProxy: "internal.example"}
 	reg := &config.Registration{Name: "runner"}
 	cli := clientmocks.NewClient(t)
 	cli.On("Address").Return("https://gitea.example/").Maybe()
 
 	r := NewRunner(cfg, reg, cli)
 
-	// The runner-local cache host is bypassed and the operator's own entry is kept.
-	require.Contains(t, r.envs["no_proxy"], "cache.local")
-	require.Contains(t, r.envs["no_proxy"], "internal.example")
-	// Gitea must not be forced direct; the operator's no_proxy governs it instead.
-	require.NotContains(t, r.envs["no_proxy"], "gitea.example")
+	require.NotContains(t, r.envs, "http_proxy")
+	require.NotContains(t, r.envs, "no_proxy")
 }
 
 func taskWithDefaultActionsURL(url string) *runnerv1.Task {

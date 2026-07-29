@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,13 +112,6 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	artifactGiteaAPI := strings.TrimSuffix(cli.Address(), "/") + "/api/actions_pipeline/"
 	envs["ACTIONS_RUNTIME_URL"] = artifactGiteaAPI
 	envs["ACTIONS_RESULTS_URL"] = strings.TrimSuffix(cli.Address(), "/")
-
-	// The runner's own cache server has an ephemeral address the operator cannot list in
-	// advance, so it is always reached directly. ACTIONS_RESULTS_URL points at Gitea, which
-	// must stay reachable however the runner reaches it — through the proxy unless the
-	// operator's own no_proxy exempts it, exactly as ApplyProcessProxyEnv treats the runner
-	// process — so it is deliberately not forced into the jobs' no_proxy.
-	maps.Copy(envs, jobProxyEnv(cfg.Proxy, envs["ACTIONS_CACHE_URL"]))
 
 	// Set specific environments to distinguish between Gitea and GitHub
 	envs["GITEA_ACTIONS"] = "true"
@@ -275,7 +269,8 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Runner.Timeout)
 	defer cancel()
-	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg)
+	// A proxy URL may carry credentials, and every job is given it; keep them out of the log.
+	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg, proxyPasswords()...)
 	var runErr error
 	defer func() {
 		r.runningCount.Add(-1)
@@ -347,6 +342,11 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 
 	taskContext := task.Context.Fields
 	envs := r.cloneEnvs()
+
+	// Added per task because this job's service containers must be reached directly, and
+	// act reaches them by their workflow key.
+	proxyEnv := JobProxyEnv(envs, envs["ACTIONS_CACHE_URL"], slices.Sorted(maps.Keys(job.Services)))
+	maps.Copy(envs, proxyEnv)
 
 	if r.capabilities != "" {
 		envs["GITEA_ACTIONS_CAPABILITIES"] = r.capabilities
@@ -457,6 +457,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		LogOutput:            true,
 		JSONLogger:           false,
 		Env:                  envs,
+		ProxyEnv:             proxyEnv,
 		Secrets:              task.Secrets,
 		GitHubInstance:       strings.TrimSuffix(r.client.Address(), "/"),
 		AutoRemove:           true,
