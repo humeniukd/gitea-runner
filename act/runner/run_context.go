@@ -30,7 +30,9 @@ import (
 	"gitea.com/gitea/runner/act/exprparser"
 	"gitea.com/gitea/runner/act/model"
 
+	"github.com/docker/cli/cli/compose/loader"
 	"github.com/docker/go-connections/nat"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/opencontainers/selinux/go-selinux"
 )
 
@@ -207,19 +209,13 @@ func (rc *RunContext) validVolumes() []string {
 // Returns the binds and mounts for the container, resolving paths as appopriate
 func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 	name := rc.jobContainerName()
-
-	binds := []string{}
-	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" {
-		daemonPath := getDockerDaemonSocketMountPath(daemonSocket)
-		binds = append(binds, fmt.Sprintf("%s:%s", daemonPath, "/var/run/docker.sock"))
-	}
-
 	ext := container.LinuxContainerEnvironmentExtensions{}
 
-	mounts := map[string]string{
-		"act-toolcache": "/opt/hostedtoolcache",
-		name + "-env":   ext.GetActPath(),
-	}
+	binds := []string{}
+	mounts := map[string]string{}
+	// Container paths the job's own `volumes:` claim. Docker rejects two mounts on one
+	// target, so the runner's own mounts yield to them.
+	claimed := map[string]bool{}
 
 	if job := rc.Run.Job(); job != nil {
 		if container := job.Container(); container != nil {
@@ -227,29 +223,47 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 				if rc.ExprEval != nil {
 					v = rc.ExprEval.Interpolate(context.Background(), v)
 				}
-				if !strings.Contains(v, ":") || filepath.IsAbs(v) {
-					// Bind anonymous volume or host file.
-					binds = append(binds, v)
+				parsed, err := loader.ParseVolume(v)
+				if err != nil {
+					binds = append(binds, v) // let Docker report the malformed spec
+					continue
+				}
+				claimed[parsed.Target] = true
+				if parsed.Type == string(mount.TypeVolume) && parsed.Source != "" && !parsed.ReadOnly {
+					// Mount existing volume. Anything the source:target map cannot express
+					// (anonymous volumes, host binds, mount options) stays a bind.
+					mounts[parsed.Source] = parsed.Target
 				} else {
-					// Mount existing volume.
-					paths := strings.SplitN(v, ":", 2)
-					mounts[paths[0]] = paths[1]
+					binds = append(binds, v)
 				}
 			}
 		}
 	}
 
-	if rc.Config.BindWorkdir {
-		bindModifiers := ""
-		if runtime.GOOS == "darwin" {
-			bindModifiers = ":delegated"
+	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" && !claimed["/var/run/docker.sock"] {
+		daemonPath := getDockerDaemonSocketMountPath(daemonSocket)
+		binds = append(binds, fmt.Sprintf("%s:%s", daemonPath, "/var/run/docker.sock"))
+	}
+	if !claimed["/opt/hostedtoolcache"] {
+		mounts["act-toolcache"] = "/opt/hostedtoolcache"
+	}
+	if !claimed[ext.GetActPath()] {
+		mounts[name+"-env"] = ext.GetActPath()
+	}
+
+	if workdir := ext.ToContainerPath(rc.Config.Workdir); !claimed[workdir] {
+		if rc.Config.BindWorkdir {
+			bindModifiers := ""
+			if runtime.GOOS == "darwin" {
+				bindModifiers = ":delegated"
+			}
+			if selinux.GetEnabled() {
+				bindModifiers = ":z"
+			}
+			binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, workdir, bindModifiers))
+		} else {
+			mounts[name] = workdir
 		}
-		if selinux.GetEnabled() {
-			bindModifiers = ":z"
-		}
-		binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, ext.ToContainerPath(rc.Config.Workdir), bindModifiers))
-	} else {
-		mounts[name] = ext.ToContainerPath(rc.Config.Workdir)
 	}
 
 	return binds, mounts

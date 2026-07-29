@@ -471,6 +471,10 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 
 	logger.Debugf("Custom container.HostConfig from options ==> %+v", containerConfig.HostConfig)
 
+	// Volumes from the options string win over anything already mounted on the same container
+	// path, the job's own `volumes:` included; Docker rejects two mounts on one target.
+	hostConfig.Binds, hostConfig.Mounts = dropShadowedVolumes(hostConfig.Binds, hostConfig.Mounts,
+		containerConfig.HostConfig.Binds, containerConfig.HostConfig.Mounts)
 	hostConfig.Binds = append(hostConfig.Binds, containerConfig.HostConfig.Binds...)
 	hostConfig.Mounts = append(hostConfig.Mounts, containerConfig.HostConfig.Mounts...)
 	binds := hostConfig.Binds
@@ -1106,6 +1110,35 @@ func (cr *containerReference) sanitizeConfig(ctx context.Context, config *contai
 	}
 
 	return config, hostConfig
+}
+
+// dropShadowedVolumes removes the binds and mounts whose container path is also mounted by
+// one of the option-declared volumes.
+func dropShadowedVolumes(binds []string, mounts []mount.Mount, optionBinds []string, optionMounts []mount.Mount) ([]string, []mount.Mount) {
+	claimed := map[string]bool{}
+	for _, bind := range optionBinds {
+		if parsed, err := loader.ParseVolume(bind); err == nil {
+			claimed[parsed.Target] = true
+		}
+	}
+	for _, mt := range optionMounts {
+		claimed[mt.Target] = true
+	}
+
+	keptBinds := make([]string, 0, len(binds))
+	for _, bind := range binds {
+		parsed, err := loader.ParseVolume(bind)
+		if err != nil || !claimed[parsed.Target] {
+			keptBinds = append(keptBinds, bind)
+		}
+	}
+	keptMounts := make([]mount.Mount, 0, len(mounts))
+	for _, mt := range mounts {
+		if !claimed[mt.Target] {
+			keptMounts = append(keptMounts, mt)
+		}
+	}
+	return keptBinds, keptMounts
 }
 
 type validVolumeMatcher struct {

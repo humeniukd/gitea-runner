@@ -160,6 +160,11 @@ container:
   # Whether to use privileged mode or not when launching task containers (privileged mode is required for Docker-in-Docker).
   privileged: false
   # Any other options to be used when the container is started (e.g., --add-host=my.gitea.url:host-gateway).
+  # A volume declared here replaces the one the runner would mount on the same container path.
+  # To keep the tool cache (${{ runner.tool_cache }}, /opt/hostedtoolcache) on the host instead of
+  # in the `act-toolcache` docker volume, mount over it and allow the source in valid_volumes:
+  #   options: --volume /path/on/host/toolcache:/opt/hostedtoolcache
+  #   valid_volumes: ['/path/on/host/toolcache']
   options:
   # The parent directory of a job's working directory.
   # NOTE: There is no need to add the first '/' of the path as runner will add it automatically.
