@@ -444,9 +444,9 @@ func normalizeMatrixValue(key string, val any) ([]any, error) {
 // Scalar values are wrapped into single-element arrays automatically.
 // Template expressions are resolved by EvaluateYamlNode before this method is
 // called; if unresolved, the literal string is wrapped as a one-element fallback.
-func (j *Job) Matrix() map[string][]any {
+func (j *Job) Matrix() (map[string][]any, error) {
 	if j.Strategy == nil || j.Strategy.RawMatrix.Kind != yaml.MappingNode {
-		return nil
+		return map[string][]any{}, nil
 	}
 
 	// Decode to flexible map first so that scalar values don't cause a type error.
@@ -456,9 +456,9 @@ func (j *Job) Matrix() map[string][]any {
 		// Fall back to the strict array-only format for backward compatibility.
 		var val map[string][]any
 		if !decodeNode(j.Strategy.RawMatrix, &val) {
-			return nil
+			return map[string][]any{}, nil
 		}
-		return val
+		return val, nil
 	}
 
 	// Convert flexible format to expected format with validation
@@ -466,12 +466,11 @@ func (j *Job) Matrix() map[string][]any {
 	for k, v := range flexVal {
 		normalized, err := normalizeMatrixValue(k, v)
 		if err != nil {
-			log.Errorf("matrix validation error: %v", err)
-			return nil
+			return nil, err
 		}
 		val[k] = normalized
 	}
-	return val
+	return val, nil
 }
 
 // GetMatrixes returns the matrix cross product
@@ -483,7 +482,11 @@ func (j *Job) GetMatrixes() ([]map[string]any, error) {
 		j.Strategy.FailFast = j.Strategy.GetFailFast()
 		j.Strategy.MaxParallel = j.Strategy.GetMaxParallel()
 
-		if m := j.Matrix(); m != nil {
+		m, err := j.Matrix()
+		if err != nil {
+			return nil, err
+		}
+		if len(m) > 0 {
 			includes := make([]map[string]any, 0)
 			extraIncludes := make([]map[string]any, 0)
 			addInclude := func(raw any) error {
