@@ -90,13 +90,8 @@ func (w *Workflow) OnSchedule() []string {
 			if !ok {
 				continue
 			}
-			for k, cron := range entry {
-				if k != "cron" {
-					continue
-				}
-				if schedule, ok := cron.(string); ok {
-					allSchedules = append(allSchedules, schedule)
-				}
+			if cron, ok := entry["cron"].(string); ok {
+				allSchedules = append(allSchedules, cron)
 			}
 		}
 		return allSchedules
@@ -491,41 +486,31 @@ func (j *Job) GetMatrixes() ([]map[string]any, error) {
 		if m := j.Matrix(); m != nil {
 			includes := make([]map[string]any, 0)
 			extraIncludes := make([]map[string]any, 0)
+			addInclude := func(raw any) error {
+				include, ok := raw.(map[string]any)
+				if !ok {
+					return fmt.Errorf("the workflow is not valid. Matrix include %v is not a map of matrix keys to values", raw)
+				}
+				for k := range include {
+					if _, ok := m[k]; ok {
+						includes = append(includes, include)
+						return nil
+					}
+				}
+				extraIncludes = append(extraIncludes, include)
+				return nil
+			}
 			for _, v := range m["include"] {
 				switch t := v.(type) {
 				case []any:
 					for _, i := range t {
-						include, ok := i.(map[string]any)
-						if !ok {
-							return nil, fmt.Errorf("the workflow is not valid. Matrix include %v is not a map of matrix keys to values", i)
-						}
-						extraInclude := true
-						for k := range include {
-							if _, ok := m[k]; ok {
-								includes = append(includes, include)
-								extraInclude = false
-								break
-							}
-						}
-						if extraInclude {
-							extraIncludes = append(extraIncludes, include)
+						if err := addInclude(i); err != nil {
+							return nil, err
 						}
 					}
 				case any:
-					include, ok := v.(map[string]any)
-					if !ok {
-						return nil, fmt.Errorf("the workflow is not valid. Matrix include %v is not a map of matrix keys to values", v)
-					}
-					extraInclude := true
-					for k := range include {
-						if _, ok := m[k]; ok {
-							includes = append(includes, include)
-							extraInclude = false
-							break
-						}
-					}
-					if extraInclude {
-						extraIncludes = append(extraIncludes, include)
+					if err := addInclude(t); err != nil {
+						return nil, err
 					}
 				}
 			}

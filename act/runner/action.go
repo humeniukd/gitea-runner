@@ -129,6 +129,16 @@ func readActionImpl(ctx context.Context, step *model.Step, actionDir, actionPath
 	return action, err
 }
 
+// cachedActionTar returns the action's tree from the action cache, which only a remote action
+// has an entry in.
+func cachedActionTar(ctx context.Context, step actionStep, name, includePrefix string) (io.ReadCloser, error) {
+	remote, ok := step.(*stepActionRemote)
+	if !ok {
+		return nil, fmt.Errorf("action %q is a remote action but runs as %T", name, step)
+	}
+	return step.getRunContext().Config.ActionCache.GetTarArchive(ctx, remote.cacheDir, remote.resolvedSha, includePrefix)
+}
+
 func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir, actionPath, containerActionDir string) error {
 	logger := common.Logger(ctx)
 	rc := step.getRunContext()
@@ -147,11 +157,7 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir, actio
 	}
 
 	if rc.Config != nil && rc.Config.ActionCache != nil {
-		raction, ok := step.(*stepActionRemote)
-		if !ok {
-			return fmt.Errorf("action %q is a remote action but runs as %T", stepModel.Uses, step)
-		}
-		ta, err := rc.Config.ActionCache.GetTarArchive(ctx, raction.cacheDir, raction.resolvedSha, "")
+		ta, err := cachedActionTar(ctx, step, stepModel.Uses, "")
 		if err != nil {
 			return err
 		}
@@ -354,11 +360,7 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 				}
 				defer buildContext.Close()
 			} else if rc.Config.ActionCache != nil {
-				rstep, ok := step.(*stepActionRemote)
-				if !ok {
-					return fmt.Errorf("action %q is a remote action but runs as %T", actionName, step)
-				}
-				buildContext, err = rc.Config.ActionCache.GetTarArchive(ctx, rstep.cacheDir, rstep.resolvedSha, contextDir)
+				buildContext, err = cachedActionTar(ctx, step, actionName, contextDir)
 				if err != nil {
 					return err
 				}

@@ -401,7 +401,12 @@ func (r *Reporter) logf(format string, a ...any) {
 func (r *Reporter) SetOutputs(outputs map[string]string) {
 	r.stateMu.Lock()
 	defer r.stateMu.Unlock()
+	r.outputsMu.Lock()
+	defer r.outputsMu.Unlock()
 
+	if r.outputs == nil {
+		r.outputs = map[string]jobOutput{}
+	}
 	for k, v := range outputs {
 		if l := len(k); l > maxOutputKeyLen {
 			log.Warnf("ignore output %q because the key is too long: %d > %d", k, l, maxOutputKeyLen)
@@ -413,14 +418,9 @@ func (r *Reporter) SetOutputs(outputs map[string]string) {
 			r.logf("ignore output %q because the value is too long: %d > %d", k, l, maxOutputValueLen)
 			continue
 		}
-		r.outputsMu.Lock()
-		if r.outputs == nil {
-			r.outputs = map[string]jobOutput{}
-		}
 		if _, ok := r.outputs[k]; !ok {
 			r.outputs[k] = jobOutput{value: v}
 		}
-		r.outputsMu.Unlock()
 	}
 }
 
@@ -585,7 +585,6 @@ func (r *Reporter) ReportState(reportResult bool) error {
 	r.clientM.Lock()
 	defer r.clientM.Unlock()
 
-	// Build the outputs map first (single pass instead of two).
 	outputs := make(map[string]string)
 	r.outputsMu.Lock()
 	for key, out := range r.outputs {
@@ -606,12 +605,8 @@ func (r *Reporter) ReportState(reportResult bool) error {
 		r.stateMu.Unlock()
 		return nil
 	}
-	clone := proto.Clone(r.state)
-	state, ok := clone.(*runnerv1.TaskState)
-	if !ok {
-		r.stateMu.Unlock()
-		return fmt.Errorf("cloning the task state produced %T", clone)
-	}
+	state := &runnerv1.TaskState{}
+	proto.Merge(state, r.state)
 	r.stateChanged = false
 	r.stateMu.Unlock()
 
@@ -639,27 +634,23 @@ func (r *Reporter) ReportState(reportResult bool) error {
 	metrics.ReportStateTotal.WithLabelValues(metrics.LabelResultSuccess).Inc()
 	r.lastReportedAtNanos.Store(time.Now().UnixNano())
 
-	r.outputsMu.Lock()
-	if r.outputs == nil {
-		r.outputs = map[string]jobOutput{}
-	}
-	for _, k := range resp.Msg.SentOutputs {
-		r.outputs[k] = jobOutput{sent: true}
-	}
-	r.outputsMu.Unlock()
-
-	if resp.Msg.State != nil && resp.Msg.State.Result == runnerv1.Result_RESULT_CANCELLED {
-		r.cancel()
-	}
-
 	var noSent []string
 	r.outputsMu.Lock()
+	for _, k := range resp.Msg.SentOutputs {
+		if _, ok := r.outputs[k]; ok {
+			r.outputs[k] = jobOutput{sent: true}
+		}
+	}
 	for key, out := range r.outputs {
 		if !out.sent {
 			noSent = append(noSent, key)
 		}
 	}
 	r.outputsMu.Unlock()
+
+	if resp.Msg.State != nil && resp.Msg.State.Result == runnerv1.Result_RESULT_CANCELLED {
+		r.cancel()
+	}
 	if len(noSent) > 0 {
 		return fmt.Errorf("there are still outputs that have not been sent: %v", noSent)
 	}
