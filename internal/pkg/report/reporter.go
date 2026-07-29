@@ -32,8 +32,8 @@ const (
 	maxOutputValueLen = 1024 * 1024 // 1 MiB
 )
 
-// output is a job output on its way to the server, sent once the server has acknowledged it.
-type output struct {
+// jobOutput is a job output on its way to the server, sent once the server has acknowledged it.
+type jobOutput struct {
 	value string
 	sent  bool
 }
@@ -60,7 +60,7 @@ type Reporter struct {
 	stateChanged      bool
 	stateMu           sync.RWMutex
 	outputsMu         sync.Mutex
-	outputs           map[string]output
+	outputs           map[string]jobOutput
 	daemon            chan struct{}
 	heartbeatStop     chan struct{}
 	heartbeatStopOnce sync.Once
@@ -415,10 +415,10 @@ func (r *Reporter) SetOutputs(outputs map[string]string) {
 		}
 		r.outputsMu.Lock()
 		if r.outputs == nil {
-			r.outputs = map[string]output{}
+			r.outputs = map[string]jobOutput{}
 		}
 		if _, ok := r.outputs[k]; !ok {
-			r.outputs[k] = output{value: v}
+			r.outputs[k] = jobOutput{value: v}
 		}
 		r.outputsMu.Unlock()
 	}
@@ -641,10 +641,10 @@ func (r *Reporter) ReportState(reportResult bool) error {
 
 	r.outputsMu.Lock()
 	if r.outputs == nil {
-		r.outputs = map[string]output{}
+		r.outputs = map[string]jobOutput{}
 	}
 	for _, k := range resp.Msg.SentOutputs {
-		r.outputs[k] = output{sent: true}
+		r.outputs[k] = jobOutput{sent: true}
 	}
 	r.outputsMu.Unlock()
 
