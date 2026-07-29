@@ -471,12 +471,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 
 	logger.Debugf("Custom container.HostConfig from options ==> %+v", containerConfig.HostConfig)
 
-	// Volumes from the options string win over anything already mounted on the same container
-	// path, the job's own `volumes:` included; Docker rejects two mounts on one target.
-	hostConfig.Binds, hostConfig.Mounts = dropShadowedVolumes(hostConfig.Binds, hostConfig.Mounts,
-		containerConfig.HostConfig.Binds, containerConfig.HostConfig.Mounts)
-	hostConfig.Binds = append(hostConfig.Binds, containerConfig.HostConfig.Binds...)
-	hostConfig.Mounts = append(hostConfig.Mounts, containerConfig.HostConfig.Mounts...)
+	overlayVolumes(hostConfig, containerConfig.HostConfig)
 	binds := hostConfig.Binds
 	mounts := hostConfig.Mounts
 	networkMode := hostConfig.NetworkMode
@@ -1112,23 +1107,32 @@ func (cr *containerReference) sanitizeConfig(ctx context.Context, config *contai
 	return config, hostConfig
 }
 
-// dropShadowedVolumes drops the binds and mounts whose target an option-declared volume takes.
-func dropShadowedVolumes(binds []string, mounts []mount.Mount, optionBinds []string, optionMounts []mount.Mount) ([]string, []mount.Mount) {
+// bindTarget returns the container path a bind mounts onto, empty if it cannot be parsed.
+func bindTarget(bind string) string {
+	parsed, err := loader.ParseVolume(bind)
+	if err != nil {
+		return ""
+	}
+	return parsed.Target
+}
+
+// overlayVolumes appends src's volumes to dst, dropping the dst ones they mount over. Docker
+// rejects two mounts on one target, so the volumes declared last have to win.
+func overlayVolumes(dst, src *container.HostConfig) {
 	claimed := map[string]bool{}
-	for _, bind := range optionBinds {
-		if parsed, err := loader.ParseVolume(bind); err == nil {
-			claimed[parsed.Target] = true
+	for _, bind := range src.Binds {
+		if target := bindTarget(bind); target != "" {
+			claimed[target] = true
 		}
 	}
-	for _, mt := range optionMounts {
+	for _, mt := range src.Mounts {
 		claimed[mt.Target] = true
 	}
 
-	binds = slices.DeleteFunc(slices.Clone(binds), func(bind string) bool {
-		parsed, err := loader.ParseVolume(bind)
-		return err == nil && claimed[parsed.Target]
-	})
-	return binds, slices.DeleteFunc(slices.Clone(mounts), func(mt mount.Mount) bool { return claimed[mt.Target] })
+	dst.Binds = append(slices.DeleteFunc(slices.Clone(dst.Binds),
+		func(bind string) bool { return claimed[bindTarget(bind)] }), src.Binds...)
+	dst.Mounts = append(slices.DeleteFunc(slices.Clone(dst.Mounts),
+		func(mt mount.Mount) bool { return claimed[mt.Target] }), src.Mounts...)
 }
 
 type validVolumeMatcher struct {
