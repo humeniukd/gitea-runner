@@ -213,9 +213,7 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 
 	binds := []string{}
 	mounts := map[string]string{}
-	// Container paths the job's own `volumes:` claim. Docker rejects two mounts on one
-	// target, so the runner's own mounts yield to them.
-	claimed := map[string]bool{}
+	claimed := map[string]bool{} // targets the job's own `volumes:` take, which the runner's yield to
 
 	if job := rc.Run.Job(); job != nil {
 		if container := job.Container(); container != nil {
@@ -230,9 +228,7 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 				}
 				claimed[parsed.Target] = true
 				if parsed.Type == string(mount.TypeVolume) && parsed.Source != "" && !parsed.ReadOnly {
-					// Mount existing volume. Anything the source:target map cannot express
-					// (anonymous volumes, host binds, mount options) stays a bind.
-					mounts[parsed.Source] = parsed.Target
+					mounts[parsed.Source] = parsed.Target // the rest cannot fit source:target, stay binds
 				} else {
 					binds = append(binds, v)
 				}
@@ -241,15 +237,12 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 	}
 
 	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" && !claimed["/var/run/docker.sock"] {
-		daemonPath := getDockerDaemonSocketMountPath(daemonSocket)
-		binds = append(binds, fmt.Sprintf("%s:%s", daemonPath, "/var/run/docker.sock"))
+		binds = append(binds, getDockerDaemonSocketMountPath(daemonSocket)+":/var/run/docker.sock")
 	}
 	if !claimed["/opt/hostedtoolcache"] {
 		mounts["act-toolcache"] = "/opt/hostedtoolcache"
 	}
-	if !claimed[ext.GetActPath()] {
-		mounts[name+"-env"] = ext.GetActPath()
-	}
+	mounts[name+"-env"] = ext.GetActPath() // runner-internal, never overridable
 
 	if workdir := ext.ToContainerPath(rc.Config.Workdir); !claimed[workdir] {
 		if rc.Config.BindWorkdir {

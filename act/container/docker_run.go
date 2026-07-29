@@ -1112,8 +1112,7 @@ func (cr *containerReference) sanitizeConfig(ctx context.Context, config *contai
 	return config, hostConfig
 }
 
-// dropShadowedVolumes removes the binds and mounts whose container path is also mounted by
-// one of the option-declared volumes.
+// dropShadowedVolumes drops the binds and mounts whose target an option-declared volume takes.
 func dropShadowedVolumes(binds []string, mounts []mount.Mount, optionBinds []string, optionMounts []mount.Mount) ([]string, []mount.Mount) {
 	claimed := map[string]bool{}
 	for _, bind := range optionBinds {
@@ -1125,20 +1124,11 @@ func dropShadowedVolumes(binds []string, mounts []mount.Mount, optionBinds []str
 		claimed[mt.Target] = true
 	}
 
-	keptBinds := make([]string, 0, len(binds))
-	for _, bind := range binds {
+	binds = slices.DeleteFunc(slices.Clone(binds), func(bind string) bool {
 		parsed, err := loader.ParseVolume(bind)
-		if err != nil || !claimed[parsed.Target] {
-			keptBinds = append(keptBinds, bind)
-		}
-	}
-	keptMounts := make([]mount.Mount, 0, len(mounts))
-	for _, mt := range mounts {
-		if !claimed[mt.Target] {
-			keptMounts = append(keptMounts, mt)
-		}
-	}
-	return keptBinds, keptMounts
+		return err == nil && claimed[parsed.Target]
+	})
+	return binds, slices.DeleteFunc(slices.Clone(mounts), func(mt mount.Mount) bool { return claimed[mt.Target] })
 }
 
 type validVolumeMatcher struct {
