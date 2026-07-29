@@ -206,35 +206,48 @@ func (rc *RunContext) validVolumes() []string {
 		getDockerDaemonSocketMountPath(rc.containerDaemonSocket()))
 }
 
+// splitVolumes routes volume specs into binds and a source:target mount map, and returns the
+// container paths they mount onto. Only a plain source:target volume fits the map, everything
+// else (anonymous volumes, host binds, mount options) stays a bind.
+func splitVolumes(specs []string) ([]string, map[string]string, map[string]bool) {
+	binds := []string{}
+	mounts := map[string]string{}
+	targets := map[string]bool{}
+
+	for _, spec := range specs {
+		parsed, err := loader.ParseVolume(spec)
+		if err != nil {
+			binds = append(binds, spec) // let Docker report the malformed spec
+			continue
+		}
+		targets[parsed.Target] = true
+		if parsed.Type == string(mount.TypeVolume) && parsed.Source != "" && !parsed.ReadOnly {
+			mounts[parsed.Source] = parsed.Target
+		} else {
+			binds = append(binds, spec)
+		}
+	}
+	return binds, mounts, targets
+}
+
 // Returns the binds and mounts for the container, resolving paths as appopriate
 func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 	name := rc.jobContainerName()
 	ext := container.LinuxContainerEnvironmentExtensions{}
 
-	binds := []string{}
-	mounts := map[string]string{}
-	claimed := map[string]bool{} // targets the job's own `volumes:` take, which the runner's yield to
-
+	var volumes []string
 	if job := rc.Run.Job(); job != nil {
 		if container := job.Container(); container != nil {
 			for _, v := range container.Volumes {
 				if rc.ExprEval != nil {
 					v = rc.ExprEval.Interpolate(context.Background(), v)
 				}
-				parsed, err := loader.ParseVolume(v)
-				if err != nil {
-					binds = append(binds, v) // let Docker report the malformed spec
-					continue
-				}
-				claimed[parsed.Target] = true
-				if parsed.Type == string(mount.TypeVolume) && parsed.Source != "" && !parsed.ReadOnly {
-					mounts[parsed.Source] = parsed.Target // the rest cannot fit source:target, stay binds
-				} else {
-					binds = append(binds, v)
-				}
+				volumes = append(volumes, v)
 			}
 		}
 	}
+	// the runner's own mounts below yield to the targets the job claims
+	binds, mounts, claimed := splitVolumes(volumes)
 
 	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" && !claimed["/var/run/docker.sock"] {
 		binds = append(binds, getDockerDaemonSocketMountPath(daemonSocket)+":/var/run/docker.sock")
@@ -1370,24 +1383,9 @@ func (rc *RunContext) handleServiceCredentials(ctx context.Context, creds map[st
 
 // GetServiceBindsAndMounts returns the binds and mounts for the service container, resolving paths as appopriate
 func (rc *RunContext) GetServiceBindsAndMounts(svcVolumes []string) ([]string, map[string]string) {
-	binds := []string{}
-	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" {
-		daemonPath := getDockerDaemonSocketMountPath(daemonSocket)
-		binds = append(binds, fmt.Sprintf("%s:%s", daemonPath, "/var/run/docker.sock"))
+	binds, mounts, claimed := splitVolumes(svcVolumes)
+	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" && !claimed["/var/run/docker.sock"] {
+		binds = append(binds, getDockerDaemonSocketMountPath(daemonSocket)+":/var/run/docker.sock")
 	}
-
-	mounts := map[string]string{}
-
-	for _, v := range svcVolumes {
-		if !strings.Contains(v, ":") || filepath.IsAbs(v) {
-			// Bind anonymous volume or host file.
-			binds = append(binds, v)
-		} else {
-			// Mount existing volume.
-			paths := strings.SplitN(v, ":", 2)
-			mounts[paths[0]] = paths[1]
-		}
-	}
-
 	return binds, mounts
 }
