@@ -1035,7 +1035,8 @@ func (rc *RunContext) getRunnerContext(ctx context.Context) map[string]any {
 	runnerContext := map[string]any{}
 	if rc.JobContainer != nil {
 		maps0.Copy(runnerContext, rc.JobContainer.GetRunnerContext(ctx))
-		runnerContext["tool_cache"] = rc.toolCache(runnerContext["tool_cache"].(string))
+		defaultToolCache, _ := runnerContext["tool_cache"].(string)
+		runnerContext["tool_cache"] = rc.toolCache(defaultToolCache)
 	}
 	runnerContext["name"] = rc.Config.RunnerName
 	runnerContext["environment"] = "self-hosted"
