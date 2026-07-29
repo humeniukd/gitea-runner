@@ -206,6 +206,29 @@ func (rc *RunContext) validVolumes() []string {
 		getDockerDaemonSocketMountPath(rc.containerDaemonSocket()))
 }
 
+// toolCache returns the tool cache path the job sees, relocatable through RUNNER_TOOL_CACHE.
+func (rc *RunContext) toolCache(fallback string) string {
+	if path := rc.GetEnv()["RUNNER_TOOL_CACHE"]; path != "" {
+		return path
+	}
+	return fallback
+}
+
+// runnerEnv returns a container's RUNNER_* variables, derived from the values runner.tool_cache
+// and friends report so the two cannot drift apart.
+func (rc *RunContext) runnerEnv(ctx context.Context) []string {
+	ext := container.LinuxContainerEnvironmentExtensions{}
+	runnerContext := ext.GetRunnerContext(ctx)
+	runnerContext["tool_cache"] = rc.toolCache(container.DefaultToolCache)
+
+	env := make([]string, 0, len(runnerContext))
+	for key, value := range runnerContext {
+		env = append(env, fmt.Sprintf("RUNNER_%s=%s", strings.ToUpper(key), value))
+	}
+	slices.Sort(env)
+	return env
+}
+
 // splitVolumes routes volume specs into binds and a source:target mount map, and returns the
 // container paths they mount onto. Only a plain source:target volume fits the map, everything
 // else (anonymous volumes, host binds, mount options) stays a bind.
@@ -252,8 +275,8 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" && !claimed["/var/run/docker.sock"] {
 		binds = append(binds, getDockerDaemonSocketMountPath(daemonSocket)+":/var/run/docker.sock")
 	}
-	if !claimed["/opt/hostedtoolcache"] {
-		mounts["act-toolcache"] = "/opt/hostedtoolcache"
+	if toolCache := rc.toolCache(container.DefaultToolCache); !claimed[toolCache] {
+		mounts["act-toolcache"] = toolCache
 	}
 	mounts[name+"-env"] = ext.GetActPath() // runner-internal, never overridable
 
@@ -303,7 +326,10 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 		if err := os.MkdirAll(runnerTmp, 0o777); err != nil {
 			return err
 		}
-		toolCache := filepath.Join(cacheDir, "tool_cache")
+		toolCache := rc.toolCache(filepath.Join(cacheDir, "tool_cache"))
+		if err := os.MkdirAll(toolCache, 0o777); err != nil {
+			return err
+		}
 		rc.JobContainer = &container.HostEnvironment{
 			Path:         path,
 			TmpDir:       runnerTmp,
@@ -388,10 +414,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 
 		envList := make([]string, 0)
 
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
+		envList = append(envList, rc.runnerEnv(ctx)...)
 		envList = append(envList, fmt.Sprintf("%s=%s", "LANG", "C.UTF-8")) // Use same locale as GitHub Actions
 
 		ext := container.LinuxContainerEnvironmentExtensions{}
@@ -1012,6 +1035,7 @@ func (rc *RunContext) getRunnerContext(ctx context.Context) map[string]any {
 	runnerContext := map[string]any{}
 	if rc.JobContainer != nil {
 		maps0.Copy(runnerContext, rc.JobContainer.GetRunnerContext(ctx))
+		runnerContext["tool_cache"] = rc.toolCache(runnerContext["tool_cache"].(string))
 	}
 	runnerContext["name"] = rc.Config.RunnerName
 	runnerContext["environment"] = "self-hosted"
