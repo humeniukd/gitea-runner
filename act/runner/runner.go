@@ -92,8 +92,16 @@ type Config struct {
 	InsecureSkipTLS                   bool                         // whether to skip verifying TLS certificate of the Gitea instance
 	MaxParallel                       int                          // max parallel jobs to run across all workflows (0 = no limit, uses CPU count)
 	AllocatePTY                       bool                         // allocate a pseudo-TTY for each step's process
+	RunnerName                        string                       // name this runner registered with, reported as `runner.name`, defaults to the hostname
 	JobStartedHook                    string                       // script run inside the job environment before the job's first step; ACTIONS_RUNNER_HOOK_JOB_STARTED is read from Env when empty
 	JobCompletedHook                  string                       // script run inside the job environment after the job's last step; ACTIONS_RUNNER_HOOK_JOB_COMPLETED is read from Env when empty
+}
+
+// RunnerDebug reports whether debug logging is on, exposed as `runner.debug` and
+// RUNNER_DEBUG. Only the secret also makes the reporter keep ::debug:: output, the env
+// is accepted for `exec` and for runners configured with it.
+func (c Config) RunnerDebug() bool {
+	return c.Secrets["ACTIONS_STEP_DEBUG"] == "true" || c.Env["ACTIONS_STEP_DEBUG"] == "true"
 }
 
 // GetToken: Adapt to Gitea
@@ -139,6 +147,11 @@ func New(runnerConfig *Config) (Runner, error) {
 }
 
 func (runner *runnerImpl) configure() (Runner, error) {
+	if runner.config.RunnerName == "" {
+		// Callers that do not register, such as `exec`, still get a `runner.name`.
+		runner.config.RunnerName, _ = os.Hostname()
+	}
+
 	runner.eventJSON = "{}"
 	if runner.config.EventJSON != "" {
 		runner.eventJSON = runner.config.EventJSON
