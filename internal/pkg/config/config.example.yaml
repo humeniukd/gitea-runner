@@ -104,6 +104,14 @@ runner:
   post_task_script: ''
   # Hard limit on post_task_script runtime. Default if omitted: 5m.
   post_task_script_timeout: 5m
+  # Scripts run inside the job environment before the job's first step and after its last
+  # one, the equivalent of GitHub's ACTIONS_RUNNER_HOOK_JOB_STARTED and
+  # ACTIONS_RUNNER_HOOK_JOB_COMPLETED, which are read when these are unset. The paths are
+  # resolved inside the job environment. Either one failing fails the job.
+  # Full guide: docs/job-hooks.md
+  hooks:
+    job_started: ''
+    job_completed: ''
 
 cache:
   # Enable the built-in cache server (used by actions/cache and similar actions).
@@ -159,7 +167,11 @@ container:
     enable_ipv6: false # Omit to use Docker's default (IPv6 disabled). Enabling it requires dockerd started with --ipv6.
   # Whether to use privileged mode or not when launching task containers (privileged mode is required for Docker-in-Docker).
   privileged: false
-  # Any other options to be used when the container is started (e.g., --add-host=my.gitea.url:host-gateway).
+  # Any other options to be used when the container is started, for example:
+  #   options: --add-host=my.gitea.url:host-gateway
+  # A volume declared here replaces the one the runner mounts on the same container path, so the
+  # tool cache can be kept on the host. Its source must also be allowed by valid_volumes below:
+  #   options: --volume /host/toolcache:/opt/hostedtoolcache
   options:
   # The parent directory of a job's working directory.
   # NOTE: There is no need to add the first '/' of the path as runner will add it automatically.

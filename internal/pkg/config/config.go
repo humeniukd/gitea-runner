@@ -4,6 +4,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"maps"
@@ -54,6 +55,13 @@ type Runner struct {
 	AllocatePTY           bool              `yaml:"allocate_pty"`             // AllocatePTY allocates a pseudo-TTY for each step's process. Default is false, matching GitHub's actions/runner. Enable only for jobs that need an interactive terminal; tools like docker build emit redrawing progress frames into the captured log when a TTY is present. Applies to both host and docker backends.
 	PostTaskScript        string            `yaml:"post_task_script"`         // PostTaskScript is the path to an executable script run on the host after each task's cleanup completes. Empty disables the hook. On Windows use .exe/.bat/.cmd; PowerShell (.ps1) is not supported yet as the configured path.
 	PostTaskScriptTimeout time.Duration     `yaml:"post_task_script_timeout"` // PostTaskScriptTimeout caps how long the post-task script may run. Default is 5m when post_task_script is set.
+	Hooks                 RunnerHooks       `yaml:"hooks"`                    // Hooks are scripts run inside the job environment around the job's steps.
+}
+
+// RunnerHooks represents the scripts run inside the job environment around the job's steps.
+type RunnerHooks struct {
+	JobStarted   string `yaml:"job_started"`   // JobStarted is the path of a script run before the job's first step. Falls back to ACTIONS_RUNNER_HOOK_JOB_STARTED; a failure fails the job.
+	JobCompleted string `yaml:"job_completed"` // JobCompleted is the path of a script run after the job's last step, while the job environment is still up. Falls back to ACTIONS_RUNNER_HOOK_JOB_COMPLETED; a failure fails the job.
 }
 
 // Cache represents the configuration for caching.
@@ -136,6 +144,7 @@ func LoadDefault(file string) (*Config, error) {
 		if err := yaml.Unmarshal(content, cfg); err != nil {
 			return nil, fmt.Errorf("parse config file %q: %w", file, err)
 		}
+		warnUnknownKeys(file, content)
 		definedRunnerKeys, err = definedRunnerConfigKeys(content)
 		if err != nil {
 			return nil, fmt.Errorf("parse config file %q for defaults metadata: %w", file, err)
@@ -279,6 +288,21 @@ func LoadDefault(file string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// warnUnknownKeys reports keys the config does not define, which are otherwise ignored
+// without a trace. It only warns, so a config carrying keys from another runner version
+// still loads.
+func warnUnknownKeys(file string, content []byte) {
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	decoder.KnownFields(true)
+
+	var typeErr *yaml.TypeError
+	if err := decoder.Decode(&Config{}); errors.As(err, &typeErr) {
+		for _, message := range typeErr.Errors {
+			log.Warnf("config file %q: %s, it will be ignored", file, message)
+		}
+	}
 }
 
 func definedRunnerConfigKeys(content []byte) (map[string]bool, error) {

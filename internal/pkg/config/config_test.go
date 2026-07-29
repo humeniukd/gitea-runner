@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -139,9 +140,6 @@ runner:
 	assert.Equal(t, -1*time.Second, cfg.Runner.IdleCleanupInterval)
 }
 
-// TestLoadDefault_MalformedYAMLReturnsParseError pins the error surfaced for
-// invalid YAML to the canonical "parse config file" message rather than the
-// "for defaults metadata" variant — i.e. the main yaml.Unmarshal runs first.
 func TestLoadDefault_LoadsPostTaskScript(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -170,6 +168,25 @@ runner:
 	assert.Equal(t, 5*time.Minute, cfg.Runner.PostTaskScriptTimeout)
 }
 
+func TestLoadDefault_LoadsJobHooks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+runner:
+  hooks:
+    job_started: /hooks/started.sh
+    job_completed: /hooks/completed.sh
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, "/hooks/started.sh", cfg.Runner.Hooks.JobStarted)
+	assert.Equal(t, "/hooks/completed.sh", cfg.Runner.Hooks.JobCompleted)
+}
+
+// TestLoadDefault_MalformedYAMLReturnsParseError pins the error surfaced for
+// invalid YAML to the canonical "parse config file" message rather than the
+// "for defaults metadata" variant — i.e. the main yaml.Unmarshal runs first.
 func TestLoadDefault_MalformedYAMLReturnsParseError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -179,6 +196,21 @@ func TestLoadDefault_MalformedYAMLReturnsParseError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parse config file")
 	assert.NotContains(t, err.Error(), "defaults metadata")
+}
+
+func TestLoadDefault_WarnsOnUnknownKeysButStillLoads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("container:\n  volumes:\n    - /host:/ctr\n  privileged: true\n"), 0o600))
+
+	hook := test.NewGlobal()
+	defer hook.Reset()
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.Container.Privileged)
+	require.Len(t, hook.Entries, 1)
+	assert.Contains(t, hook.LastEntry().Message, "field volumes not found")
 }
 
 func TestContainerNetworkCreateOptions(t *testing.T) {
