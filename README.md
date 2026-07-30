@@ -209,6 +209,35 @@ Whenever the resulting labels differ from the ones in the registration file, the
 
 > **Note:** A runner that only exposes `host` labels still needs access to a Docker daemon (e.g. a mounted `/var/run/docker.sock`) whenever a job uses a `docker://` action or a service container. `host` labels only change where the job's own steps run; container-based steps and actions are still executed with Docker.
 
+#### Proxy
+
+Set these variables in the runner's environment, with systemd `Environment=`, `docker run -e`, or Kubernetes `env:`:
+
+```sh
+http_proxy=http://proxy.example:3128
+https_proxy=http://proxy.example:3128
+no_proxy=gitea.internal,.example.local
+```
+
+The runner uses them for its own requests and gives them to every job, in lower and upper case.
+
+These hosts are added to `no_proxy` for jobs, so they are always reached directly:
+
+- the cache server
+- `localhost`, `127.0.0.1` and `::1`
+- the job's service containers
+- the Docker daemon, when it is reached over `tcp://`
+
+Gitea is not added. Add it to `no_proxy` yourself if it should be reached directly.
+
+To change a value for one job, set it in a step's `env:` or in the job's `container.env`. Setting it at workflow or job level has no effect. To change it for the whole runner, set it in `runner.envs`. A `no_proxy` set there is added to the list above instead of replacing it.
+
+Images are pulled by the Docker daemon, which needs its own proxy setting. In the `dind` images the daemon runs in the same container and reads the variables above. For any other daemon, see [the Docker documentation](https://docs.docker.com/engine/daemon/proxy/). The runner logs a warning at startup if it has a proxy and the daemon does not.
+
+Dockerfile actions are built with these variables as build arguments, so their `RUN` steps can reach the network.
+
+A password in a proxy URL is hidden in job logs. Any step can still read it, because the step is given the proxy URL in its environment.
+
 #### Caching (`actions/cache`)
 
 Each runner starts its own cache server automatically. Cache entries are local to that runner — runners do not share a cache by default.
@@ -282,6 +311,16 @@ Optional host script that runs **after** each task's built-in cleanup (post-step
 On Windows, use `.exe`, `.bat`, or `.cmd` paths; **PowerShell (`.ps1`) is not supported yet** as the configured path — wrap commands in a `.cmd` file instead.
 
 See **[docs/post-task-script.md](docs/post-task-script.md)** for lifecycle details, environment variables, timeout interaction, and platform notes.
+
+#### Job hooks (`runner.hooks.job_started`, `runner.hooks.job_completed`)
+
+Optional scripts that run **inside the job environment** (the job container, or the host in host mode), before the job's first step and after its last one. They are the equivalent of GitHub's `ACTIONS_RUNNER_HOOK_JOB_STARTED` / `ACTIONS_RUNNER_HOOK_JOB_COMPLETED`, which are read when the settings are unset.
+
+Because they run where the steps run and see the job's environment, they are the place for per-job setup no workflow should have to carry: registry logins, mirror configuration, or masking runner-wide secrets with `::add-mask::`. Their output is part of the job log and is scanned for workflow commands, and they can export to the job through `$GITHUB_ENV` and `$GITHUB_PATH`.
+
+Both hooks are synchronous and block the job while they run. Either one exiting non-zero fails the job, and there is no per-hook timeout.
+
+See **[docs/job-hooks.md](docs/job-hooks.md)** for the execution order, environment, and platform notes.
 
 ### Example Deployments
 
