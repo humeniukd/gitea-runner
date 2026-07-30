@@ -64,7 +64,7 @@ func getURL(t *testing.T, url string) []byte {
 func startTestHandler(t *testing.T) *Handler {
 	t.Helper()
 
-	handler, err := StartHandler(filepath.Join(t.TempDir(), "artifactcache"), "", 0, "", nil)
+	handler, err := StartHandler(filepath.Join(t.TempDir(), "artifactcache"), "127.0.0.1", 0, "", nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = handler.Close() })
 	handler.RegisterJob(testToken, testRepo)
@@ -213,6 +213,23 @@ func TestCacheServiceV2Lookups(t *testing.T) {
 		})
 		assert.Equal(t, true, got["ok"])
 	})
+}
+
+// Both API versions are served from one store, so an entry written through v2 is a hit for
+// a v1 client asking for the same key and version.
+func TestCacheServiceV2SharesTheStoreWithV1(t *testing.T) {
+	handler := startTestHandler(t)
+	require.Equal(t, true, saveV2(t, handler, "shared", "v1", []byte("shared"))["ok"])
+
+	resp, err := testClient.Get(fmt.Sprintf("%s%s/cache?keys=shared&version=v1", handler.ExternalURL(), apiPath))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	got := map[string]any{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	assert.Equal(t, "shared", got["cacheKey"])
+	assert.Equal(t, []byte("shared"), getURL(t, got["archiveLocation"].(string)))
 }
 
 // The cache of one repository must stay invisible to another, as it does for the v1 API.

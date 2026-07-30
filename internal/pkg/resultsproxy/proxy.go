@@ -18,6 +18,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
@@ -78,6 +79,9 @@ func Start(host string, port uint16, gitea, cache string, insecureTLS bool, logg
 			w.WriteHeader(http.StatusBadGateway)
 		},
 		Transport: transport(insecureTLS),
+		// Artifact uploads are many parallel chunked requests; the default is a fresh 32 KiB
+		// buffer per request.
+		BufferPool: &bufferPool{},
 	}
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
@@ -99,7 +103,6 @@ func Start(host string, port uint16, gitea, cache string, insecureTLS bool, logg
 		}
 	}()
 
-	// Resolved once, so the URL outlives Close and needs no type assertion on the address.
 	return &Proxy{server: server, url: "http://" + net.JoinHostPort(host, boundPort)}, nil
 }
 
@@ -113,12 +116,10 @@ func (p *Proxy) ExternalURL() string {
 }
 
 func (p *Proxy) Close() error {
-	if p == nil || p.server == nil {
+	if p == nil {
 		return nil
 	}
-	server := p.server
-	p.server = nil
-	return server.Close()
+	return p.server.Close()
 }
 
 func parseTarget(raw string) (*url.URL, error) {
@@ -151,3 +152,15 @@ func transport(insecureTLS bool) http.RoundTripper {
 	}
 	return tr
 }
+
+// bufferPool reuses the copy buffers the proxy would otherwise allocate per request.
+type bufferPool struct{ pool sync.Pool }
+
+func (b *bufferPool) Get() []byte {
+	if buf, ok := b.pool.Get().(*[]byte); ok {
+		return *buf
+	}
+	return make([]byte, 256<<10)
+}
+
+func (b *bufferPool) Put(buf []byte) { b.pool.Put(&buf) }

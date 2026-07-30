@@ -223,7 +223,7 @@ The runner uses them for its own requests and gives them to every job, in lower 
 
 These hosts are added to `no_proxy` for jobs, so they are always reached directly:
 
-- the cache server, and the results proxy when `cache.service_v2` is on
+- the cache server, and the results proxy when `cache.v2` is on
 - `localhost`, `127.0.0.1` and `::1`
 - the job's service containers
 - the Docker daemon, when it is reached over `tcp://`
@@ -244,16 +244,20 @@ Each runner starts its own cache server automatically. Cache entries are local t
 
 **Cache service v2**
 
-`actions/cache@v4.2` and later can use the *cache service v2* API instead of the older cache endpoints. The runner serves it when enabled:
+`actions/cache@v4.2` and later can use the *cache service v2* API instead of the older cache endpoints. The runner serves it:
+
+It is on by default. Turn it off with:
 
 ```yaml
 cache:
-  service_v2: true
+  v2: false
 ```
 
 The v2 client looks that service up under `ACTIONS_RESULTS_URL`, the same URL artifacts are uploaded to, so enabling this starts a small proxy that jobs get as `ACTIONS_RESULTS_URL`: cache calls are answered by the runner's cache server, everything else — artifacts above all — is forwarded to Gitea unchanged. It works with `external_server` too, and both API versions share one store, so nothing is lost when a workflow moves between them.
 
-It is off by default; clients that do not use v2 keep using the v1 API.
+The client refuses the v2 API unless `GITHUB_SERVER_URL` names a GitHub host, and no server-side setting overrides that. Rather than misreport the server URL, which would break actions that build real URLs from it, the runner replaces that one check with `false` in the action's own bundle, keeping the untouched copy beside it. An action whose bundle does not match is left alone and keeps using v1. If a step fails with a patched bundle, the original is restored and the step is retried as shipped.
+
+Clients that do not use v2 keep using the v1 API, and both versions share one store.
 
 **Shared cache across multiple runners**
 

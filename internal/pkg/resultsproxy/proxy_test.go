@@ -4,10 +4,13 @@
 package resultsproxy
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -121,4 +124,60 @@ func TestCloseIsIdempotent(t *testing.T) {
 	// Reported after shutdown too, so a caller that logs it cannot panic on a closed proxy.
 	assert.Equal(t, url, proxy.ExternalURL())
 	assert.Empty(t, (*Proxy)(nil).ExternalURL())
+}
+
+// Artifacts are the bulk of what passes through here once the proxy fronts the results URL:
+// large bodies in both directions, several at once, and the bytes must survive intact.
+func TestProxyStreamsLargeBodiesConcurrently(t *testing.T) {
+	payload := make([]byte, 8<<20)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	want := sha256.Sum256(payload)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, err := io.ReadAll(r.Body)
+		if err != nil || sha256.Sum256(got) != want {
+			http.Error(w, "corrupt upload", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(upstream.Close)
+
+	proxy, err := Start("127.0.0.1", 0, upstream.URL, upstream.URL, false, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = proxy.Close() })
+
+	const parallel = 8
+	var wg sync.WaitGroup
+	errs := make([]error, parallel)
+	sums := make([][32]byte, parallel)
+	statuses := make([]int, parallel)
+	for i := range parallel {
+		wg.Go(func() {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPut,
+				proxy.ExternalURL()+"/twirp/github.actions.results.api.v1.ArtifactService/UploadArtifact",
+				bytes.NewReader(payload))
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			errs[i], statuses[i], sums[i] = err, resp.StatusCode, sha256.Sum256(body)
+		})
+	}
+	wg.Wait()
+
+	for i := range parallel {
+		require.NoError(t, errs[i])
+		assert.Equal(t, http.StatusOK, statuses[i])
+		assert.Equal(t, want, sums[i])
+	}
 }

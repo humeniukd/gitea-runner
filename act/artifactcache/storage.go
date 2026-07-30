@@ -107,6 +107,19 @@ func (s *Storage) Commit(id uint64, size int64) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
 		return 0, err
 	}
+	// A single-shot upload, which is what the v2 API produces below the client's block
+	// threshold, is already the whole archive: move it rather than copy it.
+	if len(tempNames) == 1 {
+		info, err := os.Stat(tempNames[0])
+		if err != nil {
+			return 0, err
+		}
+		if size >= 0 && info.Size() != size {
+			return 0, fmt.Errorf("broken file: %v != %v", info.Size(), size)
+		}
+		return info.Size(), os.Rename(tempNames[0], name)
+	}
+
 	file, err := os.Create(name)
 	if err != nil {
 		return 0, err

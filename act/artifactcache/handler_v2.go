@@ -32,8 +32,7 @@ const (
 	// without an Authorization header.
 	blobPath = apiPath + "/blobs"
 
-	// blobUploadPurpose separates upload signatures from download ones, so a URL handed
-	// out for writing an entry cannot be replayed to read one.
+	// blobUploadPurpose keeps an upload URL from being replayed to read an entry.
 	blobUploadPurpose = "upload:"
 
 	// blobUploadURLTTL bounds how long a signed upload URL stays valid. Uploading a
@@ -80,7 +79,7 @@ func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ h
 		h.twirpError(w, r, twirpInternal, err)
 		return
 	} else if existing != nil {
-		h.responseJSON(w, r, http.StatusOK, map[string]any{"ok": false})
+		h.twirpMiss(w, r)
 		return
 	}
 
@@ -123,7 +122,7 @@ func (h *Handler) v2FinalizeCacheEntryUpload(w http.ResponseWriter, r *http.Requ
 
 	cache, err := findReservedCache(db, cred.Repo, req.Key, req.Version)
 	if errors.Is(err, bolthold.ErrNotFound) {
-		h.responseJSON(w, r, http.StatusOK, map[string]any{"ok": false})
+		h.twirpMiss(w, r)
 		return
 	} else if err != nil {
 		h.twirpError(w, r, twirpInternal, err)
@@ -131,10 +130,10 @@ func (h *Handler) v2FinalizeCacheEntryUpload(w http.ResponseWriter, r *http.Requ
 	}
 	db.Close() // commitCache needs the store closed
 
-	size, _ := cmp.Or(req.SizeBytes, req.SizeBytesJSON).Int64()
+	size, _ := cmp.Or(req.SizeBytes, req.SizeBytesCamel).Int64()
 	if err := h.commitCache(cache, size); err != nil {
 		h.logger.Errorf("finalize cache %d (%s): %v", cache.ID, cache.Key, err)
-		h.responseJSON(w, r, http.StatusOK, map[string]any{"ok": false})
+		h.twirpMiss(w, r)
 		return
 	}
 
@@ -166,7 +165,7 @@ func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if cache == nil {
-		h.responseJSON(w, r, http.StatusOK, map[string]any{"ok": false})
+		h.twirpMiss(w, r)
 		return
 	}
 	if ok, err := h.storage.Exist(cache.ID); err != nil {
@@ -175,7 +174,7 @@ func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Requ
 	} else if !ok {
 		// The blob is gone (pruned or lost); drop the dangling entry and report a miss.
 		_ = db.Delete(cache.ID, cache)
-		h.responseJSON(w, r, http.StatusOK, map[string]any{"ok": false})
+		h.twirpMiss(w, r)
 		return
 	}
 
@@ -188,7 +187,7 @@ func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Requ
 
 // blockList is the body of an Azure "put block list" request.
 type blockList struct {
-	Latest []string `xml:"Latest"`
+	Latest []string
 }
 
 // The archive arrives over the subset of the Azure blob API the toolkit uses: a small
@@ -241,12 +240,9 @@ func (h *Handler) v2UploadBlob(w http.ResponseWriter, r *http.Request, params ht
 	w.WriteHeader(http.StatusCreated)
 }
 
-// touchIncompleteCache rejects an entry that is already finalized and, in the same
-// transaction, bumps UsedAt so gcCache does not reap the reservation mid-upload. One
-// bolt open per uploaded part rather than two, which matters at a block apiece.
-//
-// An entry that is not in the store at all is accepted: the signature already proves the
-// id was handed out, and the write is harmless once the reservation is gone.
+// touchIncompleteCache rejects an already finalized entry and, in the same transaction, bumps
+// UsedAt so gcCache does not reap the reservation mid-upload: one bolt open per part, not two.
+// An entry missing from the store is accepted, since the signature proves the id was handed out.
 func (h *Handler) touchIncompleteCache(id uint64) error {
 	db, err := h.openDB()
 	if err != nil {
@@ -268,14 +264,9 @@ func (h *Handler) touchIncompleteCache(id uint64) error {
 	return db.Update(cache.ID, cache)
 }
 
-// findReservedCache returns the entry a finalize call refers to: the reservation for this
-// key and version that was written to most recently, since the upload route touches UsedAt
-// on every part it stores. A missing reservation is reported as bolthold.ErrNotFound.
-//
-// The request carries no entry id, so two jobs reserving the same key and version
-// concurrently cannot be told apart here and one may finalize the other's blob. Their
-// archives are the same content in practice, and the size check in Commit rejects the pair
-// that are not.
+// findReservedCache returns the reservation written to most recently, since the upload route
+// touches UsedAt on every part. The request carries no entry id, so two jobs reserving the same
+// key and version cannot be told apart here; the size check in Commit rejects a mismatched pair.
 func findReservedCache(db *bolthold.Store, repo, key, version string) (*Cache, error) {
 	cache := &Cache{}
 	if err := db.FindOne(cache, bolthold.Where("Repo").Eq(repo).
@@ -286,6 +277,11 @@ func findReservedCache(db *bolthold.Store, repo, key, version string) (*Cache, e
 		return nil, err
 	}
 	return cache, nil
+}
+
+// twirpMiss is the cache service's "no such entry": not an error, just nothing to restore.
+func (h *Handler) twirpMiss(w http.ResponseWriter, r *http.Request) {
+	h.responseJSON(w, r, http.StatusOK, map[string]any{"ok": false})
 }
 
 // twirpError reports a failure in the shape a twirp client expects, so the toolkit
@@ -309,17 +305,17 @@ type (
 	}
 
 	v2FinalizeRequest struct {
-		Key           string      `json:"key"`
-		Version       string      `json:"version"`
-		SizeBytes     json.Number `json:"size_bytes"`
-		SizeBytesJSON json.Number `json:"sizeBytes"`
+		Key            string      `json:"key"`
+		Version        string      `json:"version"`
+		SizeBytes      json.Number `json:"size_bytes"`
+		SizeBytesCamel json.Number `json:"sizeBytes"`
 	}
 
 	v2DownloadRequest struct {
-		Key             string   `json:"key"`
-		Version         string   `json:"version"`
-		RestoreKeys     []string `json:"restore_keys"`
-		RestoreKeysJSON []string `json:"restoreKeys"`
+		Key              string   `json:"key"`
+		Version          string   `json:"version"`
+		RestoreKeys      []string `json:"restore_keys"`
+		RestoreKeysCamel []string `json:"restoreKeys"`
 	}
 )
 
@@ -327,7 +323,7 @@ type (
 func (d v2DownloadRequest) keys() []string {
 	restoreKeys := d.RestoreKeys
 	if len(restoreKeys) == 0 {
-		restoreKeys = d.RestoreKeysJSON
+		restoreKeys = d.RestoreKeysCamel
 	}
 	return append([]string{d.Key}, restoreKeys...)
 }

@@ -13,6 +13,7 @@ import (
 
 	"connectrpc.com/connect"
 	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -119,4 +120,40 @@ func taskWithDefaultActionsURL(url string) *runnerv1.Task {
 			},
 		},
 	}
+}
+
+// The results proxy is on by default, so a runner with a cache server hands jobs the proxy
+// rather than Gitea, and tells the cache client the v2 API is available.
+func TestNewRunnerStartsTheResultsProxyByDefault(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Cache.Dir = t.TempDir()
+	cfg.Cache.Host = "127.0.0.1"
+	cli := clientmocks.NewClient(t)
+	cli.On("Address").Return("https://gitea.example/").Maybe()
+
+	r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
+	t.Cleanup(func() { _ = r.Close() })
+
+	require.NotNil(t, r.resultsProxy)
+	assert.Equal(t, r.resultsProxy.ExternalURL(), r.envs["ACTIONS_RESULTS_URL"])
+	assert.Equal(t, "true", r.envs["ACTIONS_CACHE_SERVICE_V2"])
+	assert.NotEqual(t, "https://gitea.example", r.envs["ACTIONS_RESULTS_URL"])
+}
+
+// Turning it off leaves the results URL pointing at Gitea, as before the v2 API.
+func TestNewRunnerResultsProxyCanBeDisabled(t *testing.T) {
+	v2 := false
+	cfg := &config.Config{}
+	cfg.Cache.V2 = &v2
+	cfg.Cache.Dir = t.TempDir()
+	cfg.Cache.Host = "127.0.0.1"
+	cli := clientmocks.NewClient(t)
+	cli.On("Address").Return("https://gitea.example/").Maybe()
+
+	r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
+	t.Cleanup(func() { _ = r.Close() })
+
+	require.Nil(t, r.resultsProxy)
+	assert.Equal(t, "https://gitea.example", r.envs["ACTIONS_RESULTS_URL"])
+	assert.Empty(t, r.envs["ACTIONS_CACHE_SERVICE_V2"])
 }

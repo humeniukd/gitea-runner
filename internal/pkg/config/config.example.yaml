@@ -151,12 +151,14 @@ cache:
   offline_mode: false
   # Serve the actions cache service v2 API, used by actions/cache@v4.2 and later. That
   # client looks the cache service up under ACTIONS_RESULTS_URL, which is also where
-  # artifacts are uploaded, so enabling this starts a proxy that job containers get as
+  # artifacts are uploaded, so this starts a proxy that job containers get as
   # ACTIONS_RESULTS_URL: it answers cache calls from this runner's cache server and
-  # forwards everything else to Gitea. Clients that do not use v2 keep using the v1 API.
-  service_v2: false
+  # forwards everything else, artifacts included, to Gitea. Clients that do not use v2
+  # keep using the v1 API. Note this fronts ACTIONS_RESULTS_URL, so artifact traffic passes
+  # through the runner as well. Set to false to leave ACTIONS_RESULTS_URL pointing at Gitea.
+  v2: true
   # Port for the proxy. 0 picks a random free port. It listens on cache.host.
-  service_v2_port: 0
+  v2_port: 0
 
 container:
   # Specifies the network to which the container will connect.

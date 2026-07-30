@@ -143,22 +143,28 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 // A proxy that cannot start is not fatal: jobs keep the plain results URL and the cache
 // falls back to the v1 API, which is what they get without this setting.
 func startResultsProxy(cfg *config.Config, cli client.Client, envs map[string]string) *resultsproxy.Proxy {
-	if !cfg.Cache.ServiceV2 {
+	if cfg.Cache.V2 != nil && !*cfg.Cache.V2 {
 		return nil
 	}
+	// On by default, so the reasons it cannot run are only worth a warning when an operator
+	// asked for it; otherwise they are the ordinary consequence of having no cache.
+	skip := log.Debugf
+	if cfg.Cache.V2 != nil {
+		skip = log.Warnf
+	}
 	if cfg.Cache.Enabled != nil && !*cfg.Cache.Enabled {
-		log.Warn("cache.service_v2 is set but the cache is disabled, ignoring it")
+		skip("the cache is disabled, so the cache service v2 API is not served")
 		return nil
 	}
 	cacheURL := envs["ACTIONS_CACHE_URL"]
 	if cacheURL == "" {
-		log.Warn("cache.service_v2 is set but no cache server is available, ignoring it")
+		skip("no cache server is available, so the cache service v2 API is not served")
 		return nil
 	}
 
 	proxy, err := resultsproxy.Start(
 		cfg.Cache.Host,
-		cfg.Cache.ServiceV2Port,
+		cfg.Cache.V2Port,
 		strings.TrimSuffix(cli.Address(), "/"),
 		cacheURL,
 		cfg.Runner.Insecure,
