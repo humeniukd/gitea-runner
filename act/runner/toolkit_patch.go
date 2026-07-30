@@ -16,19 +16,20 @@ import (
 	"gitea.com/gitea/runner/act/model"
 )
 
-// Two lines of the @actions/cache client keep it from using this runner's cache service v2 API,
-// and both are edited out of the action's own bundle.
+// Actions bundle the @actions toolkit into their own JavaScript, and two of its lines keep it
+// from working against Gitea. Both are edited out of the bundle the runner downloaded.
 //
-// isGhes() decides that any host which is not github.com, *.ghe.com or *.localhost is GitHub
-// Enterprise, and getCacheServiceVersion() forces v1 for it. The edit turns the last of those
-// three tests, `hostname.endsWith('.LOCALHOST')`, into `endsWith("")`, which every hostname
-// satisfies. That is the whole gate: one string literal, no call sites to resolve, and the same
-// answer the toolkit's own proposed ACTIONS_VENDOR switch would give. Gitea already makes this
-// edit by hand in its fork of upload-artifact.
+// isGhes() takes any host that is not github.com, *.ghe.com or *.localhost for GitHub
+// Enterprise. @actions/cache then forces the v1 API, and @actions/artifact refuses outright,
+// which is why the stock upload-artifact aborts here. The edit empties the last of the three
+// hostname tests, so `endsWith('.LOCALHOST')` becomes `endsWith(”)`, which every hostname
+// satisfies: one string literal, no call sites to resolve, and the same answer the toolkit's own
+// proposed ACTIONS_VENDOR switch would give. Gitea already makes this edit by hand in its fork
+// of upload-artifact.
 //
-// getCacheServiceURL() then resolves the service from ACTIONS_RESULTS_URL alone, where v1 reads
-// ACTIONS_CACHE_URL first. Both reads there are given the same preference, which is what keeps
-// the runner out of the artifact path: the results URL still points at Gitea.
+// getCacheServiceURL() then resolves the cache service from ACTIONS_RESULTS_URL alone, where v1
+// reads ACTIONS_CACHE_URL first. Both reads there are given the same preference, which is what
+// keeps the runner out of the artifact path: the results URL still points at Gitea.
 //
 // Either of these landing upstream makes this file deletable:
 //
@@ -39,19 +40,18 @@ const (
 	cacheURLEnv       = "ACTIONS_CACHE_URL"
 	resultsURLEnv     = "ACTIONS_RESULTS_URL"
 
-	// localhostHost is the hostname suffix isGhes accepts, and dropping it from the test is what
-	// opens the gate: every hostname ends with the empty string.
+	// localhostHost is the suffix isGhes accepts; emptying the test is what opens the gate,
+	// because every hostname ends with the empty string.
 	localhostHost = ".LOCALHOST"
 
-	// artifactRefusal is the error @actions/artifact throws behind the same gate, and the only
-	// thing that gate guards there. Its presence is what makes an artifact bundle safe to open:
-	// a bundle carrying neither toolkit uses isGhes for something this runner has not looked at,
-	// and is left alone.
+	// artifactRefusal is the only thing the gate guards in @actions/artifact, which is what makes
+	// such a bundle safe to open. A bundle carrying neither toolkit uses isGhes for something this
+	// runner has not looked at, and is left alone.
 	artifactRefusal = "GHESNotSupportedError"
 
-	// sidecarSuffix names the directory holding each patched bundle's untouched copy, a sibling
-	// of the action directory because that directory is copied wholesale into job containers.
-	sidecarSuffix = ".cache-gate"
+	// sidecarSuffix names the directory of untouched copies, a sibling of the action directory
+	// because that directory is copied wholesale into job containers.
+	sidecarSuffix = ".toolkit-patch"
 
 	// skipMarker in the sidecar means a patched bundle already failed once here.
 	skipMarker = "skip"
@@ -64,21 +64,20 @@ var (
 	// sensitive on purpose, and that is load-bearing: isGhes uppercases the hostname before
 	// testing it, while undici, bundled into all of these actions, tests a lowercase ".localhost"
 	// in isURLPotentiallyTrustworthy. Opening that one would tell its HTTP client that every URL
-	// is trustworthy. Uppercase, the literal occurs nowhere but this test, across sixteen bundles
-	// from ten actions.
+	// is trustworthy. Uppercase, the literal occurs nowhere but this test, across 118 bundles
+	// covering every major version of sixteen actions.
 	localhostTest = regexp.MustCompile(`endsWith\s*\(\s*` + quoted(regexp.QuoteMeta(localhostHost)) + `\s*\)`)
 
-	// serviceURLBranches matches both branches of getCacheServiceURL at once. The v1 branch reads
-	// the cache URL and falls back to the results URL, and the v2 branch just below reads the
-	// results URL alone. That `||` pairing is the only place in a bundle where the two variables
-	// are read together, which is what identifies the function: matching it as one expression
-	// keeps the edit inside that switch instead of anywhere the two happen to sit near each other.
-	// The gap between the branches is 21 bytes minified and 63 not, across every bundle measured.
+	// serviceURLBranches matches both branches of getCacheServiceURL at once: the v1 branch reads
+	// the cache URL and falls back to the results URL, the v2 branch just below reads the results
+	// URL alone. That `||` pairing is the only place the two variables are read together, so
+	// matching them as one expression is what keeps the edit inside this function rather than
+	// anywhere they happen to sit near each other. The branches are 21 bytes apart minified and
+	// 63 not, across every bundle measured.
 	serviceURLBranches = regexp.MustCompile(`(` + envRead(cacheURLEnv) + `\s*\|\|\s*)(` +
 		envRead(resultsURLEnv) + `)((?s).{0,256}?)(` + envRead(resultsURLEnv) + `)`)
 
-	// cacheURLFirst gives both of those reads the same cache URL preference, which is what the v1
-	// branch already had.
+	// cacheURLFirst gives both reads the preference the v1 branch already had.
 	cacheURLFirst = []byte(`${1}(process.env.` + cacheURLEnv + `||${2})${3}(process.env.` + cacheURLEnv + `||${4})`)
 )
 
@@ -94,7 +93,7 @@ func quoted(pattern string) string {
 
 // actionScriptPaths returns the entrypoints of a node action, the only kind with a bundle. Only
 // remote actions get here: a local one lives in the user's checkout, which the runner does not
-// rewrite, so a repo-vendored action bundling @actions/cache stays on the v1 API.
+// rewrite.
 func actionScriptPaths(dir string, action *model.Action) []string {
 	if action == nil || !action.Runs.Using.IsNode() {
 		return nil
@@ -108,10 +107,10 @@ func actionScriptPaths(dir string, action *model.Action) []string {
 	return paths
 }
 
-// patchCacheGate lets an action reach the v2 cache API by patching the version gate out of its
-// bundles, keeping each original in a sidecar directory. Every failure is silent and leaves the
-// bundle untouched: the client then picks v1, which the runner also serves.
-func patchCacheGate(ctx context.Context, actionDir string, scripts []string) {
+// patchToolkit edits the toolkit in an action's bundles, keeping each original beside them. Every
+// failure is silent and leaves the bundle as it was, which costs the cache client the v2 API and
+// an artifact action nothing at all.
+func patchToolkit(ctx context.Context, actionDir string, scripts []string) {
 	if len(scripts) == 0 {
 		return
 	}
@@ -122,15 +121,15 @@ func patchCacheGate(ctx context.Context, actionDir string, scripts []string) {
 
 	for _, script := range scripts {
 		if err := patchBundle(script, originalFor(actionDir, script)); err != nil {
-			common.Logger(ctx).Debugf("cache service v2: %s left unpatched: %v", filepath.Base(script), err)
+			common.Logger(ctx).Debugf("actions toolkit: %s left unpatched: %v", filepath.Base(script), err)
 		}
 	}
 }
 
-// revertCacheGate puts the originals back and stops this action being patched again, so the next
-// job runs it exactly as shipped. Called when a step failed with a patched bundle; it does not
-// re-run the step, because a step's outputs and env-file writes are already recorded by then.
-func revertCacheGate(ctx context.Context, actionDir string, scripts []string) {
+// revertToolkit puts the originals back and stops this action being patched again, so the next job
+// runs it exactly as shipped. Called when a step failed with a patched bundle; it does not re-run
+// the step, because a step's outputs and env-file writes are already recorded by then.
+func revertToolkit(ctx context.Context, actionDir string, scripts []string) {
 	if len(scripts) == 0 {
 		return
 	}
@@ -151,7 +150,7 @@ func revertCacheGate(ctx context.Context, actionDir string, scripts []string) {
 	}
 	if reverted {
 		_ = os.WriteFile(filepath.Join(sidecarDir(actionDir), skipMarker), nil, 0o600)
-		common.Logger(ctx).Warnf("cache service v2: restored the original %s, it will not be patched again", filepath.Base(actionDir))
+		common.Logger(ctx).Warnf("actions toolkit: restored the original %s, it will not be patched again", filepath.Base(actionDir))
 	}
 }
 

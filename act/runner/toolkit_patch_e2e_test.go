@@ -122,7 +122,7 @@ func TestCacheServiceV2EndToEnd(t *testing.T) {
 		scripts[stage] = filepath.Join(actionDir, stage+".js")
 		require.NoError(t, os.WriteFile(scripts[stage], body, 0o600))
 	}
-	patchCacheGate(t.Context(), actionDir, []string{scripts["restore"], scripts["save"]})
+	patchToolkit(t.Context(), actionDir, []string{scripts["restore"], scripts["save"]})
 
 	handler, err := artifactcache.StartHandler(filepath.Join(t.TempDir(), "cache"), "127.0.0.1", 0, "", nil)
 	require.NoError(t, err)
@@ -157,7 +157,7 @@ func TestCacheServiceV2EndToEnd(t *testing.T) {
 // anchored on that distance. One entrypoint from each of the families that bundle the cache
 // toolkit, patched but not run, is what keeps a future release from quietly matching only one of
 // the two shapes and leaving every cache on v1.
-func TestCacheGatePatchesTheToolkitFamily(t *testing.T) {
+func TestToolkitPatchAcrossActions(t *testing.T) {
 	for _, tc := range []struct{ repo, ref, path string }{
 		{"actions/setup-go", "v7.0.0", "dist/setup/index.js"},
 		{"actions/setup-node", "v6.0.0", "dist/cache-save/index.js"},

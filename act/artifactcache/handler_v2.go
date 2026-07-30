@@ -74,7 +74,7 @@ func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ h
 		h.twirpError(w, r, twirpInternal, err)
 		return
 	} else if existing != nil {
-		h.twirpMiss(w, r)
+		h.twirpNotOK(w, r)
 		return
 	}
 
@@ -119,7 +119,7 @@ func (h *Handler) v2FinalizeCacheEntryUpload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if cache == nil {
-		h.twirpMiss(w, r)
+		h.twirpNotOK(w, r)
 		return
 	}
 	db.Close() // commitCache needs the store closed
@@ -127,7 +127,7 @@ func (h *Handler) v2FinalizeCacheEntryUpload(w http.ResponseWriter, r *http.Requ
 	cache.Size, _ = cmp.Or(req.SizeBytes, req.SizeBytesCamel).Int64()
 	if err := h.commitCache(cache); err != nil {
 		h.logger.Errorf("finalize cache %d (%s): %v", cache.ID, cache.Key, err)
-		h.twirpMiss(w, r)
+		h.twirpNotOK(w, r)
 		return
 	}
 
@@ -159,7 +159,7 @@ func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if cache == nil {
-		h.twirpMiss(w, r)
+		h.twirpNotOK(w, r)
 		return
 	}
 
@@ -212,13 +212,14 @@ func (h *Handler) v2UploadBlob(w http.ResponseWriter, r *http.Request, params ht
 	w.WriteHeader(http.StatusCreated)
 }
 
-// twirpMiss is the cache service's "no such entry": not an error, just nothing to restore.
-func (h *Handler) twirpMiss(w http.ResponseWriter, r *http.Request) {
+// twirpNotOK is the negative answer all three endpoints share: no such entry to restore, no
+// reservation to finalize, or an entry that already exists and need not be uploaded again.
+func (h *Handler) twirpNotOK(w http.ResponseWriter, r *http.Request) {
 	h.responseJSON(w, r, http.StatusOK, map[string]any{"ok": false})
 }
 
-// twirpError reports a failure in the shape a twirp client expects, so the toolkit
-// surfaces the message instead of a parse error.
+// twirpError reports in the shape a twirp client expects, so the toolkit surfaces the message
+// instead of a parse error.
 func (h *Handler) twirpError(w http.ResponseWriter, r *http.Request, code string, err error) {
 	h.logger.Debugf("%s %s: %v", r.Method, r.URL.Path, err)
 	status := http.StatusBadRequest
@@ -228,9 +229,9 @@ func (h *Handler) twirpError(w http.ResponseWriter, r *http.Request, code string
 	h.responseJSON(w, r, status, map[string]any{"code": code, "msg": err.Error()})
 }
 
-// The twirp request bodies. The toolkit's client serialises with useProtoFieldName, so the
-// proto names are what arrive; the camelCase spellings are accepted too. json.Number takes
-// a 64-bit integer as either the string the proto JSON mapping prescribes or a bare number.
+// The twirp request bodies. The toolkit's client serialises with useProtoFieldName, so the proto
+// names are what arrive; the camelCase spellings of the same mapping are accepted too, as are
+// int64s sent as a bare number rather than the string the mapping prescribes.
 type (
 	v2CreateRequest struct {
 		Key     string `json:"key"`

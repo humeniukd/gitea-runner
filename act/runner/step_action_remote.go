@@ -175,7 +175,7 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			},
 			// A stage of its own: it takes the same clone lock, and it has to land before
 			// runAction copies the action into the job container.
-			sar.useCacheServiceV2,
+			sar.patchActionToolkit,
 		)(ctx)
 	}
 }
@@ -194,7 +194,7 @@ func (sar *stepActionRemote) pre() common.Executor {
 
 	return common.NewPipelineExecutor(
 		sar.prepareActionExecutor(),
-		runStepExecutor(sar, stepStagePre, sar.revertCacheGateOnFailure(runPreStep(sar))).If(hasPreStep(sar)).If(shouldRunPreStep(sar)))
+		runStepExecutor(sar, stepStagePre, sar.revertToolkitOnFailure(runPreStep(sar))).If(hasPreStep(sar)).If(shouldRunPreStep(sar)))
 }
 
 func (sar *stepActionRemote) main() common.Executor {
@@ -218,17 +218,17 @@ func (sar *stepActionRemote) main() common.Executor {
 
 			actionDir := sar.actionDir()
 
-			return sar.revertCacheGateOnFailure(sar.runAction(sar, actionDir, sar.remoteAction))(ctx)
+			return sar.revertToolkitOnFailure(sar.runAction(sar, actionDir, sar.remoteAction))(ctx)
 		}),
 	)
 }
 
 func (sar *stepActionRemote) post() common.Executor {
-	return runStepExecutor(sar, stepStagePost, sar.revertCacheGateOnFailure(runPostStep(sar))).If(hasPostStep(sar)).If(shouldRunPostStep(sar))
+	return runStepExecutor(sar, stepStagePost, sar.revertToolkitOnFailure(runPostStep(sar))).If(hasPostStep(sar)).If(shouldRunPostStep(sar))
 }
 
-// cacheGateBundles is the action directory and the entrypoints the version gate may live in.
-func (sar *stepActionRemote) cacheGateBundles() (string, []string) {
+// toolkitBundles is the action directory and the entrypoints the toolkit may live in.
+func (sar *stepActionRemote) toolkitBundles() (string, []string) {
 	if sar.remoteAction == nil {
 		return "", nil
 	}
@@ -236,24 +236,24 @@ func (sar *stepActionRemote) cacheGateBundles() (string, []string) {
 	return dir, actionScriptPaths(filepath.Join(dir, sar.remoteAction.Path), sar.action)
 }
 
-// useCacheServiceV2 patches the cache client's version gate out of this action's bundles, so it
-// can use the v2 API this runner serves. A no-op unless the runner serves it.
-func (sar *stepActionRemote) useCacheServiceV2(ctx context.Context) error {
+// patchActionToolkit edits the bundled toolkit so it works against Gitea, which lets the cache
+// client use the v2 API this runner serves. A no-op unless the runner serves it.
+func (sar *stepActionRemote) patchActionToolkit(ctx context.Context) error {
 	if sar.RunContext.GetEnv()[CacheServiceV2Env] != "" {
-		dir, scripts := sar.cacheGateBundles()
-		patchCacheGate(ctx, dir, scripts)
+		dir, scripts := sar.toolkitBundles()
+		patchToolkit(ctx, dir, scripts)
 	}
 	return nil
 }
 
-// revertCacheGateOnFailure restores the untouched bundles when the action fails, so a later job
+// revertToolkitOnFailure restores the untouched bundles when the action fails, so a later job
 // runs it as shipped rather than repeating a failure the patch may have caused.
-func (sar *stepActionRemote) revertCacheGateOnFailure(exec common.Executor) common.Executor {
+func (sar *stepActionRemote) revertToolkitOnFailure(exec common.Executor) common.Executor {
 	return func(ctx context.Context) error {
 		err := exec(ctx)
 		if err != nil {
-			dir, scripts := sar.cacheGateBundles()
-			revertCacheGate(ctx, dir, scripts)
+			dir, scripts := sar.toolkitBundles()
+			revertToolkit(ctx, dir, scripts)
 		}
 		return err
 	}

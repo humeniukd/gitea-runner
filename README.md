@@ -244,16 +244,14 @@ Each runner starts its own cache server automatically. Cache entries are local t
 
 **Cache service v2**
 
-`actions/cache@v4.2` and later can use the *cache service v2* API instead of the older cache endpoints. The runner serves it, on by default, from the same store as v1, so a workflow moving between action versions loses nothing. It works with `external_server` too. Turn it off with:
+`actions/cache@v4.2` and later can use the *cache service v2* API. The runner serves it from the same store as v1, on by default, and it works with `external_server`. Turn it off with:
 
 ```yaml
 cache:
   v2: false
 ```
 
-That client only talks to a host it takes for GitHub, so rather than misreport the server URL the runner edits the check out of the action's own bundle and points the cache at `ACTIONS_CACHE_URL`, keeping the untouched copy beside the action. `ACTIONS_RESULTS_URL` still points at Gitea, so artifacts never travel through the runner. A bundle that does not match is left alone and keeps to v1.
-
-The same check makes the stock `actions/upload-artifact` and `actions/download-artifact` abort on Gitea, so opening it also removes the need for the `gitea-upload-artifact` fork, from `upload-artifact@v4.4.0` onward.
+Those actions refuse any host they do not take for GitHub. Rather than misreport the server URL, the runner edits that check out of the action's own bundle and keeps the untouched copy beside it; a bundle it does not recognise is left alone and keeps to v1. The same edit lets the stock `actions/upload-artifact` and `actions/download-artifact` work from `v4.4.0` on, without the `gitea-upload-artifact` fork.
 
 **Shared cache across multiple runners**
 

@@ -231,22 +231,22 @@ func TestActionScriptPaths(t *testing.T) {
 
 // A step that fails with a patched bundle gets the untouched bundle back, and the action is not
 // patched again, so later jobs run it exactly as its author shipped it.
-func TestRevertCacheGate(t *testing.T) {
+func TestRevertToolkit(t *testing.T) {
 	dir, script := bundleFile(t, gateTSC)
 	scripts := []string{script}
 
-	patchCacheGate(t.Context(), dir, scripts)
+	patchToolkit(t.Context(), dir, scripts)
 	body, err := os.ReadFile(script)
 	require.NoError(t, err)
 	require.True(t, gateOpened(string(body)), "precondition: the bundle is patched")
 
-	revertCacheGate(t.Context(), dir, scripts)
+	revertToolkit(t.Context(), dir, scripts)
 	body, err = os.ReadFile(script)
 	require.NoError(t, err)
 	assert.Equal(t, gateTSC, string(body), "the original bundle is back")
 
 	// The skip marker survives, so the action stays unpatched from now on.
-	patchCacheGate(t.Context(), dir, scripts)
+	patchToolkit(t.Context(), dir, scripts)
 	body, err = os.ReadFile(script)
 	require.NoError(t, err)
 	assert.Equal(t, gateTSC, string(body), "a reverted action stays unpatched")
@@ -259,11 +259,11 @@ func TestPatchBundleAfterTheActionMoved(t *testing.T) {
 	original := originalFor(dir, script)
 	scripts := []string{script}
 
-	patchCacheGate(t.Context(), dir, scripts)
+	patchToolkit(t.Context(), dir, scripts)
 	require.NoError(t, os.WriteFile(script, []byte(gateWebpack), 0o600)) // the new version lands
 
 	// Reverting must not roll the action back to the version the original came from.
-	revertCacheGate(t.Context(), dir, scripts)
+	revertToolkit(t.Context(), dir, scripts)
 	body, err := os.ReadFile(script)
 	require.NoError(t, err)
 	assert.Equal(t, gateWebpack, string(body))
@@ -282,7 +282,7 @@ func TestPatchBundleAfterTheActionMoved(t *testing.T) {
 
 // The wiring: a step patches its own bundles only when the runner serves the v2 API, and a step
 // that fails gets them back. The action's path inside its repository is part of where they live.
-func TestStepActionRemoteCacheGate(t *testing.T) {
+func TestStepActionRemoteToolkitPatch(t *testing.T) {
 	newStep := func(t *testing.T, env map[string]string) (*stepActionRemote, string) {
 		t.Helper()
 
@@ -303,7 +303,7 @@ func TestStepActionRemoteCacheGate(t *testing.T) {
 
 	t.Run("left alone when the runner does not serve the v2 API", func(t *testing.T) {
 		sar, script := newStep(t, map[string]string{})
-		require.NoError(t, sar.useCacheServiceV2(t.Context()))
+		require.NoError(t, sar.patchActionToolkit(t.Context()))
 
 		body, err := os.ReadFile(script)
 		require.NoError(t, err)
@@ -312,14 +312,14 @@ func TestStepActionRemoteCacheGate(t *testing.T) {
 
 	t.Run("patched, and put back when the step fails", func(t *testing.T) {
 		sar, script := newStep(t, map[string]string{CacheServiceV2Env: "true"})
-		require.NoError(t, sar.useCacheServiceV2(t.Context()))
+		require.NoError(t, sar.patchActionToolkit(t.Context()))
 
 		body, err := os.ReadFile(script)
 		require.NoError(t, err)
 		require.True(t, gateOpened(string(body)))
 
 		failed := errors.New("the step failed")
-		require.ErrorIs(t, sar.revertCacheGateOnFailure(func(context.Context) error { return failed })(t.Context()), failed)
+		require.ErrorIs(t, sar.revertToolkitOnFailure(func(context.Context) error { return failed })(t.Context()), failed)
 
 		body, err = os.ReadFile(script)
 		require.NoError(t, err)

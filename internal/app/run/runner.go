@@ -110,7 +110,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 
 	if envs["ACTIONS_CACHE_URL"] != "" && (cfg.Cache.V2 == nil || *cfg.Cache.V2) {
 		// act patches the GHES check out of an action's bundle when it sees this, so the client
-		// uses the cache service v2 API this server also answers; see act/runner/cache_gate.go.
+		// uses the cache service v2 API this server also answers; see act/runner/toolkit_patch.go.
 		envs[runner.CacheServiceV2Env] = "true"
 	}
 
