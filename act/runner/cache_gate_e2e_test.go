@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,21 +24,21 @@ import (
 // deliberately: a new release is exactly what can stop the patch matching.
 const actionsCacheRef = "v6.1.0"
 
-// actionsCacheBundle downloads one of the pinned action's entrypoints, keeping it in the user
-// cache dir so repeated runs cost nothing. The bundles are megabytes, too large to vendor.
-func actionsCacheBundle(t *testing.T, stage string) string {
+// bundleFromGitHub downloads one entrypoint, keeping it in the user cache dir so repeated runs
+// cost nothing. The bundles are megabytes, too large to vendor.
+func bundleFromGitHub(t *testing.T, repo, ref, path string) string {
 	t.Helper()
 
 	cacheDir, err := os.UserCacheDir()
 	require.NoError(t, err)
-	dir := filepath.Join(cacheDir, "gitea-runner-test", "actions-cache-"+actionsCacheRef)
-	bundle := filepath.Join(dir, stage+".js")
+	dir := filepath.Join(cacheDir, "gitea-runner-test", strings.ReplaceAll(repo, "/", "-")+"-"+ref)
+	bundle := filepath.Join(dir, strings.ReplaceAll(path, "/", "-"))
 	if _, err := os.Stat(bundle); err == nil {
 		return bundle
 	}
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 
-	url := "https://raw.githubusercontent.com/actions/cache/" + actionsCacheRef + "/dist/" + stage + "/index.js"
+	url := "https://raw.githubusercontent.com/" + repo + "/" + ref + "/" + path
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -58,11 +59,11 @@ func actionsCacheBundle(t *testing.T, stage string) string {
 	return bundle
 }
 
-// runCacheAction runs one entrypoint the way a job would. The server URL is the real Gitea host:
-// nothing about the environment is rewritten, so only the patch can make the client choose v2.
-func runCacheAction(t *testing.T, script, workspace, runnerTemp, resultsURL, token, key string) string {
+// runCacheAction runs one entrypoint the way a job would: a real Gitea server URL, and a results
+// URL that points at Gitea rather than at the runner. Nothing about the environment is rewritten,
+// so only the patch can make the client choose v2 and find the cache server.
+func runCacheAction(t *testing.T, script, workspace, runnerTemp, cacheURL, token, key string) string {
 	t.Helper()
-
 	state := filepath.Join(runnerTemp, "state")
 	output := filepath.Join(runnerTemp, "output")
 	for _, name := range []string{state, output} {
@@ -75,7 +76,9 @@ func runCacheAction(t *testing.T, script, workspace, runnerTemp, resultsURL, tok
 		"INPUT_PATH=to-cache",
 		"INPUT_KEY="+key,
 		"ACTIONS_RUNTIME_TOKEN="+token,
-		"ACTIONS_RESULTS_URL="+resultsURL+"/",
+		"ACTIONS_CACHE_URL="+cacheURL+"/",
+		// Unreachable on purpose: the artifact service lives here, the cache service must not.
+		"ACTIONS_RESULTS_URL=https://gitea.example",
 		"ACTIONS_CACHE_SERVICE_V2=true",
 		"GITHUB_SERVER_URL=https://gitea.example.com",
 		"GITHUB_REF=refs/heads/main",
@@ -101,10 +104,12 @@ func tempDirPath(t *testing.T) string {
 	return dir
 }
 
-// The whole chain against the pinned release: patch the real bundles, run the real client with an
-// ordinary Gitea server URL, and have it save and restore through this runner's cache server. If
-// a release stops matching the patch the client falls back to v1 and this fails on the version
-// line, which is the signal to look at the new bundle.
+// The whole chain against the pinned release, whose bundles ship unminified: patch them, run the
+// real client with an ordinary Gitea server URL and a results URL that goes nowhere, and have it
+// save and restore through this runner's cache server. The unreachable results URL is the point,
+// it is what proves the cache reaches the runner without the runner fronting Gitea. If a release
+// stops matching the patch the client falls back to v1 and this fails on the version line, which
+// is the signal to look at the new bundle.
 func TestCacheServiceV2EndToEnd(t *testing.T) {
 	requireHostTools(t, "node")
 
@@ -112,7 +117,7 @@ func TestCacheServiceV2EndToEnd(t *testing.T) {
 	actionDir := tempDirPath(t)
 	scripts := map[string]string{}
 	for _, stage := range []string{"restore", "save"} {
-		body, err := os.ReadFile(actionsCacheBundle(t, stage))
+		body, err := os.ReadFile(bundleFromGitHub(t, "actions/cache", actionsCacheRef, "dist/"+stage+"/index.js"))
 		require.NoError(t, err)
 		scripts[stage] = filepath.Join(actionDir, stage+".js")
 		require.NoError(t, os.WriteFile(scripts[stage], body, 0o600))
@@ -145,4 +150,47 @@ func TestCacheServiceV2EndToEnd(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(restored, "to-cache", "data.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, content, got)
+}
+
+// The gate and the URL getter are separate functions, and a bundler may put either first: the gap
+// between them runs from 159 to 1179 bytes across these actions, which is why neither edit is
+// anchored on that distance. One entrypoint from each of the families that bundle the cache
+// toolkit, patched but not run, is what keeps a future release from quietly matching only one of
+// the two shapes and leaving every cache on v1.
+func TestCacheGatePatchesTheToolkitFamily(t *testing.T) {
+	for _, tc := range []struct{ repo, ref, path string }{
+		{"actions/setup-go", "v7.0.0", "dist/setup/index.js"},
+		{"actions/setup-node", "v6.0.0", "dist/cache-save/index.js"},
+		{"actions/setup-python", "v6.0.0", "dist/setup/index.js"},
+		{"ruby/setup-ruby", "v1.271.0", "dist/index.js"},
+		{"pnpm/action-setup", "v6.0.9", "dist/index.js"},
+		// The artifact toolkit, where the gate is a refusal and there is nothing to redirect.
+		// v4.4.0 is the first release whose gate carries the localhost test this matches; the
+		// releases before it refuse in a shape the runner leaves alone.
+		{"actions/upload-artifact", "v4.4.0", "dist/upload/index.js"},
+		{"actions/upload-artifact", "v7.0.1", "dist/upload/index.js"},
+		{"actions/download-artifact", "v6.0.0", "dist/index.js"},
+		{"oven-sh/setup-bun", "v2.2.0", "dist/setup/index.js"},
+	} {
+		t.Run(tc.repo+"@"+tc.ref, func(t *testing.T) {
+			t.Parallel()
+
+			data, err := os.ReadFile(bundleFromGitHub(t, tc.repo, tc.ref, tc.path))
+			require.NoError(t, err)
+
+			out, patched := patchedBundle(data)
+			assert.True(t, patched, "the version gate was not patched")
+			assert.NotContains(t, string(out), ".LOCALHOST", "a copy of the gate was missed")
+
+			if !strings.Contains(string(data), CacheServiceV2Env) {
+				return // the artifact toolkit: a refusal to open, and no URL to move
+			}
+			// Only the reads inside getCacheServiceURL are rewritten. The others, such as the
+			// feature-availability check, must be left as they are.
+			assert.NotZero(t, strings.Count(string(out), "(process.env."+cacheURLEnv+"||process.env"),
+				"the cache service URL was not redirected")
+			assert.Equal(t, strings.Count(string(data), resultsURLEnv), strings.Count(string(out), resultsURLEnv),
+				"a read of the results URL was lost, it must stay as the fallback")
+		})
+	}
 }

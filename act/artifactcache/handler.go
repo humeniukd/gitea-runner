@@ -340,7 +340,7 @@ func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Para
 	}
 	defer db.Close()
 
-	cache, err := findCache(db, cred.Repo, keys, version)
+	cache, err := h.lookupCache(db, cred.Repo, keys, version)
 	if err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
@@ -349,20 +349,30 @@ func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Para
 		h.responseJSON(w, r, 204)
 		return
 	}
-
-	if ok, err := h.storage.Exist(cache.ID); err != nil {
-		h.responseJSON(w, r, 500, err)
-		return
-	} else if !ok {
-		_ = db.Delete(cache.ID, cache)
-		h.responseJSON(w, r, 204)
-		return
-	}
 	h.responseJSON(w, r, 200, map[string]any{
 		"result":          "hit",
 		"archiveLocation": h.signedArtifactURL(cache.ID, time.Now().Add(artifactURLTTL)),
 		"cacheKey":        cache.Key,
 	})
+}
+
+// lookupCache returns the entry to restore for these keys, or (nil, nil) when there is none:
+// either nothing matched, or the match had lost its blob to a prune, in which case the dangling
+// entry is dropped on the way out.
+func (h *Handler) lookupCache(db *bolthold.Store, repo string, keys []string, version string) (*Cache, error) {
+	cache, err := findCache(db, repo, keys, version)
+	if err != nil || cache == nil {
+		return nil, err
+	}
+	ok, err := h.storage.Exist(cache.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		_ = db.Delete(cache.ID, cache)
+		return nil, nil //nolint:nilnil // absence is not an error here
+	}
+	return cache, nil
 }
 
 // POST /_apis/artifactcache/caches
@@ -480,7 +490,7 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 
 	db.Close()
 
-	if err := h.commitCache(cache, cache.Size); err != nil {
+	if err := h.commitCache(cache); err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
 	}
@@ -491,8 +501,8 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 // commitCache assembles the uploaded parts and marks the entry complete. The caller must
 // have closed its store first: Commit concatenates the whole archive and would otherwise
 // hold bolt's exclusive file lock for the duration.
-func (h *Handler) commitCache(cache *Cache, size int64) error {
-	written, err := h.storage.Commit(cache.ID, size)
+func (h *Handler) commitCache(cache *Cache) error {
+	written, err := h.storage.Commit(cache.ID, cache.Size)
 	if err != nil {
 		return err
 	}
@@ -689,7 +699,7 @@ func findCache(db *bolthold.Store, repo string, keys []string, version string) (
 	cache := &Cache{}
 	for _, prefix := range keys {
 		// if a key in the list matches exactly, don't return partial matches
-		exact, err := findExactCache(db, repo, prefix, version)
+		exact, err := findExactCache(db, repo, prefix, version, true)
 		if err != nil {
 			return nil, err
 		}
@@ -717,18 +727,25 @@ func findCache(db *bolthold.Store, repo string, keys []string, version string) (
 	return nil, nil //nolint:nilnil // pre-existing issue from nektos/act
 }
 
-// findExactCache returns the completed entry for exactly this key and version, or (nil, nil)
-// if there is none. Unlike findCache it never falls back to a prefix (restore-key) match,
-// which is what a reservation needs: a new key that is only a prefix of an existing key is
-// not the same entry and must still be allowed to upload.
-func findExactCache(db *bolthold.Store, repo, key, version string) (*Cache, error) {
+// findExactCache returns the entry for exactly this key and version, or (nil, nil) if there is
+// none. Unlike findCache it never falls back to a prefix (restore-key) match, which is what both
+// its callers need: a new key that is only a prefix of an existing key is not the same entry.
+//
+// A completed entry is the one to restore, sorted by when it was written. An incomplete one is a
+// reservation being uploaded to, sorted by when it was last written to, because the upload route
+// touches UsedAt on every part.
+func findExactCache(db *bolthold.Store, repo, key, version string, complete bool) (*Cache, error) {
+	sortBy := "UsedAt"
+	if complete {
+		sortBy = "CreatedAt"
+	}
 	cache := &Cache{}
 	err := db.FindOne(cache,
 		bolthold.Where("Repo").Eq(repo).
 			And("Key").Eq(key).
 			And("Version").Eq(version).
-			And("Complete").Eq(true).
-			SortBy("CreatedAt").Reverse())
+			And("Complete").Eq(complete).
+			SortBy(sortBy).Reverse())
 	if errors.Is(err, bolthold.ErrNotFound) {
 		return nil, nil //nolint:nilnil // absence is not an error here
 	}

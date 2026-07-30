@@ -27,16 +27,15 @@ import (
 const (
 	cacheServiceV2Path = "/twirp/github.actions.results.api.v1.CacheService"
 
-	// blobPath is where the URLs handed out by the v2 API point. Like the v1 artifact
-	// route it authenticates by signature, because the client uploads and downloads
-	// without an Authorization header.
+	// blobPath is where a v2 client uploads the archive. Like the v1 artifact route it
+	// authenticates by signature, because the client uploads without an Authorization header.
+	// Downloads are handed the v1 artifact URL, which is the same handler behind the same
+	// signature.
 	blobPath = apiPath + "/blobs"
 
 	// blobUploadPurpose keeps an upload URL from being replayed to read an entry.
 	blobUploadPurpose = "upload:"
 
-	// blobUploadURLTTL bounds how long a signed upload URL stays valid. Uploading a
-	// large cache takes a while, so it is more generous than the download TTL.
 	blobUploadURLTTL = time.Hour
 
 	// twirpInternal is the only error code that is not the client's fault.
@@ -48,7 +47,6 @@ func (h *Handler) registerV2Routes(router *httprouter.Router) {
 	router.POST(cacheServiceV2Path+"/FinalizeCacheEntryUpload", h.bearerAuth(h.v2FinalizeCacheEntryUpload))
 	router.POST(cacheServiceV2Path+"/GetCacheEntryDownloadURL", h.bearerAuth(h.v2GetCacheEntryDownloadURL))
 	router.PUT(blobPath+"/:id", h.signedAuth(blobUploadPurpose, h.v2UploadBlob))
-	router.GET(blobPath+"/:id", h.signedAuth("", h.get))
 }
 
 // Reserves an entry and returns the URL to upload the archive to. An entry that already
@@ -75,7 +73,7 @@ func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ h
 	// An exact (key, version) match means the entry is already cached; the client then skips
 	// the upload. A prefix match must not count here, or a shorter key would be reported as
 	// existing and silently never saved.
-	if existing, err := findExactCache(db, cred.Repo, req.Key, req.Version); err != nil {
+	if existing, err := findExactCache(db, cred.Repo, req.Key, req.Version, true); err != nil {
 		h.twirpError(w, r, twirpInternal, err)
 		return
 	} else if existing != nil {
@@ -120,18 +118,19 @@ func (h *Handler) v2FinalizeCacheEntryUpload(w http.ResponseWriter, r *http.Requ
 	}
 	defer db.Close()
 
-	cache, err := findReservedCache(db, cred.Repo, req.Key, req.Version)
-	if errors.Is(err, bolthold.ErrNotFound) {
-		h.twirpMiss(w, r)
-		return
-	} else if err != nil {
+	cache, err := findExactCache(db, cred.Repo, req.Key, req.Version, false)
+	if err != nil {
 		h.twirpError(w, r, twirpInternal, err)
+		return
+	}
+	if cache == nil {
+		h.twirpMiss(w, r)
 		return
 	}
 	db.Close() // commitCache needs the store closed
 
-	size, _ := cmp.Or(req.SizeBytes, req.SizeBytesCamel).Int64()
-	if err := h.commitCache(cache, size); err != nil {
+	cache.Size, _ = cmp.Or(req.SizeBytes, req.SizeBytesCamel).Int64()
+	if err := h.commitCache(cache); err != nil {
 		h.logger.Errorf("finalize cache %d (%s): %v", cache.ID, cache.Key, err)
 		h.twirpMiss(w, r)
 		return
@@ -159,7 +158,7 @@ func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Requ
 	}
 	defer db.Close()
 
-	cache, err := findCache(db, cred.Repo, req.keys(), req.Version)
+	cache, err := h.lookupCache(db, cred.Repo, req.keys(), req.Version)
 	if err != nil {
 		h.twirpError(w, r, twirpInternal, err)
 		return
@@ -168,19 +167,10 @@ func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Requ
 		h.twirpMiss(w, r)
 		return
 	}
-	if ok, err := h.storage.Exist(cache.ID); err != nil {
-		h.twirpError(w, r, twirpInternal, err)
-		return
-	} else if !ok {
-		// The blob is gone (pruned or lost); drop the dangling entry and report a miss.
-		_ = db.Delete(cache.ID, cache)
-		h.twirpMiss(w, r)
-		return
-	}
 
 	h.responseJSON(w, r, http.StatusOK, map[string]any{
 		"ok":                true,
-		"signedDownloadUrl": h.signedURL(blobPath, "", cache.ID, time.Now().Add(artifactURLTTL)),
+		"signedDownloadUrl": h.signedArtifactURL(cache.ID, time.Now().Add(artifactURLTTL)),
 		"matchedKey":        cache.Key,
 	})
 }
@@ -208,9 +198,10 @@ func (h *Handler) v2UploadBlob(w http.ResponseWriter, r *http.Request, params ht
 		return
 	}
 
-	switch strings.ToLower(r.URL.Query().Get("comp")) {
+	query := r.URL.Query()
+	switch strings.ToLower(query.Get("comp")) {
 	case "block":
-		blockID := r.URL.Query().Get("blockid")
+		blockID := query.Get("blockid")
 		if blockID == "" {
 			h.responseJSON(w, r, http.StatusBadRequest, errors.New("missing blockid"))
 			return
@@ -262,21 +253,6 @@ func (h *Handler) touchIncompleteCache(id uint64) error {
 	}
 	cache.UsedAt = time.Now().Unix()
 	return db.Update(cache.ID, cache)
-}
-
-// findReservedCache returns the reservation written to most recently, since the upload route
-// touches UsedAt on every part. The request carries no entry id, so two jobs reserving the same
-// key and version cannot be told apart here; the size check in Commit rejects a mismatched pair.
-func findReservedCache(db *bolthold.Store, repo, key, version string) (*Cache, error) {
-	cache := &Cache{}
-	if err := db.FindOne(cache, bolthold.Where("Repo").Eq(repo).
-		And("Key").Eq(key).
-		And("Version").Eq(version).
-		And("Complete").Eq(false).
-		SortBy("UsedAt").Reverse()); err != nil {
-		return nil, err
-	}
-	return cache, nil
 }
 
 // twirpMiss is the cache service's "no such entry": not an error, just nothing to restore.

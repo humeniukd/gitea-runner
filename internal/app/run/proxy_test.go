@@ -24,28 +24,13 @@ func TestJobProxyEnv(t *testing.T) {
 	const proxy = "http://proxy:3128"
 
 	for _, tc := range []struct {
-		name       string
-		runner     map[string]string // the runner process environment
-		envs       map[string]string // what runner.envs already put in the job
-		cacheURL   string
-		resultsURL string
-		services   []string
-		want       map[string]string
+		name     string
+		runner   map[string]string // the runner process environment
+		envs     map[string]string // what runner.envs already put in the job
+		cacheURL string
+		services []string
+		want     map[string]string
 	}{
-		{
-			// With an external cache server the results proxy is on a different host, so
-			// listing only the cache server would send the job's cache and artifact
-			// traffic through the proxy.
-			name:       "the results proxy is reached directly alongside the cache server",
-			runner:     map[string]string{"http_proxy": proxy},
-			cacheURL:   "http://cache.example:8088/",
-			resultsURL: "http://192.168.1.10:34567",
-			want: map[string]string{
-				"http_proxy": proxy, "HTTP_PROXY": proxy,
-				"no_proxy": loopback + ",cache.example,192.168.1.10",
-				"NO_PROXY": loopback + ",cache.example,192.168.1.10",
-			},
-		},
 		{
 			// The guarantee that makes this safe to ship: a runner without a proxy gives its
 			// jobs nothing at all.
@@ -134,7 +119,7 @@ func TestJobProxyEnv(t *testing.T) {
 			for name, value := range tc.runner {
 				t.Setenv(name, value)
 			}
-			assert.Equal(t, tc.want, JobProxyEnv(tc.envs, tc.services, tc.cacheURL, tc.resultsURL))
+			assert.Equal(t, tc.want, JobProxyEnv(tc.envs, tc.cacheURL, tc.services))
 		})
 	}
 }

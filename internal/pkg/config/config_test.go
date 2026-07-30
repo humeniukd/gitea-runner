@@ -347,3 +347,25 @@ cache:
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "contains no secret")
 }
+
+// cache.v2 is left unset rather than defaulted, because enableCacheServiceV2 reads the pointer to
+// tell "the operator turned it off" from "the operator never mentioned it".
+func TestLoadDefault_CacheV2StaysUnsetWhenAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("cache:\n  dir: /tmp/x\n"), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Nil(t, cfg.Cache.V2)
+}
+
+// The shipped example must parse and must not warn about unknown keys.
+func TestLoadDefault_ExampleConfigParses(t *testing.T) {
+	hook := test.NewGlobal()
+
+	cfg, err := LoadDefault("config.example.yaml")
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Cache.V2)
+	assert.True(t, *cfg.Cache.V2)
+	assert.Empty(t, hook.AllEntries())
+}

@@ -69,6 +69,8 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 				github.Token = sar.RunContext.Config.ReplaceGheActionTokenWithGithubCom
 			}
 		}
+		// Actions served from the action cache are read out of a git object store rather than a
+		// directory, so they never reach the bundle patch below and keep to the v1 cache API.
 		if sar.RunContext.Config.ActionCache != nil {
 			cache := sar.RunContext.Config.ActionCache
 
@@ -173,10 +175,7 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			},
 			// A stage of its own: it takes the same clone lock, and it has to land before
 			// runAction copies the action into the job container.
-			func(ctx context.Context) error {
-				sar.useCacheServiceV2(ctx)
-				return nil
-			},
+			sar.useCacheServiceV2,
 		)(ctx)
 	}
 }
@@ -239,12 +238,12 @@ func (sar *stepActionRemote) cacheGateBundles() (string, []string) {
 
 // useCacheServiceV2 patches the cache client's version gate out of this action's bundles, so it
 // can use the v2 API this runner serves. A no-op unless the runner serves it.
-func (sar *stepActionRemote) useCacheServiceV2(ctx context.Context) {
-	if sar.RunContext.GetEnv()[cacheServiceV2Env] == "" {
-		return
+func (sar *stepActionRemote) useCacheServiceV2(ctx context.Context) error {
+	if sar.RunContext.GetEnv()[CacheServiceV2Env] != "" {
+		dir, scripts := sar.cacheGateBundles()
+		patchCacheGate(ctx, dir, scripts)
 	}
-	dir, scripts := sar.cacheGateBundles()
-	patchCacheGate(ctx, dir, scripts)
+	return nil
 }
 
 // revertCacheGateOnFailure restores the untouched bundles when the action fails, so a later job
@@ -260,7 +259,6 @@ func (sar *stepActionRemote) revertCacheGateOnFailure(exec common.Executor) comm
 	}
 }
 
-// actionDir is where this action's files are unpacked, the same location every stage uses.
 func (sar *stepActionRemote) actionDir() string {
 	return fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), sar.Step.UsesHash())
 }

@@ -223,7 +223,7 @@ The runner uses them for its own requests and gives them to every job, in lower 
 
 These hosts are added to `no_proxy` for jobs, so they are always reached directly:
 
-- the cache server, and the results proxy when `cache.v2` is on
+- the cache server
 - `localhost`, `127.0.0.1` and `::1`
 - the job's service containers
 - the Docker daemon, when it is reached over `tcp://`
@@ -244,20 +244,16 @@ Each runner starts its own cache server automatically. Cache entries are local t
 
 **Cache service v2**
 
-`actions/cache@v4.2` and later can use the *cache service v2* API instead of the older cache endpoints. The runner serves it:
-
-It is on by default. Turn it off with:
+`actions/cache@v4.2` and later can use the *cache service v2* API instead of the older cache endpoints. The runner serves it, on by default, from the same store as v1, so a workflow moving between action versions loses nothing. It works with `external_server` too. Turn it off with:
 
 ```yaml
 cache:
   v2: false
 ```
 
-The v2 client looks that service up under `ACTIONS_RESULTS_URL`, the same URL artifacts are uploaded to, so enabling this starts a small proxy that jobs get as `ACTIONS_RESULTS_URL`: cache calls are answered by the runner's cache server, everything else — artifacts above all — is forwarded to Gitea unchanged. It works with `external_server` too, and both API versions share one store, so nothing is lost when a workflow moves between them.
+The client will not use that API unless `GITHUB_SERVER_URL` names a GitHub host, and no server-side setting overrides that. Rather than misreport the server URL, which would break actions that build real URLs from it, the runner edits the action's own bundle: the check becomes one every host satisfies, and the cache service URL comes from `ACTIONS_CACHE_URL`. The untouched copy is kept beside the action, `ACTIONS_RESULTS_URL` still points at Gitea, and artifacts never travel through the runner. Both edits are applied together or not at all, so a bundle that does not match is left alone and keeps to v1, as is an action whose step failed while patched: its original is put back for later jobs.
 
-The client refuses the v2 API unless `GITHUB_SERVER_URL` names a GitHub host, and no server-side setting overrides that. Rather than misreport the server URL, which would break actions that build real URLs from it, the runner replaces that one check with `false` in the action's own bundle, keeping the untouched copy beside it. An action whose bundle does not match is left alone and keeps using v1. If a step fails with a patched bundle, the original is restored and the step is retried as shipped.
-
-Clients that do not use v2 keep using the v1 API, and both versions share one store.
+The same check is what makes the stock `actions/upload-artifact` and `actions/download-artifact` abort on Gitea, since they take any non-GitHub host for GitHub Enterprise. Opening it lets them work without the `gitea-upload-artifact` fork, from `upload-artifact@v4.4.0` onward; earlier releases word the check differently and are left alone.
 
 **Shared cache across multiple runners**
 

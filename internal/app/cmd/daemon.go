@@ -141,9 +141,13 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		)
 
 		runner := run.NewRunner(cfg, reg, cli)
-		// NewRunner starts the job-facing servers, so an early return must not leak them.
-		// Close is idempotent; the graceful path below still closes once jobs are done.
-		defer func() { _ = runner.Close() }()
+		// NewRunner starts the job-facing servers, so nothing is left serving jobs once this
+		// returns, however it returns.
+		defer func() {
+			if err := runner.Close(); err != nil {
+				log.Warnf("runner: %s failed to shut down its job-facing servers: %v", reg.Name, err)
+			}
+		}()
 
 		// declare the labels of the runner before fetching tasks
 		resp, err := runner.Declare(ctx, ls.Names())
@@ -203,11 +207,6 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		err = poller.Shutdown(ctx)
 		if err != nil {
 			log.Warnf("runner: %s cancelled in progress jobs during shutdown", resp.Msg.Runner.Name)
-		}
-
-		// After the jobs are done: nothing is left to serve them.
-		if err := runner.Close(); err != nil {
-			log.Warnf("runner: %s failed to shut down its job-facing servers: %v", resp.Msg.Runner.Name, err)
 		}
 
 		if poller.Unregistered() {

@@ -71,13 +71,14 @@ func startTestHandler(t *testing.T) *Handler {
 	return handler
 }
 
-// saveV2 runs the reserve/upload/finalize sequence and returns the finalize response.
-func saveV2(t *testing.T, handler *Handler, key, version string, content []byte) map[string]any {
+// saveV2 runs the reserve/upload/finalize sequence and returns the finalize response along
+// with the upload URL it used.
+func saveV2(t *testing.T, handler *Handler, key, version string, content []byte) (finalized map[string]any, uploadURL string) {
 	t.Helper()
 
 	created := v2Call(t, handler, testClient, "CreateCacheEntry", map[string]any{"key": key, "version": version})
 	require.Equal(t, true, created["ok"])
-	uploadURL, _ := created["signedUploadUrl"].(string)
+	uploadURL, _ = created["signedUploadUrl"].(string)
 	require.NotEmpty(t, uploadURL)
 	require.Equal(t, http.StatusCreated, putBlob(t, uploadURL, content))
 
@@ -85,29 +86,30 @@ func saveV2(t *testing.T, handler *Handler, key, version string, content []byte)
 		"key": key, "version": version,
 		// int64 fields travel as strings in the proto JSON mapping.
 		"size_bytes": strconv.Itoa(len(content)),
-	})
+	}), uploadURL
 }
 
-// The whole round trip an actions/cache v2 client makes, plus the guarantee that the
-// signed upload URL cannot be replayed to replace the archive once the entry is finalized.
+// The whole round trip an actions/cache v2 client makes, plus the guarantees on the signed
+// URLs it is handed: unsigned requests are refused, an upload URL cannot be replayed to read
+// or to replace a finalized entry.
 func TestCacheServiceV2RoundTrip(t *testing.T) {
 	handler := startTestHandler(t)
 	content := []byte("the cached archive")
 
-	created := v2Call(t, handler, testClient, "CreateCacheEntry", map[string]any{"key": "deps-v1", "version": "abc123"})
-	require.Equal(t, true, created["ok"])
-	uploadURL, _ := created["signedUploadUrl"].(string)
-	require.NotEmpty(t, uploadURL)
-	require.Equal(t, http.StatusCreated, putBlob(t, uploadURL, content))
+	unsigned := fmt.Sprintf("%s%s/1", handler.ExternalURL(), blobPath)
+	assert.Equal(t, http.StatusUnauthorized, putBlob(t, unsigned, content))
 
-	finalized := v2Call(t, handler, testClient, "FinalizeCacheEntryUpload", map[string]any{
-		"key": "deps-v1", "version": "abc123", "size_bytes": strconv.Itoa(len(content)),
-	})
+	finalized, uploadURL := saveV2(t, handler, "deps-v1", "abc123", content)
 	require.Equal(t, true, finalized["ok"])
 	assert.NotEmpty(t, finalized["entryId"])
 
-	// The upload URL outlives the finalize call, so replaying it must not poison the entry.
+	// The upload URL outlives the finalize call, so replaying it must not poison the entry,
+	// and it is an upload URL only: nothing reads a blob back through it.
 	assert.Equal(t, http.StatusBadRequest, putBlob(t, uploadURL, []byte("poisoned")))
+	resp, err := http.Get(uploadURL) //nolint:noctx // the URL is the server under test
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
 
 	got := v2Call(t, handler, testClient, "GetCacheEntryDownloadURL", map[string]any{"key": "deps-v1", "version": "abc123"})
 	require.Equal(t, true, got["ok"])
@@ -158,7 +160,8 @@ func TestCacheServiceV2BlockUpload(t *testing.T) {
 
 func TestCacheServiceV2Lookups(t *testing.T) {
 	handler := startTestHandler(t)
-	require.Equal(t, true, saveV2(t, handler, "deps-abc", "v1", []byte("x"))["ok"])
+	saved, _ := saveV2(t, handler, "deps-abc", "v1", []byte("x"))
+	require.Equal(t, true, saved["ok"])
 
 	t.Run("reports a miss for an unknown key", func(t *testing.T) {
 		got := v2Call(t, handler, testClient, "GetCacheEntryDownloadURL", map[string]any{"key": "nothing", "version": "v1"})
@@ -213,51 +216,27 @@ func TestCacheServiceV2Lookups(t *testing.T) {
 		})
 		assert.Equal(t, true, got["ok"])
 	})
-}
 
-// Both API versions are served from one store, so an entry written through v2 is a hit for
-// a v1 client asking for the same key and version.
-func TestCacheServiceV2SharesTheStoreWithV1(t *testing.T) {
-	handler := startTestHandler(t)
-	require.Equal(t, true, saveV2(t, handler, "shared", "v1", []byte("shared"))["ok"])
+	// Both API versions are served from one store, so an entry written through v2 is a hit for
+	// a v1 client asking for the same key and version.
+	t.Run("a v1 client sees an entry written through v2", func(t *testing.T) {
+		resp, err := testClient.Get(fmt.Sprintf("%s%s/cache?keys=deps-abc&version=v1", handler.ExternalURL(), apiPath))
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	resp, err := testClient.Get(fmt.Sprintf("%s%s/cache?keys=shared&version=v1", handler.ExternalURL(), apiPath))
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+		got := map[string]any{}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+		assert.Equal(t, "deps-abc", got["cacheKey"])
+		assert.Equal(t, []byte("x"), getURL(t, got["archiveLocation"].(string)))
+	})
 
-	got := map[string]any{}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
-	assert.Equal(t, "shared", got["cacheKey"])
-	assert.Equal(t, []byte("shared"), getURL(t, got["archiveLocation"].(string)))
-}
+	// The cache of one repository must stay invisible to another, as it does for the v1 API.
+	t.Run("another repository sees nothing", func(t *testing.T) {
+		handler.RegisterJob("other-runtime-token", "other/repo")
+		otherClient := &http.Client{Transport: &bearerTransport{token: "other-runtime-token"}}
 
-// The cache of one repository must stay invisible to another, as it does for the v1 API.
-func TestCacheServiceV2IsScopedPerRepository(t *testing.T) {
-	handler := startTestHandler(t)
-	require.Equal(t, true, saveV2(t, handler, "scoped", "v1", []byte("secret"))["ok"])
-
-	handler.RegisterJob("other-runtime-token", "other/repo")
-	otherClient := &http.Client{Transport: &bearerTransport{token: "other-runtime-token"}}
-
-	got := v2Call(t, handler, otherClient, "GetCacheEntryDownloadURL", map[string]any{"key": "scoped", "version": "v1"})
-	assert.Equal(t, false, got["ok"])
-}
-
-func TestCacheServiceV2RejectsUnsignedBlobRequests(t *testing.T) {
-	handler := startTestHandler(t)
-
-	created := v2Call(t, handler, testClient, "CreateCacheEntry", map[string]any{"key": "signed", "version": "v1"})
-	uploadURL, _ := created["signedUploadUrl"].(string)
-	require.NotEmpty(t, uploadURL)
-
-	unsigned := fmt.Sprintf("%s%s/1", handler.ExternalURL(), blobPath)
-	assert.Equal(t, http.StatusUnauthorized, putBlob(t, unsigned, []byte("x")))
-
-	// An upload URL is signed differently from a download URL, so it cannot be replayed
-	// to read an entry.
-	resp, err := http.Get(uploadURL) //nolint:noctx // the URL is the server under test
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		got := v2Call(t, handler, otherClient, "GetCacheEntryDownloadURL", map[string]any{"key": "deps-abc", "version": "v1"})
+		assert.Equal(t, false, got["ok"])
+	})
 }

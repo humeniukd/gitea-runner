@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gitea.com/gitea/runner/act/common"
@@ -16,50 +17,89 @@ import (
 	"gitea.com/gitea/runner/act/model"
 )
 
-// The @actions/cache client picks its API version from GITHUB_SERVER_URL: getCacheServiceVersion
-// returns v1 unless the host is github.com, *.ghe.com or *.localhost, and no server-side setting
-// overrides that. Rather than lie to the whole action about the server URL, which breaks anything
-// that builds a real URL out of it, the one call that gates the choice is replaced with false in
-// the action's own bundle. Gitea already does the same edit by hand in its fork of
-// upload-artifact; this applies it to the one call site, so other uses of isGhes keep working.
+// Two lines of the @actions/cache client keep it from using this runner's cache service v2 API,
+// and both are edited out of the action's own bundle.
+//
+// isGhes() decides that any host which is not github.com, *.ghe.com or *.localhost is GitHub
+// Enterprise, and getCacheServiceVersion() forces v1 for it. The edit turns the last of those
+// three tests, `hostname.endsWith('.LOCALHOST')`, into `endsWith("")`, which every hostname
+// satisfies. That is the whole gate: one string literal, no call sites to resolve, and the same
+// answer the toolkit's own proposed ACTIONS_VENDOR switch would give. Gitea already makes this
+// edit by hand in its fork of upload-artifact.
+//
+// getCacheServiceURL() then resolves the service from ACTIONS_RESULTS_URL alone, where v1 reads
+// ACTIONS_CACHE_URL first. Both reads in that function are given the same ACTIONS_CACHE_URL
+// preference, which is what keeps the runner out of the artifact path: the results URL still
+// points at Gitea and only the cache goes to the cache server. That function is found by its v1
+// branch, the only place the two variables are read together.
+//
+// Neither edit is applied without the other. A bundle where one shape is unrecognised is left
+// alone and keeps to v1, which the runner also serves, rather than being sent to a results URL
+// that implements no cache service.
 //
 // Either of these landing upstream makes this file deletable:
 //
 //	https://github.com/actions/toolkit/pull/2123   — an ACTIONS_VENDOR switch, naming Gitea
 //	https://github.com/actions/toolkit/issues/2439 — treat ACTIONS_RESULTS_URL as the signal
 const (
-	cacheServiceV2Env = "ACTIONS_CACHE_SERVICE_V2"
-	gateName          = "isGhes"
+	CacheServiceV2Env = "ACTIONS_CACHE_SERVICE_V2"
+	cacheURLEnv       = "ACTIONS_CACHE_URL"
+	resultsURLEnv     = "ACTIONS_RESULTS_URL"
 
-	// cacheGateMarker must occur within maxMarkerDistance of the variable for the bundle to
-	// hold the gate rather than an unrelated mention: they are adjacent statements of
-	// getCacheServiceVersion and bundling keeps them so, measured 310-335 bytes apart across
-	// actions/cache, the setup-* family, Swatinem/rust-cache and ruby/setup-ruby.
-	cacheGateMarker   = ".LOCALHOST"
-	maxMarkerDistance = 2 << 10
+	// artifactRefusal is the error @actions/artifact throws behind the same gate, and the only
+	// thing that gate guards there. Its presence is what makes an artifact bundle safe to open:
+	// a bundle carrying neither toolkit uses isGhes for something this runner has not looked at,
+	// and is left alone.
+	artifactRefusal = "GHESNotSupportedError"
 
-	// gateCallDistance is how far ahead of the variable the guarding call sits, in every shape
-	// seen: an if statement, or the ternary esbuild emits.
-	gateCallDistance = 400
+	// urlBranchDistance separates the two branches of getCacheServiceURL: the v1 branch reads the
+	// cache URL and falls back to the results URL, the v2 branch reads the results URL alone. Both
+	// live in one function body, so the gap is small and stable, 2 bytes minified and 20 not,
+	// across every bundle measured. The nearest read of the results URL belonging to anything else
+	// sits some 75 kB away, so the window has room to spare for a larger function body.
+	urlBranchDistance = 1 << 10
 
-	// sidecarSuffix names the directory holding each patched bundle's untouched copy. It is a
-	// sibling of the action directory, never inside it, because the action directory is copied
-	// wholesale into every job container.
+	// sidecarSuffix names the directory holding each patched bundle's untouched copy, a sibling
+	// of the action directory because that directory is copied wholesale into job containers.
 	sidecarSuffix = ".cache-gate"
 
-	// skipMarker in the sidecar means a patched bundle already failed once here, so the action
-	// is left as its author shipped it from then on.
+	// skipMarker in the sidecar means a patched bundle already failed once here.
 	skipMarker = "skip"
 
 	maxBundleSize = 64 << 20
 )
 
-// gateAlias recovers the gate's real name after a bundler mangled it, as in `vu.isGhes=$K`.
-var gateAlias = regexp.MustCompile(`\.` + gateName + `\s*=\s*([A-Za-z_$][A-Za-z0-9_$]*)`)
+var (
+	// localhostTest matches the third hostname test of isGhes, in any quoting. The match is case
+	// sensitive on purpose, and that is load-bearing: isGhes uppercases the hostname before
+	// testing it, while undici, bundled into all of these actions, tests a lowercase ".localhost"
+	// in isURLPotentiallyTrustworthy. Opening that one would tell its HTTP client that every URL
+	// is trustworthy. Uppercase, the literal occurs nowhere but this test, across sixteen bundles
+	// from ten actions.
+	localhostTest = regexp.MustCompile(`endsWith\s*\(\s*` + quoted(`\.LOCALHOST`) + `\s*\)`)
 
-// actionScriptPaths returns the entrypoints of a node action, the only kind with a bundle.
+	// cacheURLRead and resultsURLRead match one read of either variable, in either property syntax.
+	cacheURLRead   = regexp.MustCompile(envRead(cacheURLEnv))
+	resultsURLRead = regexp.MustCompile(envRead(resultsURLEnv))
+)
+
+// envRead builds a pattern matching one read of an environment variable, as a property or as any
+// flavour of quoted index.
+func envRead(name string) string {
+	return `process\s*\.\s*env\s*(?:\.\s*` + name + `\b|\[\s*` + quoted(name) + `\s*\])`
+}
+
+// quoted matches a JavaScript string literal holding exactly pattern, in any of the three quote
+// characters. RE2 has no backreferences, so the pairs are spelled out.
+func quoted(pattern string) string {
+	return "(?:'" + pattern + "'|\"" + pattern + "\"|`" + pattern + "`)"
+}
+
+// actionScriptPaths returns the entrypoints of a node action, the only kind with a bundle. Only
+// remote actions get here: a local one lives in the user's checkout, which the runner does not
+// rewrite, so a repo-vendored action bundling @actions/cache stays on the v1 API.
 func actionScriptPaths(dir string, action *model.Action) []string {
-	if action == nil || !strings.HasPrefix(string(action.Runs.Using), "node") {
+	if action == nil || !action.Runs.Using.IsNode() {
 		return nil
 	}
 	var paths []string
@@ -71,15 +111,14 @@ func actionScriptPaths(dir string, action *model.Action) []string {
 	return paths
 }
 
-// patchCacheGateIn lets an action reach the v2 cache API by patching the version gate out of its
+// patchCacheGate lets an action reach the v2 cache API by patching the version gate out of its
 // bundles, keeping each original in a sidecar directory. Every failure is silent and leaves the
 // bundle untouched: the client then picks v1, which the runner also serves.
 func patchCacheGate(ctx context.Context, actionDir string, scripts []string) {
 	if len(scripts) == 0 {
 		return
 	}
-	sidecar := actionDir + sidecarSuffix
-	if _, err := os.Stat(filepath.Join(sidecar, skipMarker)); err == nil {
+	if _, err := os.Stat(filepath.Join(sidecarDir(actionDir), skipMarker)); err == nil {
 		return
 	}
 	defer git.AcquireCloneLock(actionDir)()
@@ -91,46 +130,56 @@ func patchCacheGate(ctx context.Context, actionDir string, scripts []string) {
 	}
 }
 
-// revertCacheGateIn puts the originals back and stops this action being patched again, so the
-// next job runs it exactly as shipped. Called when a step failed with a patched bundle; it does
-// not re-run the step, because a step's outputs and env-file writes are already recorded by then.
+// revertCacheGate puts the originals back and stops this action being patched again, so the next
+// job runs it exactly as shipped. Called when a step failed with a patched bundle; it does not
+// re-run the step, because a step's outputs and env-file writes are already recorded by then.
 func revertCacheGate(ctx context.Context, actionDir string, scripts []string) {
 	if len(scripts) == 0 {
 		return
 	}
-	sidecar := actionDir + sidecarSuffix
-	if _, err := os.Stat(sidecar); err != nil {
+	if _, err := os.Stat(sidecarDir(actionDir)); err != nil {
 		return
 	}
 	defer git.AcquireCloneLock(actionDir)()
 
 	reverted := false
 	for _, script := range scripts {
-		if err := os.Rename(originalFor(actionDir, script), script); err == nil {
+		original := originalFor(actionDir, script)
+		if !isPatchOf(original, script) {
+			continue
+		}
+		if err := os.Rename(original, script); err == nil {
 			reverted = true
 		}
 	}
-	if err := os.MkdirAll(sidecar, 0o755); err == nil {
-		_ = os.WriteFile(filepath.Join(sidecar, skipMarker), nil, 0o600)
-	}
+	_ = os.WriteFile(filepath.Join(sidecarDir(actionDir), skipMarker), nil, 0o600)
 	if reverted {
 		common.Logger(ctx).Warnf("cache service v2: restored the original %s, it will not be patched again", filepath.Base(actionDir))
 	}
 }
 
-func originalFor(actionDir, script string) string {
-	rel, err := filepath.Rel(actionDir, script)
-	if err != nil {
-		rel = filepath.Base(script)
-	}
-	return filepath.Join(actionDir+sidecarSuffix, rel)
+// sidecarDir holds an action's untouched bundles, and the marker that stops it being patched.
+func sidecarDir(actionDir string) string {
+	return actionDir + sidecarSuffix
 }
 
-// patchBundle rewrites one entrypoint in place. The original is moved aside, not copied, and its
-// presence is what marks the bundle as already patched.
+func originalFor(actionDir, script string) string {
+	return filepath.Join(sidecarDir(actionDir), strings.TrimPrefix(script, actionDir))
+}
+
+// patchBundle rewrites one entrypoint in place. The original is moved aside, not copied, and it
+// is what marks the bundle as already patched.
 func patchBundle(script, original string) error {
 	if _, err := os.Stat(original); err == nil {
-		return nil
+		if isPatchOf(original, script) {
+			return nil
+		}
+		// The action's ref moved and git checked the new bundle out over the patched one, so
+		// the pair no longer belongs together. Patch afresh rather than keep an original that
+		// would restore an older version of the action.
+		if err := os.Remove(original); err != nil {
+			return err
+		}
 	}
 	info, err := os.Stat(script)
 	if err != nil {
@@ -143,8 +192,8 @@ func patchBundle(script, original string) error {
 	if err != nil {
 		return err
 	}
-	patched, count := patchedBundle(data)
-	if count == 0 {
+	patched, ok := patchedBundle(data)
+	if !ok {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(original), 0o755); err != nil {
@@ -156,75 +205,92 @@ func patchBundle(script, original string) error {
 	return os.WriteFile(script, patched, info.Mode().Perm())
 }
 
-// patchCacheGate replaces the call guarding each read of the variable with false. A bundle that
-// only mentions the variable comes back untouched.
-func patchedBundle(data []byte) ([]byte, int) {
-	if !hasVersionGate(data) {
-		return data, 0
+// isPatchOf reports whether script is exactly what patching original produced. It is what proves
+// the two still belong together: an action whose ref moved is checked out over the patched bundle,
+// leaving an original that would restore the version before the move.
+func isPatchOf(original, script string) bool {
+	data, err := os.ReadFile(original)
+	if err != nil {
+		return false
 	}
-	calls := gateCalls(data)
-
-	out := make([]byte, 0, len(data))
-	last, count := 0, 0
-	marker := []byte(cacheServiceV2Env)
-	for i := 0; ; {
-		j := bytes.Index(data[i:], marker)
-		if j < 0 {
-			break
-		}
-		at := i + j
-		i = at + len(marker)
-
-		// The nearest call before the read is the guard; earlier ones include the gate's own
-		// definition, which reads as an empty call too.
-		k := len(calls) - 1
-		for ; k >= 0 && calls[k][0] >= at; k-- {
-		}
-		if k < 0 || calls[k][0] < max(last, at-gateCallDistance) {
-			continue
-		}
-		out = append(out, data[last:calls[k][0]]...)
-		out = append(out, "false"...)
-		last, count = calls[k][1], count+1
+	current, err := os.ReadFile(script)
+	if err != nil {
+		return false
 	}
-	if count == 0 {
-		return data, 0
-	}
-	return append(out, data[last:]...), count
+	patched, ok := patchedBundle(data)
+	return ok && bytes.Equal(patched, current)
 }
 
-// gateCalls returns the byte range of every empty call to the gate, under the plain name, any
-// prefix a bundler added, and the short name it was mangled to. A definition is not a call.
-func gateCalls(data []byte) [][2]int {
-	names := []string{`[A-Za-z0-9_$]*` + gateName}
-	for _, m := range gateAlias.FindAllSubmatch(data, -1) {
-		names = append(names, regexp.QuoteMeta(string(m[1])))
-	}
-	call := regexp.MustCompile(`(?:\A|[^A-Za-z0-9_$])((?:` + strings.Join(names, "|") + `)\s*\(\s*\))`)
-
-	var calls [][2]int
-	for _, m := range call.FindAllSubmatchIndex(data, -1) {
-		if bytes.HasSuffix(bytes.TrimRight(data[max(m[2]-10, 0):m[2]], " \t"), []byte("function")) {
-			continue
-		}
-		calls = append(calls, [2]int{m[2], m[3]})
-	}
-	return calls
+// edit is a byte range of the bundle and what replaces it.
+type edit struct {
+	start, end int
+	text       string
 }
 
-func hasVersionGate(data []byte) bool {
-	marker, gate := []byte(cacheServiceV2Env), []byte(cacheGateMarker)
-	for i := 0; ; {
-		j := bytes.Index(data[i:], marker)
-		if j < 0 {
-			return false
-		}
-		at := i + j
-		lo := max(at-maxMarkerDistance, 0)
-		hi := min(at+maxMarkerDistance+len(gate), len(data))
-		if bytes.Contains(data[lo:hi], gate) {
-			return true
-		}
-		i = at + 1
+// patchedBundle opens the GHES gate, and where the cache toolkit is present, points the cache
+// service at the cache server. A bundle this runner cannot account for comes back untouched.
+func patchedBundle(data []byte) ([]byte, bool) {
+	gates := localhostTest.FindAllIndex(data, -1)
+	if len(gates) == 0 {
+		return data, false
 	}
+	urls := cacheURLPreference(data)
+
+	switch {
+	case bytes.Contains(data, []byte(CacheServiceV2Env)):
+		// The cache toolkit: both edits or neither, because choosing v2 without redirecting the
+		// URL would send the client to a results URL that serves no cache service.
+		if len(urls) == 0 {
+			return data, false
+		}
+	case bytes.Contains(data, []byte(artifactRefusal)):
+		// The artifact toolkit, where the gate is a plain refusal and there is no URL to move:
+		// artifacts already go to Gitea, which implements that service.
+	default:
+		return data, false
+	}
+
+	edits := make([]edit, 0, len(gates)+len(urls))
+	for _, g := range gates {
+		edits = append(edits, edit{g[0], g[1], `endsWith("")`})
+	}
+	return applyEdits(data, append(edits, urls...)), true
+}
+
+// cacheURLPreference rewrites the reads of the results URL that sit in getCacheServiceURL so they
+// prefer the cache URL, which is where this runner serves the cache service. That function is
+// found by its v1 branch, the only place the two variables are read together: the v2 branch is
+// what follows. Giving both branches the same preference leaves v1 as it already behaves.
+func cacheURLPreference(data []byte) []edit {
+	var edits []edit
+	for _, anchor := range cacheURLRead.FindAllIndex(data, -1) {
+		hi := min(anchor[1]+urlBranchDistance, len(data))
+		for _, m := range resultsURLRead.FindAllIndex(data[anchor[1]:hi], -1) {
+			start, end := anchor[1]+m[0], anchor[1]+m[1]
+			edits = append(edits, edit{start, end, "(process.env." + cacheURLEnv + "||" + string(data[start:end]) + ")"})
+		}
+	}
+	return edits
+}
+
+// applyEdits splices the edits into data. They are sorted because a later edit may sit before an
+// earlier one's anchor, and any that overlap a kept edit is dropped rather than applied twice.
+func applyEdits(data []byte, edits []edit) []byte {
+	slices.SortFunc(edits, func(a, b edit) int { return a.start - b.start })
+
+	grown := len(data)
+	for _, e := range edits {
+		grown += len(e.text)
+	}
+	out := make([]byte, 0, grown)
+	last := 0
+	for _, e := range edits {
+		if e.start < last {
+			continue
+		}
+		out = append(out, data[last:e.start]...)
+		out = append(out, e.text...)
+		last = e.end
+	}
+	return append(out, data[last:]...)
 }

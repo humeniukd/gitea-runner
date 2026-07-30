@@ -64,12 +64,11 @@ func (s *Storage) WriteBlock(id uint64, blockID string, reader io.Reader) error 
 	return s.writeFile(s.blockName(id, blockID), reader)
 }
 
-// OrderBlocks renames the staged blocks so that Commit concatenates them in the order the
-// block list gives, which is the order the client wants them in, not the order they
-// arrived in. A block the list does not name is dropped, as Azure drops it.
-//
-// A single rename pass is safe because a staged name always carries blockFilePrefix and a
-// target name never does, so no rename can collide with a block not yet moved.
+// OrderBlocks renames the staged blocks so that Commit concatenates them in the order the block
+// list gives, not the order they arrived in. A block the list does not name keeps its staged
+// name, which is how Commit leaves it out and Azure drops it. A single rename pass is safe
+// because a staged name always carries blockFilePrefix and a target name never does, so no
+// rename can collide with a block not yet moved.
 func (s *Storage) OrderBlocks(id uint64, blockIDs []string) error {
 	for i, blockID := range blockIDs {
 		if err := os.Rename(s.blockName(id, blockID), s.tempName(id, int64(i))); err != nil {
@@ -77,17 +76,6 @@ func (s *Storage) OrderBlocks(id uint64, blockIDs []string) error {
 				return fmt.Errorf("block %q of cache %d was never uploaded: %w", blockID, id, err)
 			}
 			return err
-		}
-	}
-
-	// Anything left is a staged block the list dropped.
-	entries, err := os.ReadDir(s.tempDir(id))
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), blockFilePrefix) {
-			_ = os.Remove(filepath.Join(s.tempDir(id), entry.Name()))
 		}
 	}
 	return nil
@@ -107,15 +95,27 @@ func (s *Storage) Commit(id uint64, size int64) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
 		return 0, err
 	}
-	// A single-shot upload, which is what the v2 API produces below the client's block
-	// threshold, is already the whole archive: move it rather than copy it.
+	written, err := assemble(name, tempNames)
+	if err != nil {
+		return 0, err
+	}
+	// If size is less than 0, it means the size is unknown.
+	// We can't check the size of the file, just skip the check.
+	// It happens when the request comes from old versions of actions, like `actions/cache@v2`.
+	if size >= 0 && written != size {
+		_ = os.Remove(name)
+		return 0, fmt.Errorf("broken file: %v != %v", written, size)
+	}
+	return written, nil
+}
+
+// assemble concatenates the uploaded parts into name. A single part, which is what the v2 API
+// produces below the client's block threshold, is already the whole archive and is moved.
+func assemble(name string, tempNames []string) (int64, error) {
 	if len(tempNames) == 1 {
 		info, err := os.Stat(tempNames[0])
 		if err != nil {
 			return 0, err
-		}
-		if size >= 0 && info.Size() != size {
-			return 0, fmt.Errorf("broken file: %v != %v", info.Size(), size)
 		}
 		return info.Size(), os.Rename(tempNames[0], name)
 	}
@@ -139,16 +139,6 @@ func (s *Storage) Commit(id uint64, size int64) (int64, error) {
 		}
 		written += n
 	}
-
-	// If size is less than 0, it means the size is unknown.
-	// We can't check the size of the file, just skip the check.
-	// It happens when the request comes from old versions of actions, like `actions/cache@v2`.
-	if size >= 0 && written != size {
-		_ = file.Close()
-		_ = os.Remove(name)
-		return 0, fmt.Errorf("broken file: %v != %v", written, size)
-	}
-
 	return written, nil
 }
 
@@ -174,8 +164,8 @@ func (s *Storage) tempName(id uint64, offset int64) string {
 	return filepath.Join(s.tempDir(id), fmt.Sprintf("%016x", offset))
 }
 
-// blockFilePrefix marks a staged, not yet ordered block, so that tempNames can keep it out
-// of Commit's name-ordered concatenation and OrderBlocks can clean up the leftovers.
+// blockFilePrefix marks a staged, not yet ordered block, so that tempNames can keep it out of
+// Commit's name-ordered concatenation.
 const blockFilePrefix = "block-"
 
 func (s *Storage) blockName(id uint64, blockID string) string {

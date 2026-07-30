@@ -31,7 +31,6 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/labels"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 	"gitea.com/gitea/runner/internal/pkg/report"
-	"gitea.com/gitea/runner/internal/pkg/resultsproxy"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"connectrpc.com/connect"
@@ -62,7 +61,6 @@ type Runner struct {
 	labels       labels.Labels
 	envs         map[string]string
 	cacheHandler *artifactcache.Handler
-	resultsProxy *resultsproxy.Proxy
 	capabilities string
 
 	runningTasks            sync.Map
@@ -115,7 +113,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	envs["ACTIONS_RUNTIME_URL"] = artifactGiteaAPI
 	envs["ACTIONS_RESULTS_URL"] = strings.TrimSuffix(cli.Address(), "/")
 
-	resultsProxy := startResultsProxy(cfg, cli, envs)
+	enableCacheServiceV2(cfg, envs)
 
 	// Set specific environments to distinguish between Gitea and GitHub
 	envs["GITEA_ACTIONS"] = "true"
@@ -128,66 +126,38 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		labels:         ls,
 		envs:           envs,
 		cacheHandler:   cacheHandler,
-		resultsProxy:   resultsProxy,
 		now:            time.Now,
 		runHealthCheck: executeHealthCheck,
 	}
 	return runner
 }
 
-// startResultsProxy puts a proxy in front of ACTIONS_RESULTS_URL when the cache service
-// v2 API is enabled, and points the jobs at it. The v2 client resolves the cache service
-// from the results URL, so serving the cache from this runner means answering for that
-// URL and forwarding everything else — artifacts above all — to Gitea.
-//
-// A proxy that cannot start is not fatal: jobs keep the plain results URL and the cache
-// falls back to the v1 API, which is what they get without this setting.
-func startResultsProxy(cfg *config.Config, cli client.Client, envs map[string]string) *resultsproxy.Proxy {
-	if cfg.Cache.V2 != nil && !*cfg.Cache.V2 {
-		return nil
+// enableCacheServiceV2 tells the actions cache client that this runner serves the cache service
+// v2 API. The client only reaches it once the GHES check is patched out of the action's bundle,
+// which act/runner does when it sees this variable; see act/runner/cache_gate.go.
+func enableCacheServiceV2(cfg *config.Config, envs map[string]string) {
+	// Unset means on, so the pointer also says whether the operator asked for this.
+	requested := cfg.Cache.V2 != nil
+	if requested && !*cfg.Cache.V2 {
+		return
 	}
-	// On by default, so the reasons it cannot run are only worth a warning when an operator
-	// asked for it; otherwise they are the ordinary consequence of having no cache.
-	skip := log.Debugf
-	if cfg.Cache.V2 != nil {
-		skip = log.Warnf
-	}
-	if cfg.Cache.Enabled != nil && !*cfg.Cache.Enabled {
-		skip("the cache is disabled, so the cache service v2 API is not served")
-		return nil
-	}
-	cacheURL := envs["ACTIONS_CACHE_URL"]
-	if cacheURL == "" {
+	if envs["ACTIONS_CACHE_URL"] == "" {
+		// Only worth a warning when an operator asked for the v2 API; otherwise having no cache
+		// server is an ordinary state and this is the consequence of it.
+		skip := log.Debugf
+		if requested {
+			skip = log.Warnf
+		}
 		skip("no cache server is available, so the cache service v2 API is not served")
-		return nil
+		return
 	}
-
-	proxy, err := resultsproxy.Start(
-		cfg.Cache.Host,
-		cfg.Cache.V2Port,
-		strings.TrimSuffix(cli.Address(), "/"),
-		cacheURL,
-		cfg.Runner.Insecure,
-		log.StandardLogger(),
-	)
-	if err != nil {
-		log.Errorf("cannot start the results proxy, the cache service v2 API will be unavailable: %v", err)
-		return nil
-	}
-
-	envs["ACTIONS_RESULTS_URL"] = proxy.ExternalURL()
-	envs["ACTIONS_CACHE_SERVICE_V2"] = "true"
-	log.Infof("results proxy is listening on %v", proxy.ExternalURL())
-	return proxy
+	envs[runner.CacheServiceV2Env] = "true"
 }
 
-// Close shuts down the servers this runner exposes to job containers. It is called once
-// the running jobs are done, so nothing is left listening after a graceful shutdown.
+// Close shuts down the cache server this runner exposes to job containers. It is called once the
+// running jobs are done, so nothing is left listening after a graceful shutdown.
 func (r *Runner) Close() error {
-	if r == nil {
-		return nil
-	}
-	return errors.Join(r.resultsProxy.Close(), r.cacheHandler.Close())
+	return r.cacheHandler.Close()
 }
 
 // OnIdle performs lightweight maintenance during polling idle windows.
@@ -405,9 +375,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 
 	// Added per task because this job's service containers must be reached directly, and
 	// act reaches them by their workflow key.
-	// The results proxy, unlike the results URL it replaces, is this runner's own server:
-	// direct, where Gitea stays reachable through whatever proxy the runner uses.
-	proxyEnv := JobProxyEnv(envs, slices.Sorted(maps.Keys(job.Services)), envs["ACTIONS_CACHE_URL"], r.resultsProxy.ExternalURL())
+	proxyEnv := JobProxyEnv(envs, envs["ACTIONS_CACHE_URL"], slices.Sorted(maps.Keys(job.Services)))
 	maps.Copy(envs, proxyEnv)
 
 	if r.capabilities != "" {
