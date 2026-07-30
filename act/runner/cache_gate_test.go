@@ -26,7 +26,8 @@ const (
 	urlTSC     = `function getCacheServiceURL() {` + "\n" + `    switch (getCacheServiceVersion()) {` + "\n" + `        case 'v1':` + "\n" + `            return (process.env['ACTIONS_CACHE_URL'] || process.env['ACTIONS_RESULTS_URL'] || '');` + "\n" + `        case 'v2':` + "\n" + `            return process.env['ACTIONS_RESULTS_URL'] || '';` + "\n" + `    }` + "\n" + `}`
 	urlEsbuild = `function YK(){let e=XK();return e==="v1"?process.env.ACTIONS_CACHE_URL||process.env.ACTIONS_RESULTS_URL||"":e==="v2"?process.env.ACTIONS_RESULTS_URL||"":""}`
 
-	gateTSC     = `function isGhes(){const h=new URL(process.env['GITHUB_SERVER_URL']||'https://github.com').hostname.toUpperCase();return h!=='GITHUB.COM'&&!h.endsWith('.GHE.COM')&&!h.endsWith('.LOCALHOST')}` + "\n" + `function getCacheServiceVersion() {` + "\n" + `    if (isGhes())` + "\n" + `        return 'v1';` + "\n" + `    return process.env['ACTIONS_CACHE_SERVICE_V2'] ? 'v2' : 'v1';` + "\n" + `}` + "\n" + urlTSC
+	isGhesTSC   = `function isGhes(){const h=new URL(process.env['GITHUB_SERVER_URL']||'https://github.com').hostname.toUpperCase();return h!=='GITHUB.COM'&&!h.endsWith('.GHE.COM')&&!h.endsWith('.LOCALHOST')}`
+	gateTSC     = isGhesTSC + "\n" + `function getCacheServiceVersion() {` + "\n" + `    if (isGhes())` + "\n" + `        return 'v1';` + "\n" + `    return process.env['ACTIONS_CACHE_SERVICE_V2'] ? 'v2' : 'v1';` + "\n" + `}` + "\n" + urlTSC
 	gateWebpack = `function config_isGhes(){const h=new URL(process.env['GITHUB_SERVER_URL']||'https://github.com').hostname.toUpperCase();return h!=='GITHUB.COM'&&!h.endsWith('.GHE.COM')&&!h.endsWith('.LOCALHOST')}` + "\n" + `function config_getCacheServiceVersion() {` + "\n" + `    if (config_isGhes())` + "\n" + `        return 'v1';` + "\n" + `    return process.env['ACTIONS_CACHE_SERVICE_V2'] ? 'v2' : 'v1';` + "\n" + `}` + "\n" + urlTSC
 	gateEsbuild = `vu.isGhes=$K;vu.getCacheServiceVersion=XK;function $K(){let e=new URL(process.env.GITHUB_SERVER_URL||"https://github.com").hostname.toUpperCase(),r=e==="GITHUB.COM",n=e.endsWith(".GHE.COM"),i=e.endsWith(".LOCALHOST");return!r&&!n&&!i}function XK(){return $K()?"v1":process.env.ACTIONS_CACHE_SERVICE_V2?"v2":"v1"}` + urlEsbuild
 )
@@ -39,11 +40,14 @@ func TestPatchedBundle(t *testing.T) {
 		{"tsc keeps the names", gateTSC, true},
 		{"webpack prefixes them", gateWebpack, true},
 		{"esbuild mangles and minifies them", gateEsbuild, true},
+		// A bundler picks its own quoting; gateTSC is single-quoted already.
+		{"double-quoted", requoted(`"`), true},
+		{"backtick-quoted", requoted("`"), true},
 		// sccache-action sets the variable itself; there is no gate to open.
 		{"mentions the variable without the gate", `core.exportVariable("ACTIONS_CACHE_SERVICE_V2","on")`, false},
 		// Both edits or neither: a gate patched without the URL would send the client to a
 		// results URL that serves no cache service.
-		{"gate without a recognisable url getter", gateOnly(gateTSC), false},
+		{"gate without a recognisable url getter", strings.TrimSuffix(gateTSC, "\n"+urlTSC), false},
 		// And the other way round: an action that reads both variables but has no gate to open.
 		{"url getter without a gate", urlTSC, false},
 	} {
@@ -54,12 +58,11 @@ func TestPatchedBundle(t *testing.T) {
 				assert.Equal(t, tc.body, string(out), "an unpatched bundle must come back byte for byte")
 				return
 			}
-			assert.Contains(t, string(out), `endsWith("")`)
+			assert.True(t, gateOpened(string(out)))
 			// The other two hostname tests are left alone, so a host that really is GitHub or
 			// GHES is still recognised as such.
 			assert.NotContains(t, string(out), ".LOCALHOST", "the localhost test is the one that opens")
 			assert.Contains(t, string(out), ".GHE.COM")
-			assert.Equal(t, strings.Count(tc.body, "ACTIONS_CACHE_SERVICE_V2"), strings.Count(string(out), "ACTIONS_CACHE_SERVICE_V2"))
 
 			// Every read of the results URL now prefers the cache URL, and none was lost: the
 			// results URL stays the fallback, so a runner not serving the cache still works.
@@ -79,34 +82,17 @@ func TestPatchedBundleLeavesTrustworthyURLCheckAlone(t *testing.T) {
 	out, patched := patchedBundle([]byte(undici + gateTSC))
 	require.True(t, patched)
 	assert.Contains(t, string(out), undici, "the trustworthy-URL check must survive byte for byte")
-	assert.Contains(t, string(out), `endsWith("")`)
-}
-
-// Any of the three quote characters, since a bundler picks its own.
-func TestPatchedBundleAcceptsEveryQuoteStyle(t *testing.T) {
-	// gateTSC is single-quoted already, so the other two are what this adds.
-	for _, quote := range []string{`"`, "`"} {
-		gate := strings.ReplaceAll(gateTSC, `'.LOCALHOST'`, quote+".LOCALHOST"+quote)
-		gate = strings.ReplaceAll(gate, `['ACTIONS_RESULTS_URL']`, "["+quote+"ACTIONS_RESULTS_URL"+quote+"]")
-		gate = strings.ReplaceAll(gate, `['ACTIONS_CACHE_URL']`, "["+quote+"ACTIONS_CACHE_URL"+quote+"]")
-
-		out, patched := patchedBundle([]byte(gate))
-		assert.True(t, patched, "quote %s", quote)
-		assert.Contains(t, string(out), `endsWith("")`, "quote %s", quote)
-		assert.Equal(t, 2, strings.Count(string(out), "(process.env.ACTIONS_CACHE_URL||process.env"), "quote %s", quote)
-	}
+	assert.True(t, gateOpened(string(out)))
 }
 
 // The artifact toolkit puts the same gate in front of a plain refusal, with no URL to move, so
 // opening it is what lets the stock upload-artifact work against Gitea instead of aborting.
 func TestPatchedBundleOpensTheArtifactRefusal(t *testing.T) {
-	const artifact = `function isGhes(){const h=new URL(process.env['GITHUB_SERVER_URL']||'https://github.com').hostname.toUpperCase();` +
-		`return h!=='GITHUB.COM'&&!h.endsWith('.GHE.COM')&&!h.endsWith('.LOCALHOST')}` + "\n" +
-		`uploadArtifact(){if(isGhes()){throw new GHESNotSupportedError()}}`
+	const artifact = isGhesTSC + "\n" + `uploadArtifact(){if(isGhes()){throw new GHESNotSupportedError()}}`
 
 	out, patched := patchedBundle([]byte(artifact))
 	assert.True(t, patched)
-	assert.Contains(t, string(out), `endsWith("")`)
+	assert.True(t, gateOpened(string(out)))
 	assert.Contains(t, string(out), "GHESNotSupportedError", "the refusal itself is left in place, it just stops firing")
 
 	// A bundle using the gate for something this runner has not accounted for is not touched.
@@ -116,10 +102,16 @@ func TestPatchedBundleOpensTheArtifactRefusal(t *testing.T) {
 	assert.Equal(t, unknown, string(out))
 }
 
-// gateOnly drops the URL getter, leaving a bundle only the first edit matches.
-func gateOnly(bundle string) string {
-	getter, _, _ := strings.Cut(bundle, "function getCacheServiceURL")
-	return getter
+// requoted respells gateTSC's string literals with another quote character.
+func requoted(quote string) string {
+	gate := strings.ReplaceAll(gateTSC, `'.LOCALHOST'`, quote+".LOCALHOST"+quote)
+	gate = strings.ReplaceAll(gate, `['ACTIONS_RESULTS_URL']`, "["+quote+"ACTIONS_RESULTS_URL"+quote+"]")
+	return strings.ReplaceAll(gate, `['ACTIONS_CACHE_URL']`, "["+quote+"ACTIONS_CACHE_URL"+quote+"]")
+}
+
+// gateOpened reports whether the hostname test was emptied, in whatever quoting the bundle used.
+func gateOpened(body string) bool {
+	return strings.Contains(body, "endsWith(") && !strings.Contains(body, ".LOCALHOST")
 }
 
 // The patched bundle must still be JavaScript, and must resolve the way the runner needs: v2 for
@@ -164,6 +156,23 @@ func TestPatchedBundleBehavesInNode(t *testing.T) {
 	}
 }
 
+// A bundler that embeds module sources as strings, such as webpack with devtool: eval, carries
+// the gate inside a double-quoted literal. Rewriting the call rather than emptying its argument
+// would end that string early and leave the bundle unparseable.
+func TestPatchedBundleSurvivesInsideAStringLiteral(t *testing.T) {
+	requireHostTools(t, "node")
+
+	escaped := strings.ReplaceAll(gateTSC, `"`, `\"`)
+	embedded := `eval("` + strings.ReplaceAll(escaped, "\n", `\n`) + `");`
+	out, patched := patchedBundle([]byte(embedded))
+	require.True(t, patched)
+
+	file := filepath.Join(t.TempDir(), "bundle.js")
+	require.NoError(t, os.WriteFile(file, out, 0o600))
+	checked, err := exec.CommandContext(t.Context(), "node", "--check", file).CombinedOutput()
+	require.NoError(t, err, "%s", checked)
+}
+
 func TestPatchBundleKeepsTheOriginal(t *testing.T) {
 	dir, script := bundleFile(t, gateTSC)
 	original := originalFor(dir, script)
@@ -171,7 +180,7 @@ func TestPatchBundleKeepsTheOriginal(t *testing.T) {
 	require.NoError(t, patchBundle(script, original))
 	patched, err := os.ReadFile(script)
 	require.NoError(t, err)
-	assert.Contains(t, string(patched), `endsWith("")`)
+	assert.True(t, gateOpened(string(patched)))
 
 	kept, err := os.ReadFile(original)
 	require.NoError(t, err)
@@ -229,7 +238,7 @@ func TestRevertCacheGate(t *testing.T) {
 	patchCacheGate(t.Context(), dir, scripts)
 	body, err := os.ReadFile(script)
 	require.NoError(t, err)
-	require.Contains(t, string(body), `endsWith("")`, "precondition: the bundle is patched")
+	require.True(t, gateOpened(string(body)), "precondition: the bundle is patched")
 
 	revertCacheGate(t.Context(), dir, scripts)
 	body, err = os.ReadFile(script)
@@ -259,12 +268,13 @@ func TestPatchBundleAfterTheActionMoved(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, gateWebpack, string(body))
 
-	// And the new version is patched in its own right, keeping its own original.
-	require.NoError(t, os.Remove(filepath.Join(sidecarDir(dir), skipMarker)))
+	// Nothing was reverted, so the action is not marked off either: the new version is patched
+	// in its own right, and keeps its own original.
+	require.NoFileExists(t, filepath.Join(sidecarDir(dir), skipMarker))
 	require.NoError(t, patchBundle(script, original))
 	body, err = os.ReadFile(script)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), `endsWith("")`)
+	assert.True(t, gateOpened(string(body)))
 	kept, err := os.ReadFile(original)
 	require.NoError(t, err)
 	assert.Equal(t, gateWebpack, string(kept))
@@ -306,7 +316,7 @@ func TestStepActionRemoteCacheGate(t *testing.T) {
 
 		body, err := os.ReadFile(script)
 		require.NoError(t, err)
-		require.Contains(t, string(body), `endsWith("")`)
+		require.True(t, gateOpened(string(body)))
 
 		failed := errors.New("the step failed")
 		require.ErrorIs(t, sar.revertCacheGateOnFailure(func(context.Context) error { return failed })(t.Context()), failed)

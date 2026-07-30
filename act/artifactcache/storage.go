@@ -57,18 +57,14 @@ func (s *Storage) writeFile(name string, reader io.Reader) error {
 	return err
 }
 
-// WriteBlock stores one staged block of an Azure block blob upload. Blocks may arrive in
-// any order and are only put in sequence by OrderBlocks, once the client sends the block
-// list that names them.
 func (s *Storage) WriteBlock(id uint64, blockID string, reader io.Reader) error {
 	return s.writeFile(s.blockName(id, blockID), reader)
 }
 
-// OrderBlocks renames the staged blocks so that Commit concatenates them in the order the block
-// list gives, not the order they arrived in. A block the list does not name keeps its staged
-// name, which is how Commit leaves it out and Azure drops it. A single rename pass is safe
-// because a staged name always carries blockFilePrefix and a target name never does, so no
-// rename can collide with a block not yet moved.
+// OrderBlocks renames the staged blocks into the order the block list gives. A block the list
+// does not name keeps its staged name, which is how Commit leaves it out, as Azure drops it. One
+// rename pass is safe because a staged name always carries blockFilePrefix and a target name
+// never does, so no rename can collide with a block not yet moved.
 func (s *Storage) OrderBlocks(id uint64, blockIDs []string) error {
 	for i, blockID := range blockIDs {
 		if err := os.Rename(s.blockName(id, blockID), s.tempName(id, int64(i))); err != nil {

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 
 	"gitea.com/gitea/runner/act/common"
@@ -28,14 +27,8 @@ import (
 // edit by hand in its fork of upload-artifact.
 //
 // getCacheServiceURL() then resolves the service from ACTIONS_RESULTS_URL alone, where v1 reads
-// ACTIONS_CACHE_URL first. Both reads in that function are given the same ACTIONS_CACHE_URL
-// preference, which is what keeps the runner out of the artifact path: the results URL still
-// points at Gitea and only the cache goes to the cache server. That function is found by its v1
-// branch, the only place the two variables are read together.
-//
-// Neither edit is applied without the other. A bundle where one shape is unrecognised is left
-// alone and keeps to v1, which the runner also serves, rather than being sent to a results URL
-// that implements no cache service.
+// ACTIONS_CACHE_URL first. Both reads there are given the same preference, which is what keeps
+// the runner out of the artifact path: the results URL still points at Gitea.
 //
 // Either of these landing upstream makes this file deletable:
 //
@@ -46,18 +39,15 @@ const (
 	cacheURLEnv       = "ACTIONS_CACHE_URL"
 	resultsURLEnv     = "ACTIONS_RESULTS_URL"
 
+	// localhostHost is the hostname suffix isGhes accepts, and dropping it from the test is what
+	// opens the gate: every hostname ends with the empty string.
+	localhostHost = ".LOCALHOST"
+
 	// artifactRefusal is the error @actions/artifact throws behind the same gate, and the only
 	// thing that gate guards there. Its presence is what makes an artifact bundle safe to open:
 	// a bundle carrying neither toolkit uses isGhes for something this runner has not looked at,
 	// and is left alone.
 	artifactRefusal = "GHESNotSupportedError"
-
-	// urlBranchDistance separates the two branches of getCacheServiceURL: the v1 branch reads the
-	// cache URL and falls back to the results URL, the v2 branch reads the results URL alone. Both
-	// live in one function body, so the gap is small and stable, 2 bytes minified and 20 not,
-	// across every bundle measured. The nearest read of the results URL belonging to anything else
-	// sits some 75 kB away, so the window has room to spare for a larger function body.
-	urlBranchDistance = 1 << 10
 
 	// sidecarSuffix names the directory holding each patched bundle's untouched copy, a sibling
 	// of the action directory because that directory is copied wholesale into job containers.
@@ -76,21 +66,28 @@ var (
 	// in isURLPotentiallyTrustworthy. Opening that one would tell its HTTP client that every URL
 	// is trustworthy. Uppercase, the literal occurs nowhere but this test, across sixteen bundles
 	// from ten actions.
-	localhostTest = regexp.MustCompile(`endsWith\s*\(\s*` + quoted(`\.LOCALHOST`) + `\s*\)`)
+	localhostTest = regexp.MustCompile(`endsWith\s*\(\s*` + quoted(regexp.QuoteMeta(localhostHost)) + `\s*\)`)
 
-	// cacheURLRead and resultsURLRead match one read of either variable, in either property syntax.
-	cacheURLRead   = regexp.MustCompile(envRead(cacheURLEnv))
-	resultsURLRead = regexp.MustCompile(envRead(resultsURLEnv))
+	// serviceURLBranches matches both branches of getCacheServiceURL at once. The v1 branch reads
+	// the cache URL and falls back to the results URL, and the v2 branch just below reads the
+	// results URL alone. That `||` pairing is the only place in a bundle where the two variables
+	// are read together, which is what identifies the function: matching it as one expression
+	// keeps the edit inside that switch instead of anywhere the two happen to sit near each other.
+	// The gap between the branches is 21 bytes minified and 63 not, across every bundle measured.
+	serviceURLBranches = regexp.MustCompile(`(` + envRead(cacheURLEnv) + `\s*\|\|\s*)(` +
+		envRead(resultsURLEnv) + `)((?s).{0,256}?)(` + envRead(resultsURLEnv) + `)`)
+
+	// cacheURLFirst gives both of those reads the same cache URL preference, which is what the v1
+	// branch already had.
+	cacheURLFirst = []byte(`${1}(process.env.` + cacheURLEnv + `||${2})${3}(process.env.` + cacheURLEnv + `||${4})`)
 )
 
-// envRead builds a pattern matching one read of an environment variable, as a property or as any
-// flavour of quoted index.
 func envRead(name string) string {
 	return `process\s*\.\s*env\s*(?:\.\s*` + name + `\b|\[\s*` + quoted(name) + `\s*\])`
 }
 
-// quoted matches a JavaScript string literal holding exactly pattern, in any of the three quote
-// characters. RE2 has no backreferences, so the pairs are spelled out.
+// quoted matches a string literal in any of the three quote characters. RE2 has no
+// backreferences, so the pairs are spelled out.
 func quoted(pattern string) string {
 	return "(?:'" + pattern + "'|\"" + pattern + "\"|`" + pattern + "`)"
 }
@@ -152,8 +149,8 @@ func revertCacheGate(ctx context.Context, actionDir string, scripts []string) {
 			reverted = true
 		}
 	}
-	_ = os.WriteFile(filepath.Join(sidecarDir(actionDir), skipMarker), nil, 0o600)
 	if reverted {
+		_ = os.WriteFile(filepath.Join(sidecarDir(actionDir), skipMarker), nil, 0o600)
 		common.Logger(ctx).Warnf("cache service v2: restored the original %s, it will not be patched again", filepath.Base(actionDir))
 	}
 }
@@ -163,13 +160,22 @@ func sidecarDir(actionDir string) string {
 	return actionDir + sidecarSuffix
 }
 
+// originalFor is where a script's untouched copy lives, or "" for a script the action's own
+// `runs` keys placed outside its directory, which is not this runner's to rewrite.
 func originalFor(actionDir, script string) string {
-	return filepath.Join(sidecarDir(actionDir), strings.TrimPrefix(script, actionDir))
+	rel, err := filepath.Rel(actionDir, script)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	return filepath.Join(sidecarDir(actionDir), rel)
 }
 
-// patchBundle rewrites one entrypoint in place. The original is moved aside, not copied, and it
-// is what marks the bundle as already patched.
+// patchBundle rewrites one entrypoint in place. The untouched copy kept beside it is what marks
+// the bundle as already patched.
 func patchBundle(script, original string) error {
+	if original == "" {
+		return nil
+	}
 	if _, err := os.Stat(original); err == nil {
 		if isPatchOf(original, script) {
 			return nil
@@ -199,10 +205,17 @@ func patchBundle(script, original string) error {
 	if err := os.MkdirAll(filepath.Dir(original), 0o755); err != nil {
 		return err
 	}
-	if err := os.Rename(script, original); err != nil {
+	// The copy is taken before the bundle is replaced, so a write that fails part way can put the
+	// action back as it was. A crash needs no handling: the clone executor checks the action out
+	// and hard resets it on every prepare, so a half-written bundle never outlives the job.
+	if err := os.WriteFile(original, data, info.Mode().Perm()); err != nil {
 		return err
 	}
-	return os.WriteFile(script, patched, info.Mode().Perm())
+	if err := os.WriteFile(script, patched, info.Mode().Perm()); err != nil {
+		_ = os.Rename(original, script)
+		return err
+	}
+	return nil
 }
 
 // isPatchOf reports whether script is exactly what patching original produced. It is what proves
@@ -221,26 +234,17 @@ func isPatchOf(original, script string) bool {
 	return ok && bytes.Equal(patched, current)
 }
 
-// edit is a byte range of the bundle and what replaces it.
-type edit struct {
-	start, end int
-	text       string
-}
-
 // patchedBundle opens the GHES gate, and where the cache toolkit is present, points the cache
 // service at the cache server. A bundle this runner cannot account for comes back untouched.
 func patchedBundle(data []byte) ([]byte, bool) {
-	gates := localhostTest.FindAllIndex(data, -1)
-	if len(gates) == 0 {
+	if !localhostTest.Match(data) {
 		return data, false
 	}
-	urls := cacheURLPreference(data)
-
 	switch {
 	case bytes.Contains(data, []byte(CacheServiceV2Env)):
 		// The cache toolkit: both edits or neither, because choosing v2 without redirecting the
 		// URL would send the client to a results URL that serves no cache service.
-		if len(urls) == 0 {
+		if !serviceURLBranches.Match(data) {
 			return data, false
 		}
 	case bytes.Contains(data, []byte(artifactRefusal)):
@@ -250,47 +254,10 @@ func patchedBundle(data []byte) ([]byte, bool) {
 		return data, false
 	}
 
-	edits := make([]edit, 0, len(gates)+len(urls))
-	for _, g := range gates {
-		edits = append(edits, edit{g[0], g[1], `endsWith("")`})
-	}
-	return applyEdits(data, append(edits, urls...)), true
-}
-
-// cacheURLPreference rewrites the reads of the results URL that sit in getCacheServiceURL so they
-// prefer the cache URL, which is where this runner serves the cache service. That function is
-// found by its v1 branch, the only place the two variables are read together: the v2 branch is
-// what follows. Giving both branches the same preference leaves v1 as it already behaves.
-func cacheURLPreference(data []byte) []edit {
-	var edits []edit
-	for _, anchor := range cacheURLRead.FindAllIndex(data, -1) {
-		hi := min(anchor[1]+urlBranchDistance, len(data))
-		for _, m := range resultsURLRead.FindAllIndex(data[anchor[1]:hi], -1) {
-			start, end := anchor[1]+m[0], anchor[1]+m[1]
-			edits = append(edits, edit{start, end, "(process.env." + cacheURLEnv + "||" + string(data[start:end]) + ")"})
-		}
-	}
-	return edits
-}
-
-// applyEdits splices the edits into data. They are sorted because a later edit may sit before an
-// earlier one's anchor, and any that overlap a kept edit is dropped rather than applied twice.
-func applyEdits(data []byte, edits []edit) []byte {
-	slices.SortFunc(edits, func(a, b edit) int { return a.start - b.start })
-
-	grown := len(data)
-	for _, e := range edits {
-		grown += len(e.text)
-	}
-	out := make([]byte, 0, grown)
-	last := 0
-	for _, e := range edits {
-		if e.start < last {
-			continue
-		}
-		out = append(out, data[last:e.start]...)
-		out = append(out, e.text...)
-		last = e.end
-	}
-	return append(out, data[last:]...)
+	opened := localhostTest.ReplaceAllFunc(data, func(test []byte) []byte {
+		// Drop the hostname from the test rather than rewriting the call, so the bundle's own
+		// quoting survives and the result stays valid even inside a string literal.
+		return bytes.Replace(test, []byte(localhostHost), nil, 1)
+	})
+	return serviceURLBranches.ReplaceAll(opened, cacheURLFirst), true
 }

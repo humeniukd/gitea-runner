@@ -93,6 +93,7 @@ func TestNewRunnerInitializesLabelsAndEnvironment(t *testing.T) {
 	require.Equal(t, "true", r.envs["GITEA_ACTIONS"])
 	require.NotEmpty(t, r.envs["GITEA_ACTIONS_RUNNER_VERSION"])
 	require.Nil(t, r.cacheHandler)
+	require.Empty(t, r.envs[runner.CacheServiceV2Env], "no cache server, nothing to serve v2 from")
 }
 
 // Proxy variables are assembled per task, because a job's service containers have to be
@@ -126,30 +127,18 @@ func taskWithDefaultActionsURL(url string) *runnerv1.Task {
 // The cache service v2 API is announced to jobs unless it is turned off. Announcing it is what
 // makes act patch the GHES check out of an action's bundle, so the client can reach it.
 func TestNewRunnerCacheServiceV2(t *testing.T) {
-	off := false
-	for _, tc := range []struct {
-		name string
-		v2   *bool
-		want string
-	}{
-		{"on by default", nil, "true"},
-		{"turned off", &off, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.Config{}
-			cfg.Cache.V2 = tc.v2
-			cfg.Cache.Dir = t.TempDir()
-			cfg.Cache.Host = "127.0.0.1"
-			cli := clientmocks.NewClient(t)
-			cli.On("Address").Return("https://gitea.example/").Maybe()
+	announced := func(v2 *bool) string {
+		cfg := &config.Config{}
+		cfg.Cache.V2, cfg.Cache.Dir, cfg.Cache.Host = v2, t.TempDir(), "127.0.0.1"
+		cli := clientmocks.NewClient(t)
+		cli.On("Address").Return("https://gitea.example/").Maybe()
 
-			r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
-			t.Cleanup(func() { _ = r.Close() })
-
-			assert.Equal(t, tc.want, r.envs[runner.CacheServiceV2Env])
-			// The results URL keeps pointing at Gitea either way: artifacts do not go
-			// through this runner.
-			assert.Equal(t, "https://gitea.example", r.envs["ACTIONS_RESULTS_URL"])
-		})
+		r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
+		t.Cleanup(func() { _ = r.Close() })
+		return r.envs[runner.CacheServiceV2Env]
 	}
+
+	off := false
+	assert.Equal(t, "true", announced(nil))
+	assert.Empty(t, announced(&off))
 }

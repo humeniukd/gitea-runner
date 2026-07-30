@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/julienschmidt/httprouter"
-	"github.com/timshannon/bolthold"
 )
 
 // The cache service v2 API. A client on this version talks twirp to
@@ -27,10 +26,8 @@ import (
 const (
 	cacheServiceV2Path = "/twirp/github.actions.results.api.v1.CacheService"
 
-	// blobPath is where a v2 client uploads the archive. Like the v1 artifact route it
-	// authenticates by signature, because the client uploads without an Authorization header.
-	// Downloads are handed the v1 artifact URL, which is the same handler behind the same
-	// signature.
+	// blobPath authenticates by signature, because the client uploads without an
+	// Authorization header. Downloads are handed the v1 artifact URL instead.
 	blobPath = apiPath + "/blobs"
 
 	// blobUploadPurpose keeps an upload URL from being replayed to read an entry.
@@ -49,8 +46,8 @@ func (h *Handler) registerV2Routes(router *httprouter.Router) {
 	router.PUT(blobPath+"/:id", h.signedAuth(blobUploadPurpose, h.v2UploadBlob))
 }
 
-// Reserves an entry and returns the URL to upload the archive to. An entry that already
-// exists is reported as not ok, which is how the client learns to skip the upload.
+// An entry that already exists is reported as not ok, which is how the client learns to skip
+// the upload.
 func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	cred := credFromContext(r.Context())
 	req, err := decodeTwirpRequest[v2CreateRequest](r)
@@ -101,8 +98,6 @@ func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ h
 	})
 }
 
-// Completes the entry once the archive is uploaded, which is what makes it visible to
-// GetCacheEntryDownloadURL.
 func (h *Handler) v2FinalizeCacheEntryUpload(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	cred := credFromContext(r.Context())
 	req, err := decodeTwirpRequest[v2FinalizeRequest](r)
@@ -175,11 +170,6 @@ func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-// blockList is the body of an Azure "put block list" request.
-type blockList struct {
-	Latest []string
-}
-
 // The archive arrives over the subset of the Azure blob API the toolkit uses: a small
 // cache is a single PUT, a large one is staged as blocks that a final block list puts
 // in order.
@@ -190,10 +180,7 @@ func (h *Handler) v2UploadBlob(w http.ResponseWriter, r *http.Request, params ht
 		return
 	}
 
-	// The upload URL outlives the finalize call, so refuse to write over an entry that is
-	// already complete: its blob is what other jobs restore, and its recorded size would
-	// no longer describe it. This is the guard the v1 upload route applies.
-	if err := h.touchIncompleteCache(id); err != nil {
+	if err := h.touchCache(id, true); err != nil {
 		h.responseJSON(w, r, http.StatusBadRequest, err)
 		return
 	}
@@ -206,53 +193,23 @@ func (h *Handler) v2UploadBlob(w http.ResponseWriter, r *http.Request, params ht
 			h.responseJSON(w, r, http.StatusBadRequest, errors.New("missing blockid"))
 			return
 		}
-		if err := h.storage.WriteBlock(id, blockID, r.Body); err != nil {
-			h.responseJSON(w, r, http.StatusInternalServerError, err)
-			return
-		}
+		err = h.storage.WriteBlock(id, blockID, r.Body)
 	case "blocklist":
-		var list blockList
+		var list struct{ Latest []string }
 		if err := xml.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&list); err != nil {
 			h.responseJSON(w, r, http.StatusBadRequest, fmt.Errorf("malformed block list: %w", err))
 			return
 		}
-		if err := h.storage.OrderBlocks(id, list.Latest); err != nil {
-			h.responseJSON(w, r, http.StatusInternalServerError, err)
-			return
-		}
+		err = h.storage.OrderBlocks(id, list.Latest)
 	default:
-		// A single-shot block blob upload: the whole archive in one request.
-		if err := h.storage.Write(id, 0, r.Body); err != nil {
-			h.responseJSON(w, r, http.StatusInternalServerError, err)
-			return
-		}
+		err = h.storage.Write(id, 0, r.Body)
+	}
+	if err != nil {
+		h.responseJSON(w, r, http.StatusInternalServerError, err)
+		return
 	}
 
 	w.WriteHeader(http.StatusCreated)
-}
-
-// touchIncompleteCache rejects an already finalized entry and, in the same transaction, bumps
-// UsedAt so gcCache does not reap the reservation mid-upload: one bolt open per part, not two.
-// An entry missing from the store is accepted, since the signature proves the id was handed out.
-func (h *Handler) touchIncompleteCache(id uint64) error {
-	db, err := h.openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	cache := &Cache{}
-	if err := db.Get(id, cache); err != nil {
-		if errors.Is(err, bolthold.ErrNotFound) {
-			return nil
-		}
-		return err
-	}
-	if cache.Complete {
-		return fmt.Errorf("cache %d: already complete", id)
-	}
-	cache.UsedAt = time.Now().Unix()
-	return db.Update(cache.ID, cache)
 }
 
 // twirpMiss is the cache service's "no such entry": not an error, just nothing to restore.
@@ -295,7 +252,6 @@ type (
 	}
 )
 
-// keys is the lookup order: the exact key first, then the restore-key prefixes.
 func (d v2DownloadRequest) keys() []string {
 	restoreKeys := d.RestoreKeys
 	if len(restoreKeys) == 0 {

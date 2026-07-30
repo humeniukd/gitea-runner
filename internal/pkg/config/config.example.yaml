@@ -149,11 +149,9 @@ cache:
   # A moved tag (e.g. a re-tagged "v6") or an updated branch stays at the cached commit
   # until its cache entry expires or is manually removed.
   offline_mode: false
-  # Serve the actions cache service v2 API, used by actions/cache@v4.2 and later. That client
-  # refuses to use it unless the server looks like GitHub, so the runner edits the check out of
-  # the action's own bundle, keeping the untouched copy beside it. The same edit lets the stock
-  # actions/upload-artifact and download-artifact work, which otherwise abort on Gitea. Actions
-  # whose bundle does not match are left alone and keep to the v1 cache API.
+  # Serve the actions cache service v2 API, used by actions/cache@v4.2 and later. Reaching it
+  # needs an edit to the action's bundle, which also lets the stock upload-artifact and
+  # download-artifact work on Gitea. See the README for what is edited.
   v2: true
 
 container:

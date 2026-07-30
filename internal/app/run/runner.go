@@ -108,12 +108,16 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		}
 	}
 
+	if envs["ACTIONS_CACHE_URL"] != "" && (cfg.Cache.V2 == nil || *cfg.Cache.V2) {
+		// act patches the GHES check out of an action's bundle when it sees this, so the client
+		// uses the cache service v2 API this server also answers; see act/runner/cache_gate.go.
+		envs[runner.CacheServiceV2Env] = "true"
+	}
+
 	// set artifact gitea api
 	artifactGiteaAPI := strings.TrimSuffix(cli.Address(), "/") + "/api/actions_pipeline/"
 	envs["ACTIONS_RUNTIME_URL"] = artifactGiteaAPI
 	envs["ACTIONS_RESULTS_URL"] = strings.TrimSuffix(cli.Address(), "/")
-
-	enableCacheServiceV2(cfg, envs)
 
 	// Set specific environments to distinguish between Gitea and GitHub
 	envs["GITEA_ACTIONS"] = "true"
@@ -132,30 +136,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	return runner
 }
 
-// enableCacheServiceV2 tells the actions cache client that this runner serves the cache service
-// v2 API. The client only reaches it once the GHES check is patched out of the action's bundle,
-// which act/runner does when it sees this variable; see act/runner/cache_gate.go.
-func enableCacheServiceV2(cfg *config.Config, envs map[string]string) {
-	// Unset means on, so the pointer also says whether the operator asked for this.
-	requested := cfg.Cache.V2 != nil
-	if requested && !*cfg.Cache.V2 {
-		return
-	}
-	if envs["ACTIONS_CACHE_URL"] == "" {
-		// Only worth a warning when an operator asked for the v2 API; otherwise having no cache
-		// server is an ordinary state and this is the consequence of it.
-		skip := log.Debugf
-		if requested {
-			skip = log.Warnf
-		}
-		skip("no cache server is available, so the cache service v2 API is not served")
-		return
-	}
-	envs[runner.CacheServiceV2Env] = "true"
-}
-
-// Close shuts down the cache server this runner exposes to job containers. It is called once the
-// running jobs are done, so nothing is left listening after a graceful shutdown.
+// Close shuts down the cache server this runner exposes to job containers.
 func (r *Runner) Close() error {
 	return r.cacheHandler.Close()
 }

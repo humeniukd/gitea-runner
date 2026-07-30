@@ -251,9 +251,9 @@ cache:
   v2: false
 ```
 
-The client will not use that API unless `GITHUB_SERVER_URL` names a GitHub host, and no server-side setting overrides that. Rather than misreport the server URL, which would break actions that build real URLs from it, the runner edits the action's own bundle: the check becomes one every host satisfies, and the cache service URL comes from `ACTIONS_CACHE_URL`. The untouched copy is kept beside the action, `ACTIONS_RESULTS_URL` still points at Gitea, and artifacts never travel through the runner. Both edits are applied together or not at all, so a bundle that does not match is left alone and keeps to v1, as is an action whose step failed while patched: its original is put back for later jobs.
+That client only talks to a host it takes for GitHub, so rather than misreport the server URL the runner edits the check out of the action's own bundle and points the cache at `ACTIONS_CACHE_URL`, keeping the untouched copy beside the action. `ACTIONS_RESULTS_URL` still points at Gitea, so artifacts never travel through the runner. A bundle that does not match is left alone and keeps to v1.
 
-The same check is what makes the stock `actions/upload-artifact` and `actions/download-artifact` abort on Gitea, since they take any non-GitHub host for GitHub Enterprise. Opening it lets them work without the `gitea-upload-artifact` fork, from `upload-artifact@v4.4.0` onward; earlier releases word the check differently and are left alone.
+The same check makes the stock `actions/upload-artifact` and `actions/download-artifact` abort on Gitea, so opening it also removes the need for the `gitea-upload-artifact` fork, from `upload-artifact@v4.4.0` onward.
 
 **Shared cache across multiple runners**
 

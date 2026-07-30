@@ -449,7 +449,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, params httprout
 		h.responseJSON(w, r, 500, err)
 		return
 	}
-	h.useCache(id)
+	_ = h.touchCache(uint64(id), false)
 	h.responseJSON(w, r, 200)
 }
 
@@ -529,7 +529,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, params httprouter.
 		h.responseJSON(w, r, 400, err)
 		return
 	}
-	h.useCache(id)
+	_ = h.touchCache(uint64(id), false)
 	h.storage.Serve(w, r, uint64(id))
 }
 
@@ -766,18 +766,30 @@ func insertCache(db *bolthold.Store, cache *Cache) error {
 	return nil
 }
 
-func (h *Handler) useCache(id int64) {
+// touchCache stamps UsedAt so gcCache does not reap an entry mid-upload. With requireIncomplete
+// it also refuses an entry that is already complete, which is what the v2 blob route needs: its
+// upload URL outlives the finalize call, and overwriting a finished entry would leave the blob
+// other jobs restore no longer matching its recorded size. An entry missing from the store is
+// accepted, since the signature proves the id was handed out.
+func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
 	db, err := h.openDB()
 	if err != nil {
-		return
+		return err
 	}
 	defer db.Close()
+
 	cache := &Cache{}
 	if err := db.Get(id, cache); err != nil {
-		return
+		if errors.Is(err, bolthold.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if requireIncomplete && cache.Complete {
+		return fmt.Errorf("cache %d: already complete", id)
 	}
 	cache.UsedAt = time.Now().Unix()
-	_ = db.Update(cache.ID, cache)
+	return db.Update(cache.ID, cache)
 }
 
 const (

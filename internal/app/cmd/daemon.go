@@ -141,11 +141,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		)
 
 		runner := run.NewRunner(cfg, reg, cli)
-		// NewRunner starts the job-facing servers, so nothing is left serving jobs once this
-		// returns, however it returns.
 		defer func() {
 			if err := runner.Close(); err != nil {
-				log.Warnf("runner: %s failed to shut down its job-facing servers: %v", reg.Name, err)
+				log.Warnf("runner %s: cache server shutdown: %v", reg.Name, err)
 			}
 		}()
 
