@@ -141,6 +141,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		)
 
 		runner := run.NewRunner(cfg, reg, cli)
+		// NewRunner starts the job-facing servers, so an early return must not leak them.
+		// Close is idempotent; the graceful path below still closes once jobs are done.
+		defer func() { _ = runner.Close() }()
 
 		// declare the labels of the runner before fetching tasks
 		resp, err := runner.Declare(ctx, ls.Names())

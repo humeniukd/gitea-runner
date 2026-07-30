@@ -4,13 +4,13 @@
 package artifactcache
 
 import (
+	"cmp"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +19,7 @@ import (
 	"github.com/timshannon/bolthold"
 )
 
-// The cache service v2 API. From actions/cache@v4.2 on, the toolkit talks twirp to
+// The cache service v2 API. A client on this version talks twirp to
 // `github.actions.results.api.v1.CacheService` instead of the /_apis/artifactcache
 // endpoints, and uploads the archive to the returned URL with the Azure blob protocol.
 // Both API versions are served from the same store, so a repository keeps its cache
@@ -32,41 +32,43 @@ const (
 	// without an Authorization header.
 	blobPath = apiPath + "/blobs"
 
+	// blobUploadPurpose separates upload signatures from download ones, so a URL handed
+	// out for writing an entry cannot be replayed to read one.
+	blobUploadPurpose = "upload:"
+
 	// blobUploadURLTTL bounds how long a signed upload URL stays valid. Uploading a
 	// large cache takes a while, so it is more generous than the download TTL.
 	blobUploadURLTTL = time.Hour
+
+	// twirpInternal is the only error code that is not the client's fault.
+	twirpInternal = "internal"
 )
 
-// registerV2Routes wires the cache service v2 API onto the router.
 func (h *Handler) registerV2Routes(router *httprouter.Router) {
 	router.POST(cacheServiceV2Path+"/CreateCacheEntry", h.bearerAuth(h.v2CreateCacheEntry))
 	router.POST(cacheServiceV2Path+"/FinalizeCacheEntryUpload", h.bearerAuth(h.v2FinalizeCacheEntryUpload))
 	router.POST(cacheServiceV2Path+"/GetCacheEntryDownloadURL", h.bearerAuth(h.v2GetCacheEntryDownloadURL))
-	router.PUT(blobPath+"/:id", h.signedUploadAuth(h.v2UploadBlob))
-	router.GET(blobPath+"/:id", h.signedURLAuth(h.get))
+	router.PUT(blobPath+"/:id", h.signedAuth(blobUploadPurpose, h.v2UploadBlob))
+	router.GET(blobPath+"/:id", h.signedAuth("", h.get))
 }
 
-// POST /twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry
-//
 // Reserves an entry and returns the URL to upload the archive to. An entry that already
 // exists is reported as not ok, which is how the client learns to skip the upload.
 func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	cred := credFromContext(r.Context())
-	req, err := decodeTwirpRequest(r)
+	req, err := decodeTwirpRequest[v2CreateRequest](r)
 	if err != nil {
-		h.twirpError(w, r, http.StatusBadRequest, "malformed_request", err)
+		h.twirpError(w, r, "malformed_request", err)
 		return
 	}
-	key := req.string("key")
-	version := req.string("version")
-	if key == "" || version == "" {
-		h.twirpError(w, r, http.StatusBadRequest, "invalid_argument", errors.New("key and version are required"))
+	if req.Key == "" || req.Version == "" {
+		h.twirpError(w, r, "invalid_argument", errors.New("key and version are required"))
 		return
 	}
 
 	db, err := h.openDB()
 	if err != nil {
-		h.twirpError(w, r, http.StatusInternalServerError, "internal", err)
+		h.twirpError(w, r, twirpInternal, err)
 		return
 	}
 	defer db.Close()
@@ -74,8 +76,8 @@ func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ h
 	// An exact (key, version) match means the entry is already cached; the client then skips
 	// the upload. A prefix match must not count here, or a shorter key would be reported as
 	// existing and silently never saved.
-	if existing, err := findExactCache(db, cred.Repo, key, version); err != nil {
-		h.twirpError(w, r, http.StatusInternalServerError, "internal", err)
+	if existing, err := findExactCache(db, cred.Repo, req.Key, req.Version); err != nil {
+		h.twirpError(w, r, twirpInternal, err)
 		return
 	} else if existing != nil {
 		h.responseJSON(w, r, http.StatusOK, map[string]any{"ok": false})
@@ -85,106 +87,82 @@ func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ h
 	now := time.Now().Unix()
 	cache := &Cache{
 		Repo:      cred.Repo,
-		Key:       key,
-		Version:   version,
+		Key:       req.Key,
+		Version:   req.Version,
 		Size:      -1, // the size is only known at finalize time
 		CreatedAt: now,
 		UsedAt:    now,
 	}
 	if err := insertCache(db, cache); err != nil {
-		h.twirpError(w, r, http.StatusInternalServerError, "internal", err)
+		h.twirpError(w, r, twirpInternal, err)
 		return
 	}
 
 	h.responseJSON(w, r, http.StatusOK, map[string]any{
 		"ok":              true,
-		"signedUploadUrl": h.signedUploadURL(cache.ID, time.Now().Add(blobUploadURLTTL)),
-		// Emitted under both spellings so a client using the proto field names finds it.
-		"signed_upload_url": h.signedUploadURL(cache.ID, time.Now().Add(blobUploadURLTTL)),
+		"signedUploadUrl": h.signedURL(blobPath, blobUploadPurpose, cache.ID, time.Now().Add(blobUploadURLTTL)),
 	})
 }
 
-// POST /twirp/github.actions.results.api.v1.CacheService/FinalizeCacheEntryUpload
-//
 // Completes the entry once the archive is uploaded, which is what makes it visible to
 // GetCacheEntryDownloadURL.
 func (h *Handler) v2FinalizeCacheEntryUpload(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	cred := credFromContext(r.Context())
-	req, err := decodeTwirpRequest(r)
+	req, err := decodeTwirpRequest[v2FinalizeRequest](r)
 	if err != nil {
-		h.twirpError(w, r, http.StatusBadRequest, "malformed_request", err)
+		h.twirpError(w, r, "malformed_request", err)
 		return
 	}
-	key := req.string("key")
-	version := req.string("version")
-	size := req.int64("sizeBytes", "size_bytes")
 
 	db, err := h.openDB()
 	if err != nil {
-		h.twirpError(w, r, http.StatusInternalServerError, "internal", err)
+		h.twirpError(w, r, twirpInternal, err)
 		return
 	}
 	defer db.Close()
 
-	cache, err := findReservedCache(db, cred.Repo, key, version)
+	cache, err := findReservedCache(db, cred.Repo, req.Key, req.Version)
 	if errors.Is(err, bolthold.ErrNotFound) {
 		h.responseJSON(w, r, http.StatusOK, map[string]any{"ok": false})
 		return
 	} else if err != nil {
-		h.twirpError(w, r, http.StatusInternalServerError, "internal", err)
+		h.twirpError(w, r, twirpInternal, err)
 		return
 	}
-	db.Close()
+	db.Close() // commitCache needs the store closed
 
-	written, err := h.storage.Commit(cache.ID, size)
-	if err != nil {
+	size, _ := cmp.Or(req.SizeBytes, req.SizeBytesJSON).Int64()
+	if err := h.commitCache(cache, size); err != nil {
 		h.logger.Errorf("finalize cache %d (%s): %v", cache.ID, cache.Key, err)
 		h.responseJSON(w, r, http.StatusOK, map[string]any{"ok": false})
-		return
-	}
-	cache.Size = written
-	cache.Complete = true
-
-	db, err = h.openDB()
-	if err != nil {
-		h.twirpError(w, r, http.StatusInternalServerError, "internal", err)
-		return
-	}
-	defer db.Close()
-	if err := db.Update(cache.ID, cache); err != nil {
-		h.twirpError(w, r, http.StatusInternalServerError, "internal", err)
 		return
 	}
 
 	h.responseJSON(w, r, http.StatusOK, map[string]any{
 		"ok": true,
 		// int64 fields travel as strings in the proto JSON mapping.
-		"entryId":  strconv.FormatUint(cache.ID, 10),
-		"entry_id": strconv.FormatUint(cache.ID, 10),
+		"entryId": strconv.FormatUint(cache.ID, 10),
 	})
 }
 
-// POST /twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL
 func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	cred := credFromContext(r.Context())
-	req, err := decodeTwirpRequest(r)
+	req, err := decodeTwirpRequest[v2DownloadRequest](r)
 	if err != nil {
-		h.twirpError(w, r, http.StatusBadRequest, "malformed_request", err)
+		h.twirpError(w, r, "malformed_request", err)
 		return
 	}
-	keys := append([]string{req.string("key")}, req.strings("restoreKeys", "restore_keys")...)
-	version := req.string("version")
 
 	db, err := h.openDB()
 	if err != nil {
-		h.twirpError(w, r, http.StatusInternalServerError, "internal", err)
+		h.twirpError(w, r, twirpInternal, err)
 		return
 	}
 	defer db.Close()
 
-	cache, err := findCache(db, cred.Repo, keys, version)
+	cache, err := findCache(db, cred.Repo, req.keys(), req.Version)
 	if err != nil {
-		h.twirpError(w, r, http.StatusInternalServerError, "internal", err)
+		h.twirpError(w, r, twirpInternal, err)
 		return
 	}
 	if cache == nil {
@@ -192,7 +170,7 @@ func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if ok, err := h.storage.Exist(cache.ID); err != nil {
-		h.twirpError(w, r, http.StatusInternalServerError, "internal", err)
+		h.twirpError(w, r, twirpInternal, err)
 		return
 	} else if !ok {
 		// The blob is gone (pruned or lost); drop the dangling entry and report a miss.
@@ -201,13 +179,10 @@ func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	downloadURL := h.signedBlobURL(cache.ID, time.Now().Add(artifactURLTTL))
 	h.responseJSON(w, r, http.StatusOK, map[string]any{
-		"ok":                  true,
-		"signedDownloadUrl":   downloadURL,
-		"signed_download_url": downloadURL,
-		"matchedKey":          cache.Key,
-		"matched_key":         cache.Key,
+		"ok":                true,
+		"signedDownloadUrl": h.signedURL(blobPath, "", cache.ID, time.Now().Add(artifactURLTTL)),
+		"matchedKey":        cache.Key,
 	})
 }
 
@@ -216,8 +191,6 @@ type blockList struct {
 	Latest []string `xml:"Latest"`
 }
 
-// PUT /_apis/artifactcache/blobs/:id
-//
 // The archive arrives over the subset of the Azure blob API the toolkit uses: a small
 // cache is a single PUT, a large one is staged as blocks that a final block list puts
 // in order.
@@ -231,11 +204,8 @@ func (h *Handler) v2UploadBlob(w http.ResponseWriter, r *http.Request, params ht
 	// The upload URL outlives the finalize call, so refuse to write over an entry that is
 	// already complete: its blob is what other jobs restore, and its recorded size would
 	// no longer describe it. This is the guard the v1 upload route applies.
-	if complete, err := h.cacheComplete(id); err != nil {
-		h.responseJSON(w, r, http.StatusInternalServerError, err)
-		return
-	} else if complete {
-		h.responseJSON(w, r, http.StatusBadRequest, fmt.Errorf("cache %d: already complete", id))
+	if err := h.touchIncompleteCache(id); err != nil {
+		h.responseJSON(w, r, http.StatusBadRequest, err)
 		return
 	}
 
@@ -251,22 +221,12 @@ func (h *Handler) v2UploadBlob(w http.ResponseWriter, r *http.Request, params ht
 			return
 		}
 	case "blocklist":
-		body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
-		if err != nil {
-			h.responseJSON(w, r, http.StatusBadRequest, err)
-			return
-		}
 		var list blockList
-		if err := xml.Unmarshal(body, &list); err != nil {
+		if err := xml.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&list); err != nil {
 			h.responseJSON(w, r, http.StatusBadRequest, fmt.Errorf("malformed block list: %w", err))
 			return
 		}
 		if err := h.storage.OrderBlocks(id, list.Latest); err != nil {
-			h.responseJSON(w, r, http.StatusInternalServerError, err)
-			return
-		}
-	case "appendblock":
-		if err := h.storage.AppendBlock(id, r.Body); err != nil {
 			h.responseJSON(w, r, http.StatusInternalServerError, err)
 			return
 		}
@@ -278,127 +238,102 @@ func (h *Handler) v2UploadBlob(w http.ResponseWriter, r *http.Request, params ht
 		}
 	}
 
-	h.useCache(int64(id))
 	w.WriteHeader(http.StatusCreated)
 }
 
-// cacheComplete reports whether the entry has already been finalized. An entry that is
-// not in the store at all is not complete: the signature already proves the id was handed
-// out, and the write is harmless once the reservation is gone.
-func (h *Handler) cacheComplete(id uint64) (bool, error) {
+// touchIncompleteCache rejects an entry that is already finalized and, in the same
+// transaction, bumps UsedAt so gcCache does not reap the reservation mid-upload. One
+// bolt open per uploaded part rather than two, which matters at a block apiece.
+//
+// An entry that is not in the store at all is accepted: the signature already proves the
+// id was handed out, and the write is harmless once the reservation is gone.
+func (h *Handler) touchIncompleteCache(id uint64) error {
 	db, err := h.openDB()
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer db.Close()
 
 	cache := &Cache{}
 	if err := db.Get(id, cache); err != nil {
 		if errors.Is(err, bolthold.ErrNotFound) {
-			return false, nil
+			return nil
 		}
-		return false, err
+		return err
 	}
-	return cache.Complete, nil
+	if cache.Complete {
+		return fmt.Errorf("cache %d: already complete", id)
+	}
+	cache.UsedAt = time.Now().Unix()
+	return db.Update(cache.ID, cache)
 }
 
-// findReservedCache returns the entry a finalize call refers to: the newest reservation
-// for this key and version that is not complete yet. A missing reservation is reported as
-// bolthold.ErrNotFound.
+// findReservedCache returns the entry a finalize call refers to: the reservation for this
+// key and version that was written to most recently, since the upload route touches UsedAt
+// on every part it stores. A missing reservation is reported as bolthold.ErrNotFound.
+//
+// The request carries no entry id, so two jobs reserving the same key and version
+// concurrently cannot be told apart here and one may finalize the other's blob. Their
+// archives are the same content in practice, and the size check in Commit rejects the pair
+// that are not.
 func findReservedCache(db *bolthold.Store, repo, key, version string) (*Cache, error) {
 	cache := &Cache{}
 	if err := db.FindOne(cache, bolthold.Where("Repo").Eq(repo).
 		And("Key").Eq(key).
 		And("Version").Eq(version).
 		And("Complete").Eq(false).
-		SortBy("CreatedAt").Reverse()); err != nil {
+		SortBy("UsedAt").Reverse()); err != nil {
 		return nil, err
 	}
 	return cache, nil
 }
 
-func (h *Handler) signedUploadURL(cacheID uint64, exp time.Time) string {
-	return h.signedBlobURLWith(cacheID, exp, h.computeUploadSignature)
-}
-
-func (h *Handler) signedBlobURL(cacheID uint64, exp time.Time) string {
-	return h.signedBlobURLWith(cacheID, exp, h.computeSignature)
-}
-
-func (h *Handler) signedBlobURLWith(cacheID uint64, exp time.Time, sign func(cacheID, exp int64) string) string {
-	expUnix := exp.Unix()
-	q := url.Values{}
-	q.Set("exp", strconv.FormatInt(expUnix, 10))
-	q.Set("sig", sign(int64(cacheID), expUnix))
-	return fmt.Sprintf("%s%s/%d?%s", h.ExternalURL(), blobPath, cacheID, q.Encode())
-}
-
 // twirpError reports a failure in the shape a twirp client expects, so the toolkit
 // surfaces the message instead of a parse error.
-func (h *Handler) twirpError(w http.ResponseWriter, r *http.Request, status int, code string, err error) {
+func (h *Handler) twirpError(w http.ResponseWriter, r *http.Request, code string, err error) {
 	h.logger.Debugf("%s %s: %v", r.Method, r.URL.Path, err)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"code": code,
-		"msg":  err.Error(),
-	})
+	status := http.StatusBadRequest
+	if code == twirpInternal {
+		status = http.StatusInternalServerError
+	}
+	h.responseJSON(w, r, status, map[string]any{"code": code, "msg": err.Error()})
 }
 
-// twirpRequest is a decoded twirp JSON body. Field names are read leniently because a
-// client may send either the proto field names or their camelCase form, and the proto
-// JSON mapping writes 64-bit integers as strings.
-type twirpRequest map[string]json.RawMessage
-
-func decodeTwirpRequest(r *http.Request) (twirpRequest, error) {
-	req := twirpRequest{}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		return nil, err
+// The twirp request bodies. The toolkit's client serialises with useProtoFieldName, so the
+// proto names are what arrive; the camelCase spellings are accepted too. json.Number takes
+// a 64-bit integer as either the string the proto JSON mapping prescribes or a bare number.
+type (
+	v2CreateRequest struct {
+		Key     string `json:"key"`
+		Version string `json:"version"`
 	}
-	return req, nil
+
+	v2FinalizeRequest struct {
+		Key           string      `json:"key"`
+		Version       string      `json:"version"`
+		SizeBytes     json.Number `json:"size_bytes"`
+		SizeBytesJSON json.Number `json:"sizeBytes"`
+	}
+
+	v2DownloadRequest struct {
+		Key             string   `json:"key"`
+		Version         string   `json:"version"`
+		RestoreKeys     []string `json:"restore_keys"`
+		RestoreKeysJSON []string `json:"restoreKeys"`
+	}
+)
+
+// keys is the lookup order: the exact key first, then the restore-key prefixes.
+func (d v2DownloadRequest) keys() []string {
+	restoreKeys := d.RestoreKeys
+	if len(restoreKeys) == 0 {
+		restoreKeys = d.RestoreKeysJSON
+	}
+	return append([]string{d.Key}, restoreKeys...)
 }
 
-func (t twirpRequest) raw(names ...string) json.RawMessage {
-	for _, name := range names {
-		if raw, ok := t[name]; ok {
-			return raw
-		}
-	}
-	return nil
-}
-
-func (t twirpRequest) string(names ...string) string {
-	var value string
-	if raw := t.raw(names...); raw != nil {
-		_ = json.Unmarshal(raw, &value)
-	}
-	return value
-}
-
-func (t twirpRequest) strings(names ...string) []string {
-	var value []string
-	if raw := t.raw(names...); raw != nil {
-		_ = json.Unmarshal(raw, &value)
-	}
-	return value
-}
-
-func (t twirpRequest) int64(names ...string) int64 {
-	raw := t.raw(names...)
-	if raw == nil {
-		return 0
-	}
-	var number json.Number
-	if err := json.Unmarshal(raw, &number); err == nil {
-		if value, err := number.Int64(); err == nil {
-			return value
-		}
-	}
-	var text string
-	if err := json.Unmarshal(raw, &text); err == nil {
-		if value, err := strconv.ParseInt(text, 10, 64); err == nil {
-			return value
-		}
-	}
-	return 0
+func decodeTwirpRequest[T any](r *http.Request) (T, error) {
+	var req T
+	err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
+	return req, err
 }

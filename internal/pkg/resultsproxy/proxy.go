@@ -30,9 +30,8 @@ import (
 const cacheServicePrefix = "/twirp/github.actions.results.api.v1.CacheService/"
 
 type Proxy struct {
-	listener net.Listener
-	server   *http.Server
-	host     string
+	server *http.Server
+	url    string
 }
 
 // Start listens on port (0 picks a free one) and proxies to gitea and cache. host is the
@@ -85,6 +84,11 @@ func Start(host string, port uint16, gitea, cache string, insecureTLS bool, logg
 	if err != nil {
 		return nil, fmt.Errorf("results proxy: %w", err)
 	}
+	_, boundPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("results proxy: %w", err)
+	}
 	server := &http.Server{
 		ReadHeaderTimeout: 5 * time.Second,
 		Handler:           reverse,
@@ -95,7 +99,8 @@ func Start(host string, port uint16, gitea, cache string, insecureTLS bool, logg
 		}
 	}()
 
-	return &Proxy{listener: listener, server: server, host: host}, nil
+	// Resolved once, so the URL outlives Close and needs no type assertion on the address.
+	return &Proxy{server: server, url: "http://" + net.JoinHostPort(host, boundPort)}, nil
 }
 
 // ExternalURL is the value to hand to jobs as ACTIONS_RESULTS_URL. It carries no trailing
@@ -104,25 +109,16 @@ func (p *Proxy) ExternalURL() string {
 	if p == nil {
 		return ""
 	}
-	return fmt.Sprintf("http://%s:%d", p.host, p.listener.Addr().(*net.TCPAddr).Port)
+	return p.url
 }
 
 func (p *Proxy) Close() error {
-	if p == nil {
+	if p == nil || p.server == nil {
 		return nil
 	}
-	var errs []error
-	if p.server != nil {
-		errs = append(errs, p.server.Close())
-		p.server = nil
-	}
-	if p.listener != nil {
-		if err := p.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			errs = append(errs, err)
-		}
-		p.listener = nil
-	}
-	return errors.Join(errs...)
+	server := p.server
+	p.server = nil
+	return server.Close()
 }
 
 func parseTarget(raw string) (*url.URL, error) {
@@ -142,10 +138,16 @@ func parseTarget(raw string) (*url.URL, error) {
 // transport clones the default transport so that a Gitea instance with a certificate the
 // runner is configured to skip verifying stays reachable through the proxy as well.
 func transport(insecureTLS bool) http.RoundTripper {
-	if !insecureTLS {
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
 		return http.DefaultTransport
 	}
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // the operator asked for it with runner.insecure
+	tr := defaultTransport.Clone()
+	// Artifact uploads run many chunks in parallel, and the default of 2 idle connections
+	// per host would make most of them reconnect.
+	tr.MaxIdleConnsPerHost = 32
+	if insecureTLS {
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // the operator asked for it with runner.insecure
+	}
 	return tr
 }

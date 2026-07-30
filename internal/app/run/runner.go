@@ -157,7 +157,7 @@ func startResultsProxy(cfg *config.Config, cli client.Client, envs map[string]st
 	}
 
 	proxy, err := resultsproxy.Start(
-		cfg.Cache.ServiceV2Host,
+		cfg.Cache.Host,
 		cfg.Cache.ServiceV2Port,
 		strings.TrimSuffix(cli.Address(), "/"),
 		cacheURL,
@@ -399,7 +399,9 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 
 	// Added per task because this job's service containers must be reached directly, and
 	// act reaches them by their workflow key.
-	proxyEnv := JobProxyEnv(envs, envs["ACTIONS_CACHE_URL"], slices.Sorted(maps.Keys(job.Services)))
+	// The results proxy, unlike the results URL it replaces, is this runner's own server:
+	// direct, where Gitea stays reachable through whatever proxy the runner uses.
+	proxyEnv := JobProxyEnv(envs, slices.Sorted(maps.Keys(job.Services)), envs["ACTIONS_CACHE_URL"], r.resultsProxy.ExternalURL())
 	maps.Copy(envs, proxyEnv)
 
 	if r.capabilities != "" {

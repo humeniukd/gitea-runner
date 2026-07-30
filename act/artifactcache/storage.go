@@ -40,7 +40,10 @@ func (s *Storage) Exist(id uint64) (bool, error) {
 }
 
 func (s *Storage) Write(id uint64, offset int64, reader io.Reader) error {
-	name := s.tempName(id, offset)
+	return s.writeFile(s.tempName(id, offset), reader)
+}
+
+func (s *Storage) writeFile(name string, reader io.Reader) error {
 	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
 		return err
 	}
@@ -58,42 +61,21 @@ func (s *Storage) Write(id uint64, offset int64, reader io.Reader) error {
 // any order and are only put in sequence by OrderBlocks, once the client sends the block
 // list that names them.
 func (s *Storage) WriteBlock(id uint64, blockID string, reader io.Reader) error {
-	name := s.blockName(id, blockID)
-	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
-		return err
-	}
-	file, err := os.Create(name)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	_, err = io.Copy(file, reader)
-	return err
+	return s.writeFile(s.blockName(id, blockID), reader)
 }
 
 // OrderBlocks renames the staged blocks so that Commit concatenates them in the order the
 // block list gives, which is the order the client wants them in, not the order they
 // arrived in. A block the list does not name is dropped, as Azure drops it.
+//
+// A single rename pass is safe because a staged name always carries blockFilePrefix and a
+// target name never does, so no rename can collide with a block not yet moved.
 func (s *Storage) OrderBlocks(id uint64, blockIDs []string) error {
-	staged := map[string]string{}
 	for i, blockID := range blockIDs {
-		name := s.blockName(id, blockID)
-		if _, err := os.Stat(name); err != nil {
-			return fmt.Errorf("block %q of cache %d was never uploaded: %w", blockID, id, err)
-		}
-		staged[name] = s.tempName(id, int64(i))
-	}
-
-	// Two passes: a block's target name may be another block's current name when the
-	// list reorders them, so move everything aside first.
-	for name := range staged {
-		if err := os.Rename(name, name+".ordering"); err != nil {
-			return err
-		}
-	}
-	for name, target := range staged {
-		if err := os.Rename(name+".ordering", target); err != nil {
+		if err := os.Rename(s.blockName(id, blockID), s.tempName(id, int64(i))); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("block %q of cache %d was never uploaded: %w", blockID, id, err)
+			}
 			return err
 		}
 	}
@@ -109,15 +91,6 @@ func (s *Storage) OrderBlocks(id uint64, blockIDs []string) error {
 		}
 	}
 	return nil
-}
-
-// AppendBlock appends to an append blob, whose parts are always written in order.
-func (s *Storage) AppendBlock(id uint64, reader io.Reader) error {
-	names, err := s.tempNames(id)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return s.Write(id, int64(len(names)), reader)
 }
 
 func (s *Storage) Commit(id uint64, size int64) (int64, error) {
@@ -188,8 +161,8 @@ func (s *Storage) tempName(id uint64, offset int64) string {
 	return filepath.Join(s.tempDir(id), fmt.Sprintf("%016x", offset))
 }
 
-// blockFilePrefix marks a staged, not yet ordered block, so that Commit's name-ordered
-// concatenation never picks one up and OrderBlocks can clean up the leftovers.
+// blockFilePrefix marks a staged, not yet ordered block, so that tempNames can keep it out
+// of Commit's name-ordered concatenation and OrderBlocks can clean up the leftovers.
 const blockFilePrefix = "block-"
 
 func (s *Storage) blockName(id uint64, blockID string) string {
@@ -207,7 +180,7 @@ func (s *Storage) tempNames(id uint64) ([]string, error) {
 	}
 	var names []string
 	for _, v := range files {
-		if !v.IsDir() {
+		if !v.IsDir() && !strings.HasPrefix(v.Name(), blockFilePrefix) {
 			names = append(names, filepath.Join(dir, v.Name()))
 		}
 	}

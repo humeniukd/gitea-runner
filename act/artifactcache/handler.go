@@ -158,7 +158,7 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret string, lo
 	router.POST(apiPath+"/clean", h.bearerAuth(h.clean))
 	// Artifact GET is signed via query-string HMAC because @actions/cache
 	// does not attach Authorization when downloading archiveLocation.
-	router.GET(apiPath+"/artifacts/:id", h.signedURLAuth(h.get))
+	router.GET(apiPath+"/artifacts/:id", h.signedAuth("", h.get))
 	// Control-plane: a remote runner registers/revokes per-job tokens so the
 	// cache API can authenticate them. Always wired so the routes exist; the
 	// handlers themselves 401 when internalSecret is unset.
@@ -480,23 +480,7 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 
 	db.Close()
 
-	size, err := h.storage.Commit(cache.ID, cache.Size)
-	if err != nil {
-		h.responseJSON(w, r, 500, err)
-		return
-	}
-	// write real size back to cache, it may be different from the current value when the request doesn't specify it.
-	cache.Size = size
-
-	db, err = h.openDB()
-	if err != nil {
-		h.responseJSON(w, r, 500, err)
-		return
-	}
-	defer db.Close()
-
-	cache.Complete = true
-	if err := db.Update(cache.ID, cache); err != nil {
+	if err := h.commitCache(cache, cache.Size); err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
 	}
@@ -504,8 +488,28 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 	h.responseJSON(w, r, 200)
 }
 
+// commitCache assembles the uploaded parts and marks the entry complete. The caller must
+// have closed its store first: Commit concatenates the whole archive and would otherwise
+// hold bolt's exclusive file lock for the duration.
+func (h *Handler) commitCache(cache *Cache, size int64) error {
+	written, err := h.storage.Commit(cache.ID, size)
+	if err != nil {
+		return err
+	}
+	// write real size back to cache, it may be different from the current value when the request doesn't specify it.
+	cache.Size = written
+	cache.Complete = true
+
+	db, err := h.openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.Update(cache.ID, cache)
+}
+
 // GET /_apis/artifactcache/artifacts/:id
-// Authenticated via signed URL (see signedURLAuth), not bearer, because the
+// Authenticated via signed URL (see signedAuth), not bearer, because the
 // @actions/cache toolkit downloads archiveLocation without Authorization.
 // Repository scoping is already enforced at find() time; the signature binds
 // the URL to the specific cache ID and an expiry.
@@ -549,11 +553,9 @@ func (h *Handler) bearerAuth(handler httprouter.Handle) httprouter.Handle {
 	}
 }
 
-func (h *Handler) signedURLAuth(handler httprouter.Handle) httprouter.Handle {
-	return h.signedAuth(handler, h.computeSignature)
-}
-
-func (h *Handler) signedAuth(handler httprouter.Handle, sign func(cacheID, exp int64) string) httprouter.Handle {
+// signedAuth authenticates a signed URL. purpose separates the flavours of URL the
+// handler hands out, so one cannot be replayed as another; see computeSignature.
+func (h *Handler) signedAuth(purpose string, handler httprouter.Handle) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 		h.logger.Debugf("%s %s", r.Method, r.URL.Path)
 		id, err := strconv.ParseInt(params.ByName("id"), 10, 64)
@@ -576,7 +578,7 @@ func (h *Handler) signedAuth(handler httprouter.Handle, sign func(cacheID, exp i
 			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("signature expired"))
 			return
 		}
-		expected := sign(id, exp)
+		expected := h.computeSignature(purpose, id, exp)
 		if !hmac.Equal([]byte(sig), []byte(expected)) {
 			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("bad signature"))
 			return
@@ -660,34 +662,26 @@ func credFromContext(ctx context.Context) JobCredential {
 	return JobCredential{}
 }
 
-func (h *Handler) computeSignature(cacheID, exp int64) string {
+// computeSignature signs a URL for one cache entry and expiry. purpose is mixed into the
+// message so a URL handed out for writing an entry cannot be replayed to read one, and the
+// other way round. Downloads use the empty purpose, the message v1 has always signed.
+func (h *Handler) computeSignature(purpose string, cacheID, exp int64) string {
 	mac := hmac.New(sha256.New, h.secret)
-	fmt.Fprintf(mac, "%d:%d", cacheID, exp)
+	fmt.Fprintf(mac, "%s%d:%d", purpose, cacheID, exp)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// computeUploadSignature signs a cache service v2 upload URL. Uploads are signed with a
-// distinct message so that a URL handed out for writing an entry cannot be replayed to
-// read one, and the other way round.
-func (h *Handler) computeUploadSignature(cacheID, exp int64) string {
-	mac := hmac.New(sha256.New, h.secret)
-	fmt.Fprintf(mac, "upload:%d:%d", cacheID, exp)
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// signedUploadAuth authenticates a signed blob upload URL, the write counterpart of
-// signedURLAuth.
-func (h *Handler) signedUploadAuth(handler httprouter.Handle) httprouter.Handle {
-	return h.signedAuth(handler, h.computeUploadSignature)
+// signedURL builds a URL under path that signedAuth accepts for the same purpose.
+func (h *Handler) signedURL(path, purpose string, cacheID uint64, exp time.Time) string {
+	expUnix := exp.Unix()
+	q := url.Values{}
+	q.Set("exp", strconv.FormatInt(expUnix, 10))
+	q.Set("sig", h.computeSignature(purpose, int64(cacheID), expUnix))
+	return fmt.Sprintf("%s%s/%d?%s", h.ExternalURL(), path, cacheID, q.Encode())
 }
 
 func (h *Handler) signedArtifactURL(cacheID uint64, exp time.Time) string {
-	expUnix := exp.Unix()
-	sig := h.computeSignature(int64(cacheID), expUnix)
-	q := url.Values{}
-	q.Set("exp", strconv.FormatInt(expUnix, 10))
-	q.Set("sig", sig)
-	return fmt.Sprintf("%s%s/artifacts/%d?%s", h.ExternalURL(), apiPath, cacheID, q.Encode())
+	return h.signedURL(apiPath+"/artifacts", "", cacheID, exp)
 }
 
 // if not found, return (nil, nil) instead of an error.
@@ -695,16 +689,12 @@ func findCache(db *bolthold.Store, repo string, keys []string, version string) (
 	cache := &Cache{}
 	for _, prefix := range keys {
 		// if a key in the list matches exactly, don't return partial matches
-		if err := db.FindOne(cache,
-			bolthold.Where("Repo").Eq(repo).
-				And("Key").Eq(prefix).
-				And("Version").Eq(version).
-				And("Complete").Eq(true).
-				SortBy("CreatedAt").Reverse()); err == nil || !errors.Is(err, bolthold.ErrNotFound) {
-			if err != nil {
-				return nil, fmt.Errorf("find cache: %w", err)
-			}
-			return cache, nil
+		exact, err := findExactCache(db, repo, prefix, version)
+		if err != nil {
+			return nil, err
+		}
+		if exact != nil {
+			return exact, nil
 		}
 		prefixPattern := "^" + regexp.QuoteMeta(prefix)
 		re, err := regexp.Compile(prefixPattern)

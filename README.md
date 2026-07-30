@@ -223,7 +223,7 @@ The runner uses them for its own requests and gives them to every job, in lower 
 
 These hosts are added to `no_proxy` for jobs, so they are always reached directly:
 
-- the cache server
+- the cache server, and the results proxy when `cache.service_v2` is on
 - `localhost`, `127.0.0.1` and `::1`
 - the job's service containers
 - the Docker daemon, when it is reached over `tcp://`
@@ -242,18 +242,18 @@ A password in a proxy URL is hidden in job logs. Any step can still read it, bec
 
 Each runner starts its own cache server automatically. Cache entries are local to that runner — runners do not share a cache by default.
 
-**Cache API versions**
+**Cache service v2**
 
-`actions/cache@v4.2` and later (including everything the `v4` tag now points at, and `v5`) stopped calling the old cache endpoints and use the *cache service v2* API instead. Serving it requires one setting, because the client looks that service up under `ACTIONS_RESULTS_URL` — the same URL artifacts are uploaded to:
+`actions/cache@v4.2` and later can use the *cache service v2* API instead of the older cache endpoints. The runner serves it when enabled:
 
 ```yaml
 cache:
   service_v2: true
 ```
 
-With it enabled the runner starts a small proxy and hands it to jobs as `ACTIONS_RESULTS_URL`: cache calls are answered by the runner's cache server, everything else — artifacts above all — is forwarded to Gitea unchanged. It works with `external_server` as well; the proxy simply points at that server. Older `actions/cache` versions keep using the v1 API, and both versions share the same store, so nothing is lost when a workflow moves between them.
+The v2 client looks that service up under `ACTIONS_RESULTS_URL`, the same URL artifacts are uploaded to, so enabling this starts a small proxy that jobs get as `ACTIONS_RESULTS_URL`: cache calls are answered by the runner's cache server, everything else — artifacts above all — is forwarded to Gitea unchanged. It works with `external_server` too, and both API versions share one store, so nothing is lost when a workflow moves between them.
 
-Leave it off if your workflows pin an `actions/cache` version below 4.2.
+It is off by default; clients that do not use v2 keep using the v1 API.
 
 **Shared cache across multiple runners**
 

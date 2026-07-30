@@ -418,7 +418,7 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 
 		// no service aliases: exec builds one config for the whole plan
 		run.BypassProxyForDockerHost(os.Getenv("DOCKER_HOST"))
-		proxyEnv := run.JobProxyEnv(env, env["ACTIONS_CACHE_URL"], nil)
+		proxyEnv := run.JobProxyEnv(env, nil, env["ACTIONS_CACHE_URL"])
 		maps.Copy(env, proxyEnv)
 
 		// run the plan

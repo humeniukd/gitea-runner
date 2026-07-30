@@ -27,8 +27,9 @@ func proxyFromEnv() *httpproxy.Config {
 
 // JobProxyEnv returns the proxy variables a job runs with, given what runner.envs already
 // put in jobEnvs. Gitea is deliberately not made direct, so it stays reachable however the
-// runner reaches it.
-func JobProxyEnv(jobEnvs map[string]string, cacheURL string, serviceNames []string) map[string]string {
+// runner reaches it. directURLs are runner-hosted servers the job must reach without the
+// proxy; their addresses are assigned at startup, so an operator cannot list them.
+func JobProxyEnv(jobEnvs map[string]string, serviceNames []string, directURLs ...string) map[string]string {
 	cfg := proxyFromEnv()
 	if cfg == nil {
 		return nil
@@ -36,7 +37,9 @@ func JobProxyEnv(jobEnvs map[string]string, cacheURL string, serviceNames []stri
 
 	// Go bypasses loopback on its own, curl and most other tools in a job do not.
 	direct := append([]string{"localhost", "127.0.0.1", "::1"}, serviceNames...)
-	direct = append(direct, hostOf(cacheURL))
+	for _, raw := range directURLs {
+		direct = append(direct, hostOf(raw))
+	}
 
 	proxyEnv := map[string]string{}
 	setPair := func(lower, upper, value string) {
@@ -54,8 +57,7 @@ func JobProxyEnv(jobEnvs map[string]string, cacheURL string, serviceNames []stri
 	setPair("http_proxy", "HTTP_PROXY", cfg.HTTPProxy)
 	setPair("https_proxy", "HTTPS_PROXY", cfg.HTTPSProxy)
 
-	// no_proxy is merged rather than replaced: the hosts above are structural, and an
-	// operator cannot list the cache server's startup-assigned address in advance.
+	// no_proxy is merged rather than replaced: the hosts above are structural.
 	noProxy := appendNoProxy(cfg.NoProxy, direct...)
 	for _, name := range []string{"no_proxy", "NO_PROXY"} {
 		if existing, ok := jobEnvs[name]; ok {

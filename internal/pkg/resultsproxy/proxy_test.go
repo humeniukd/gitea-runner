@@ -14,83 +14,62 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// startProxy fronts two recording upstreams and returns the proxy plus the requests each
-// upstream saw.
-func startProxy(t *testing.T) (proxy *Proxy, gitea, cache *[]*http.Request) {
+// startProxy fronts two upstreams that echo which one was reached, and records the
+// requests Gitea saw.
+func startProxy(t *testing.T) (*Proxy, *[]*http.Request) {
 	t.Helper()
 
 	giteaSeen := &[]*http.Request{}
-	cacheSeen := &[]*http.Request{}
+	upstream := func(name string, seen *[]*http.Request) *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if seen != nil {
+				*seen = append(*seen, r.Clone(t.Context()))
+			}
+			body, _ := io.ReadAll(r.Body)
+			_, _ = w.Write([]byte(name + ":" + r.URL.Path + ":" + string(body)))
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
 
-	giteaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*giteaSeen = append(*giteaSeen, r.Clone(t.Context()))
-		body, _ := io.ReadAll(r.Body)
-		_, _ = w.Write([]byte("gitea:" + r.URL.Path + ":" + string(body)))
-	}))
-	t.Cleanup(giteaServer.Close)
-
-	cacheServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*cacheSeen = append(*cacheSeen, r.Clone(t.Context()))
-		_, _ = w.Write([]byte("cache:" + r.URL.Path))
-	}))
-	t.Cleanup(cacheServer.Close)
-
-	proxy, err := Start("127.0.0.1", 0, giteaServer.URL, cacheServer.URL+"/", false, nil)
+	proxy, err := Start("127.0.0.1", 0, upstream("gitea", giteaSeen).URL, upstream("cache", nil).URL+"/", false, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = proxy.Close() })
 
-	return proxy, giteaSeen, cacheSeen
+	return proxy, giteaSeen
 }
 
-func get(t *testing.T, url string) string {
-	t.Helper()
+// The cache service is answered by the runner; everything else belongs to Gitea, the
+// artifact service above all, which must keep working exactly as it does without the proxy.
+func TestProxyRoutesByPath(t *testing.T) {
+	proxy, _ := startProxy(t)
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
-	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	return string(body)
-}
-
-func TestProxyRoutesCacheServiceToTheCacheServer(t *testing.T) {
-	proxy, giteaSeen, cacheSeen := startProxy(t)
-
-	body := get(t, proxy.ExternalURL()+cacheServicePrefix+"GetCacheEntryDownloadURL")
-
-	assert.Equal(t, "cache:"+cacheServicePrefix+"GetCacheEntryDownloadURL", body)
-	assert.Len(t, *cacheSeen, 1)
-	assert.Empty(t, *giteaSeen)
-}
-
-// Everything that is not the cache service belongs to Gitea; the artifact service above
-// all, which must keep working exactly as it does without the proxy.
-func TestProxyForwardsEverythingElseToGitea(t *testing.T) {
-	proxy, giteaSeen, cacheSeen := startProxy(t)
-
-	for _, path := range []string{
-		"/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact",
-		"/api/actions_pipeline/_apis/pipelines/workflows/1/artifacts",
-		"/",
+	for _, tc := range []struct{ path, want string }{
+		{cacheServicePrefix + "GetCacheEntryDownloadURL", "cache"},
+		{"/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact", "gitea"},
+		{"/api/actions_pipeline/_apis/pipelines/workflows/1/artifacts", "gitea"},
+		{"/", "gitea"},
 	} {
-		assert.Equal(t, "gitea:"+path+":", get(t, proxy.ExternalURL()+path))
-	}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, proxy.ExternalURL()+tc.path, nil)
+		require.NoError(t, err)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
 
-	assert.Len(t, *giteaSeen, 3)
-	assert.Empty(t, *cacheSeen)
+		assert.Equal(t, tc.want+":"+tc.path+":", string(body))
+	}
 }
 
 func TestProxyPreservesRequestDetails(t *testing.T) {
-	proxy, giteaSeen, _ := startProxy(t)
+	proxy, giteaSeen := startProxy(t)
 
+	const path = "/twirp/github.actions.results.api.v1.ArtifactService/FinalizeArtifact"
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
-		proxy.ExternalURL()+"/twirp/github.actions.results.api.v1.ArtifactService/FinalizeArtifact?name=x",
-		strings.NewReader(`{"ok":true}`))
+		proxy.ExternalURL()+path+"?name=x", strings.NewReader(`{"ok":true}`))
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer token")
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -98,7 +77,7 @@ func TestProxyPreservesRequestDetails(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
-	assert.Equal(t, `gitea:/twirp/github.actions.results.api.v1.ArtifactService/FinalizeArtifact:{"ok":true}`, string(body))
+	assert.Equal(t, `gitea:`+path+`:{"ok":true}`, string(body))
 	require.Len(t, *giteaSeen, 1)
 	forwarded := (*giteaSeen)[0]
 	assert.Equal(t, http.MethodPost, forwarded.Method)
@@ -132,10 +111,14 @@ func TestStartRejectsAnUnusableTarget(t *testing.T) {
 }
 
 func TestCloseIsIdempotent(t *testing.T) {
-	proxy, _, _ := startProxy(t)
+	proxy, _ := startProxy(t)
+	url := proxy.ExternalURL()
 
 	require.NoError(t, proxy.Close())
 	require.NoError(t, proxy.Close())
 	require.NoError(t, (*Proxy)(nil).Close())
+
+	// Reported after shutdown too, so a caller that logs it cannot panic on a closed proxy.
+	assert.Equal(t, url, proxy.ExternalURL())
 	assert.Empty(t, (*Proxy)(nil).ExternalURL())
 }
