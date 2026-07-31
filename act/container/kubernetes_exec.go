@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -85,30 +84,26 @@ func mapExecError(err error) error {
 	return err
 }
 
-// validEnvKey matches a POSIX shell name. Env keys are emitted UNQUOTED into the
-// `export <key>=` script, so a key must be validated to a safe shell identifier
-// to avoid command injection through the key (the value is always shell-quoted).
-var validEnvKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
 // buildExecCommand wraps an act step command so the pods/exec subresource — which
-// has no native env/workdir/user fields — reproduces the Docker exec semantics:
-// it exports each env var, changes into the working directory, then execs the
-// command. When user is set the script runs via `su <user> -c`, otherwise `sh`.
-// Env keys are emitted in sorted order for deterministic output; keys that are
-// not valid shell identifiers are skipped (the unquoted key would otherwise be a
-// shell-injection vector).
+// has no native env/workdir/user fields — reproduces the Docker exec semantics.
+// Environment is applied via env(1): unlike POSIX `export`, env(1) accepts
+// arbitrary NAME=VALUE pairs, so keys containing dashes (e.g. INPUT_FETCH-DEPTH,
+// used by actions/checkout) are preserved. env(1) splits on the first '=' and
+// treats a leading '-' as an option, so keys containing '=' or NUL or starting
+// with '-' are skipped (they cannot round-trip). The non-user path passes the
+// env args as literal argv (no shell), and the su path shellquote.Joins every
+// argument, so keys cannot inject shell metacharacters. Keys are emitted in
+// sorted order for deterministic output.
 func buildExecCommand(command []string, env map[string]string, user, workdir string) []string {
-	var script strings.Builder
+	envArgs := make([]string, 0, len(env))
 	for _, key := range sortedKeys(env) {
-		if !validEnvKey.MatchString(key) {
+		if strings.ContainsAny(key, "=\x00") || strings.HasPrefix(key, "-") {
 			continue
 		}
-		script.WriteString("export ")
-		script.WriteString(key)
-		script.WriteString("=")
-		script.WriteString(shellquote.Join(env[key]))
-		script.WriteByte('\n')
+		envArgs = append(envArgs, key+"="+env[key])
 	}
+
+	var script strings.Builder
 	if workdir != "" {
 		script.WriteString("cd ")
 		script.WriteString(shellquote.Join(workdir))
@@ -116,12 +111,20 @@ func buildExecCommand(command []string, env map[string]string, user, workdir str
 	}
 	script.WriteString("exec ")
 	script.WriteString(shellquote.Join(command...))
-
 	body := script.String()
-	if user != "" {
-		return []string{"su", user, "-c", body}
+
+	if len(envArgs) == 0 {
+		if user != "" {
+			return []string{"su", user, "-c", body}
+		}
+		return []string{"sh", "-c", body}
 	}
-	return []string{"sh", "-c", body}
+
+	runCmd := append([]string{"env"}, append(envArgs, "sh", "-c", body)...)
+	if user != "" {
+		return []string{"su", user, "-c", shellquote.Join(runCmd...)}
+	}
+	return runCmd
 }
 
 func sortedKeys(m map[string]string) []string {

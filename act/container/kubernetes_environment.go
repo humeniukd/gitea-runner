@@ -20,11 +20,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
 
+	"github.com/avast/retry-go/v5"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +38,16 @@ import (
 
 // podReadyPollInterval is how often Start polls a submitted Pod for readiness.
 const podReadyPollInterval = 500 * time.Millisecond
+
+// kubernetesDeleteRetryAttempts bounds the retry loop around a pod/secret
+// delete so transient control-plane instability cannot strand a finished job's
+// Pod. 5 attempts with exponential backoff (500ms→8s, capped) lands ~16s worst
+// case — short enough that a failed job still tears down promptly, long enough
+// to ride out a typical API server hiccup.
+const (
+	kubernetesDeleteRetryAttempts = 5
+	kubernetesDeleteRetryMaxDelay = 8 * time.Second
+)
 
 type kubernetesContainerRole int
 
@@ -170,22 +182,66 @@ func (p *KubernetesPod) waitReady(ctx context.Context, name string) error {
 }
 
 // remove deletes the Pod and any registered per-job Secrets, tolerating
-// already-absent objects so cleanup is idempotent (R2).
+// already-absent objects so cleanup is idempotent (R2). Transient API-server
+// errors (timeouts, throttling, connection resets during a control-plane blip)
+// are retried with bounded backoff so a failed job does not strand its Pod
+// forever; permanent errors (NotFound, Forbidden) fail fast.
 func (p *KubernetesPod) remove(ctx context.Context) error {
 	var firstErr error
 	if p.builder != nil && p.builder.name != "" {
-		if err := p.clientset.CoreV1().Pods(p.namespace).Delete(ctx, p.builder.name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			firstErr = fmt.Errorf("delete job pod %s/%s: %w", p.namespace, p.builder.name, err)
+		name := p.builder.name
+		if err := deleteWithRetry(ctx, p.clientset, p.namespace, "job pod", name, func(ctx context.Context) error {
+			return p.clientset.CoreV1().Pods(p.namespace).Delete(ctx, name, metav1.DeleteOptions{})
+		}); err != nil && !apierrors.IsNotFound(err) {
+			firstErr = err
 		}
 	}
 	for _, secret := range p.perJobSecrets {
-		if err := p.clientset.CoreV1().Secrets(p.namespace).Delete(ctx, secret, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("delete per-job secret %s/%s: %w", p.namespace, secret, err)
-			}
+		if err := deleteWithRetry(ctx, p.clientset, p.namespace, "per-job secret", secret, func(ctx context.Context) error {
+			return p.clientset.CoreV1().Secrets(p.namespace).Delete(ctx, secret, metav1.DeleteOptions{})
+		}); err != nil && !apierrors.IsNotFound(err) && firstErr == nil {
+			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+// deleteWithRetry deletes a single Kubernetes object, retrying transient
+// API-server errors (throttling, server timeouts, connection resets) with
+// bounded exponential backoff so a control-plane blip cannot strand a finished
+// job's Pod. Permanent errors (NotFound, Forbidden) abort immediately — retrying
+// cannot fix them. The returned error is already namespaced/qualified.
+func deleteWithRetry(ctx context.Context, clientset kubernetes.Interface, namespace, kind, name string, delete func(context.Context) error) error {
+	err := retry.New(
+		retry.Context(ctx),
+		retry.Attempts(kubernetesDeleteRetryAttempts),
+		retry.DelayType(retry.BackOffDelay),
+		retry.MaxDelay(kubernetesDeleteRetryMaxDelay),
+		retry.LastErrorOnly(true),
+		retry.RetryIf(isTransientDeleteError),
+	).Do(func() error { return delete(ctx) })
+	if err == nil {
+		return nil
+	}
+	if isTransientDeleteError(err) {
+		return fmt.Errorf("delete %s %s/%s failed after %d attempts: %w", kind, namespace, name, kubernetesDeleteRetryAttempts, err)
+	}
+	return fmt.Errorf("delete %s %s/%s: %w", kind, namespace, name, err)
+}
+
+// isTransientDeleteError reports whether a Delete error is worth retrying: API
+// server throttling (429), server timeouts, and transport-level timeouts.
+// NotFound and Forbidden are deliberately excluded — the object is already
+// absent (success), or retrying cannot fix RBAC.
+func isTransientDeleteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if apierrors.IsTooManyRequests(err) || apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // removeWithPolicy applies the configured pod_cleanup policy to a completed job:

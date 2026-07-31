@@ -93,12 +93,15 @@ func TestKubernetesPodBuilder(t *testing.T) {
 	assert.True(t, job.Resources.Limits.Cpu().Equal(resource.MustParse("2")))
 	assert.True(t, job.Resources.Limits.Memory().Equal(resource.MustParse("2Gi")))
 
-	// workspace volume + mount
-	require.Len(t, pod.Spec.Volumes, 1)
+	// workspace volume + mount, plus the act runtime emptyDir
+	require.Len(t, pod.Spec.Volumes, 2)
 	assert.Equal(t, kubernetesWorkspaceVolumeName, pod.Spec.Volumes[0].Name)
 	require.NotNil(t, pod.Spec.Volumes[0].EmptyDir)
-	require.Len(t, job.VolumeMounts, 1)
-	assert.Equal(t, "/workspace/owner/repo", job.VolumeMounts[0].MountPath)
+	assert.Equal(t, kubernetesActPathVolumeName, pod.Spec.Volumes[1].Name)
+	require.NotNil(t, pod.Spec.Volumes[1].EmptyDir)
+	require.Len(t, job.VolumeMounts, 2)
+	assert.Equal(t, "/var/run/act", job.VolumeMounts[0].MountPath)
+	assert.Equal(t, "/workspace/owner/repo", job.VolumeMounts[1].MountPath)
 
 	// security context from cap add/drop
 	require.NotNil(t, job.SecurityContext)
@@ -122,9 +125,10 @@ func TestKubernetesPodBuilderPVCWorkspace(t *testing.T) {
 	b.setJobContainer(kubernetesContainerSpec(kubernetesJobContainerName, &NewContainerInput{Image: "alpine:3"}, cfg.Resources.Job, nil, nil, false))
 	pod := b.build()
 
-	require.Len(t, pod.Spec.Volumes, 1)
+	require.Len(t, pod.Spec.Volumes, 2)
 	require.NotNil(t, pod.Spec.Volumes[0].PersistentVolumeClaim)
 	assert.Equal(t, "gitea-job-2", pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
+	assert.Equal(t, kubernetesActPathVolumeName, pod.Spec.Volumes[1].Name)
 	// no maxLifetime -> no deadline; no env owner -> no ownerReference
 	assert.Nil(t, pod.Spec.ActiveDeadlineSeconds)
 	assert.Empty(t, pod.OwnerReferences)
@@ -142,7 +146,7 @@ func TestKubernetesPodBuilderEphemeralWorkspace(t *testing.T) {
 	b.setJobContainer(kubernetesContainerSpec(kubernetesJobContainerName, &NewContainerInput{Image: "alpine:3"}, cfg.Resources.Job, nil, nil, false))
 	pod := b.build()
 
-	require.Len(t, pod.Spec.Volumes, 1)
+	require.Len(t, pod.Spec.Volumes, 2)
 	eph := pod.Spec.Volumes[0].Ephemeral
 	require.NotNil(t, eph)
 	require.NotNil(t, eph.VolumeClaimTemplate)
@@ -154,6 +158,7 @@ func TestKubernetesPodBuilderEphemeralWorkspace(t *testing.T) {
 	// emptyDir and static pvc must not be set for the ephemeral type.
 	assert.Nil(t, pod.Spec.Volumes[0].EmptyDir)
 	assert.Nil(t, pod.Spec.Volumes[0].PersistentVolumeClaim)
+	assert.Equal(t, kubernetesActPathVolumeName, pod.Spec.Volumes[1].Name)
 }
 
 func TestKubernetesPodBuilderEphemeralDefaultsAccessMode(t *testing.T) {
