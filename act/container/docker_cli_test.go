@@ -5,15 +5,17 @@
 // This file is exact copy of https://github.com/docker/cli/blob/9ac8584acfd501c3f4da0e845e3a40ed15c85041/cli/command/container/opts_test.go with:
 // * appended with license information
 // * commented out case 'invalid-mixed-network-types' in test TestParseNetworkConfig
+// * replaced github.com/pkg/errors with the standard library errors package, as upstream has since done
 //
 // docker/cli is licensed under the Apache License, Version 2.0.
 // See DOCKER_LICENSE for the full license text.
 //
 
-//nolint:depguard,gocritic // verbatim copy from docker/cli tests
+//nolint:gocritic // verbatim copy from docker/cli tests
 package container
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -28,7 +30,6 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/moby/moby/api/types/container"
 	networktypes "github.com/moby/moby/api/types/network"
-	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
@@ -294,7 +295,7 @@ func compareRandomizedStrings(a, b, c, d string) error {
 	if a == d && b == c {
 		return nil
 	}
-	return errors.Errorf("strings don't match")
+	return errors.New("strings don't match")
 }
 
 func mustNetworkPort(t *testing.T, value string) networktypes.Port {
