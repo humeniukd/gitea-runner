@@ -46,7 +46,10 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		// Pod is gone (dangling owner). Best-effort — never block startup. Live
 		// sibling runners' pods (resolvable owner) are spared.
 		if cfg.Kubernetes.Enabled {
-			if err := container.SweepDanglingJobPods(ctx, run.KubernetesRunnerConfig(&cfg.Kubernetes)); err != nil {
+			k8sConfig, err := run.KubernetesRunnerConfig(&cfg.Kubernetes)
+			if err != nil {
+				log.WithError(err).Warn("kubernetes startup dangling-owner sweep config parse failed, continuing")
+			} else if err := container.SweepDanglingJobPods(ctx, k8sConfig); err != nil {
 				log.WithError(err).Warn("kubernetes startup dangling-owner sweep failed, continuing")
 			}
 		}

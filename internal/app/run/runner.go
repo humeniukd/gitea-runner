@@ -28,6 +28,7 @@ import (
 
 	"go.yaml.in/yaml/v4"
 	corev1 "k8s.io/api/core/v1"
+	sigsyaml "sigs.k8s.io/yaml"
 
 	"gitea.com/gitea/runner/internal/pkg/client"
 	"gitea.com/gitea/runner/internal/pkg/config"
@@ -429,6 +430,11 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// Without bind_workdir, the workspace path omits the task id; concurrent host-mode jobs
 	// for the same repository would share this directory and can race with per-job cleanup.
 
+	kubernetesConfig, err := KubernetesRunnerConfig(&r.cfg.Kubernetes)
+	if err != nil {
+		return err
+	}
+
 	runnerConfig := &runner.Config{
 		// On Linux, Workdir will be like "/<parent_directory>/<owner>/<repo>"
 		// On Windows, Workdir will be like "\<parent_directory>\<owner>\<repo>"
@@ -467,7 +473,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		Vars:                  task.Vars,
 		ValidVolumes:          r.cfg.Container.ValidVolumes,
 		InsecureSkipTLS:       r.cfg.Runner.Insecure,
-		Kubernetes:            KubernetesRunnerConfig(&r.cfg.Kubernetes),
+		Kubernetes:            kubernetesConfig,
 	}
 
 	rr, err := runner.New(runnerConfig)
@@ -593,9 +599,9 @@ func (r *Runner) Declare(ctx context.Context, labels []string) (*connect.Respons
 // KubernetesRunnerConfig maps the YAML-facing Kubernetes settings into the
 // runtime KubernetesConfig the act engine consumes. It returns nil when the
 // backend is disabled so the docker/host branches are selected unchanged.
-func KubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfig {
+func KubernetesRunnerConfig(k *config.Kubernetes) (*act_container.KubernetesConfig, error) {
 	if k == nil || !k.Enabled {
-		return nil
+		return nil, nil
 	}
 
 	rootless := true
@@ -607,7 +613,13 @@ func KubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfi
 	if k.Tolerations != nil {
 		yamlData, err := yaml.Marshal(k.Tolerations)
 		if err == nil {
-			_ = yaml.Unmarshal(yamlData, &tolerations)
+			// sigs.k8s.io/yaml converts YAML -> JSON first, so json tags on
+			// corev1 types (e.g. nodeAffinity) are honored; yaml.v4 only maps
+			// lowercased field names and silently produced nil here.
+			err = sigsyaml.Unmarshal(yamlData, &tolerations)
+			if err != nil {
+				return nil, fmt.Errorf("parse kubernetes tolerations: %w", err)
+			}
 		}
 	}
 
@@ -615,7 +627,10 @@ func KubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfi
 	if k.Affinity != nil {
 		yamlData, err := yaml.Marshal(k.Affinity)
 		if err == nil {
-			_ = yaml.Unmarshal(yamlData, &affinity)
+			err = sigsyaml.Unmarshal(yamlData, &affinity)
+			if err != nil {
+				return nil, fmt.Errorf("parse kubernetes affinity: %w", err)
+			}
 		}
 	}
 
@@ -647,7 +662,7 @@ func KubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfi
 		NodeSelector:     k.NodeSelector,
 		Tolerations:      tolerations,
 		Affinity:         affinity,
-	}
+	}, nil
 }
 
 func kubernetesRoleResources(r *config.KubernetesContainerResources) act_container.KubernetesRoleResources {
