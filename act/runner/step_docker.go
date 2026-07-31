@@ -85,7 +85,7 @@ func (sd *stepDocker) runUsesContainer() common.Executor {
 			stepContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 			stepContainer.Start(true),
 		).Finally(
-			stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
+			stepContainer.Remove().IfBool(!rc.Config.ReuseContainers && !rc.Config.AutoRemove),
 		).Finally(stepContainer.Close())(ctx)
 	}
 }
@@ -110,10 +110,7 @@ func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd, e
 		envList = append(envList, fmt.Sprintf("%s=%s", k, v))
 	}
 
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
+	envList = append(envList, rc.runnerEnv(ctx)...)
 
 	binds, mounts := rc.GetBindsAndMounts()
 	networkMode := "container:" + rc.jobContainerName()

@@ -69,6 +69,8 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 				github.Token = sar.RunContext.Config.ReplaceGheActionTokenWithGithubCom
 			}
 		}
+		// Actions served from the action cache are read out of a git object store rather than a
+		// directory, so they never reach the bundle patch below and keep to the v1 cache API.
 		if sar.RunContext.Config.ActionCache != nil {
 			cache := sar.RunContext.Config.ActionCache
 
@@ -112,7 +114,7 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			return err
 		}
 
-		actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), sar.Step.UsesHash())
+		actionDir := sar.actionDir()
 		defaultActionURL := sar.RunContext.Config.DefaultActionURL()
 		// For Gitea
 		// A composite RunContext nils Config.Secrets, so getGitCloneToken would yield an
@@ -131,19 +133,29 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			Token:       token,
 			OfflineMode: sar.RunContext.Config.ActionOfflineMode,
 			Depth:       sar.RunContext.Config.ActionCloneDepth,
+			// printPrepareActions reports the download with its resolved commit.
+			Quiet: true,
 
 			InsecureSkipTLS: sar.cloneSkipTLS(), // For Gitea
 		})
 		var ntErr common.Executor
 		if err := gitClone(ctx); err != nil {
-			if errors.Is(err, git.ErrShortRef) {
+			var refErr *git.Error
+			if errors.As(err, &refErr) && errors.Is(err, git.ErrShortRef) {
 				return fmt.Errorf("Unable to resolve action `%s`, the provided ref `%s` is the shortened version of a commit SHA, which is not supported. Please use the full commit SHA `%s` instead",
-					sar.Step.Uses, sar.remoteAction.Ref, err.(*git.Error).Commit())
+					sar.Step.Uses, sar.remoteAction.Ref, refErr.Commit())
 			} else if errors.Is(err, gogit.ErrForceNeeded) { // TODO: figure out if it will be easy to shadow/alias go-git err's
 				ntErr = common.NewInfoExecutor("Non-terminating error while running 'git clone': %v", err)
 			} else {
 				return err
 			}
+		}
+
+		// Best effort: the download report falls back to the ref alone when the commit is unknown.
+		if _, sha, err := git.FindGitRevision(ctx, actionDir); err != nil {
+			common.Logger(ctx).Debugf("unable to resolve the commit of %s: %v", sar.remoteAction.Reference(), err)
+		} else {
+			sar.resolvedSha = sha
 		}
 
 		remoteReader := func(ctx context.Context) actionYamlReader { //nolint:unparam // pre-existing issue from nektos/act
@@ -161,8 +173,20 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 				sar.action = actionModel
 				return err
 			},
+			// A stage of its own: it takes the same clone lock, and it has to land before
+			// runAction copies the action into the job container.
+			sar.patchActionToolkit,
 		)(ctx)
 	}
+}
+
+// actionDownloadInfo reports the action this step downloaded and the commit it resolved to. ok is
+// false when nothing was fetched, as for the local checkout of the workflow's own repository.
+func (sar *stepActionRemote) actionDownloadInfo() (reference, sha string, ok bool) {
+	if sar.remoteAction == nil || sar.action == nil {
+		return "", "", false
+	}
+	return sar.remoteAction.Reference(), sar.resolvedSha, true
 }
 
 func (sar *stepActionRemote) pre() common.Executor {
@@ -170,7 +194,7 @@ func (sar *stepActionRemote) pre() common.Executor {
 
 	return common.NewPipelineExecutor(
 		sar.prepareActionExecutor(),
-		runStepExecutor(sar, stepStagePre, runPreStep(sar)).If(hasPreStep(sar)).If(shouldRunPreStep(sar)))
+		runStepExecutor(sar, stepStagePre, sar.revertToolkitOnFailure(runPreStep(sar))).If(hasPreStep(sar)).If(shouldRunPreStep(sar)))
 }
 
 func (sar *stepActionRemote) main() common.Executor {
@@ -192,15 +216,51 @@ func (sar *stepActionRemote) main() common.Executor {
 				return sar.RunContext.JobContainer.CopyDir(copyToPath, sar.RunContext.Config.Workdir+string(filepath.Separator)+".", sar.RunContext.Config.UseGitIgnore)(ctx)
 			}
 
-			actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), sar.Step.UsesHash())
+			actionDir := sar.actionDir()
 
-			return sar.runAction(sar, actionDir, sar.remoteAction)(ctx)
+			return sar.revertToolkitOnFailure(sar.runAction(sar, actionDir, sar.remoteAction))(ctx)
 		}),
 	)
 }
 
 func (sar *stepActionRemote) post() common.Executor {
-	return runStepExecutor(sar, stepStagePost, runPostStep(sar)).If(hasPostStep(sar)).If(shouldRunPostStep(sar))
+	return runStepExecutor(sar, stepStagePost, sar.revertToolkitOnFailure(runPostStep(sar))).If(hasPostStep(sar)).If(shouldRunPostStep(sar))
+}
+
+// toolkitBundles is the action directory and the entrypoints the toolkit may live in.
+func (sar *stepActionRemote) toolkitBundles() (string, []string) {
+	if sar.remoteAction == nil {
+		return "", nil
+	}
+	dir := sar.actionDir()
+	return dir, actionScriptPaths(filepath.Join(dir, sar.remoteAction.Path), sar.action)
+}
+
+// patchActionToolkit edits the bundled toolkit so it works against Gitea, which lets the cache
+// client use the v2 API this runner serves. A no-op unless the runner serves it.
+func (sar *stepActionRemote) patchActionToolkit(ctx context.Context) error {
+	if sar.RunContext.GetEnv()[CacheServiceV2Env] != "" {
+		dir, scripts := sar.toolkitBundles()
+		patchToolkit(ctx, dir, scripts)
+	}
+	return nil
+}
+
+// revertToolkitOnFailure restores the untouched bundles when the action fails, so a later job
+// runs it as shipped rather than repeating a failure the patch may have caused.
+func (sar *stepActionRemote) revertToolkitOnFailure(exec common.Executor) common.Executor {
+	return func(ctx context.Context) error {
+		err := exec(ctx)
+		if err != nil {
+			dir, scripts := sar.toolkitBundles()
+			revertToolkit(ctx, dir, scripts)
+		}
+		return err
+	}
+}
+
+func (sar *stepActionRemote) actionDir() string {
+	return fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), sar.Step.UsesHash())
 }
 
 func (sar *stepActionRemote) getRunContext() *RunContext {
@@ -251,7 +311,7 @@ func (sar *stepActionRemote) getActionModel() *model.Action {
 
 func (sar *stepActionRemote) getCompositeRunContext(ctx context.Context) *RunContext {
 	if sar.compositeRunContext == nil {
-		actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), sar.Step.UsesHash())
+		actionDir := sar.actionDir()
 		actionLocation := path.Join(actionDir, sar.remoteAction.Path)
 		_, containerActionDir := getContainerActionPaths(sar.getStepModel(), actionLocation, sar.RunContext)
 
@@ -311,6 +371,16 @@ func (ra *remoteAction) CloneURL(u string) string {
 	}
 
 	return fmt.Sprintf("%s/%s/%s", u, ra.Org, ra.Repo)
+}
+
+// Reference renders the action as {org}/{repo}[/path]@{ref}, omitting the download source, which
+// can be interpolated from a secret.
+func (ra *remoteAction) Reference() string {
+	repo := fmt.Sprintf("%s/%s", ra.Org, ra.Repo)
+	if ra.Path != "" {
+		repo = fmt.Sprintf("%s/%s", repo, ra.Path)
+	}
+	return fmt.Sprintf("%s@%s", repo, ra.Ref)
 }
 
 func (ra *remoteAction) IsCheckout() bool {

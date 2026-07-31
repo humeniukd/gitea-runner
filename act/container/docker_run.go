@@ -35,7 +35,6 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/gobwas/glob"
 	"github.com/joho/godotenv"
-	"github.com/kballard/go-shellquote"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
@@ -44,7 +43,6 @@ import (
 	"github.com/moby/moby/client"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/pflag"
 )
 
 // drainGracePeriod bounds how long we wait for an output-copy goroutine to
@@ -58,6 +56,12 @@ const drainGracePeriod = 2 * time.Second
 func NewContainer(input *NewContainerInput) ExecutionsEnvironment {
 	cr := new(containerReference)
 	cr.input = input
+	// Resolved up front because the image pull runs before the container is created.
+	cf := createFlagsFromOptions(input.Options)
+	if cf.platform != "" {
+		cr.input.Platform = cf.platform
+	}
+	cr.pullPolicy = cf.pull
 	return cr
 }
 
@@ -138,6 +142,11 @@ func (cr *containerReference) Start(attach bool) common.Executor {
 }
 
 func (cr *containerReference) Pull(forcePull bool) common.Executor {
+	if cr.pullPolicy == pullPolicyNever {
+		return common.NewInfoExecutor("docker pull skipped image=%s, --pull=never in the options", cr.input.Image)
+	}
+	forcePull = forcePull || cr.pullPolicy == pullPolicyAlways
+
 	return common.
 		NewInfoExecutor("docker pull image=%s platform=%s username=%s forcePull=%t", cr.input.Image, cr.input.Platform, cr.input.Username, forcePull).
 		Then(
@@ -233,11 +242,12 @@ func (cr *containerReference) ReplaceLogWriter(stdout, stderr io.Writer) (io.Wri
 }
 
 type containerReference struct {
-	cli   client.APIClient
-	id    string
-	input *NewContainerInput
-	UID   int
-	GID   int
+	cli        client.APIClient
+	id         string
+	input      *NewContainerInput
+	pullPolicy string
+	UID        int
+	GID        int
 	// attachDone is closed by the attach() streaming goroutine once it has
 	// drained and flushed the container's output. wait() blocks on it so the
 	// tail of the log lands before the step proceeds.
@@ -379,22 +389,66 @@ func (cr *containerReference) find() common.Executor {
 
 func (cr *containerReference) remove() common.Executor {
 	return func(ctx context.Context) error {
-		if cr.id == "" {
+		idOrName := cr.id
+		if idOrName == "" && cr.input != nil {
+			idOrName = cr.input.Name
+		}
+		if idOrName == "" {
 			return nil
 		}
 
 		logger := common.Logger(ctx)
-		_, err := cr.cli.ContainerRemove(ctx, cr.id, client.ContainerRemoveOptions{
+		// Kill first so removal never waits out a daemon's stop timeout: Docker kills outright
+		// on a forced remove, Podman sends SIGTERM and waits. Only worth it for a container
+		// this started, and removal can still deal with one it could not kill.
+		if cr.id != "" {
+			_, err := cr.cli.ContainerKill(ctx, cr.id, client.ContainerKillOptions{Signal: "SIGKILL"})
+			if err != nil && !cerrdefs.IsConflict(err) && !cerrdefs.IsNotFound(err) {
+				logger.Debugf("Container %s could not be killed: %v", cr.id, err)
+			}
+		}
+		_, err := cr.cli.ContainerRemove(ctx, idOrName, client.ContainerRemoveOptions{
 			RemoveVolumes: true,
 			Force:         true,
 		})
-		if err != nil {
-			logger.Error(fmt.Errorf("failed to remove container: %w", err))
+		switch {
+		case cerrdefs.IsConflict(err):
+			// the daemon's own AutoRemove teardown is running, and it releases the volume
+			// references and the network endpoint only once it finishes
+			cr.waitForRemoval(ctx, idOrName)
+		case err != nil && !cerrdefs.IsNotFound(err):
+			logger.Error(fmt.Errorf("failed to remove container %s: %w", idOrName, err))
+			return nil // keep the id, the container is still there for a later Remove()
 		}
 
-		logger.Debugf("Removed container: %v", cr.id)
+		logger.Debugf("Removed container: %v", idOrName)
 		cr.id = ""
 		return nil
+	}
+}
+
+func (cr *containerReference) waitForRemoval(ctx context.Context, idOrName string) {
+	// per container, against the one minute the post-job executor allows for the whole
+	// cleanup, so a job with several services can spend most of that budget here
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	waitResult := cr.cli.ContainerWait(ctx, idOrName, client.ContainerWaitOptions{
+		Condition: container.WaitConditionRemoved,
+	})
+	select {
+	case <-waitResult.Result:
+	case <-waitResult.Error:
+	case <-ctx.Done():
+		// the client delivers the result over an unbuffered channel, so leave a receiver
+		// behind or its goroutine parks on the send for the lifetime of the process
+		go func() {
+			select {
+			case <-waitResult.Result:
+			case <-waitResult.Error:
+			}
+		}()
+		common.Logger(ctx).Warnf("Timed out waiting for the daemon to remove container %s, its volumes and network may be left behind", idOrName)
 	}
 }
 
@@ -407,17 +461,13 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 	}
 
 	// parse configuration from CLI container.options
-	flags := pflag.NewFlagSet("container_flags", pflag.ContinueOnError)
-	copts := addFlags(flags)
-
-	optionsArgs, err := shellquote.Split(input.Options)
+	flags, copts, cf, err := parseContainerOptions(input.Options)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Cannot split container options: '%s': '%w'", input.Options, err)
+		return nil, nil, err
 	}
 
-	err = flags.Parse(optionsArgs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Cannot parse container options: '%s': '%w'", input.Options, err)
+	if err := cf.validate(); err != nil {
+		return nil, nil, fmt.Errorf("Cannot process container options: '%s': '%w'", input.Options, err)
 	}
 
 	// FIXME: If everything is fine after gitea/act v0.260.0, remove the following comment.
@@ -471,8 +521,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 
 	logger.Debugf("Custom container.HostConfig from options ==> %+v", containerConfig.HostConfig)
 
-	hostConfig.Binds = append(hostConfig.Binds, containerConfig.HostConfig.Binds...)
-	hostConfig.Mounts = append(hostConfig.Mounts, containerConfig.HostConfig.Mounts...)
+	overlayVolumes(hostConfig, containerConfig.HostConfig)
 	binds := hostConfig.Binds
 	mounts := hostConfig.Mounts
 	networkMode := hostConfig.NetworkMode
@@ -482,6 +531,9 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 	}
 	hostConfig.Binds = binds
 	hostConfig.Mounts = mounts
+	if cf.name != "" {
+		logger.Warn("--name in the options will be ignored.")
+	}
 	if len(copts.netMode.Value()) > 0 {
 		logger.Warn("--network and --net in the options will be ignored.")
 	}
@@ -1174,6 +1226,34 @@ func (cr *containerReference) sanitizeConfig(ctx context.Context, config *contai
 	}
 
 	return config, hostConfig
+}
+
+// bindTarget returns the container path a bind mounts onto, empty if it cannot be parsed.
+func bindTarget(bind string) string {
+	parsed, err := loader.ParseVolume(bind)
+	if err != nil {
+		return ""
+	}
+	return parsed.Target
+}
+
+// overlayVolumes appends src's volumes to dst, dropping the dst ones they mount over. Docker
+// rejects two mounts on one target, so the volumes declared last have to win.
+func overlayVolumes(dst, src *container.HostConfig) {
+	claimed := map[string]bool{}
+	for _, bind := range src.Binds {
+		if target := bindTarget(bind); target != "" {
+			claimed[target] = true
+		}
+	}
+	for _, mt := range src.Mounts {
+		claimed[mt.Target] = true
+	}
+
+	dst.Binds = append(slices.DeleteFunc(slices.Clone(dst.Binds),
+		func(bind string) bool { return claimed[bindTarget(bind)] }), src.Binds...)
+	dst.Mounts = append(slices.DeleteFunc(slices.Clone(dst.Mounts),
+		func(mt mount.Mount) bool { return claimed[mt.Target] }), src.Mounts...)
 }
 
 type validVolumeMatcher struct {

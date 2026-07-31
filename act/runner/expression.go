@@ -95,9 +95,7 @@ func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map
 		Inputs:    inputs,
 		HashFiles: getHashFilesFunction(ctx, rc),
 	}
-	if rc.JobContainer != nil {
-		ee.Runner = rc.JobContainer.GetRunnerContext(ctx)
-	}
+	ee.Runner = rc.getRunnerContext(ctx)
 	return expressionEvaluator{
 		interpreter: exprparser.NewInterpeter(ee, exprparser.Config{
 			Run:        rc.Run,
@@ -149,9 +147,7 @@ func (rc *RunContext) NewStepExpressionEvaluator(ctx context.Context, step step)
 		Inputs:    inputs,
 		HashFiles: getHashFilesFunction(ctx, rc),
 	}
-	if rc.JobContainer != nil {
-		ee.Runner = rc.JobContainer.GetRunnerContext(ctx)
-	}
+	ee.Runner = rc.getRunnerContext(ctx)
 	return expressionEvaluator{
 		interpreter: exprparser.NewInterpeter(ee, exprparser.Config{
 			Run:        rc.Run,
@@ -229,7 +225,8 @@ func (ee expressionEvaluator) evaluate(ctx context.Context, in string, defaultSt
 	logger.Debugf("evaluating expression '%s'", in)
 	evaluated, err := ee.interpreter.Evaluate(in, defaultStatusCheck)
 
-	printable := regexp.MustCompile(`::add-mask::.*`).ReplaceAllString(fmt.Sprintf("%t", evaluated), "::add-mask::***)")
+	// evaluated is an any: %t renders everything but a bool as "%!t(string=...)"
+	printable := regexp.MustCompile(`::add-mask::.*`).ReplaceAllString(fmt.Sprintf("%v", evaluated), "::add-mask::***)")
 	logger.Debugf("expression '%s' evaluated to '%s'", in, printable)
 
 	return evaluated, err
@@ -497,11 +494,7 @@ func getEvaluatorInputs(ctx context.Context, rc *RunContext, step step, ghc *mod
 				if value == nil {
 					value = v.Default
 				}
-				if v.Type == "boolean" {
-					inputs[k] = value == "true"
-				} else {
-					inputs[k] = value
-				}
+				inputs[k] = coerceInputValue(value, v.Type)
 			}
 		}
 	}
@@ -514,15 +507,24 @@ func getEvaluatorInputs(ctx context.Context, rc *RunContext, step step, ghc *mod
 				if value == nil {
 					value = v.Default
 				}
-				if v.Type == "boolean" {
-					inputs[k] = value == "true"
-				} else {
-					inputs[k] = value
-				}
+				inputs[k] = coerceInputValue(value, v.Type)
 			}
 		}
 	}
 	return inputs
+}
+
+// coerceInputValue converts an input value to the type declared by the workflow.
+// The event payload carries natively typed JSON values on newer Gitea versions,
+// while defaults and older servers provide strings.
+func coerceInputValue(value any, inputType string) any {
+	if inputType != "boolean" {
+		return value
+	}
+	if b, ok := value.(bool); ok {
+		return b
+	}
+	return value == "true"
 }
 
 func setupWorkflowInputs(ctx context.Context, inputs *map[string]any, rc *RunContext) {
@@ -548,7 +550,7 @@ func setupWorkflowInputs(ctx context.Context, inputs *map[string]any, rc *RunCon
 				}
 			}
 
-			(*inputs)[name] = value
+			(*inputs)[name] = coerceInputValue(value, input.Type)
 		}
 	}
 }

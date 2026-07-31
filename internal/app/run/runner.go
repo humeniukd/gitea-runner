@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +54,7 @@ func RunnerCapabilities() []string {
 // Runner runs the pipeline.
 type Runner struct {
 	name string
+	uuid string
 
 	cfg *config.Config
 
@@ -66,6 +68,13 @@ type Runner struct {
 	runningCount            atomic.Int64
 	lastIdleCleanupUnixNano atomic.Int64
 	now                     func() time.Time
+	healthCheckLast         time.Time
+	healthCheckReady        bool
+	healthCheckReason       string
+	healthStatusSet         bool
+	healthStatusReady       bool
+	healthStatusReason      string
+	runHealthCheck          func(context.Context, string, time.Duration, map[string]string) error
 }
 
 func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) *Runner {
@@ -82,6 +91,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		if cfg.Cache.ExternalServer != "" {
 			envs["ACTIONS_CACHE_URL"] = cfg.Cache.ExternalServer
 		} else {
+			warnIgnoredCacheSecret(cfg)
 			handler, err := artifactcache.StartHandler(
 				cfg.Cache.Dir,
 				cfg.Cache.Host,
@@ -99,6 +109,12 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		}
 	}
 
+	if envs["ACTIONS_CACHE_URL"] != "" && (cfg.Cache.V2 == nil || *cfg.Cache.V2) {
+		// act patches the GHES check out of an action's bundle when it sees this, so the client
+		// uses the cache service v2 API this server also answers; see act/runner/toolkit_patch.go.
+		envs[runner.CacheServiceV2Env] = "true"
+	}
+
 	// set artifact gitea api
 	artifactGiteaAPI := strings.TrimSuffix(cli.Address(), "/") + "/api/actions_pipeline/"
 	envs["ACTIONS_RUNTIME_URL"] = artifactGiteaAPI
@@ -109,16 +125,26 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	envs["GITEA_ACTIONS_RUNNER_VERSION"] = ver.Version()
 
 	runner := &Runner{
-		name:         reg.Name,
-		cfg:          cfg,
-		client:       cli,
-		labels:       ls,
-		envs:         envs,
-		cacheHandler: cacheHandler,
-		now:          time.Now,
+		name:           reg.Name,
+		uuid:           reg.UUID,
+		cfg:            cfg,
+		client:         cli,
+		labels:         ls,
+		envs:           envs,
+		cacheHandler:   cacheHandler,
+		now:            time.Now,
+		runHealthCheck: executeHealthCheck,
 	}
 	return runner
 }
+
+// Close shuts down the cache server this runner exposes to job containers.
+func (r *Runner) Close() error {
+	return r.cacheHandler.Close()
+}
+
+// removeOrphanNetworks is a variable so tests can substitute one that needs no Docker daemon.
+var removeOrphanNetworks = container.RemoveOrphanNetworks
 
 // OnIdle performs lightweight maintenance during polling idle windows.
 // It runs synchronously on the poller goroutine; shouldRunIdleCleanup
@@ -140,6 +166,21 @@ func (r *Runner) OnIdle(ctx context.Context) {
 	// the name match leaves untouched. No-op when no host-mode job ever ran.
 	if hostRoot := filepath.FromSlash(r.cfg.Host.WorkdirParent); hostRoot != "" {
 		r.cleanupStaleDirs(ctx, hostRoot, isHostScratchDir)
+	}
+	r.cleanupOrphanNetworks(ctx)
+}
+
+// cleanupOrphanNetworks reclaims the per-job networks of jobs this runner did not live to
+// tear down. A labelled network with no containers on it is finished with, and as for the
+// directories above, a task beginning during the pass is safe because the cutoff keeps a
+// network it has created but not yet attached a container to out of scope.
+func (r *Runner) cleanupOrphanNetworks(ctx context.Context) {
+	if r.uuid == "" || !r.labels.RequireDocker() && !r.cfg.Container.RequireDocker {
+		return
+	}
+	cutoff := r.now().Add(-r.cfg.Runner.WorkdirCleanupAge)
+	if err := removeOrphanNetworks(ctx, r.uuid, cutoff); err != nil {
+		log.Warnf("failed to clean up networks left behind by earlier jobs: %v", err)
 	}
 }
 
@@ -259,7 +300,8 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Runner.Timeout)
 	defer cancel()
-	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg)
+	// A proxy URL may carry credentials, and every job is given it; keep them out of the log.
+	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg, proxyPasswords()...)
 	var runErr error
 	defer func() {
 		r.runningCount.Add(-1)
@@ -315,7 +357,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		}
 	}()
 
-	reporter.Logf("%s(version:%s) received task %v of job %v, be triggered by event: %s", r.name, ver.Version(), task.Id, task.Context.Fields["job"].GetStringValue(), task.Context.Fields["event_name"].GetStringValue())
+	r.reportSetup(reporter, task)
 
 	workflow, jobID, err := generateWorkflow(task)
 	if err != nil {
@@ -331,6 +373,11 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 
 	taskContext := task.Context.Fields
 	envs := r.cloneEnvs()
+
+	// Added per task because this job's service containers must be reached directly, and
+	// act reaches them by their workflow key.
+	proxyEnv := JobProxyEnv(envs, envs["ACTIONS_CACHE_URL"], slices.Sorted(maps.Keys(job.Services)))
+	maps.Copy(envs, proxyEnv)
 
 	if r.capabilities != "" {
 		envs["GITEA_ACTIONS_CAPABILITIES"] = r.capabilities
@@ -441,10 +488,12 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		LogOutput:            true,
 		JSONLogger:           false,
 		Env:                  envs,
+		ProxyEnv:             proxyEnv,
 		Secrets:              task.Secrets,
 		GitHubInstance:       strings.TrimSuffix(r.client.Address(), "/"),
 		AutoRemove:           true,
 		NoSkipCheckout:       true,
+		DisableActEnv:        r.cfg.Runner.SetActEnv != nil && !*r.cfg.Runner.SetActEnv,
 		PresetGitHubContext:  preset,
 		EventJSON:            string(eventJSON),
 		ContainerNamePrefix:  fmt.Sprintf("GITEA-ACTIONS-TASK-%d", task.Id),
@@ -454,6 +503,9 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		ContainerNetworkCreateOptions: container.NewDockerNetworkCreateExecutorInput{
 			EnableIPv4: r.cfg.Container.NetworkCreateOptions.EnableIPv4,
 			EnableIPv6: r.cfg.Container.NetworkCreateOptions.EnableIPv6,
+			// so a network this job leaks, if the runner dies before its teardown, can be
+			// told apart from one belonging to another runner on the same daemon
+			RunnerUUID: r.uuid,
 		},
 		ContainerOptions:                  r.cfg.Container.Options,
 		ContainerDaemonSocket:             r.cfg.Container.DockerHost,
@@ -461,9 +513,12 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		DefaultActionInstance:             r.getDefaultActionsURL(task),
 		DefaultActionInstanceIsSelfHosted: r.isSelfHostedActionsURL(task),
 		PlatformPicker:                    r.labels.PickPlatform,
+		JobStartedHook:                    r.cfg.Runner.Hooks.JobStarted,
+		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
 		Vars:                              task.Vars,
 		ValidVolumes:                      r.cfg.Container.ValidVolumes,
 		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
+		RunnerName:                        r.name,
 	}
 
 	rr, err := runner.New(runnerConfig)
@@ -503,14 +558,11 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 // function the caller must invoke (typically via defer) to revoke the
 // credential when the task finishes.
 //
-// Three modes:
+// Two modes:
 //   - Embedded handler: register in-process via RegisterJob.
-//   - external_server + external_secret: POST to the remote server's
-//     /_internal/register, defer a POST to /_internal/revoke. This is what
-//     enables full per-job auth and repo scoping over the network.
-//   - external_server alone (no secret): no-op revoker. The remote server is
-//     in legacy openMode and ignores the runtime token; trust is at the
-//     network layer.
+//   - external_server: POST to the remote server's /_internal/register, defer a
+//     POST to /_internal/revoke. This is what enables full per-job auth and
+//     repo scoping over the network.
 //
 // Safe with an empty token (older Gitea did not issue one).
 func (r *Runner) registerCacheForTask(token, repo string, reporter *report.Reporter) func() {
@@ -523,6 +575,7 @@ func (r *Runner) registerCacheForTask(token, repo string, reporter *report.Repor
 	if r.cfg.Cache.ExternalServer != "" && r.cfg.Cache.ExternalSecret != "" {
 		return r.registerExternalCacheJob(token, repo, reporter)
 	}
+	// No cache server to register against: caching is disabled, or the built-in server failed to start.
 	return func() {}
 }
 
@@ -578,10 +631,88 @@ func (r *Runner) RunningCount() int64 {
 	return r.runningCount.Load()
 }
 
+// CanAcceptTask checks local admission conditions without consuming a task. It is
+// called only from the poll loop, so the cached health fields need no lock.
+func (r *Runner) CanAcceptTask(ctx context.Context) (bool, string) {
+	if !r.cfg.HealthCheck.Enabled {
+		return true, "ok"
+	}
+
+	if r.RunningCount() > 0 {
+		if !r.healthStatusSet {
+			return true, "health checks deferred while jobs are running"
+		}
+		return r.healthStatusReady, r.healthStatusReason
+	}
+
+	if ready, reason := checkFreeDisk(r.cfg); !ready {
+		r.setHealthStatus(ready, reason)
+		return false, reason
+	}
+	ready, reason := r.checkConfiguredHealth(ctx)
+	r.setHealthStatus(ready, reason)
+	return ready, reason
+}
+
+func (r *Runner) setHealthStatus(ready bool, reason string) {
+	r.healthStatusSet = true
+	r.healthStatusReady = ready
+	r.healthStatusReason = reason
+}
+
+// checkFreeDisk evaluates the configured task-admission disk threshold.
+func checkFreeDisk(cfg *config.Config) (bool, string) {
+	root := cfg.Host.WorkdirParent
+	if cfg.Container.BindWorkdir {
+		root = filepath.FromSlash("/" + strings.TrimLeft(cfg.Container.WorkdirParent, "/"))
+	}
+	root = nearestExistingPath(root)
+	available, err := freeDiskBytes(root)
+	if err != nil {
+		return false, fmt.Sprintf("cannot determine free disk space for %s: %v", root, err)
+	}
+	availableMB := available / (1024 * 1024)
+	if availableMB < uint64(cfg.HealthCheck.MinFreeDiskSpaceMB) {
+		return false, fmt.Sprintf("low disk space on %s: %d MiB available, %d MiB required", root, availableMB, cfg.HealthCheck.MinFreeDiskSpaceMB)
+	}
+	return true, "ok"
+}
+
+func nearestExistingPath(path string) string {
+	for path != "" {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return parent
+		}
+		path = parent
+	}
+	return "."
+}
+
 func (r *Runner) Declare(ctx context.Context, labels []string) (*connect.Response[runnerv1.DeclareResponse], error) {
 	return r.client.Declare(ctx, connect.NewRequest(&runnerv1.DeclareRequest{
 		Version:      ver.Version(),
 		Labels:       labels,
 		Capabilities: RunnerCapabilities(),
 	}))
+}
+
+// warnIgnoredCacheSecret flags an external cache server secret configured on a runner that uses the built-in cache server.
+func warnIgnoredCacheSecret(cfg *config.Config) {
+	if cfg.Cache.ExternalServer != "" {
+		return
+	}
+	// Not using an external cache server, so any configured secret is ignored.
+	if cfg.Cache.ExternalSecret == "" {
+		return
+	}
+	// LoadDefault resolves external_secret_file into ExternalSecret, so report whichever key the operator actually wrote.
+	key := "cache.external_secret"
+	if cfg.Cache.ExternalSecretFile != "" {
+		key = "cache.external_secret_file"
+	}
+	log.Warnf("%s is set but cache.external_server is not; the built-in cache server does not use a shared secret, so the value is ignored", key)
 }

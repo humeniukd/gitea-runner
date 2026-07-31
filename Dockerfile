@@ -17,14 +17,14 @@ RUN make clean && make build
 ### DIND VARIANT
 #
 #
-FROM docker:29.6.1-dind AS dind
+FROM docker:29.6.2-dind AS dind
 
 ARG VERSION=dev
 
 LABEL org.opencontainers.image.source="https://gitea.com/gitea/runner"
 LABEL org.opencontainers.image.version="${VERSION}"
 
-RUN apk add --no-cache s6 bash git tzdata
+RUN apk add --no-cache s6 bash git tzdata nftables
 
 COPY --from=builder /opt/src/runner/gitea-runner /usr/local/bin/gitea-runner
 COPY scripts/run.sh /usr/local/bin/run.sh
@@ -37,7 +37,7 @@ ENTRYPOINT ["s6-svscan","/etc/s6"]
 ### DIND-ROOTLESS VARIANT
 #
 #
-FROM docker:29.6.1-dind-rootless AS dind-rootless
+FROM docker:29.6.2-dind-rootless AS dind-rootless
 
 ARG VERSION=dev
 
@@ -45,7 +45,7 @@ LABEL org.opencontainers.image.source="https://gitea.com/gitea/runner"
 LABEL org.opencontainers.image.version="${VERSION}"
 
 USER root
-RUN apk add --no-cache s6 bash git tzdata
+RUN apk add --no-cache s6 bash git tzdata nftables
 
 COPY --from=builder /opt/src/runner/gitea-runner /usr/local/bin/gitea-runner
 COPY scripts/run.sh /usr/local/bin/run.sh

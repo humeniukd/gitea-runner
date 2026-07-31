@@ -22,6 +22,7 @@ import (
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/model"
 	"gitea.com/gitea/runner/act/runner"
+	"gitea.com/gitea/runner/internal/app/run"
 
 	"github.com/joho/godotenv"
 	"github.com/moby/moby/api/types/container"
@@ -34,6 +35,7 @@ type executeArgs struct {
 	runList               bool
 	job                   string
 	event                 string
+	eventpath             string
 	workdir               string
 	workflowsPath         string
 	noWorkflowRecurse     bool
@@ -130,6 +132,8 @@ func (i *executeArgs) LoadEnvs() map[string]string {
 	_ = readEnvs(i.Envfile(), envs)
 
 	envs["ACTIONS_CACHE_URL"] = i.cacheHandler.ExternalURL() + "/"
+	// The same server answers the cache service v2 API, so let the actions reach it.
+	envs[runner.CacheServiceV2Env] = "true"
 
 	return envs
 }
@@ -414,6 +418,11 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 		}
 		handler.RegisterJob(actionsRuntimeToken, "__local/__exec")
 
+		// no service aliases: exec builds one config for the whole plan
+		run.BypassProxyForDockerHost(os.Getenv("DOCKER_HOST"))
+		proxyEnv := run.JobProxyEnv(env, env["ACTIONS_CACHE_URL"], nil)
+		maps.Copy(env, proxyEnv)
+
 		// run the plan
 		config := &runner.Config{
 			Workdir:               execArgs.Workdir(),
@@ -424,6 +433,7 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 			LogOutput:             true,
 			JSONLogger:            execArgs.jsonLogger,
 			Env:                   env,
+			ProxyEnv:              proxyEnv,
 			Vars:                  execArgs.LoadVars(),
 			Secrets:               execArgs.LoadSecrets(),
 			InsecureSecrets:       execArgs.insecureSecrets,
@@ -441,6 +451,7 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 			ArtifactServerPort:    execArgs.artifactServerPort,
 			ArtifactServerAddr:    execArgs.artifactServerAddr,
 			NoSkipCheckout:        execArgs.noSkipCheckout,
+			EventPath:             execArgs.resolve(execArgs.eventpath),
 			// PresetGitHubContext:   preset,
 			// EventJSON:             string(eventJSON),
 			ContainerNamePrefix:               "GITEA-ACTIONS-TASK-" + eventName,
@@ -496,8 +507,9 @@ func loadExecCmd(ctx context.Context) *cobra.Command {
 	}
 
 	execCmd.Flags().BoolVarP(&execArg.runList, "list", "l", false, "list workflows")
-	execCmd.Flags().StringVarP(&execArg.job, "job", "j", "", "run a specific job ID")
+	execCmd.Flags().StringVarP(&execArg.job, "job", "j", "", "run a specific job ID; when several workflow files define that job, also pass --workflows/-W to select the file")
 	execCmd.Flags().StringVarP(&execArg.event, "event", "E", "", "run a event name")
+	execCmd.Flags().StringVarP(&execArg.eventpath, "eventpath", "e", "", "path to a JSON event payload file exposed as the event that triggered the workflow")
 	execCmd.PersistentFlags().StringVarP(&execArg.workflowsPath, "workflows", "W", "./.gitea/workflows/", "path to workflow file(s)")
 	execCmd.PersistentFlags().StringVarP(&execArg.workdir, "directory", "C", ".", "working directory")
 	execCmd.PersistentFlags().BoolVarP(&execArg.noWorkflowRecurse, "no-recurse", "", false, "Flag to disable running workflows from subdirectories of specified path in '--workflows'/'-W' flag")

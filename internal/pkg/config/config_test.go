@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -46,6 +47,41 @@ func TestLoadDefault_DefaultsWorkdirCleanupAge(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 24*time.Hour, cfg.Runner.WorkdirCleanupAge)
 	assert.Equal(t, 10*time.Minute, cfg.Runner.IdleCleanupInterval)
+}
+
+func TestLoadDefault_HealthChecksAreOptIn(t *testing.T) {
+	cfg, err := LoadDefault("")
+	require.NoError(t, err)
+	assert.False(t, cfg.HealthCheck.Enabled)
+	assert.Equal(t, int64(1024), cfg.HealthCheck.MinFreeDiskSpaceMB)
+	assert.Empty(t, cfg.HealthCheck.Script)
+	assert.Equal(t, 30*time.Second, cfg.HealthCheck.Interval)
+	assert.Equal(t, 10*time.Second, cfg.HealthCheck.Timeout)
+	assert.False(t, cfg.Metrics.Enabled)
+}
+
+func TestLoadDefault_DiskAndReadinessSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+health_check:
+  enabled: true
+  min_free_disk_space_mb: 4096
+  script: /usr/local/bin/runner-health
+  interval: 15s
+  timeout: 3s
+metrics:
+  readiness_grace: 45s
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.HealthCheck.Enabled)
+	assert.Equal(t, int64(4096), cfg.HealthCheck.MinFreeDiskSpaceMB)
+	assert.Equal(t, "/usr/local/bin/runner-health", cfg.HealthCheck.Script)
+	assert.Equal(t, 15*time.Second, cfg.HealthCheck.Interval)
+	assert.Equal(t, 3*time.Second, cfg.HealthCheck.Timeout)
+	assert.Equal(t, 45*time.Second, cfg.Metrics.ReadinessGrace)
 }
 
 func TestLoadDefault_UsesConfiguredWorkdirCleanupAge(t *testing.T) {
@@ -104,9 +140,6 @@ runner:
 	assert.Equal(t, -1*time.Second, cfg.Runner.IdleCleanupInterval)
 }
 
-// TestLoadDefault_MalformedYAMLReturnsParseError pins the error surfaced for
-// invalid YAML to the canonical "parse config file" message rather than the
-// "for defaults metadata" variant — i.e. the main yaml.Unmarshal runs first.
 func TestLoadDefault_LoadsPostTaskScript(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -135,6 +168,25 @@ runner:
 	assert.Equal(t, 5*time.Minute, cfg.Runner.PostTaskScriptTimeout)
 }
 
+func TestLoadDefault_LoadsJobHooks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+runner:
+  hooks:
+    job_started: /hooks/started.sh
+    job_completed: /hooks/completed.sh
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, "/hooks/started.sh", cfg.Runner.Hooks.JobStarted)
+	assert.Equal(t, "/hooks/completed.sh", cfg.Runner.Hooks.JobCompleted)
+}
+
+// TestLoadDefault_MalformedYAMLReturnsParseError pins the error surfaced for
+// invalid YAML to the canonical "parse config file" message rather than the
+// "for defaults metadata" variant — i.e. the main yaml.Unmarshal runs first.
 func TestLoadDefault_MalformedYAMLReturnsParseError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -144,6 +196,21 @@ func TestLoadDefault_MalformedYAMLReturnsParseError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parse config file")
 	assert.NotContains(t, err.Error(), "defaults metadata")
+}
+
+func TestLoadDefault_WarnsOnUnknownKeysButStillLoads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("container:\n  volumes:\n    - /host:/ctr\n  privileged: true\n"), 0o600))
+
+	hook := test.NewGlobal()
+	defer hook.Reset()
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.Container.Privileged)
+	require.Len(t, hook.Entries, 1)
+	assert.Contains(t, hook.LastEntry().Message, "field volumes not found")
 }
 
 func TestContainerNetworkCreateOptions(t *testing.T) {
@@ -191,4 +258,102 @@ func TestContainerNetworkCreateOptions(t *testing.T) {
 		assert.Nil(t, opts.EnableIPv4)
 		assert.Nil(t, opts.EnableIPv6)
 	})
+}
+
+func TestLoadDefault_ReadsExternalSecretFromFile(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "cache.secret")
+	require.NoError(t, os.WriteFile(secretPath, []byte("  s3cr3t\n"), 0o600))
+
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+cache:
+  enabled: true
+  external_server: "http://cache.invalid/"
+  external_secret_file: "`+secretPath+`"
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, "s3cr3t", cfg.Cache.ExternalSecret)
+}
+
+func TestLoadDefault_ReadsExternalSecretFromFileWhenCacheDisabled(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "cache.secret")
+	require.NoError(t, os.WriteFile(secretPath, []byte("s3cr3t"), 0o600))
+
+	// the file has to be resolved even when cache is disabled
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+cache:
+  enabled: false
+  external_secret_file: "`+secretPath+`"
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, "s3cr3t", cfg.Cache.ExternalSecret)
+}
+
+func TestLoadDefault_RejectsBothExternalSecretAndFile(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "cache.secret")
+	require.NoError(t, os.WriteFile(secretPath, []byte("s3cr3t"), 0o600))
+
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+cache:
+  enabled: true
+  external_server: "http://cache.invalid/"
+  external_secret: "inline"
+  external_secret_file: "`+secretPath+`"
+`), 0o600))
+
+	_, err := LoadDefault(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "both set")
+}
+
+func TestLoadDefault_RejectsMissingExternalSecretFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+cache:
+  enabled: true
+  external_server: "http://cache.invalid/"
+  external_secret_file: "`+filepath.Join(dir, "absent.secret")+`"
+`), 0o600))
+
+	_, err := LoadDefault(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read cache.external_secret_file")
+}
+
+func TestLoadDefault_RejectsEmptyExternalSecretFile(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "cache.secret")
+	require.NoError(t, os.WriteFile(secretPath, []byte("\n  \n"), 0o600))
+
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+cache:
+  enabled: true
+  external_server: "http://cache.invalid/"
+  external_secret_file: "`+secretPath+`"
+`), 0o600))
+
+	_, err := LoadDefault(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "contains no secret")
+}
+
+// The shipped example must parse, and every key in it must be one the config knows.
+func TestLoadDefault_ExampleConfigParses(t *testing.T) {
+	hook := test.NewGlobal()
+	defer hook.Reset()
+
+	_, err := LoadDefault("config.example.yaml")
+	require.NoError(t, err)
+	assert.Empty(t, hook.AllEntries())
 }
