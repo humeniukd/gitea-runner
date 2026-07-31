@@ -19,6 +19,7 @@ import (
 	"gitea.com/gitea/runner/act/exprparser"
 	"gitea.com/gitea/runner/act/model"
 
+	"github.com/docker/cli/cli/compose/loader"
 	log "github.com/sirupsen/logrus"
 	assert "github.com/stretchr/testify/assert"
 	require "github.com/stretchr/testify/require"
@@ -291,6 +292,83 @@ jobs:
 	require.Equal(t, [2]string{"", ""}, credentials["redis:latest"])
 }
 
+// A service container reaches the internet the same way the job does, so it inherits the
+// job's proxy; a service that sets the variable itself keeps its own value.
+func TestStartJobContainerGivesServicesTheJobProxy(t *testing.T) {
+	workflow, err := model.ReadWorkflow(strings.NewReader(`
+name: test
+on: push
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    container:
+      image: registry.example/job:latest
+    services:
+      redis:
+        image: redis:latest
+      db:
+        image: postgres:latest
+        env:
+          no_proxy: db-only.example
+    steps: []
+`))
+	require.NoError(t, err)
+
+	var inputs []*container.NewContainerInput
+	origNewContainer := newContainer
+	newContainer = func(input *container.NewContainerInput) container.ExecutionsEnvironment {
+		inputs = append(inputs, input)
+		return fakeContainer{}
+	}
+	t.Cleanup(func() { newContainer = origNewContainer })
+
+	rc := &RunContext{
+		Name: "test",
+		Config: &Config{
+			Workdir:              "/tmp",
+			ContainerNetworkMode: "host",
+			ReuseContainers:      true,
+			Env:                  map[string]string{},
+			ProxyEnv:             map[string]string{"http_proxy": "http://proxy:3128", "no_proxy": "internal.example"},
+			Secrets:              map[string]string{},
+		},
+		Env: map[string]string{},
+		Run: &model.Run{
+			JobID:    "job",
+			Workflow: workflow,
+		},
+	}
+	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
+
+	require.NoError(t, rc.startJobContainer()(t.Context()))
+
+	env := map[string][]string{}
+	for _, in := range inputs {
+		env[in.Image] = in.Env
+	}
+
+	require.Contains(t, env["redis:latest"], "http_proxy=http://proxy:3128")
+	require.Contains(t, env["redis:latest"], "no_proxy=internal.example")
+	// the service's own env wins over what the runner injected, without dropping the rest
+	require.Contains(t, env["postgres:latest"], "no_proxy=db-only.example")
+	require.NotContains(t, env["postgres:latest"], "no_proxy=internal.example")
+	require.Contains(t, env["postgres:latest"], "http_proxy=http://proxy:3128")
+}
+
+// act builds Dockerfile actions through the API, which does not pre-populate the proxy
+// build args the docker CLI would, so the RUN steps would have no network behind a proxy.
+func TestProxyBuildArgs(t *testing.T) {
+	rc := &RunContext{Config: &Config{ProxyEnv: map[string]string{"http_proxy": "http://proxy:3128"}}}
+
+	args := rc.proxyBuildArgs()
+
+	require.Len(t, args, 1)
+	require.Equal(t, "http://proxy:3128", *args["http_proxy"])
+
+	// a job without a proxy builds exactly as it does today
+	require.Nil(t, (&RunContext{Config: &Config{}}).proxyBuildArgs())
+}
+
 func TestRunContext_GetBindsAndMounts(t *testing.T) {
 	rctemplate := &RunContext{
 		Name: "TestRCName",
@@ -363,6 +441,10 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 			{"BindAnonymousVolume", []string{"/volume"}, "/volume", map[string]string{}},
 			{"BindHostFile", []string{"/path/to/file/on/host:/volume"}, "/path/to/file/on/host:/volume", map[string]string{}},
 			{"MountExistingVolume", []string{"volume-id:/volume"}, "", map[string]string{"volume-id": "/volume"}},
+			{"MountExistingVolumeReadOnly", []string{"volume-id:/volume:ro"}, "volume-id:/volume:ro", map[string]string{}},
+			{"BindRelativeHostPath", []string{"./relative:/volume"}, "./relative:/volume", map[string]string{}},
+			{"OverridesToolCache", []string{"/host/tools:/opt/hostedtoolcache"}, "/host/tools:/opt/hostedtoolcache", map[string]string{}},
+			{"OverridesDockerSocket", []string{"/host/docker.sock:/var/run/docker.sock"}, "/host/docker.sock:/var/run/docker.sock", map[string]string{}},
 		}
 
 		t.Run("InterpolatedContainerVolumes", func(t *testing.T) {
@@ -418,15 +500,37 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 				rc.Run.JobID = "job1"
 				rc.Run.Workflow.Jobs = map[string]*model.Job{"job1": job}
 
-				gotbind, gotmount := rc.GetBindsAndMounts()
+				jobBinds, jobMounts := rc.GetBindsAndMounts()
+				svcBinds, svcMounts := rc.GetServiceBindsAndMounts(testcase.volumes)
+				// job and service containers classify volumes alike, only their own mounts differ
+				for _, got := range []struct {
+					binds  []string
+					mounts map[string]string
+				}{{jobBinds, jobMounts}, {svcBinds, svcMounts}} {
+					gotbind, gotmount := got.binds, got.mounts
 
-				if len(testcase.wantbind) > 0 {
-					assert.Contains(t, gotbind, testcase.wantbind)
-				}
+					if len(testcase.wantbind) > 0 {
+						assert.Contains(t, gotbind, testcase.wantbind)
+					}
 
-				for k, v := range testcase.wantmount {
-					assert.Contains(t, gotmount, k)
-					assert.Equal(t, gotmount[k], v)
+					for k, v := range testcase.wantmount {
+						assert.Contains(t, gotmount, k)
+						assert.Equal(t, gotmount[k], v)
+					}
+
+					// Docker rejects a container with two mounts on one target, so the job's own
+					// volumes must displace the runner's rather than pile up next to them.
+					targets := map[string]bool{}
+					for _, bind := range gotbind {
+						parsed, err := loader.ParseVolume(bind)
+						require.NoError(t, err)
+						assert.NotContains(t, targets, parsed.Target, "%s mounts an already mounted target", bind)
+						targets[parsed.Target] = true
+					}
+					for source, target := range gotmount {
+						assert.NotContains(t, targets, target, "%s mounts an already mounted target", source)
+						targets[target] = true
+					}
 				}
 			})
 		}
@@ -939,4 +1043,118 @@ func TestRunContext_cleanupFailedStart(t *testing.T) {
 	t.Run("no-op when there is nothing to clean up", func(t *testing.T) {
 		assert.NotPanics(t, func() { (&RunContext{}).cleanupFailedStart(context.Background()) })
 	})
+}
+
+func TestImageOSFromImage(t *testing.T) {
+	for _, tc := range []struct {
+		image string
+		want  string
+	}{
+		{"", ""},
+		{"docker.gitea.com/runner-images:ubuntu-24.04", "ubuntu24"},
+		{"docker.gitea.com/runner-images:ubuntu-latest", ""},
+		{"runner-images:ubuntu22.04", "ubuntu22"},
+		{"node:20", ""},
+		{"ubuntu:22.04", ""},
+		{"ubuntu", ""},
+		{"catthehacker/ubuntu:act-22.04", ""},
+		{"myco/ubuntu:v2.1", ""},
+		{"myco/ubuntu:v22.04", ""},
+		{"app:release-1", ""},
+		{"app:1.2.3", ""},
+		{"app:build-2.1", ""},
+		{"registry.example.com:5000/runner-images", ""},
+		{"registry.example.com:5000/runner-images:ubuntu-24.04", "ubuntu24"},
+	} {
+		t.Run(tc.image, func(t *testing.T) {
+			assert.Equal(t, tc.want, imageOSFromImage(tc.image))
+		})
+	}
+}
+
+func createRunsOnRunContext(t *testing.T, runsOn string) *RunContext {
+	return createIfTestRunContext(map[string]*model.Job{
+		"job1": createJob(t, "runs-on: "+runsOn, ""),
+	})
+}
+
+func TestRunContextImageOS(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("prefers the release in the resolved image tag", func(t *testing.T) {
+		rc := createRunsOnRunContext(t, "ubuntu-latest")
+		rc.Config.Platforms = map[string]string{
+			"ubuntu-latest": "docker.gitea.com/runner-images:ubuntu-24.04",
+		}
+		assert.Equal(t, "ubuntu24", rc.imageOS(ctx))
+	})
+
+	t.Run("falls back to the runs-on label", func(t *testing.T) {
+		rc := createRunsOnRunContext(t, "ubuntu-22.04")
+		rc.Config.Platforms = map[string]string{"ubuntu-22.04": "some-image"}
+		assert.Equal(t, "ubuntu22", rc.imageOS(ctx))
+	})
+
+	t.Run("keeps the historical value for a rolling label with no release", func(t *testing.T) {
+		assert.Equal(t, "ubuntu20", createRunsOnRunContext(t, "ubuntu-latest").imageOS(ctx))
+	})
+
+	t.Run("is empty for the synthetic job of a composite action", func(t *testing.T) {
+		rc := createIfTestRunContext(map[string]*model.Job{"job1": {}})
+		assert.Empty(t, rc.imageOS(ctx))
+	})
+}
+
+func TestRunContextGetRunnerContext(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("adds the runner values the container cannot know", func(t *testing.T) {
+		rc := createRunsOnRunContext(t, "ubuntu-latest")
+		rc.Config.RunnerName = "runner-1"
+
+		runnerContext := rc.getRunnerContext(ctx)
+		assert.Equal(t, "runner-1", runnerContext["name"])
+		assert.Equal(t, "self-hosted", runnerContext["environment"])
+		assert.NotContains(t, runnerContext, "debug")
+	})
+
+	t.Run("reports debug when step debugging is on", func(t *testing.T) {
+		rc := createRunsOnRunContext(t, "ubuntu-latest")
+		rc.Config.Secrets = map[string]string{"ACTIONS_STEP_DEBUG": "true"}
+
+		assert.Equal(t, "1", rc.getRunnerContext(ctx)["debug"])
+	})
+
+	t.Run("keeps the execution environment values", func(t *testing.T) {
+		rc := createRunsOnRunContext(t, "ubuntu-latest")
+		rc.JobContainer = &container.HostEnvironment{TmpDir: "/tmp/act", ToolCache: "/tmp/tool_cache"}
+
+		runnerContext := rc.getRunnerContext(ctx)
+		assert.Equal(t, "/tmp/act", runnerContext["temp"])
+		assert.Equal(t, "/tmp/tool_cache", runnerContext["tool_cache"])
+		assert.NotEmpty(t, runnerContext["os"])
+	})
+}
+
+func TestParentDir(t *testing.T) {
+	assert.Empty(t, parentDir(""))
+	assert.Empty(t, parentDir("repo"))
+	assert.Empty(t, parentDir("/repo"))
+	assert.Equal(t, "/workspace/owner", parentDir("/workspace/owner/repo"))
+	assert.Equal(t, `C:\workspace\owner`, parentDir(`C:\workspace\owner\repo`))
+}
+
+func TestRunContextWithGithubEnvRunnerValues(t *testing.T) {
+	ctx := context.Background()
+	rc := createRunsOnRunContext(t, "ubuntu-latest")
+	rc.Config.RunnerName = "runner-1"
+	rc.Config.Secrets = map[string]string{"ACTIONS_STEP_DEBUG": "true"}
+
+	env := map[string]string{}
+	rc.withGithubEnv(ctx, &model.GithubContext{Workspace: "/workspace/owner/repo"}, env)
+
+	assert.Equal(t, "runner-1", env["RUNNER_NAME"])
+	assert.Equal(t, "self-hosted", env["RUNNER_ENVIRONMENT"])
+	assert.Equal(t, "/workspace/owner", env["RUNNER_WORKSPACE"])
+	assert.Equal(t, "1", env["RUNNER_DEBUG"])
 }
