@@ -3,7 +3,10 @@
 
 package container
 
-import "time"
+import (
+	corev1 "k8s.io/api/core/v1"
+	"time"
+)
 
 // Pod cleanup policies select when a completed job Pod (and its per-job Secret
 // and ConfigMap) is deleted. Retained pods keep the backend label and survive
@@ -87,4 +90,11 @@ type KubernetesConfig struct {
 	// route different trust tiers to different runners via runs-on. Empty leaves
 	// spec.runtimeClassName unset, so the cluster's default runtime is used.
 	RuntimeClassName string
+
+	// NodeSelector constrains job pods to nodes matching all key-value pairs.
+	NodeSelector map[string]string
+	// Tolerations allow job pods to schedule on tainted nodes.
+	Tolerations []corev1.Toleration
+	// Affinity is a corev1.Affinity object applied to the job pod.
+	Affinity *corev1.Affinity
 }

@@ -25,6 +25,10 @@ import (
 	act_container "gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/model"
 	"gitea.com/gitea/runner/act/runner"
+
+	"go.yaml.in/yaml/v4"
+	corev1 "k8s.io/api/core/v1"
+
 	"gitea.com/gitea/runner/internal/pkg/client"
 	"gitea.com/gitea/runner/internal/pkg/config"
 	"gitea.com/gitea/runner/internal/pkg/labels"
@@ -599,6 +603,22 @@ func KubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfi
 		rootless = *k.Dind.Rootless
 	}
 
+	var tolerations []corev1.Toleration
+	if k.Tolerations != nil {
+		yamlData, err := yaml.Marshal(k.Tolerations)
+		if err == nil {
+			_ = yaml.Unmarshal(yamlData, &tolerations)
+		}
+	}
+
+	var affinity *corev1.Affinity
+	if k.Affinity != nil {
+		yamlData, err := yaml.Marshal(k.Affinity)
+		if err == nil {
+			_ = yaml.Unmarshal(yamlData, &affinity)
+		}
+	}
+
 	return &act_container.KubernetesConfig{
 		Enabled:          true,
 		Namespace:        k.Namespace,
@@ -624,6 +644,9 @@ func KubernetesRunnerConfig(k *config.Kubernetes) *act_container.KubernetesConfi
 		},
 		PodCleanup:       k.PodCleanup,
 		RuntimeClassName: k.RuntimeClassName,
+		NodeSelector:     k.NodeSelector,
+		Tolerations:      tolerations,
+		Affinity:         affinity,
 	}
 }
 

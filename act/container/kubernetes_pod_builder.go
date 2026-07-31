@@ -41,6 +41,9 @@ const (
 	// kubernetesWorkspaceVolumeName backs the shared job workspace.
 	kubernetesWorkspaceVolumeName = "gitea-workspace"
 
+	// kubernetesActPathVolumeName backs the act runtime directory (/var/run/act/)
+	kubernetesActPathVolumeName = "gitea-act-path"
+
 	kubernetesWorkspaceTypePVC       = "pvc"
 	kubernetesWorkspaceTypeEphemeral = "ephemeral"
 
@@ -73,6 +76,9 @@ type podBuilder struct {
 	ownerReference        *metav1.OwnerReference
 	hostAliases           []corev1.HostAlias
 	runtimeClassName      string
+	nodeSelector          map[string]string
+	tolerations           []corev1.Toleration
+	affinity              *corev1.Affinity
 
 	jobContainer   *corev1.Container
 	sidecars       []corev1.Container
@@ -111,6 +117,9 @@ func newPodBuilder(name, namespace string, cfg *KubernetesConfig, maxLifetime ti
 		activeDeadlineSeconds: deadline,
 		ownerReference:        owner,
 		runtimeClassName:      cfg.RuntimeClassName,
+		nodeSelector:          cfg.NodeSelector,
+		tolerations:           cfg.Tolerations,
+		affinity:              cfg.Affinity,
 	}
 }
 
@@ -206,7 +215,10 @@ func (b *podBuilder) build() *corev1.Pod {
 		RestartPolicy:         corev1.RestartPolicyNever,
 		Containers:            containers,
 		InitContainers:        initContainers,
-		Volumes:               []corev1.Volume{b.workspaceVolumeSpec()},
+		Volumes: []corev1.Volume{
+			b.workspaceVolumeSpec(),
+			{Name: kubernetesActPathVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		},
 		ActiveDeadlineSeconds: b.activeDeadlineSeconds,
 		HostAliases:           b.hostAliases,
 	}
@@ -218,6 +230,15 @@ func (b *podBuilder) build() *corev1.Pod {
 	}
 	if b.serviceAccount != "" {
 		spec.ServiceAccountName = b.serviceAccount
+	}
+	if len(b.nodeSelector) > 0 {
+		spec.NodeSelector = b.nodeSelector
+	}
+	if len(b.tolerations) > 0 {
+		spec.Tolerations = b.tolerations
+	}
+	if b.affinity != nil {
+		spec.Affinity = b.affinity
 	}
 	for _, name := range b.imagePullSecrets {
 		spec.ImagePullSecrets = append(spec.ImagePullSecrets, corev1.LocalObjectReference{Name: name})
@@ -298,6 +319,9 @@ func kubernetesContainerSpec(name string, input *NewContainerInput, res Kubernet
 		Env:        envVarsFromList(input.Env),
 		Resources:  resourceRequirements(res),
 		VolumeMounts: []corev1.VolumeMount{{
+			Name:      kubernetesActPathVolumeName,
+			MountPath: "/var/run/act",
+		}, {
 			Name:      kubernetesWorkspaceVolumeName,
 			MountPath: workspaceMountPath(input.WorkingDir),
 		}},
