@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"gitea.com/gitea/runner/act/model"
@@ -429,41 +430,52 @@ func (impl *interperterImpl) coerceToNumber(value reflect.Value) reflect.Value {
 	return reflect.ValueOf(math.NaN())
 }
 
-func (impl *interperterImpl) coerceToString(value reflect.Value) reflect.Value {
+// CoerceToString converts an evaluated expression value to a string the way GitHub does,
+// see https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#operators
+func CoerceToString(v any) string {
+	return coerceToString(reflect.ValueOf(v))
+}
+
+func coerceToString(value reflect.Value) string {
 	switch value.Kind() {
 	case reflect.Invalid:
-		return reflect.ValueOf("")
+		return ""
 
 	case reflect.Bool:
-		switch value.Bool() {
-		case true:
-			return reflect.ValueOf("true")
-		case false:
-			return reflect.ValueOf("false")
-		}
+		return strconv.FormatBool(value.Bool())
 
 	case reflect.String:
-		return value
+		return value.String()
 
-	case reflect.Int:
-		return reflect.ValueOf(fmt.Sprint(value))
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.FormatInt(value.Int(), 10)
 
-	case reflect.Float64:
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return strconv.FormatUint(value.Uint(), 10)
+
+	case reflect.Float32, reflect.Float64:
 		if math.IsInf(value.Float(), 1) {
-			return reflect.ValueOf("Infinity")
+			return "Infinity"
 		} else if math.IsInf(value.Float(), -1) {
-			return reflect.ValueOf("-Infinity")
+			return "-Infinity"
 		}
-		return reflect.ValueOf(fmt.Sprintf("%.15G", value.Float()))
+		return fmt.Sprintf("%.15G", value.Float())
 
-	case reflect.Slice:
-		return reflect.ValueOf("Array")
+	case reflect.Slice, reflect.Array:
+		return "Array"
 
-	case reflect.Map:
-		return reflect.ValueOf("Object")
+	// contexts such as `github` are pointers to structs, so they stringify as objects too
+	case reflect.Map, reflect.Struct:
+		return "Object"
+
+	case reflect.Interface, reflect.Pointer:
+		if value.IsNil() {
+			return ""
+		}
+		return coerceToString(value.Elem())
 	}
 
-	return value
+	return fmt.Sprintf("%v", value)
 }
 
 func (impl *interperterImpl) compareString(left, right string, kind actionlint.CompareOpNodeKind) (bool, error) {
