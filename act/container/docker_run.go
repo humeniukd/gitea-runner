@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
@@ -286,7 +287,23 @@ func GetDockerClient(ctx context.Context) (cli client.APIClient, err error) {
 	return cli, nil
 }
 
+type hostInfoEntry struct {
+	dockerHost string
+	info       system.Info
+}
+
+// hostInfo holds the daemon's last answer. Concurrent misses store the same one.
+var hostInfo atomic.Pointer[hostInfoEntry]
+
+// GetHostInfo returns the daemon's system info, asking once and answering later
+// calls from memory. The answer is kept with the DOCKER_HOST it came from.
 func GetHostInfo(ctx context.Context) (info system.Info, err error) {
+	dockerHost := os.Getenv("DOCKER_HOST")
+
+	if cached := hostInfo.Load(); cached != nil && cached.dockerHost == dockerHost {
+		return cached.info, nil
+	}
+
 	var cli client.APIClient
 	cli, err = GetDockerClient(ctx)
 	if err != nil {
@@ -298,6 +315,8 @@ func GetHostInfo(ctx context.Context) (info system.Info, err error) {
 	if err != nil {
 		return info, err
 	}
+
+	hostInfo.Store(&hostInfoEntry{dockerHost: dockerHost, info: result.Info})
 
 	return result.Info, nil
 }
