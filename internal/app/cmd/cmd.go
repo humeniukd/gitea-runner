@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"os"
 
-	"gitea.com/gitea/runner/internal/pkg/config"
-	"gitea.com/gitea/runner/internal/pkg/ver"
+	"gitea.com/gitea/runner/v3/internal/pkg/config"
+	"gitea.com/gitea/runner/v3/internal/pkg/ver"
 
 	"github.com/spf13/cobra"
 )

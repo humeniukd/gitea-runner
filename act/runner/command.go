@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/v3/act/common"
 )
 
 var commandPatternGA *regexp.Regexp

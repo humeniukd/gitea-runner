@@ -72,7 +72,7 @@ else
 endif
 
 TAGS ?=
-LDFLAGS ?= -X "gitea.com/gitea/runner/internal/pkg/ver.version=v$(RELASE_VERSION)"
+LDFLAGS ?= -X "gitea.com/gitea/runner/v3/internal/pkg/ver.version=v$(RELASE_VERSION)"
 
 .PHONY: all
 all: build

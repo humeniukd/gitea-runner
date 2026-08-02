@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 
-	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/v3/act/common"
 
 	"github.com/docker/go-connections/nat"
 )
