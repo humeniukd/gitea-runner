@@ -234,6 +234,7 @@ func TestFunctionFormat(t *testing.T) {
 		{"format('{0}', github)", "Object", nil, "format-with-context"},
 		{"format('echo Hello {0} ${{Test}}', github.undefined_property)", "echo Hello  ${Test}", nil, "format-with-undefined-value"},
 		{"format('{0}}', '{1}', 'World')", nil, "Closing bracket without opening one. The following format string is invalid: '{0}}'", "format-invalid-format-string"},
+		{"format('a}b')", nil, "Closing bracket without opening one. The following format string is invalid: 'a}b'", "format-unmatched-closing-brace"},
 		{"format('{0', '{1}', 'World')", nil, "Unclosed brackets. The following format string is invalid: '{0'", "format-invalid-format-string"},
 		{"format('{2}', '{1}', 'World')", "", "The following format string references more arguments than were supplied: '{2}'", "format-invalid-replacement-reference"},
 		{"format('{2147483648}')", "", "The following format string is invalid: '{2147483648}'", "format-invalid-replacement-reference"},
