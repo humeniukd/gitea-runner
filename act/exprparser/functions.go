@@ -28,8 +28,8 @@ func (impl *interperterImpl) contains(search, item reflect.Value) (bool, error) 
 	switch search.Kind() {
 	case reflect.String, reflect.Int, reflect.Float64, reflect.Bool, reflect.Invalid:
 		return strings.Contains(
-			strings.ToLower(coerceToString(search)),
-			strings.ToLower(coerceToString(item)),
+			strings.ToLower(CoerceToString(search)),
+			strings.ToLower(CoerceToString(item)),
 		), nil
 
 	case reflect.Slice:
@@ -51,15 +51,15 @@ func (impl *interperterImpl) contains(search, item reflect.Value) (bool, error) 
 
 func (impl *interperterImpl) startsWith(searchString, searchValue reflect.Value) (bool, error) { //nolint:unparam // pre-existing issue from nektos/act
 	return strings.HasPrefix(
-		strings.ToLower(coerceToString(searchString)),
-		strings.ToLower(coerceToString(searchValue)),
+		strings.ToLower(CoerceToString(searchString)),
+		strings.ToLower(CoerceToString(searchValue)),
 	), nil
 }
 
 func (impl *interperterImpl) endsWith(searchString, searchValue reflect.Value) (bool, error) { //nolint:unparam // pre-existing issue from nektos/act
 	return strings.HasSuffix(
-		strings.ToLower(coerceToString(searchString)),
-		strings.ToLower(coerceToString(searchValue)),
+		strings.ToLower(CoerceToString(searchString)),
+		strings.ToLower(CoerceToString(searchValue)),
 	), nil
 }
 
@@ -70,7 +70,7 @@ const (
 )
 
 func (impl *interperterImpl) format(str reflect.Value, replaceValue ...reflect.Value) (string, error) {
-	input := coerceToString(str)
+	input := CoerceToString(str)
 	var output strings.Builder
 	replacementIndex := ""
 
@@ -108,7 +108,7 @@ func (impl *interperterImpl) format(str reflect.Value, replaceValue ...reflect.V
 					return "", fmt.Errorf("The following format string references more arguments than were supplied: '%s'", input)
 				}
 
-				output.WriteString(coerceToString(replaceValue[index]))
+				output.WriteString(CoerceToString(replaceValue[index]))
 
 				state = passThrough
 
@@ -143,17 +143,17 @@ func (impl *interperterImpl) format(str reflect.Value, replaceValue ...reflect.V
 }
 
 func (impl *interperterImpl) join(array, sep reflect.Value) (string, error) { //nolint:unparam // pre-existing issue from nektos/act
-	separator := coerceToString(sep)
+	separator := CoerceToString(sep)
 	switch array.Kind() {
 	case reflect.Slice:
 		var items []string
 		for i := 0; i < array.Len(); i++ {
-			items = append(items, coerceToString(array.Index(i)))
+			items = append(items, CoerceToString(array.Index(i)))
 		}
 
 		return strings.Join(items, separator), nil
 	default:
-		return strings.Join([]string{coerceToString(array)}, separator), nil
+		return strings.Join([]string{CoerceToString(array)}, separator), nil
 	}
 }
 

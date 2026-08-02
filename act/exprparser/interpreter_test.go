@@ -6,6 +6,7 @@ package exprparser
 
 import (
 	"math"
+	"reflect"
 	"testing"
 
 	"gitea.com/gitea/runner/act/model"
@@ -671,6 +672,8 @@ func TestCoerceToString(t *testing.T) {
 		{&obj, "Object", "pointer-to-struct"},
 		{nilPointer, "", "nil-pointer"},
 		{&model.GithubContext{Action: "push"}, "Object", "github-context"},
+		{reflect.ValueOf(42), "42", "reflected-value"},
+		{reflect.Value{}, "", "invalid-reflected-value"},
 	}
 
 	for _, tt := range table {

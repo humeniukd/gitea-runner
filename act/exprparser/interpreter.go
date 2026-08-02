@@ -432,11 +432,13 @@ func (impl *interperterImpl) coerceToNumber(value reflect.Value) reflect.Value {
 
 // CoerceToString converts an evaluated expression value to a string the way GitHub does,
 // see https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#operators
+// An already reflected value is accepted as-is, since Interface() would panic on an invalid one.
 func CoerceToString(v any) string {
-	return coerceToString(reflect.ValueOf(v))
-}
+	value, ok := v.(reflect.Value)
+	if !ok {
+		value = reflect.ValueOf(v)
+	}
 
-func coerceToString(value reflect.Value) string {
 	switch value.Kind() {
 	case reflect.Invalid:
 		return ""
@@ -472,7 +474,7 @@ func coerceToString(value reflect.Value) string {
 		if value.IsNil() {
 			return ""
 		}
-		return coerceToString(value.Elem())
+		return CoerceToString(value.Elem())
 	}
 
 	return fmt.Sprintf("%v", value)
