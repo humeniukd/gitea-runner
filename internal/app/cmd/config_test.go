@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"gitea.com/gitea/runner/internal/pkg/config"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,9 +25,20 @@ func TestLoadConfigCmdDefinesExpectedSubcommands(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		names[sub.Name()] = true
 	}
-	for _, name := range []string{"get", "set", "add", "remove"} {
+	for _, name := range []string{"generate", "get", "set", "add", "remove"} {
 		assert.True(t, names[name], "expected subcommand %q to be registered", name)
 	}
+}
+
+func TestConfigCmdGeneratePrintsTheExample(t *testing.T) {
+	configFile := ""
+	cmd := loadConfigCmd(&configFile)
+	out := &bytes.Buffer{}
+	cmd.SetOut(out)
+	cmd.SetArgs([]string{"generate"})
+
+	require.NoError(t, cmd.Execute())
+	assert.Equal(t, string(config.Example), out.String())
 }
 
 func TestConfigCmdRequiresConfigFile(t *testing.T) {

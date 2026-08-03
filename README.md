@@ -132,8 +132,10 @@ Same idea as `dind`, but built on `docker:dind-rootless` so the bundled daemon a
 The runner is configured with a YAML file. Generate a starting point (this matches what ships in the tree):
 
 ```bash
-./gitea-runner generate-config > config.yaml
+./gitea-runner config generate > config.yaml
 ```
+
+> The top-level `generate-config` command still does the same thing, but is deprecated in favour of `config generate`.
 
 Pass it with `-c` / `--config` on any command that loads configuration (`register`, `daemon`, `cache-server`):
 
@@ -143,7 +145,7 @@ Pass it with `-c` / `--config` on any command that loads configuration (`registe
 ./gitea-runner -c config.yaml cache-server
 ```
 
-Every option is described in [config.example.yaml](internal/pkg/config/config.example.yaml) (the same content `generate-config` prints).
+Every option is described in [config.example.yaml](internal/pkg/config/config.example.yaml) (the same content `config generate` prints).
 
 #### Editing a config file
 

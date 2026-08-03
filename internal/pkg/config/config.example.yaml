@@ -1,7 +1,7 @@
 # Example configuration file, it's safe to copy this as the default config file without any modification.
 
 # You don't have to copy this file to your instance,
-# just run `./gitea-runner generate-config > config.yaml` to generate a config file.
+# just run `./gitea-runner config generate > config.yaml` to generate a config file.
 
 # Logging for the runner process itself (messages printed to stderr).
 # This does not control how workflow step output is streamed to the Gitea UI;

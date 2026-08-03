@@ -193,7 +193,7 @@ func loadForEdit(file, path string) (*editSession, error) {
 	content, err := os.ReadFile(file)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("config file %q does not exist, create one with `gitea-runner generate-config > %s`", file, file)
+			return nil, fmt.Errorf("config file %q does not exist, create one with `gitea-runner config generate > %s`", file, file)
 		}
 		return nil, err
 	}

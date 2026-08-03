@@ -65,11 +65,12 @@ func Execute(ctx context.Context) {
 
 	// ./gitea-runner generate-config
 	rootCmd.AddCommand(&cobra.Command{
-		Use:   "generate-config",
-		Short: "Generate an example config file",
-		Args:  cobra.MaximumNArgs(0),
-		Run: func(_ *cobra.Command, _ []string) {
-			fmt.Printf("%s", config.Example)
+		Use:        "generate-config",
+		Short:      "Generate an example config file",
+		Args:       cobra.MaximumNArgs(0),
+		Deprecated: "use `config generate` instead.",
+		Run: func(cmd *cobra.Command, _ []string) {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s", config.Example)
 		},
 	})
 

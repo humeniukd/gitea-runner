@@ -17,12 +17,21 @@ import (
 func loadConfigCmd(configFile *string) *cobra.Command {
 	configCmd := &cobra.Command{
 		Use:   "config",
-		Short: "Read and edit a config file",
+		Short: "Generate, read and edit config files",
 		Args:  cobra.MaximumNArgs(0),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
 	}
+
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "generate",
+		Short: "Print an example config file",
+		Args:  cobra.MaximumNArgs(0),
+		Run: func(cmd *cobra.Command, _ []string) {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s", config.Example)
+		},
+	})
 
 	configCmd.AddCommand(&cobra.Command{
 		Use:   "get <key>",
