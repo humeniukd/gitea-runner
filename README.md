@@ -225,7 +225,13 @@ services:
 
 A service that reports unhealthy or exits fails the job right away. One that never becomes healthy fails it after `container.service_ready_timeout` (default `5m`); set that to a negative value to start the steps immediately instead.
 
-Once started, services are described by the `job` context:
+A job running in a container reaches a service by its id on the job network, on the port the service itself listens on:
+
+```yaml
+- run: psql -h postgres -p 5432 -U postgres -c 'select 1'
+```
+
+Once started, services are described by the `job` context. `ports` maps a service port to the host port it was published on, which is what a job whose steps run on the host (a `host` label) connects to. It is only filled for services that declare `ports:`:
 
 ```yaml
 - run: psql -h localhost -p ${{ job.services.postgres.ports['5432'] }} -U postgres -c 'select 1'

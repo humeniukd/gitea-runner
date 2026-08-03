@@ -1164,6 +1164,16 @@ func TestWaitForServiceContainers(t *testing.T) {
 		assert.Equal(t, "id", svc.info.ID)
 	})
 
+	t.Run("fails on an inspect error even when the timeout is negative", func(t *testing.T) {
+		service := &containerMock{}
+		service.On("Inspect", mock.Anything).Return((*container.Info)(nil), errors.New("daemon is gone")).Once()
+
+		rc := newRunContext(-1, &serviceContainer{name: "postgres", container: service})
+		err := rc.waitForServiceContainers()(context.Background())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to inspect service 'postgres'")
+	})
+
 	t.Run("is a no-op without services", func(t *testing.T) {
 		require.NoError(t, newRunContext(0).waitForServiceContainers()(context.Background()))
 	})

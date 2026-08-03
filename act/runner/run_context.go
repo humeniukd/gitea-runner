@@ -739,8 +739,7 @@ func (rc *RunContext) waitForServiceContainers() common.Executor {
 			for _, svc := range rc.serviceContainers {
 				info, err := svc.container.Inspect(ctx)
 				if err != nil {
-					common.Logger(ctx).Debugf("unable to inspect the service container '%s': %v", svc.name, err)
-					continue
+					return fmt.Errorf("failed to inspect service '%s': %w", svc.name, err)
 				}
 				svc.info = info
 			}
