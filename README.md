@@ -145,6 +145,21 @@ Pass it with `-c` / `--config` on any command that loads configuration (`registe
 
 Every option is described in [config.example.yaml](internal/pkg/config/config.example.yaml) (the same content `generate-config` prints).
 
+#### Editing a config file
+
+`config` changes an existing file in place, keeping its comments and layout, which is handy in provisioning scripts:
+
+```bash
+./gitea-runner -c config.yaml config set runner.capacity 4
+./gitea-runner -c config.yaml config set runner.timeout 90m
+./gitea-runner -c config.yaml config set runner.envs.MY_VAR value
+./gitea-runner -c config.yaml config add runner.labels 'ubuntu:docker://node:22'
+./gitea-runner -c config.yaml config remove runner.labels 'ubuntu:docker://node:22'
+./gitea-runner -c config.yaml config get runner.labels
+```
+
+Keys are the dotted YAML path and are validated against the known options, so a typo is rejected instead of being written. `add` and `remove` only work on list options such as `runner.labels` and `container.valid_volumes`; `set` replaces the whole list when given several values.
+
 #### Without a config file
 
 If you omit `-c`, built-in defaults apply (same as an empty YAML document).
