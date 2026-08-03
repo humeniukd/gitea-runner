@@ -15,76 +15,61 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadConfigCmdDefinesExpectedSubcommands(t *testing.T) {
-	configFile := ""
-	cmd := loadConfigCmd(&configFile)
-
-	require.Equal(t, "config", cmd.Use)
-
-	names := map[string]bool{}
-	for _, sub := range cmd.Commands() {
-		names[sub.Name()] = true
-	}
-	for _, name := range []string{"generate", "get", "set", "add", "remove"} {
-		assert.True(t, names[name], "expected subcommand %q to be registered", name)
-	}
-}
-
-func TestConfigCmdGeneratePrintsTheExample(t *testing.T) {
-	configFile := ""
-	cmd := loadConfigCmd(&configFile)
-	out := &bytes.Buffer{}
-	cmd.SetOut(out)
-	cmd.SetArgs([]string{"generate"})
-
-	require.NoError(t, cmd.Execute())
-	assert.Equal(t, string(config.Example), out.String())
-}
-
-func TestConfigCmdRequiresConfigFile(t *testing.T) {
-	t.Chdir(t.TempDir())
-
-	configFile := ""
-	cmd := loadConfigCmd(&configFile)
-	cmd.SetArgs([]string{"set", "runner.capacity", "4"})
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-
-	err := cmd.Execute()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--config")
-}
-
-func TestConfigCmdFallsBackToWorkingDirectory(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("runner:\n  capacity: 2\n"), 0o600))
-	t.Chdir(dir)
-
-	configFile := ""
+func runConfigCmd(t *testing.T, configFile string, args ...string) (string, string, error) {
+	t.Helper()
 	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
 	cmd := loadConfigCmd(&configFile)
 	cmd.SetOut(out)
 	cmd.SetErr(errOut)
-	cmd.SetArgs([]string{"get", "runner.capacity"})
-
-	require.NoError(t, cmd.Execute())
-	assert.Equal(t, "2\n", out.String())
-	assert.Contains(t, errOut.String(), "using config file")
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return out.String(), errOut.String(), err
 }
 
-func TestConfigCmdAddAndGet(t *testing.T) {
-	configFile := filepath.Join(t.TempDir(), "config.yaml")
-	require.NoError(t, os.WriteFile(configFile, []byte("runner:\n  labels:\n    - self-hosted\n"), 0o600))
+func TestConfigCmdGeneratePrintsTheExample(t *testing.T) {
+	out, _, err := runConfigCmd(t, "", "generate")
+	require.NoError(t, err)
+	assert.Equal(t, string(config.Example), out)
+}
 
-	cmd := loadConfigCmd(&configFile)
-	cmd.SetArgs([]string{"add", "runner.labels", "ubuntu:docker://node:22"})
-	require.NoError(t, cmd.Execute())
+// The subcommands only wire arguments through, so one pass over all of them is enough.
+func TestConfigCmdEditsTheFile(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(file, []byte("runner:\n  labels:\n    - self-hosted\n"), 0o600))
 
-	out := &bytes.Buffer{}
-	cmd = loadConfigCmd(&configFile)
-	cmd.SetOut(out)
-	cmd.SetArgs([]string{"get", "runner.labels"})
-	require.NoError(t, cmd.Execute())
+	_, _, err := runConfigCmd(t, file, "set", "container.options", "--cpus 2")
+	require.NoError(t, err)
+	_, _, err = runConfigCmd(t, file, "add", "runner.labels", "ubuntu:docker://node:22")
+	require.NoError(t, err)
+	_, _, err = runConfigCmd(t, file, "remove", "runner.labels", "self-hosted")
+	require.NoError(t, err)
 
-	assert.Equal(t, "self-hosted\nubuntu:docker://node:22\n", out.String())
+	out, _, err := runConfigCmd(t, file, "get", "runner.labels")
+	require.NoError(t, err)
+	assert.Equal(t, "ubuntu:docker://node:22\n", out)
+
+	out, _, err = runConfigCmd(t, file, "get", "container.options")
+	require.NoError(t, err)
+	assert.Equal(t, "--cpus 2\n", out)
+}
+
+func TestConfigCmdResolvesTheConfigFile(t *testing.T) {
+	t.Run("falls back to the working directory", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("runner:\n  capacity: 2\n"), 0o600))
+		t.Chdir(dir)
+
+		out, errOut, err := runConfigCmd(t, "", "get", "runner.capacity")
+		require.NoError(t, err)
+		assert.Equal(t, "2\n", out)
+		assert.Contains(t, errOut, "using config file")
+	})
+
+	t.Run("reports that none was found", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+
+		_, _, err := runConfigCmd(t, "", "set", "runner.capacity", "4")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--config")
+	})
 }

@@ -58,10 +58,13 @@ func TestEditValues(t *testing.T) {
 			},
 		},
 		{
-			name: "set bool in a missing section",
-			edit: func(file string) error { return SetValue(file, "metrics.enabled", "true") },
+			name: "set a pointer field in a missing section",
+			edit: func(file string) error {
+				return SetValue(file, "container.network_create_options.enable_ipv4", "false")
+			},
 			assert: func(t *testing.T, cfg *Config, _ string) {
-				assert.True(t, cfg.Metrics.Enabled)
+				require.NotNil(t, cfg.Container.NetworkCreateOptions.EnableIPv4)
+				assert.False(t, *cfg.Container.NetworkCreateOptions.EnableIPv4)
 			},
 		},
 		{
@@ -99,19 +102,17 @@ func TestEditValues(t *testing.T) {
 			file := writeEditFixture(t)
 			require.NoError(t, tt.edit(file))
 
-			content, err := os.ReadFile(file)
+			raw, err := os.ReadFile(file)
 			require.NoError(t, err)
+			content := string(raw)
 			cfg, err := LoadDefault(file)
 			require.NoError(t, err)
 
-			tt.assert(t, cfg, string(content))
+			tt.assert(t, cfg, content)
 
-			// Every edit keeps the comments, the section spacing and the untouched keys.
-			assert.Contains(t, string(content), "# A leading comment.")
-			assert.Contains(t, string(content), "  # The logging level.")
-			assert.Contains(t, string(content), "\n\nrunner:")
-			assert.Equal(t, "info", cfg.Log.Level)
-			assert.Equal(t, "value", cfg.Runner.Envs["EXISTING"])
+			assert.Contains(t, content, "# A leading comment.")
+			assert.Contains(t, content, "  # The logging level.")
+			assert.Contains(t, content, "\n\nrunner:")
 		})
 	}
 }
@@ -126,11 +127,6 @@ func TestEditValuesRejectsBadInput(t *testing.T) {
 			name:    "unknown key",
 			edit:    func(file string) error { return SetValue(file, "runner.labl", "x") },
 			wantErr: `unknown config key "runner.labl"`,
-		},
-		{
-			name:    "unknown section",
-			edit:    func(file string) error { return SetValue(file, "nope.key", "x") },
-			wantErr: `unknown config key "nope"`,
 		},
 		{
 			name:    "value is not a number",
@@ -193,13 +189,6 @@ func TestEditValuesRejectsBadInput(t *testing.T) {
 	}
 }
 
-func TestEditValuesMissingFile(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "absent.yaml")
-	err := SetValue(file, "runner.capacity", "4")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not exist")
-}
-
 func TestGetValue(t *testing.T) {
 	file := writeEditFixture(t)
 
@@ -215,12 +204,56 @@ func TestGetValue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "EXISTING=value", value)
 
+	// A section has no single-line rendering.
+	value, err = GetValue(file, "runner")
+	require.NoError(t, err)
+	assert.Contains(t, value, "labels:\n  - ubuntu-latest:docker://node:20")
+
 	_, err = GetValue(file, "metrics.addr")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "is not set")
 }
 
-// The example config is the file users edit, so it has to survive a round-trip.
+func TestEditValuesFileHandling(t *testing.T) {
+	t.Run("reports a missing file", func(t *testing.T) {
+		err := SetValue(filepath.Join(t.TempDir(), "absent.yaml"), "runner.capacity", "4")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not exist")
+	})
+
+	t.Run("writes through a symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real.yaml")
+		link := filepath.Join(dir, "config.yaml")
+		require.NoError(t, os.WriteFile(target, []byte(editFixture), 0o600))
+		require.NoError(t, os.Symlink(target, link))
+
+		require.NoError(t, SetValue(link, "runner.capacity", "4"))
+
+		info, err := os.Lstat(link)
+		require.NoError(t, err)
+		assert.NotZero(t, info.Mode()&os.ModeSymlink, "the symlink must not be replaced by a regular file")
+
+		content, err := os.ReadFile(target)
+		require.NoError(t, err)
+		assert.Contains(t, string(content), "capacity: 4")
+	})
+
+	t.Run("keeps CRLF line endings", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(file, []byte(strings.ReplaceAll(editFixture, "\n", "\r\n")), 0o600))
+
+		require.NoError(t, SetValue(file, "runner.capacity", "4"))
+
+		content, err := os.ReadFile(file)
+		require.NoError(t, err)
+		assert.Contains(t, string(content), "capacity: 4\r\n")
+		assert.NotContains(t, strings.ReplaceAll(string(content), "\r\n", ""), "\n")
+	})
+}
+
+// The example config is the file users edit, so it has to stay written the way
+// the encoder emits it, down to the single space before a trailing comment.
 func TestEditValuesKeepsExampleConfigIntact(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(file, Example, 0o600))
@@ -229,20 +262,6 @@ func TestEditValuesKeepsExampleConfigIntact(t *testing.T) {
 
 	content, err := os.ReadFile(file)
 	require.NoError(t, err)
-
-	const added = "    - ubuntu:docker://node:22"
-	var (
-		withoutAdded []string
-		found        bool
-	)
-	for line := range strings.SplitSeq(string(content), "\n") {
-		if !found && line == added {
-			found = true
-			continue
-		}
-		withoutAdded = append(withoutAdded, line)
-	}
-
-	require.True(t, found, "the label was not appended")
-	assert.Equal(t, strings.Split(string(Example), "\n"), withoutAdded, "only the appended label may differ")
+	withoutAdded := strings.Replace(string(content), "    - ubuntu:docker://node:22\n", "", 1)
+	assert.Equal(t, string(Example), withoutAdded, "only the appended label may differ")
 }

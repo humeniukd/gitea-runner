@@ -15,8 +15,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// loadConfigCmd edits an existing config file in place, keeping its comments
-// and layout, so settings can be changed from provisioning scripts.
 func loadConfigCmd(configFile *string) *cobra.Command {
 	configCmd := &cobra.Command{
 		Use:   "config",
@@ -27,14 +25,7 @@ func loadConfigCmd(configFile *string) *cobra.Command {
 		},
 	}
 
-	configCmd.AddCommand(&cobra.Command{
-		Use:   "generate",
-		Short: "Print an example config file",
-		Args:  cobra.MaximumNArgs(0),
-		Run: func(cmd *cobra.Command, _ []string) {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s", config.Example)
-		},
-	})
+	configCmd.AddCommand(loadGenerateConfigCmd("generate"))
 
 	configCmd.AddCommand(&cobra.Command{
 		Use:   "get <key>",
@@ -54,54 +45,49 @@ func loadConfigCmd(configFile *string) *cobra.Command {
 		},
 	})
 
-	configCmd.AddCommand(&cobra.Command{
-		Use:   "set <key> <value>...",
-		Short: "Set the value of a config key",
-		Args:  cobra.MinimumNArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			file, err := resolveConfigFile(cmd, configFile)
-			if err != nil {
-				return err
-			}
-			return config.SetValue(file, args[0], args[1:]...)
-		},
-	})
-
-	configCmd.AddCommand(&cobra.Command{
-		Use:   "add <key> <value>...",
-		Short: "Append values to a list config key",
-		Args:  cobra.MinimumNArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			file, err := resolveConfigFile(cmd, configFile)
-			if err != nil {
-				return err
-			}
-			return config.AddValue(file, args[0], args[1:]...)
-		},
-	})
-
-	configCmd.AddCommand(&cobra.Command{
-		Use:   "remove <key> <value>...",
-		Short: "Remove values from a list config key",
-		Args:  cobra.MinimumNArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			file, err := resolveConfigFile(cmd, configFile)
-			if err != nil {
-				return err
-			}
-			return config.RemoveValue(file, args[0], args[1:]...)
-		},
-	})
+	for _, sub := range []struct {
+		use   string
+		short string
+		edit  func(file, key string, values ...string) error
+	}{
+		{"set <key> <value>...", "Set the value of a config key", config.SetValue},
+		{"add <key> <value>...", "Append values to a list config key", config.AddValue},
+		{"remove <key> <value>...", "Remove values from a list config key", config.RemoveValue},
+	} {
+		valueCmd := &cobra.Command{
+			Use:   sub.use,
+			Short: sub.short,
+			Args:  cobra.MinimumNArgs(2),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				file, err := resolveConfigFile(cmd, configFile)
+				if err != nil {
+					return err
+				}
+				return sub.edit(file, args[0], args[1:]...)
+			},
+		}
+		valueCmd.Flags().SetInterspersed(false) // so a value such as `--cpus 2` is not parsed as a flag
+		configCmd.AddCommand(valueCmd)
+	}
 
 	return configCmd
 }
 
-// defaultConfigFileNames are looked up in the working directory and next to the
-// executable when --config is not given.
+func loadGenerateConfigCmd(use string) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: "Generate an example config file",
+		Args:  cobra.MaximumNArgs(0),
+		Run: func(cmd *cobra.Command, _ []string) {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s", config.Example)
+		},
+	}
+}
+
 var defaultConfigFileNames = []string{"config.yaml", "config.yml"}
 
 func resolveConfigFile(cmd *cobra.Command, configFile *string) (string, error) {
-	if configFile != nil && *configFile != "" {
+	if *configFile != "" {
 		return *configFile, nil
 	}
 

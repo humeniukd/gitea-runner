@@ -5,10 +5,8 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"os"
 
-	"gitea.com/gitea/runner/internal/pkg/config"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"github.com/spf13/cobra"
@@ -64,15 +62,9 @@ func Execute(ctx context.Context) {
 	rootCmd.AddCommand(loadConfigCmd(&configFile))
 
 	// ./gitea-runner generate-config
-	rootCmd.AddCommand(&cobra.Command{
-		Use:        "generate-config",
-		Short:      "Generate an example config file",
-		Args:       cobra.MaximumNArgs(0),
-		Deprecated: "use `config generate` instead.",
-		Run: func(cmd *cobra.Command, _ []string) {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s", config.Example)
-		},
-	})
+	generateConfigCmd := loadGenerateConfigCmd("generate-config")
+	generateConfigCmd.Deprecated = "use `config generate` instead."
+	rootCmd.AddCommand(generateConfigCmd)
 
 	// ./gitea-runner cache-server
 	var cacheArgs cacheServerArgs

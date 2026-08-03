@@ -18,130 +18,109 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
-// fieldKind describes what a resolved config path points at, which decides
-// whether a path can be set, appended to or listed.
 type fieldKind int
 
 const (
 	kindScalar fieldKind = iota
 	kindSequence
-	kindMapping
 	kindSection
 )
 
 var durationType = reflect.TypeFor[time.Duration]()
 
-// GetValue returns the value stored at path in file, rendered one entry per
-// line for sequences and mappings.
+// GetValue renders a flat list or mapping one entry per line, and anything nested as YAML.
 func GetValue(file, path string) (string, error) {
 	session, err := loadForEdit(file, path)
 	if err != nil {
 		return "", err
 	}
 
-	node, err := lookupNode(session.root, strings.Split(path, "."))
+	node, err := lookupNode(session.root, session.segments)
 	if err != nil {
 		return "", err
 	}
 
-	return renderNode(node), nil
+	return renderNode(node)
 }
 
-// SetValue replaces the value at path. A sequence path takes every value, any
-// other path takes exactly one.
 func SetValue(file, path string, values ...string) error {
 	session, err := loadForEdit(file, path)
 	if err != nil {
 		return err
 	}
 
+	var replacement *yaml.Node
 	switch session.field.kind {
 	case kindSequence:
 		if len(values) == 0 {
 			return fmt.Errorf("%q needs at least one value", path)
 		}
-		node, err := ensureNode(session.root, strings.Split(path, "."))
+		items, err := session.scalars(values)
 		if err != nil {
 			return err
 		}
-		items := make([]*yaml.Node, 0, len(values))
-		for _, value := range values {
-			scalar, err := scalarNode(session.field.elem, value)
-			if err != nil {
-				return fmt.Errorf("%s: %w", path, err)
-			}
-			items = append(items, scalar)
-		}
-		node.Kind, node.Tag, node.Style, node.Value, node.Content = yaml.SequenceNode, "!!seq", 0, "", items
+		replacement = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: items}
 	case kindScalar:
 		if len(values) != 1 {
 			return fmt.Errorf("%q takes exactly one value", path)
 		}
-		scalar, err := scalarNode(session.field.typ, values[0])
-		if err != nil {
-			return fmt.Errorf("%s: %w", path, err)
-		}
-		node, err := ensureNode(session.root, strings.Split(path, "."))
+		items, err := session.scalars(values)
 		if err != nil {
 			return err
 		}
-		node.Kind, node.Tag, node.Style, node.Value, node.Content = scalar.Kind, scalar.Tag, scalar.Style, scalar.Value, nil
+		replacement = items[0]
 	default:
 		return fmt.Errorf("%q is a section, set one of its keys instead", path)
 	}
 
-	return session.write(file)
-}
-
-// AddValue appends values to the sequence at path.
-func AddValue(file, path string, values ...string) error {
-	session, err := loadForEdit(file, path)
+	node, err := ensureNode(session.root, session.segments)
 	if err != nil {
 		return err
 	}
-	if session.field.kind != kindSequence {
-		return fmt.Errorf("%q is not a list, use `config set` instead", path)
+	replaceNode(node, replacement)
+
+	return session.write()
+}
+
+func AddValue(file, path string, values ...string) error {
+	session, err := loadSequenceEdit(file, path, values)
+	if err != nil {
+		return err
 	}
-	if len(values) == 0 {
-		return fmt.Errorf("%q needs at least one value", path)
+	items, err := session.scalars(values)
+	if err != nil {
+		return err
 	}
 
-	node, err := ensureNode(session.root, strings.Split(path, "."))
+	node, err := ensureNode(session.root, session.segments)
 	if err != nil {
 		return err
 	}
 	if node.Kind != yaml.SequenceNode {
-		node.Kind, node.Tag, node.Style, node.Value, node.Content = yaml.SequenceNode, "!!seq", 0, "", nil
+		replaceNode(node, &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"})
 	}
 
-	for _, value := range values {
-		scalar, err := scalarNode(session.field.elem, value)
-		if err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+	for _, item := range items {
+		if indexOfValue(node, item.Value) >= 0 {
+			return fmt.Errorf("%s already contains %q", path, item.Value)
 		}
-		if indexOfValue(node, scalar.Value) >= 0 {
-			return fmt.Errorf("%s already contains %q", path, scalar.Value)
-		}
-		node.Content = append(node.Content, scalar)
+		node.Content = append(node.Content, item)
 	}
 
-	return session.write(file)
+	return session.write()
 }
 
-// RemoveValue drops values from the sequence at path.
 func RemoveValue(file, path string, values ...string) error {
-	session, err := loadForEdit(file, path)
+	session, err := loadSequenceEdit(file, path, values)
 	if err != nil {
 		return err
 	}
-	if session.field.kind != kindSequence {
-		return fmt.Errorf("%q is not a list, use `config set` instead", path)
-	}
-	if len(values) == 0 {
-		return fmt.Errorf("%q needs at least one value", path)
+	items, err := session.scalars(values)
+	if err != nil {
+		return err
 	}
 
-	node, err := lookupNode(session.root, strings.Split(path, "."))
+	node, err := lookupNode(session.root, session.segments)
 	if err != nil {
 		return err
 	}
@@ -149,19 +128,15 @@ func RemoveValue(file, path string, values ...string) error {
 		return fmt.Errorf("%s is not a list in %q", path, file)
 	}
 
-	for _, value := range values {
-		scalar, err := scalarNode(session.field.elem, value)
-		if err != nil {
-			return fmt.Errorf("%s: %w", path, err)
-		}
-		index := indexOfValue(node, scalar.Value)
+	for _, item := range items {
+		index := indexOfValue(node, item.Value)
 		if index < 0 {
-			return fmt.Errorf("%s does not contain %q", path, scalar.Value)
+			return fmt.Errorf("%s does not contain %q", path, item.Value)
 		}
-		node.Content = append(node.Content[:index], node.Content[index+1:]...)
+		node.Content = slices.Delete(node.Content, index, index+1)
 	}
 
-	return session.write(file)
+	return session.write()
 }
 
 func indexOfValue(seq *yaml.Node, value string) int {
@@ -173,19 +148,27 @@ func indexOfValue(seq *yaml.Node, value string) int {
 	return -1
 }
 
+// replaceNode assigns field by field, as *node = *with would drop the comments attached to node.
+func replaceNode(node, with *yaml.Node) {
+	node.Kind, node.Tag, node.Style, node.Value, node.Content = with.Kind, with.Tag, with.Style, with.Value, with.Content
+}
+
 type editSession struct {
+	file     string
+	path     string
 	original []byte
 	root     *yaml.Node
 	field    *fieldInfo
+	segments []string
 }
 
-// loadForEdit validates path against the Config schema and parses file into a
-// document node, so every caller fails before touching the file on disk.
+// loadForEdit validates the path and parses the file, so every caller fails before anything is written.
 func loadForEdit(file, path string) (*editSession, error) {
 	if path == "" {
 		return nil, errors.New("no config key given")
 	}
-	field, err := resolvePath(path)
+	segments := strings.Split(path, ".")
+	field, err := resolvePath(segments)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +176,7 @@ func loadForEdit(file, path string) (*editSession, error) {
 	content, err := os.ReadFile(file)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("config file %q does not exist, create one with `gitea-runner config generate > %s`", file, file)
+			return nil, fmt.Errorf("config file %q does not exist, create one with `config generate`", file)
 		}
 		return nil, err
 	}
@@ -212,10 +195,35 @@ func loadForEdit(file, path string) (*editSession, error) {
 		return nil, fmt.Errorf("config file %q is not a YAML mapping", file)
 	}
 
-	return &editSession{original: content, root: &root, field: field}, nil
+	return &editSession{file: file, path: path, original: content, root: &root, field: field, segments: segments}, nil
 }
 
-// lookupNode resolves segments in an existing document without creating keys.
+func loadSequenceEdit(file, path string, values []string) (*editSession, error) {
+	session, err := loadForEdit(file, path)
+	if err != nil {
+		return nil, err
+	}
+	if session.field.kind != kindSequence {
+		return nil, fmt.Errorf("%q is not a list, use `config set` instead", path)
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%q needs at least one value", path)
+	}
+	return session, nil
+}
+
+func (s *editSession) scalars(values []string) ([]*yaml.Node, error) {
+	nodes := make([]*yaml.Node, 0, len(values))
+	for _, value := range values {
+		node, err := scalarNode(s.field.typ, value)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", s.path, err)
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes, nil
+}
+
 func lookupNode(root *yaml.Node, segments []string) (*yaml.Node, error) {
 	node := root.Content[0]
 	for i, segment := range segments {
@@ -231,8 +239,6 @@ func lookupNode(root *yaml.Node, segments []string) (*yaml.Node, error) {
 	return node, nil
 }
 
-// ensureNode resolves segments, creating the intermediate mappings and the leaf
-// placeholder when they are missing.
 func ensureNode(root *yaml.Node, segments []string) (*yaml.Node, error) {
 	node := root.Content[0]
 	for i, segment := range segments {
@@ -264,27 +270,56 @@ func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-func renderNode(node *yaml.Node) string {
+func renderNode(node *yaml.Node) (string, error) {
+	if !allScalars(node.Content) {
+		encoded, err := encodeYAML(node)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimRight(string(encoded), "\n"), nil
+	}
+
 	switch node.Kind {
 	case yaml.SequenceNode:
 		lines := make([]string, 0, len(node.Content))
 		for _, item := range node.Content {
 			lines = append(lines, item.Value)
 		}
-		return strings.Join(lines, "\n")
+		return strings.Join(lines, "\n"), nil
 	case yaml.MappingNode:
 		lines := make([]string, 0, len(node.Content)/2)
 		for i := 0; i+1 < len(node.Content); i += 2 {
 			lines = append(lines, node.Content[i].Value+"="+node.Content[i+1].Value)
 		}
-		return strings.Join(lines, "\n")
+		return strings.Join(lines, "\n"), nil
 	default:
-		return node.Value
+		return node.Value, nil
 	}
 }
 
-// restoreBlankLines re-inserts the blank lines between top-level sections that
-// the encoder drops, so one edit does not reflow the whole file.
+func allScalars(nodes []*yaml.Node) bool {
+	for _, node := range nodes {
+		if node.Kind != yaml.ScalarNode {
+			return false
+		}
+	}
+	return true
+}
+
+func encodeYAML(node *yaml.Node) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := yaml.NewEncoder(&buf)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(node); err != nil {
+		return nil, err
+	}
+	if err := encoder.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// restoreBlankLines re-inserts the blank lines between top-level sections that the encoder drops.
 func restoreBlankLines(original, generated []byte) []byte {
 	spaced := map[string]bool{}
 	blank := false
@@ -300,9 +335,6 @@ func restoreBlankLines(original, generated []byte) []byte {
 			}
 			blank = false
 		}
-	}
-	if len(spaced) == 0 {
-		return generated
 	}
 
 	var out []string
@@ -334,29 +366,31 @@ func topLevelKey(line string) (string, bool) {
 	return key, ok
 }
 
-// write re-encodes the edited document, rejects it if it no longer parses as a
-// config, and swaps it in atomically so a failure leaves the original in place.
-func (s *editSession) write(file string) error {
-	var buf bytes.Buffer
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(s.root); err != nil {
-		return err
-	}
-	if err := encoder.Close(); err != nil {
+func (s *editSession) write() error {
+	generated, err := encodeYAML(s.root)
+	if err != nil {
 		return err
 	}
 
-	// Unknown keys stay tolerated, as LoadDefault only warns about them.
-	var typeErr *yaml.TypeError
-	if err := yaml.Unmarshal(buf.Bytes(), &Config{}); err != nil && !errors.As(err, &typeErr) {
-		return fmt.Errorf("the edit would produce an invalid config: %w", err)
+	// A file the runner already refused to load stays the user's to fix, only a regression is rejected.
+	if err := yaml.Unmarshal(generated, &Config{}); err != nil && yaml.Unmarshal(s.original, &Config{}) == nil {
+		return fmt.Errorf("the edit would produce a config the runner cannot load: %w", err)
 	}
-	content := restoreBlankLines(s.original, buf.Bytes())
 
+	content := restoreBlankLines(s.original, generated)
+	if bytes.Contains(s.original, []byte("\r\n")) { // the encoder only ever emits LF
+		content = bytes.ReplaceAll(content, []byte("\n"), []byte("\r\n"))
+	}
+
+	file := s.file
+	if resolved, err := filepath.EvalSymlinks(file); err == nil {
+		file = resolved // keeps a config linked in from elsewhere intact
+	}
+
+	var info os.FileInfo
 	mode := os.FileMode(0o600)
-	if info, err := os.Stat(file); err == nil {
-		mode = info.Mode().Perm()
+	if stat, err := os.Stat(file); err == nil {
+		info, mode = stat, stat.Mode().Perm()
 	}
 
 	temp, err := os.CreateTemp(filepath.Dir(file), filepath.Base(file)+".*.tmp")
@@ -369,8 +403,17 @@ func (s *editSession) write(file string) error {
 		temp.Close()
 		return err
 	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
 	if err := temp.Close(); err != nil {
 		return err
+	}
+	if info != nil { // before the chmod, as a chown can clear mode bits
+		if err := preserveOwner(temp.Name(), info); err != nil {
+			return err
+		}
 	}
 	if err := os.Chmod(temp.Name(), mode); err != nil {
 		return err
@@ -381,15 +424,12 @@ func (s *editSession) write(file string) error {
 
 type fieldInfo struct {
 	kind fieldKind
-	typ  reflect.Type // the leaf type, for scalars
-	elem reflect.Type // the element type, for sequences
+	typ  reflect.Type // the element type for a sequence
 }
 
-// resolvePath walks the Config struct through the yaml tags of a dotted path,
-// so an unknown or mistyped key is rejected before anything is written.
-func resolvePath(path string) (*fieldInfo, error) {
+// resolvePath walks the Config struct through the yaml tags of a dotted path.
+func resolvePath(segments []string) (*fieldInfo, error) {
 	typ := reflect.TypeFor[Config]()
-	segments := strings.Split(path, ".")
 
 	for i, segment := range segments {
 		switch typ.Kind() {
@@ -411,19 +451,13 @@ func resolvePath(path string) (*fieldInfo, error) {
 		}
 	}
 
-	return describe(typ), nil
-}
-
-func describe(typ reflect.Type) *fieldInfo {
-	switch {
-	case typ.Kind() == reflect.Slice:
-		return &fieldInfo{kind: kindSequence, elem: typ.Elem()}
-	case typ.Kind() == reflect.Map:
-		return &fieldInfo{kind: kindMapping}
-	case typ.Kind() == reflect.Struct:
-		return &fieldInfo{kind: kindSection}
+	switch typ.Kind() {
+	case reflect.Slice:
+		return &fieldInfo{kind: kindSequence, typ: typ.Elem()}, nil
+	case reflect.Map, reflect.Struct:
+		return &fieldInfo{kind: kindSection}, nil
 	default:
-		return &fieldInfo{kind: kindScalar, typ: typ}
+		return &fieldInfo{kind: kindScalar, typ: typ}, nil
 	}
 }
 
@@ -439,7 +473,7 @@ func fieldByYAMLName(typ reflect.Type, name string) (reflect.StructField, bool) 
 func yamlNames(typ reflect.Type) []string {
 	names := make([]string, 0, typ.NumField())
 	for field := range typ.Fields() {
-		if name := yamlName(field); name != "" && name != "-" {
+		if name := yamlName(field); name != "-" {
 			names = append(names, name)
 		}
 	}
@@ -455,8 +489,7 @@ func yamlName(field reflect.StructField) string {
 	return name
 }
 
-// scalarNode converts a command line value into a typed YAML scalar, so a bad
-// value is reported instead of silently landing in the file as a string.
+// scalarNode types the value, so a bad one is reported instead of landing in the file as a string.
 func scalarNode(typ reflect.Type, value string) (*yaml.Node, error) {
 	if typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
