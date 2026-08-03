@@ -5,6 +5,8 @@ package run
 
 import (
 	"context"
+	"net/http"
+	"strings"
 	"testing"
 
 	"gitea.com/gitea/runner/act/runner"
@@ -134,6 +136,7 @@ func TestNewRunnerCacheServiceV2(t *testing.T) {
 
 	r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
 	t.Cleanup(func() { _ = r.Close() })
+	const token = "task-token"
 
 	assert.Equal(t, "https://gitea.example", r.envs["ACTIONS_RESULTS_URL"])
 	assert.Empty(t, r.envs[runner.CacheServiceV2Env], "a promise the runner has not made yet")
@@ -141,9 +144,23 @@ func TestNewRunnerCacheServiceV2(t *testing.T) {
 
 	// The registration is what makes it true: the cache server takes the results service over,
 	// having been told which instance to forward the artifact half to.
-	revoke, resultsURL := r.registerCacheForTask("task-token", "owner/repo", nil)
+	revoke, resultsURL := r.registerCacheForTask(token, "owner/repo", nil)
 	defer revoke()
-	assert.Equal(t, r.cacheHandler.ExternalURL(), resultsURL)
+	require.Equal(t, r.cacheHandler.ExternalURL(), resultsURL)
+
+	// And what is advertised has to answer the cache service. A client without the GHES escape
+	// hatch, docker buildx among them, posts its cache calls at exactly this URL and nowhere else,
+	// so a 404 here is the failure this whole change is about.
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		resultsURL+"/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL",
+		strings.NewReader(`{"key":"k","version":"v"}`))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "the advertised results service serves no cache service")
 }
 
 // The v1 cache client appends its path to ACTIONS_CACHE_URL without a separator, so a configured

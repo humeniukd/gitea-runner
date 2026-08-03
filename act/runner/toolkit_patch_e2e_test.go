@@ -59,37 +59,45 @@ func bundleFromGitHub(t *testing.T, repo, ref, path string) string {
 	return bundle
 }
 
-// runCacheAction runs one entrypoint the way a job would: a real Gitea server URL, and a results
-// URL that points at Gitea rather than at the runner. Nothing about the environment is rewritten,
-// so only the patch can make the client choose v2 and find the cache server.
-func runCacheAction(t *testing.T, script, workspace, runnerTemp, cacheURL, token, key string) string {
+// jobEnv is the environment a job gets from this runner, which is what decides where an action's
+// toolkit looks for the cache and artifact services.
+type jobEnv struct {
+	workspace, runnerTemp string
+	cacheURL, resultsURL  string
+	token                 string
+}
+
+// runActionEntrypoint runs one action entrypoint the way a job would. Adding another action to these tests
+// means downloading its entrypoint with bundleFromGitHub and calling this with its inputs, whose
+// names are the ones the action's own action.yml uses.
+func runActionEntrypoint(t *testing.T, script string, env jobEnv, inputs map[string]string) string {
 	t.Helper()
-	state := filepath.Join(runnerTemp, "state")
-	output := filepath.Join(runnerTemp, "output")
+	state := filepath.Join(env.runnerTemp, "state")
+	output := filepath.Join(env.runnerTemp, "output")
 	for _, name := range []string{state, output} {
 		require.NoError(t, os.WriteFile(name, nil, 0o600))
 	}
 
 	cmd := exec.CommandContext(t.Context(), "node", script)
-	cmd.Dir = workspace
+	cmd.Dir = env.workspace
 	cmd.Env = append(os.Environ(),
-		"INPUT_PATH=to-cache",
-		"INPUT_KEY="+key,
-		"ACTIONS_RUNTIME_TOKEN="+token,
-		"ACTIONS_CACHE_URL="+cacheURL+"/",
-		// Unreachable on purpose: the artifact service lives here, the cache service must not.
-		"ACTIONS_RESULTS_URL=https://gitea.example",
+		"ACTIONS_RUNTIME_TOKEN="+env.token,
+		"ACTIONS_CACHE_URL="+env.cacheURL+"/",
+		"ACTIONS_RESULTS_URL="+env.resultsURL,
 		"ACTIONS_CACHE_SERVICE_V2=true",
 		"GITHUB_SERVER_URL=https://gitea.example.com",
 		"GITHUB_REF=refs/heads/main",
 		"GITHUB_EVENT_NAME=push",
-		"GITHUB_WORKSPACE="+workspace,
-		"RUNNER_TEMP="+runnerTemp,
+		"GITHUB_WORKSPACE="+env.workspace,
+		"RUNNER_TEMP="+env.runnerTemp,
 		"GITHUB_STATE="+state,
 		"GITHUB_OUTPUT="+output,
 	)
+	for name, value := range inputs {
+		cmd.Env = append(cmd.Env, "INPUT_"+strings.ToUpper(name)+"="+value)
+	}
 	out, err := cmd.CombinedOutput()
-	t.Logf("%s:\n%s", filepath.Base(filepath.Dir(script)), out)
+	t.Logf("%s:\n%s", filepath.Base(script), out)
 	require.NoError(t, err, "%s failed", script)
 	return string(out)
 }
@@ -130,24 +138,33 @@ func TestCacheServiceV2EndToEnd(t *testing.T) {
 	const token, repo = "e2e-runtime-token", "testuser/testrepo"
 	handler.RegisterJob(token, artifactcache.JobCredential{Repo: repo})
 
-	workspace, runnerTemp := tempDirPath(t), tempDirPath(t)
-	require.NoError(t, os.MkdirAll(filepath.Join(workspace, "to-cache"), 0o755))
+	env := jobEnv{
+		workspace:  tempDirPath(t),
+		runnerTemp: tempDirPath(t),
+		cacheURL:   handler.ExternalURL(),
+		// The results service is the cache server's too, which is what the runner advertises.
+		resultsURL: handler.ExternalURL(),
+		token:      token,
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(env.workspace, "to-cache"), 0o755))
 	content := []byte("cached through the patched gate")
-	require.NoError(t, os.WriteFile(filepath.Join(workspace, "to-cache", "data.txt"), content, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(env.workspace, "to-cache", "data.txt"), content, 0o600))
 
 	const key = "patched-gate-key"
-	missed := runCacheAction(t, scripts["restore"], workspace, runnerTemp, handler.ExternalURL(), token, key)
+	inputs := map[string]string{"path": "to-cache", "key": key}
+
+	missed := runActionEntrypoint(t, scripts["restore"], env, inputs)
 	require.Contains(t, missed, "Cache service version: v2", "the patch did not take, the client stayed on v1")
 	require.Contains(t, missed, "Cache not found for input keys: "+key)
 
-	saved := runCacheAction(t, scripts["save"], workspace, runnerTemp, handler.ExternalURL(), token, key)
+	saved := runActionEntrypoint(t, scripts["save"], env, inputs)
 	require.Contains(t, saved, "Cache saved with key: "+key)
 
-	restored := tempDirPath(t)
-	hit := runCacheAction(t, scripts["restore"], restored, runnerTemp, handler.ExternalURL(), token, key)
+	env.workspace = tempDirPath(t)
+	hit := runActionEntrypoint(t, scripts["restore"], env, inputs)
 	require.Contains(t, hit, "Cache restored from key: "+key)
 
-	got, err := os.ReadFile(filepath.Join(restored, "to-cache", "data.txt"))
+	got, err := os.ReadFile(filepath.Join(env.workspace, "to-cache", "data.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, content, got)
 }

@@ -45,6 +45,11 @@ func putBlob(t *testing.T, url string, content []byte) int {
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusCreated {
+		// The Azure SDK client dereferences this header without checking, so a blob upload that
+		// omits it panics the caller rather than failing it.
+		require.NotEmpty(t, resp.Header.Get("x-ms-request-id"))
+	}
 	return resp.StatusCode
 }
 
