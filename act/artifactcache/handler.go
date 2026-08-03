@@ -53,6 +53,12 @@ type credKey struct{}
 // cache server over the docker bridge network.
 type JobCredential struct {
 	Repo string
+
+	// Results is the Gitea instance whose artifact service this server forwards for the job, and
+	// InsecureTLS how the runner reaches it. They travel with the registration so a cache server
+	// shared by several instances forwards each job to its own; see results.go.
+	Results     string
+	InsecureTLS bool
 }
 
 // credEntry holds a registered job's credential along with an active
@@ -165,6 +171,7 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret string, lo
 	router.POST(internalPath+"/register", h.internalAuth(h.internalRegister))
 	router.POST(internalPath+"/revoke", h.internalAuth(h.internalRevoke))
 	h.registerV2Routes(router)
+	router.NotFound = http.HandlerFunc(h.forwardOrNotFound)
 
 	h.router = router
 
@@ -211,10 +218,11 @@ func (h *Handler) ExternalURL() string {
 // is only accepted while the job is running.
 //
 // Registrations are reference-counted: if a token is already registered, the
-// existing repo is kept and the refcount is incremented. The entry is
-// removed only when every revoker returned by RegisterJob has been called.
+// credential it was registered with is kept and the refcount is incremented.
+// The entry is removed only when every revoker returned by RegisterJob has
+// been called.
 // This keeps a stray re-registration from silently revoking a live job.
-func (h *Handler) RegisterJob(token, repo string) func() {
+func (h *Handler) RegisterJob(token string, cred JobCredential) func() {
 	if h == nil || token == "" {
 		return func() {}
 	}
@@ -223,7 +231,7 @@ func (h *Handler) RegisterJob(token, repo string) func() {
 		existing.refs++
 	} else {
 		h.creds[token] = &credEntry{
-			cred: JobCredential{Repo: repo},
+			cred: cred,
 			refs: 1,
 		}
 	}
@@ -618,8 +626,10 @@ func (h *Handler) internalAuth(handler httprouter.Handle) httprouter.Handle {
 }
 
 type internalRegisterBody struct {
-	Token string `json:"token"`
-	Repo  string `json:"repo"`
+	Token       string `json:"token"`
+	Repo        string `json:"repo"`
+	Results     string `json:"results"`
+	InsecureTLS bool   `json:"insecure_tls"`
 }
 
 type internalRevokeBody struct {
@@ -627,6 +637,16 @@ type internalRevokeBody struct {
 }
 
 // POST /_internal/register
+// ResultsURL is what a job registered with cred should be given as ACTIONS_RESULTS_URL: this
+// server, which serves the cache service and forwards the artifact service to the instance the
+// credential names, or "" when it names none and this is only half of that service.
+func (h *Handler) ResultsURL(cred JobCredential) string {
+	if h == nil || cred.Results == "" {
+		return ""
+	}
+	return h.ExternalURL()
+}
+
 func (h *Handler) internalRegister(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	var body internalRegisterBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -637,8 +657,11 @@ func (h *Handler) internalRegister(w http.ResponseWriter, r *http.Request, _ htt
 		h.responseJSON(w, r, http.StatusBadRequest, errors.New("token is required"))
 		return
 	}
-	h.RegisterJob(body.Token, body.Repo)
-	h.responseJSON(w, r, http.StatusOK)
+	cred := JobCredential{Repo: body.Repo, Results: body.Results, InsecureTLS: body.InsecureTLS}
+	h.RegisterJob(body.Token, cred)
+	// The caller learns from this whether it may hand jobs this address as ACTIONS_RESULTS_URL: a
+	// server too old to forward the artifact service answers without it.
+	h.responseJSON(w, r, http.StatusOK, map[string]any{"results_url": h.ResultsURL(cred)})
 }
 
 // POST /_internal/revoke

@@ -128,7 +128,7 @@ func TestCacheServiceV2EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = handler.Close() })
 	const token, repo = "e2e-runtime-token", "testuser/testrepo"
-	handler.RegisterJob(token, repo)
+	handler.RegisterJob(token, artifactcache.JobCredential{Repo: repo})
 
 	workspace, runnerTemp := tempDirPath(t), tempDirPath(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(workspace, "to-cache"), 0o755))

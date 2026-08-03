@@ -124,21 +124,43 @@ func taskWithDefaultActionsURL(url string) *runnerv1.Task {
 	}
 }
 
-// The cache service v2 API is announced to jobs unless it is turned off. Announcing it is what
-// makes act patch the GHES check out of an action's bundle, so the client can reach it.
+// The results service is decided per task, because that is where the job's token and its
+// instance are both known. NewRunner only leaves the address Gitea serves.
 func TestNewRunnerCacheServiceV2(t *testing.T) {
-	announced := func(v2 *bool) string {
-		cfg := &config.Config{}
-		cfg.Cache.V2, cfg.Cache.Dir, cfg.Cache.Host = v2, t.TempDir(), "127.0.0.1"
-		cli := clientmocks.NewClient(t)
-		cli.On("Address").Return("https://gitea.example/").Maybe()
+	cfg := &config.Config{}
+	cfg.Cache.Dir, cfg.Cache.Host = t.TempDir(), "127.0.0.1"
+	cli := clientmocks.NewClient(t)
+	cli.On("Address").Return("https://gitea.example/").Maybe()
 
-		r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
-		t.Cleanup(func() { _ = r.Close() })
-		return r.envs[runner.CacheServiceV2Env]
-	}
+	r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
+	t.Cleanup(func() { _ = r.Close() })
 
-	off := false
-	assert.Equal(t, "true", announced(nil))
-	assert.Empty(t, announced(&off))
+	assert.Equal(t, "https://gitea.example", r.envs["ACTIONS_RESULTS_URL"])
+	assert.Empty(t, r.envs[runner.CacheServiceV2Env], "a promise the runner has not made yet")
+	assert.True(t, r.patchToolkit())
+
+	// The registration is what makes it true: the cache server takes the results service over,
+	// having been told which instance to forward the artifact half to.
+	revoke, resultsURL := r.registerCacheForTask("task-token", "owner/repo", nil)
+	defer revoke()
+	assert.Equal(t, r.cacheHandler.ExternalURL(), resultsURL)
+}
+
+// The v1 cache client appends its path to ACTIONS_CACHE_URL without a separator, so a configured
+// server that is missing the slash would send it to a URL whose port swallows the path.
+func TestNewRunnerNormalizesTheExternalCacheServer(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Cache.ExternalServer = "http://cache.local:8088//"
+	cli := clientmocks.NewClient(t)
+	cli.On("Address").Return("https://gitea.example/").Maybe()
+
+	r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
+
+	assert.Equal(t, "http://cache.local:8088/", r.envs["ACTIONS_CACHE_URL"])
+	// No local server to front the results service with, so the variable stays untrue and unset,
+	// but the bundles are still patched: that is what artifacts v4 need, and it costs the cache
+	// client nothing, because the patch keeps it on the cache URL either way.
+	assert.Equal(t, "https://gitea.example", r.envs["ACTIONS_RESULTS_URL"])
+	assert.Empty(t, r.envs[runner.CacheServiceV2Env])
+	assert.True(t, r.patchToolkit())
 }
