@@ -110,12 +110,14 @@ type NewDockerBuildExecutorInput struct {
 	BuildContext io.Reader
 	ImageTag     string
 	Platform     string
+	BuildArgs    map[string]*string
 }
 
 // NewDockerNetworkCreateExecutorInput the input for the NewDockerNetworkCreateExecutor function
 type NewDockerNetworkCreateExecutorInput struct {
 	EnableIPv4 *bool
 	EnableIPv6 *bool
+	RunnerUUID string
 }
 
 // NewDockerPullExecutorInput the input for the NewDockerPullExecutor function

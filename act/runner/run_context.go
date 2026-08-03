@@ -22,15 +22,17 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/exprparser"
 	"gitea.com/gitea/runner/act/model"
+	"gitea.com/gitea/runner/internal/pkg/lock"
 
+	"github.com/docker/cli/cli/compose/loader"
 	"github.com/docker/go-connections/nat"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/opencontainers/selinux/go-selinux"
 	"golang.org/x/sync/errgroup"
 )
@@ -219,52 +221,93 @@ func (rc *RunContext) validVolumes() []string {
 		getDockerDaemonSocketMountPath(rc.containerDaemonSocket()))
 }
 
+// toolCache returns the tool cache path the job sees, relocatable through RUNNER_TOOL_CACHE.
+func (rc *RunContext) toolCache(fallback string) string {
+	if path := rc.GetEnv()["RUNNER_TOOL_CACHE"]; path != "" {
+		return path
+	}
+	return fallback
+}
+
+// runnerEnv returns a container's RUNNER_* variables, derived from the values runner.tool_cache
+// and friends report so the two cannot drift apart.
+func (rc *RunContext) runnerEnv(ctx context.Context) []string {
+	ext := container.LinuxContainerEnvironmentExtensions{}
+	runnerContext := ext.GetRunnerContext(ctx)
+	runnerContext["tool_cache"] = rc.toolCache(container.DefaultToolCache)
+
+	env := make([]string, 0, len(runnerContext))
+	for key, value := range runnerContext {
+		env = append(env, fmt.Sprintf("RUNNER_%s=%s", strings.ToUpper(key), value))
+	}
+	slices.Sort(env)
+	return env
+}
+
+// splitVolumes routes volume specs into binds and a source:target mount map, and returns the
+// container paths they mount onto. Only a plain source:target volume fits the map, everything
+// else (anonymous volumes, host binds, mount options) stays a bind.
+func splitVolumes(specs []string) ([]string, map[string]string, map[string]bool) {
+	binds := []string{}
+	mounts := map[string]string{}
+	targets := map[string]bool{}
+
+	for _, spec := range specs {
+		parsed, err := loader.ParseVolume(spec)
+		if err != nil {
+			binds = append(binds, spec) // let Docker report the malformed spec
+			continue
+		}
+		targets[parsed.Target] = true
+		if parsed.Type == string(mount.TypeVolume) && parsed.Source != "" && !parsed.ReadOnly {
+			mounts[parsed.Source] = parsed.Target
+		} else {
+			binds = append(binds, spec)
+		}
+	}
+	return binds, mounts, targets
+}
+
 // Returns the binds and mounts for the container, resolving paths as appopriate
 func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 	name := rc.jobContainerName()
-
-	binds := []string{}
-	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" {
-		daemonPath := getDockerDaemonSocketMountPath(daemonSocket)
-		binds = append(binds, fmt.Sprintf("%s:%s", daemonPath, "/var/run/docker.sock"))
-	}
-
 	ext := container.LinuxContainerEnvironmentExtensions{}
 
-	mounts := map[string]string{
-		"act-toolcache": "/opt/hostedtoolcache",
-		name + "-env":   ext.GetActPath(),
-	}
-
+	var volumes []string
 	if job := rc.Run.Job(); job != nil {
 		if container := job.Container(); container != nil {
 			for _, v := range container.Volumes {
 				if rc.ExprEval != nil {
 					v = rc.ExprEval.Interpolate(context.Background(), v)
 				}
-				if !strings.Contains(v, ":") || filepath.IsAbs(v) {
-					// Bind anonymous volume or host file.
-					binds = append(binds, v)
-				} else {
-					// Mount existing volume.
-					paths := strings.SplitN(v, ":", 2)
-					mounts[paths[0]] = paths[1]
-				}
+				volumes = append(volumes, v)
 			}
 		}
 	}
+	// the runner's own mounts below yield to the targets the job claims
+	binds, mounts, claimed := splitVolumes(volumes)
 
-	if rc.Config.BindWorkdir {
-		bindModifiers := ""
-		if runtime.GOOS == "darwin" {
-			bindModifiers = ":delegated"
+	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" && !claimed["/var/run/docker.sock"] {
+		binds = append(binds, getDockerDaemonSocketMountPath(daemonSocket)+":/var/run/docker.sock")
+	}
+	if toolCache := rc.toolCache(container.DefaultToolCache); !claimed[toolCache] {
+		mounts["act-toolcache"] = toolCache
+	}
+	mounts[name+"-env"] = ext.GetActPath() // runner-internal, never overridable
+
+	if workdir := ext.ToContainerPath(rc.Config.Workdir); !claimed[workdir] {
+		if rc.Config.BindWorkdir {
+			bindModifiers := ""
+			if runtime.GOOS == "darwin" {
+				bindModifiers = ":delegated"
+			}
+			if selinux.GetEnabled() {
+				bindModifiers = ":z"
+			}
+			binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, workdir, bindModifiers))
+		} else {
+			mounts[name] = workdir
 		}
-		if selinux.GetEnabled() {
-			bindModifiers = ":z"
-		}
-		binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, ext.ToContainerPath(rc.Config.Workdir), bindModifiers))
-	} else {
-		mounts[name] = ext.ToContainerPath(rc.Config.Workdir)
 	}
 
 	return binds, mounts
@@ -298,7 +341,10 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 		if err := os.MkdirAll(runnerTmp, 0o777); err != nil {
 			return err
 		}
-		toolCache := filepath.Join(cacheDir, "tool_cache")
+		toolCache := rc.toolCache(filepath.Join(cacheDir, "tool_cache"))
+		if err := os.MkdirAll(toolCache, 0o777); err != nil {
+			return err
+		}
 		rc.JobContainer = &container.HostEnvironment{
 			Path:         path,
 			TmpDir:       runnerTmp,
@@ -313,7 +359,7 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 			AllocatePTY: rc.Config.AllocatePTY,
 		}
 		rc.cleanUpJobContainer = rc.JobContainer.Remove()
-		for k, v := range rc.JobContainer.GetRunnerContext(ctx) {
+		for k, v := range rc.getRunnerContext(ctx) {
 			if v, ok := v.(string); ok {
 				rc.Env["RUNNER_"+strings.ToUpper(k)] = v
 			}
@@ -383,10 +429,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 
 		envList := make([]string, 0)
 
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
+		envList = append(envList, rc.runnerEnv(ctx)...)
 		envList = append(envList, fmt.Sprintf("%s=%s", "LANG", "C.UTF-8")) // Use same locale as GitHub Actions
 
 		ext := container.LinuxContainerEnvironmentExtensions{}
@@ -407,7 +450,9 @@ func (rc *RunContext) startJobContainer() common.Executor {
 				continue
 			}
 			// interpolate env
-			interpolatedEnvs := make(map[string]string, len(spec.Env))
+			interpolatedEnvs := make(map[string]string, len(spec.Env)+len(rc.Config.ProxyEnv))
+			// a service reaches the internet the way the job does; its own env still wins
+			maps0.Copy(interpolatedEnvs, rc.Config.ProxyEnv)
 			for k, v := range spec.Env {
 				interpolatedEnvs[k] = rc.ExprEval.Interpolate(ctx, v)
 			}
@@ -810,13 +855,10 @@ func (rc *RunContext) ActionCacheDir() string {
 // jobMutexes serializes per-job result/output aggregation across the matrix combinations that
 // share one *model.Job and run in parallel. Keyed by the shared *model.Job (mirrors the
 // per-directory AcquireCloneLock pattern).
-var jobMutexes sync.Map // key: *model.Job; value: *sync.Mutex
+var jobMutexes lock.Keyed[*model.Job]
 
 func lockJob(job *model.Job) func() {
-	v, _ := jobMutexes.LoadOrStore(job, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	return jobMutexes.Lock(job)
 }
 
 func (rc *RunContext) interpolateOutputs() common.Executor {
@@ -1067,6 +1109,20 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// proxyBuildArgs returns the job's proxy variables as docker build args. The docker CLI
+// pre-populates these from its own client configuration, but act builds through the API,
+// so without them a Dockerfile action's RUN steps have no network behind a proxy.
+func (rc *RunContext) proxyBuildArgs() map[string]*string {
+	if len(rc.Config.ProxyEnv) == 0 {
+		return nil
+	}
+	args := make(map[string]*string, len(rc.Config.ProxyEnv))
+	for name, value := range rc.Config.ProxyEnv {
+		args[name] = &value
+	}
+	return args
+}
+
 func mergeMaps(maps ...map[string]string) map[string]string {
 	rtnMap := make(map[string]string)
 	for _, m := range maps {
@@ -1156,6 +1212,23 @@ func jobServicePorts(ports map[string]string) map[string]string {
 
 func (rc *RunContext) getStepsContext() map[string]*model.StepResult {
 	return rc.StepResults
+}
+
+// getRunnerContext returns the `runner` context: what the execution environment knows
+// (os, arch, temp, tool_cache) plus what only the runner process knows.
+func (rc *RunContext) getRunnerContext(ctx context.Context) map[string]any {
+	runnerContext := map[string]any{}
+	if rc.JobContainer != nil {
+		maps0.Copy(runnerContext, rc.JobContainer.GetRunnerContext(ctx))
+		defaultToolCache, _ := runnerContext["tool_cache"].(string)
+		runnerContext["tool_cache"] = rc.toolCache(defaultToolCache)
+	}
+	runnerContext["name"] = rc.Config.RunnerName
+	runnerContext["environment"] = "self-hosted"
+	if rc.Config.RunnerDebug() {
+		runnerContext["debug"] = "1"
+	}
+	return runnerContext
 }
 
 func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext {
@@ -1342,7 +1415,7 @@ func nestedMapLookup(m map[string]any, ks ...string) (rval any) {
 	}
 }
 
-func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubContext, env map[string]string) map[string]string { //nolint:unparam // pre-existing issue from nektos/act
+func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubContext, env map[string]string) {
 	env["CI"] = "true"
 	env["GITHUB_WORKFLOW"] = github.Workflow
 	env["GITHUB_RUN_ID"] = github.RunID
@@ -1384,23 +1457,71 @@ func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubCon
 		env["GITHUB_RUN_ATTEMPT"] = github.RunAttempt
 	}
 
+	env["RUNNER_NAME"] = rc.Config.RunnerName
+	env["RUNNER_ENVIRONMENT"] = "self-hosted"
+	if workspace := parentDir(github.Workspace); workspace != "" {
+		env["RUNNER_WORKSPACE"] = workspace
+	}
+	if rc.Config.RunnerDebug() {
+		env["RUNNER_DEBUG"] = "1"
+	}
+
 	if rc.Config.ArtifactServerPath != "" {
 		setActionRuntimeVars(rc, env)
 	}
 
-	for _, platformName := range rc.runsOnPlatformNames(ctx) {
-		if platformName != "" {
-			if platformName == "ubuntu-latest" {
-				// hardcode current ubuntu-latest since we have no way to check that 'on the fly'
-				env["ImageOS"] = "ubuntu20"
-			} else {
-				platformName = strings.SplitN(strings.Replace(platformName, `-`, ``, 1), `.`, 2)[0]
-				env["ImageOS"] = platformName
-			}
-		}
+	if imageOS := rc.imageOS(ctx); imageOS != "" {
+		env["ImageOS"] = imageOS
+	}
+}
+
+// parentDir returns the directory containing p, or "" when p names no parent. Both
+// separators are accepted rather than filepath's, as p may describe a container while
+// the runner itself runs on Windows, or the other way round.
+func parentDir(p string) string {
+	if slash := strings.LastIndexAny(p, `/\`); slash > 0 {
+		return p[:slash]
+	}
+	return ""
+}
+
+// imageOS returns ImageOS, which setup-* actions use to tell one runner image release
+// from another. The resolved image tag is preferred over the runs-on label because it
+// still names a release when the label is a rolling one such as ubuntu-latest.
+func (rc *RunContext) imageOS(ctx context.Context) string {
+	if rc.Run.Job().RunsOn() == nil {
+		// A composite action runs on a synthetic job, and resolving its image would only
+		// log that runs-on is missing.
+		return ""
+	}
+	if imageOS := imageOSFromImage(rc.platformImage(ctx)); imageOS != "" {
+		return imageOS
 	}
 
-	return env
+	for _, platformName := range slices.Backward(rc.runsOnPlatformNames(ctx)) {
+		if platformName == "ubuntu-latest" {
+			// Rolling label whose image names no release either, so keep the historical value.
+			return "ubuntu20"
+		} else if platformName != "" {
+			return strings.SplitN(strings.Replace(platformName, `-`, ``, 1), `.`, 2)[0]
+		}
+	}
+	return ""
+}
+
+// imageOSTag matches an image reference tagged with an OS family ImageOS can report plus
+// its release, such as "docker.gitea.com/runner-images:ubuntu-24.04". Anything else
+// ("ubuntu-latest", "app:22.04", "catthehacker/ubuntu:act-22.04", or a registry port) is
+// left to the runs-on label rather than turned into a bogus OS.
+var imageOSTag = regexp.MustCompile(`:(ubuntu|win|macos)-?([0-9]+)[^/]*$`)
+
+// imageOSFromImage derives ImageOS from an image reference, e.g.
+// "docker.gitea.com/runner-images:ubuntu-24.04" yields "ubuntu24".
+func imageOSFromImage(image string) string {
+	if match := imageOSTag.FindStringSubmatch(image); match != nil {
+		return match[1] + match[2]
+	}
+	return ""
 }
 
 func setActionRuntimeVars(rc *RunContext, env map[string]string) {
@@ -1472,24 +1593,9 @@ func (rc *RunContext) handleServiceCredentials(ctx context.Context, creds map[st
 
 // GetServiceBindsAndMounts returns the binds and mounts for the service container, resolving paths as appopriate
 func (rc *RunContext) GetServiceBindsAndMounts(svcVolumes []string) ([]string, map[string]string) {
-	binds := []string{}
-	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" {
-		daemonPath := getDockerDaemonSocketMountPath(daemonSocket)
-		binds = append(binds, fmt.Sprintf("%s:%s", daemonPath, "/var/run/docker.sock"))
+	binds, mounts, claimed := splitVolumes(svcVolumes)
+	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" && !claimed["/var/run/docker.sock"] {
+		binds = append(binds, getDockerDaemonSocketMountPath(daemonSocket)+":/var/run/docker.sock")
 	}
-
-	mounts := map[string]string{}
-
-	for _, v := range svcVolumes {
-		if !strings.Contains(v, ":") || filepath.IsAbs(v) {
-			// Bind anonymous volume or host file.
-			binds = append(binds, v)
-		} else {
-			// Mount existing volume.
-			paths := strings.SplitN(v, ":", 2)
-			mounts[paths[0]] = paths[1]
-		}
-	}
-
 	return binds, mounts
 }

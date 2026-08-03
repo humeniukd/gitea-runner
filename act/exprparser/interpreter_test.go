@@ -6,11 +6,13 @@ package exprparser
 
 import (
 	"math"
+	"reflect"
 	"testing"
 
 	"gitea.com/gitea/runner/act/model"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLiterals(t *testing.T) {
@@ -523,7 +525,9 @@ func TestOperatorsBooleanEvaluation(t *testing.T) {
 			assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
 
 			if expected, ok := tt.expected.(float64); ok && math.IsNaN(expected) {
-				assert.True(t, math.IsNaN(output.(float64)))
+				number, ok := output.(float64)
+				require.True(t, ok, "want a number, got %T", output)
+				assert.True(t, math.IsNaN(number))
 			} else {
 				assert.Equal(t, tt.expected, output)
 			}
@@ -627,6 +631,54 @@ func TestContexts(t *testing.T) {
 			assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
 
 			assert.Equal(t, tt.expected, output)
+		})
+	}
+}
+
+func TestCoerceToString(t *testing.T) {
+	type object struct{ Name string }
+	obj := object{Name: "x"}
+	var nilPointer *object
+	var nilMap map[string]any
+	var nilSlice []any
+
+	table := []struct {
+		input    any
+		expected string
+		name     string
+	}{
+		{nil, "", "null"},
+		{true, "true", "true"},
+		{false, "false", "false"},
+		{"foo", "foo", "string"},
+		{"", "", "empty-string"},
+		{123, "123", "int"},
+		{int64(-9), "-9", "int64"},
+		{uint8(7), "7", "uint8"},
+		{1.0, "1", "float-integral"},
+		{-9.7, "-9.7", "float"},
+		{2.99e-2, "0.0299", "float-exponential"},
+		{1e21, "1E+21", "float-large"},
+		{float32(1.5), "1.5", "float32"},
+		{math.NaN(), "NaN", "nan"},
+		{math.Inf(1), "Infinity", "positive-infinity"},
+		{math.Inf(-1), "-Infinity", "negative-infinity"},
+		{[]any{1, 2}, "Array", "slice"},
+		{nilSlice, "Array", "nil-slice"},
+		{[2]int{1, 2}, "Array", "fixed-size-array"},
+		{map[string]any{"a": 1}, "Object", "map"},
+		{nilMap, "Object", "nil-map"},
+		{obj, "Object", "struct"},
+		{&obj, "Object", "pointer-to-struct"},
+		{nilPointer, "", "nil-pointer"},
+		{&model.GithubContext{Action: "push"}, "Object", "github-context"},
+		{reflect.ValueOf(42), "42", "reflected-value"},
+		{reflect.Value{}, "", "invalid-reflected-value"},
+	}
+
+	for _, tt := range table {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, CoerceToString(tt.input))
 		})
 	}
 }

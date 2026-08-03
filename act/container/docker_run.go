@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -26,7 +27,6 @@ import (
 	"gitea.com/gitea/runner/act/filecollector"
 
 	"dario.cat/mergo"
-	"github.com/Masterminds/semver"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/cli/cli/compose/loader"
 	"github.com/docker/cli/cli/connhelper"
@@ -41,7 +41,9 @@ import (
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/api/types/system"
 	"github.com/moby/moby/client"
+	"github.com/moby/moby/client/pkg/versions"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/sirupsen/logrus"
 )
 
 // drainGracePeriod bounds how long we wait for an output-copy goroutine to
@@ -90,19 +92,11 @@ func (cr *containerReference) connectToNetwork(name string, aliases []string) co
 // supportsContainerImagePlatform returns true if the underlying Docker server
 // API version is 1.41 and beyond
 func supportsContainerImagePlatform(ctx context.Context, cli client.APIClient) bool {
-	logger := common.Logger(ctx)
 	ver, err := cli.ServerVersion(ctx, client.ServerVersionOptions{})
 	if err != nil {
-		logger.Panicf("Failed to get Docker API Version: %s", err)
-		return false
+		common.Logger(ctx).Panicf("Failed to get Docker API Version: %s", err)
 	}
-	sv, err := semver.NewVersion(ver.APIVersion)
-	if err != nil {
-		logger.Panicf("Failed to unmarshal Docker Version: %s", err)
-		return false
-	}
-	constraint, _ := semver.NewConstraint(">= 1.41")
-	return constraint.Check(sv)
+	return versions.GreaterThanOrEqualTo(ver.APIVersion, "1.41")
 }
 
 func (cr *containerReference) Create(capAdd, capDrop []string) common.Executor {
@@ -450,29 +444,68 @@ func (cr *containerReference) find() common.Executor {
 	}
 }
 
-// isContainerGone reports whether a failed remove still left the container gone (NotFound or Conflict).
-func isContainerGone(err error) bool {
-	return cerrdefs.IsNotFound(err) || cerrdefs.IsConflict(err)
-}
-
 func (cr *containerReference) remove() common.Executor {
 	return func(ctx context.Context) error {
-		if cr.id == "" {
+		idOrName := cr.id
+		if idOrName == "" && cr.input != nil {
+			idOrName = cr.input.Name
+		}
+		if idOrName == "" {
 			return nil
 		}
 
 		logger := common.Logger(ctx)
-		_, err := cr.cli.ContainerRemove(ctx, cr.id, client.ContainerRemoveOptions{
+		// Kill first so removal never waits out a daemon's stop timeout: Docker kills outright
+		// on a forced remove, Podman sends SIGTERM and waits. Only worth it for a container
+		// this started, and removal can still deal with one it could not kill.
+		if cr.id != "" {
+			_, err := cr.cli.ContainerKill(ctx, cr.id, client.ContainerKillOptions{Signal: "SIGKILL"})
+			if err != nil && !cerrdefs.IsConflict(err) && !cerrdefs.IsNotFound(err) {
+				logger.Debugf("Container %s could not be killed: %v", cr.id, err)
+			}
+		}
+		_, err := cr.cli.ContainerRemove(ctx, idOrName, client.ContainerRemoveOptions{
 			RemoveVolumes: true,
 			Force:         true,
 		})
-		if err != nil && !isContainerGone(err) {
-			logger.Error(fmt.Errorf("failed to remove container: %w", err))
+		switch {
+		case cerrdefs.IsConflict(err):
+			// the daemon's own AutoRemove teardown is running, and it releases the volume
+			// references and the network endpoint only once it finishes
+			cr.waitForRemoval(ctx, idOrName)
+		case err != nil && !cerrdefs.IsNotFound(err):
+			logger.Error(fmt.Errorf("failed to remove container %s: %w", idOrName, err))
+			return nil // keep the id, the container is still there for a later Remove()
 		}
 
-		logger.Debugf("Removed container: %v", cr.id)
+		logger.Debugf("Removed container: %v", idOrName)
 		cr.id = ""
 		return nil
+	}
+}
+
+func (cr *containerReference) waitForRemoval(ctx context.Context, idOrName string) {
+	// per container, against the one minute the post-job executor allows for the whole
+	// cleanup, so a job with several services can spend most of that budget here
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	waitResult := cr.cli.ContainerWait(ctx, idOrName, client.ContainerWaitOptions{
+		Condition: container.WaitConditionRemoved,
+	})
+	select {
+	case <-waitResult.Result:
+	case <-waitResult.Error:
+	case <-ctx.Done():
+		// the client delivers the result over an unbuffered channel, so leave a receiver
+		// behind or its goroutine parks on the send for the lifetime of the process
+		go func() {
+			select {
+			case <-waitResult.Result:
+			case <-waitResult.Error:
+			}
+		}()
+		common.Logger(ctx).Warnf("Timed out waiting for the daemon to remove container %s, its volumes and network may be left behind", idOrName)
 	}
 }
 
@@ -525,6 +558,16 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 		return nil, nil, fmt.Errorf("Cannot process container options: '%s': '%w'", input.Options, err)
 	}
 
+	// For Gitea
+	// When privileged mode is disabled, container.options is workflow-controlled
+	// untrusted input. Strip the HostConfig fields that would let a workflow break
+	// out of the container (host namespaces, capability expansion, security profile
+	// overrides, device and runtime access). Otherwise these survive into the final
+	// HostConfig even though --privileged is forced off.
+	if !hostConfig.Privileged {
+		sanitizeOptionsHostConfig(logger, containerConfig.HostConfig)
+	}
+
 	logger.Debugf("Custom container.Config from options ==> %+v", containerConfig.Config)
 
 	err = mergo.Merge(config, containerConfig.Config, mergo.WithOverride, mergo.WithAppendSlice)
@@ -535,8 +578,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 
 	logger.Debugf("Custom container.HostConfig from options ==> %+v", containerConfig.HostConfig)
 
-	hostConfig.Binds = append(hostConfig.Binds, containerConfig.HostConfig.Binds...)
-	hostConfig.Mounts = append(hostConfig.Mounts, containerConfig.HostConfig.Mounts...)
+	overlayVolumes(hostConfig, containerConfig.HostConfig)
 	binds := hostConfig.Binds
 	mounts := hostConfig.Mounts
 	networkMode := hostConfig.NetworkMode
@@ -602,7 +644,7 @@ func (cr *containerReference) create(capAdd, capDrop []string) common.Executor {
 		}
 
 		var platSpecs *specs.Platform
-		if supportsContainerImagePlatform(ctx, cr.cli) && cr.input.Platform != "" {
+		if cr.input.Platform != "" && supportsContainerImagePlatform(ctx, cr.cli) {
 			platSpecs, err = parsePlatform(cr.input.Platform)
 			if err != nil {
 				return err
@@ -879,23 +921,59 @@ func (cr *containerReference) waitForCommand(ctx context.Context, isTerminal boo
 	}
 }
 
+// mkdirInContainer creates containerPath and returns it with the symlinked components
+// replaced by the targets the daemon reports for them. Docker 29.7 rejects tar entries
+// traversing a symlink to an absolute target, like the "/var/run" of most images, with
+// "path escapes from parent", and not every daemon creates the implied parents of a
+// directory entry, so one entry per missing component is extracted at the deepest
+// existing ancestor.
+// WORKAROUND: https://github.com/moby/moby/issues/53258
+func (cr *containerReference) mkdirInContainer(ctx context.Context, containerPath string) (string, error) {
+	parts := strings.Split(strings.Trim(path.Clean(containerPath), "/"), "/")
+	existing := "/"
+	for i, part := range parts {
+		if part == "" {
+			return existing, nil
+		}
+		stat, err := cr.cli.ContainerStatPath(ctx, cr.id, client.ContainerStatPathOptions{Path: path.Join(existing, part)})
+		if err != nil {
+			// nothing below exists either, so create the remaining components
+			return path.Join(existing, path.Join(parts[i:]...)), cr.mkdirEntries(ctx, existing, parts[i:])
+		}
+		existing = path.Join(existing, part)
+		if target := stat.Stat.LinkTarget; target != "" {
+			if !path.IsAbs(target) {
+				target = path.Join(path.Dir(existing), target)
+			}
+			existing = target
+		}
+	}
+	return existing, nil
+}
+
+func (cr *containerReference) mkdirEntries(ctx context.Context, destPath string, missing []string) error {
+	buf := &bytes.Buffer{}
+	tw := tar.NewWriter(buf)
+	for i := range missing {
+		_ = tw.WriteHeader(&tar.Header{
+			Name:     path.Join(missing[:i+1]...),
+			Mode:     0o777,
+			Typeflag: tar.TypeDir,
+		})
+	}
+	tw.Close()
+	_, err := cr.cli.CopyToContainer(ctx, cr.id, client.CopyToContainerOptions{
+		DestinationPath: destPath,
+		Content:         buf,
+	})
+	return err
+}
+
 func (cr *containerReference) CopyTarStream(ctx context.Context, destPath string, tarStream io.Reader) error {
 	if cr.id == "" {
 		return cr.missingContainerError("copy to %s", destPath)
 	}
-	// Mkdir
-	buf := &bytes.Buffer{}
-	tw := tar.NewWriter(buf)
-	_ = tw.WriteHeader(&tar.Header{
-		Name:     destPath,
-		Mode:     0o777,
-		Typeflag: tar.TypeDir,
-	})
-	tw.Close()
-	_, err := cr.cli.CopyToContainer(ctx, cr.id, client.CopyToContainerOptions{
-		DestinationPath: "/",
-		Content:         buf,
-	})
+	destPath, err := cr.mkdirInContainer(ctx, destPath)
 	if err != nil {
 		return fmt.Errorf("failed to mkdir to copy content to container: %w", err)
 	}
@@ -920,6 +998,10 @@ func (cr *containerReference) copyDir(dstPath, srcPath string, useGitIgnore bool
 			return cr.missingContainerError("copy directory to %s", dstPath)
 		}
 		logger := common.Logger(ctx)
+		dstPath, err := cr.mkdirInContainer(ctx, dstPath)
+		if err != nil {
+			return fmt.Errorf("failed to mkdir to copy directory to container: %w", err)
+		}
 		tarFile, err := os.CreateTemp("", "act")
 		if err != nil {
 			return err
@@ -1128,6 +1210,77 @@ func (cr *containerReference) wait() common.Executor {
 }
 
 // For Gitea
+// sanitizeOptionsHostConfig clears the HostConfig fields parsed from a
+// workflow-controlled container.options string that could be used to escape the
+// container when privileged mode is disabled. It must only be called when the
+// runner has privileged mode turned off; with privileged mode enabled the
+// administrator has already opted into host access.
+func sanitizeOptionsHostConfig(logger logrus.FieldLogger, hostConfig *container.HostConfig) {
+	warn := func(option string) {
+		logger.Warnf("container option %q is not allowed when privileged mode is disabled and will be ignored", option)
+	}
+
+	if hostConfig.PidMode != "" {
+		warn("--pid")
+		hostConfig.PidMode = ""
+	}
+	if hostConfig.IpcMode != "" {
+		warn("--ipc")
+		hostConfig.IpcMode = ""
+	}
+	if hostConfig.UTSMode != "" {
+		warn("--uts")
+		hostConfig.UTSMode = ""
+	}
+	if hostConfig.CgroupnsMode != "" {
+		warn("--cgroupns")
+		hostConfig.CgroupnsMode = ""
+	}
+	// UsernsMode is set from the runner-controlled input; never let options
+	// override it (e.g. --userns=host disables user namespace remapping).
+	if hostConfig.UsernsMode != "" {
+		warn("--userns")
+		hostConfig.UsernsMode = ""
+	}
+	if len(hostConfig.CapAdd) > 0 {
+		warn("--cap-add")
+		hostConfig.CapAdd = nil
+	}
+	if len(hostConfig.SecurityOpt) > 0 {
+		warn("--security-opt")
+		hostConfig.SecurityOpt = nil
+	}
+	if len(hostConfig.Devices) > 0 {
+		warn("--device")
+		hostConfig.Devices = nil
+	}
+	if len(hostConfig.DeviceCgroupRules) > 0 {
+		warn("--device-cgroup-rule")
+		hostConfig.DeviceCgroupRules = nil
+	}
+	if len(hostConfig.DeviceRequests) > 0 {
+		warn("--gpus")
+		hostConfig.DeviceRequests = nil
+	}
+	if len(hostConfig.VolumesFrom) > 0 {
+		warn("--volumes-from")
+		hostConfig.VolumesFrom = nil
+	}
+	if hostConfig.Runtime != "" {
+		warn("--runtime")
+		hostConfig.Runtime = ""
+	}
+	if hostConfig.CgroupParent != "" {
+		warn("--cgroup-parent")
+		hostConfig.CgroupParent = ""
+	}
+	if len(hostConfig.Sysctls) > 0 {
+		warn("--sysctl")
+		hostConfig.Sysctls = nil
+	}
+}
+
+// For Gitea
 // sanitizeConfig remove the invalid configurations from `config` and `hostConfig`
 func (cr *containerReference) sanitizeConfig(ctx context.Context, config *container.Config, hostConfig *container.HostConfig) (*container.Config, *container.HostConfig) {
 	logger := common.Logger(ctx)
@@ -1170,6 +1323,34 @@ func (cr *containerReference) sanitizeConfig(ctx context.Context, config *contai
 	}
 
 	return config, hostConfig
+}
+
+// bindTarget returns the container path a bind mounts onto, empty if it cannot be parsed.
+func bindTarget(bind string) string {
+	parsed, err := loader.ParseVolume(bind)
+	if err != nil {
+		return ""
+	}
+	return parsed.Target
+}
+
+// overlayVolumes appends src's volumes to dst, dropping the dst ones they mount over. Docker
+// rejects two mounts on one target, so the volumes declared last have to win.
+func overlayVolumes(dst, src *container.HostConfig) {
+	claimed := map[string]bool{}
+	for _, bind := range src.Binds {
+		if target := bindTarget(bind); target != "" {
+			claimed[target] = true
+		}
+	}
+	for _, mt := range src.Mounts {
+		claimed[mt.Target] = true
+	}
+
+	dst.Binds = append(slices.DeleteFunc(slices.Clone(dst.Binds),
+		func(bind string) bool { return claimed[bindTarget(bind)] }), src.Binds...)
+	dst.Mounts = append(slices.DeleteFunc(slices.Clone(dst.Mounts),
+		func(mt mount.Mount) bool { return claimed[mt.Target] }), src.Mounts...)
 }
 
 type validVolumeMatcher struct {

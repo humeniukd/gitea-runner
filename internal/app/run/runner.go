@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +54,7 @@ func RunnerCapabilities() []string {
 // Runner runs the pipeline.
 type Runner struct {
 	name string
+	uuid string
 
 	cfg *config.Config
 
@@ -107,6 +109,12 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		}
 	}
 
+	if envs["ACTIONS_CACHE_URL"] != "" && (cfg.Cache.V2 == nil || *cfg.Cache.V2) {
+		// act patches the GHES check out of an action's bundle when it sees this, so the client
+		// uses the cache service v2 API this server also answers; see act/runner/toolkit_patch.go.
+		envs[runner.CacheServiceV2Env] = "true"
+	}
+
 	// set artifact gitea api
 	artifactGiteaAPI := strings.TrimSuffix(cli.Address(), "/") + "/api/actions_pipeline/"
 	envs["ACTIONS_RUNTIME_URL"] = artifactGiteaAPI
@@ -118,6 +126,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 
 	runner := &Runner{
 		name:           reg.Name,
+		uuid:           reg.UUID,
 		cfg:            cfg,
 		client:         cli,
 		labels:         ls,
@@ -128,6 +137,14 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	}
 	return runner
 }
+
+// Close shuts down the cache server this runner exposes to job containers.
+func (r *Runner) Close() error {
+	return r.cacheHandler.Close()
+}
+
+// removeOrphanNetworks is a variable so tests can substitute one that needs no Docker daemon.
+var removeOrphanNetworks = container.RemoveOrphanNetworks
 
 // OnIdle performs lightweight maintenance during polling idle windows.
 // It runs synchronously on the poller goroutine; shouldRunIdleCleanup
@@ -149,6 +166,21 @@ func (r *Runner) OnIdle(ctx context.Context) {
 	// the name match leaves untouched. No-op when no host-mode job ever ran.
 	if hostRoot := filepath.FromSlash(r.cfg.Host.WorkdirParent); hostRoot != "" {
 		r.cleanupStaleDirs(ctx, hostRoot, isHostScratchDir)
+	}
+	r.cleanupOrphanNetworks(ctx)
+}
+
+// cleanupOrphanNetworks reclaims the per-job networks of jobs this runner did not live to
+// tear down. A labelled network with no containers on it is finished with, and as for the
+// directories above, a task beginning during the pass is safe because the cutoff keeps a
+// network it has created but not yet attached a container to out of scope.
+func (r *Runner) cleanupOrphanNetworks(ctx context.Context) {
+	if r.uuid == "" || !r.labels.RequireDocker() && !r.cfg.Container.RequireDocker {
+		return
+	}
+	cutoff := r.now().Add(-r.cfg.Runner.WorkdirCleanupAge)
+	if err := removeOrphanNetworks(ctx, r.uuid, cutoff); err != nil {
+		log.Warnf("failed to clean up networks left behind by earlier jobs: %v", err)
 	}
 }
 
@@ -268,7 +300,8 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Runner.Timeout)
 	defer cancel()
-	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg)
+	// A proxy URL may carry credentials, and every job is given it; keep them out of the log.
+	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg, proxyPasswords()...)
 	var runErr error
 	defer func() {
 		r.runningCount.Add(-1)
@@ -340,6 +373,11 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 
 	taskContext := task.Context.Fields
 	envs := r.cloneEnvs()
+
+	// Added per task because this job's service containers must be reached directly, and
+	// act reaches them by their workflow key.
+	proxyEnv := JobProxyEnv(envs, envs["ACTIONS_CACHE_URL"], slices.Sorted(maps.Keys(job.Services)))
+	maps.Copy(envs, proxyEnv)
 
 	if r.capabilities != "" {
 		envs["GITEA_ACTIONS_CAPABILITIES"] = r.capabilities
@@ -450,6 +488,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		LogOutput:            true,
 		JSONLogger:           false,
 		Env:                  envs,
+		ProxyEnv:             proxyEnv,
 		Secrets:              task.Secrets,
 		GitHubInstance:       strings.TrimSuffix(r.client.Address(), "/"),
 		AutoRemove:           true,
@@ -464,6 +503,9 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		ContainerNetworkCreateOptions: container.NewDockerNetworkCreateExecutorInput{
 			EnableIPv4: r.cfg.Container.NetworkCreateOptions.EnableIPv4,
 			EnableIPv6: r.cfg.Container.NetworkCreateOptions.EnableIPv6,
+			// so a network this job leaks, if the runner dies before its teardown, can be
+			// told apart from one belonging to another runner on the same daemon
+			RunnerUUID: r.uuid,
 		},
 		ContainerOptions:                  r.cfg.Container.Options,
 		ServiceReadyTimeout:               r.cfg.Container.ServiceReadyTimeout,
@@ -472,9 +514,12 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		DefaultActionInstance:             r.getDefaultActionsURL(task),
 		DefaultActionInstanceIsSelfHosted: r.isSelfHostedActionsURL(task),
 		PlatformPicker:                    r.labels.PickPlatform,
+		JobStartedHook:                    r.cfg.Runner.Hooks.JobStarted,
+		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
 		Vars:                              task.Vars,
 		ValidVolumes:                      r.cfg.Container.ValidVolumes,
 		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
+		RunnerName:                        r.name,
 	}
 
 	rr, err := runner.New(runnerConfig)

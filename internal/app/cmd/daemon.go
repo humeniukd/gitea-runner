@@ -22,6 +22,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/config"
 	"gitea.com/gitea/runner/internal/pkg/envcheck"
 	"gitea.com/gitea/runner/internal/pkg/labels"
+	"gitea.com/gitea/runner/internal/pkg/lock"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
@@ -49,6 +50,25 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			return fmt.Errorf("failed to load registration file: %w", err)
 		}
 
+		// Guard against a second runner process sharing this runner file: two
+		// processes with the same identity are indistinguishable to Gitea and
+		// end up cancelling each other's jobs.
+		releaseLock, err := lock.TryLock(cfg.Runner.File)
+		if errors.Is(err, lock.ErrLocked) {
+			log.Errorf("another gitea-runner process is already using %q; each runner process needs its own runner file (runner.file)", cfg.Runner.File)
+			return err
+		} else if err != nil {
+			// Best-effort guard: if the lock file can't be created (e.g. a
+			// read-only runner-file mount), warn and start anyway rather than
+			// refusing to run.
+			log.Warnf("could not lock runner file %q, continuing without the single-process guard: %v", cfg.Runner.File, err)
+		} else {
+			// Held until shutdown finishes: the draining runner still owns this
+			// identity on the server, so releasing early would let a restart
+			// reintroduce the duplicate-identity job cancellations.
+			defer func() { _ = releaseLock() }()
+		}
+
 		lbls := resolveLabels(daemArgs.Labels, cfg.Runner.Labels, reg.Labels)
 
 		ls := labels.Labels{}
@@ -62,6 +82,14 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		}
 		if len(ls) == 0 {
 			log.Warn("no labels configured, runner may not be able to pick up jobs")
+		}
+
+		// Before the first Docker API call: the standard library resolves the proxy
+		// environment once. Ungated because host labels still reach the daemon.
+		if dockerSocketPath, err := getDockerSocketPath(cfg.Container.DockerHost); err == nil {
+			run.BypassProxyForDockerHost(dockerSocketPath)
+		} else {
+			log.Debugf("cannot resolve the docker socket path, so Docker API calls are not exempted from the proxy: %v", err)
 		}
 
 		if ls.RequireDocker() || cfg.Container.RequireDocker {
@@ -101,6 +129,7 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			}
 			// if dockerSocketPath passes the check, override DOCKER_HOST with dockerSocketPath
 			os.Setenv("DOCKER_HOST", dockerSocketPath)
+			run.WarnIfDaemonHasNoProxy(ctx)
 			// empty cfg.Container.DockerHost means runner need to find an available docker host automatically
 			// and assign the path to cfg.Container.DockerHost
 			if cfg.Container.DockerHost == "" {
@@ -132,6 +161,11 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		)
 
 		runner := run.NewRunner(cfg, reg, cli)
+		defer func() {
+			if err := runner.Close(); err != nil {
+				log.Warnf("runner %s: cache server shutdown: %v", reg.Name, err)
+			}
+		}()
 
 		// declare the labels of the runner before fetching tasks
 		resp, err := runner.Declare(ctx, ls.Names())

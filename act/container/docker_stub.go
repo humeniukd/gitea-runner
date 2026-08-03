@@ -8,12 +8,13 @@ package container
 
 import (
 	"context"
+	"errors"
 	"runtime"
+	"time"
 
 	"gitea.com/gitea/runner/act/common"
 
 	"github.com/moby/moby/api/types/system"
-	"github.com/pkg/errors"
 )
 
 // ImageExistsLocally returns a boolean indicating if an image with the
@@ -71,4 +72,8 @@ func NewDockerNetworkRemoveExecutor(name string) common.Executor {
 	return func(ctx context.Context) error {
 		return nil
 	}
+}
+
+func RemoveOrphanNetworks(ctx context.Context, runnerUUID string, createdBefore time.Time) error {
+	return nil
 }
