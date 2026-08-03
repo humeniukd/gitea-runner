@@ -437,11 +437,8 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// is that server's responsibility to authenticate requests.
 	revokeCache, resultsURL := r.registerCacheForTask(giteaRuntimeToken, preset.Repository, reporter)
 	defer revokeCache()
-	// ACTIONS_RESULTS_URL names one origin serving both halves of the results service, and Gitea
-	// serves only the artifact half. A cache server that agreed to forward the other half is the
-	// whole service, so the job is pointed at it and the v2 variable is finally true, which is
-	// what lets a client the runner cannot patch, docker buildx among them, find the cache
-	// service where it looks for it.
+	// A cache server that agreed to forward the artifact half is the whole results service, so
+	// the job is pointed at it and the v2 variable is finally true.
 	if resultsURL != "" {
 		envs["ACTIONS_RESULTS_URL"], envs[runner.CacheServiceV2Env] = resultsURL, "true"
 	}
@@ -583,10 +580,8 @@ func (r *Runner) registerCacheForTask(token, repo string, reporter *report.Repor
 		return func() {}, ""
 	}
 	cred := artifactcache.JobCredential{
-		Repo: repo,
-		// The instance as the job would reach it, which is what Gitea builds its artifact upload
-		// and download URLs from.
-		Results:     r.envs["ACTIONS_RESULTS_URL"],
+		Repo:        repo,
+		Results:     r.envs["ACTIONS_RESULTS_URL"], // the instance as the job would reach it
 		InsecureTLS: r.cfg.Runner.Insecure,
 	}
 	if r.cacheHandler != nil {
@@ -615,9 +610,7 @@ func (r *Runner) registerExternalCacheJob(token string, cred artifactcache.JobCr
 			reporter.Logf("::warning::cache external_server register failed (%s): %v — cache requests from this job will be unauthenticated and likely return 401", base, err)
 		}
 	} else {
-		// Absent from a server too old to forward the artifact service, which is what keeps this
-		// runner from pointing jobs at one that would 404 their artifact calls.
-		resultsURL, _ = body["results_url"].(string)
+		resultsURL, _ = body["results_url"].(string) // absent from a server too old to forward
 	}
 	return func() {
 		if _, err := postInternalCache(base+"/_internal/revoke", r.cfg.Cache.ExternalSecret,

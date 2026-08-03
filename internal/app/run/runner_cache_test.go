@@ -156,10 +156,9 @@ func decodeJSON(resp *http.Response, v any) error {
 }
 
 // End-to-end against a remote cache-server: token unknown → 401, register →
-// reserve/upload/commit/find/download all OK, revoke → 401 again. The registration also tells the
-// server which instance the job belongs to, and the server answers with its own address when it
-// will forward that instance's artifact service, which is what makes a shared cache server the
-// whole results service just as the built-in one is.
+// reserve/upload/commit/find/download all OK, revoke → 401 again. Registering also names the
+// instance, and the server answering with its own address is what makes a shared cache server the
+// whole results service, as the built-in one is.
 func TestRunner_ExternalCacheServer_RegisterRevoke(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "remote-cache")
 	const secret = "shared-secret-for-tests"

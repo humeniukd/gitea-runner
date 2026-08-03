@@ -7,16 +7,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// Fronting the results service is what lets ACTIONS_RESULTS_URL point here: the cache half is
-// served, the artifact half is forwarded to Gitea under the Host Gitea knows itself by, so the
-// upload and download URLs it hands back still point at Gitea, and nothing else is proxied.
+// The artifact half is forwarded under the Host Gitea knows itself by, so the URLs it hands back
+// still point at Gitea, and nothing else is proxied.
 func TestFrontResultsService(t *testing.T) {
 	var gotHost, gotPath, gotProto string
 	gitea := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -24,8 +23,6 @@ func TestFrontResultsService(t *testing.T) {
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}))
 	defer gitea.Close()
-	giteaHost, err := url.Parse(gitea.URL)
-	require.NoError(t, err)
 
 	handler, err := StartHandler(t.TempDir(), "127.0.0.1", 0, "", nil)
 	require.NoError(t, err)
@@ -48,7 +45,7 @@ func TestFrontResultsService(t *testing.T) {
 	defer handler.RegisterJob(token, JobCredential{Repo: "owner/repo", Results: gitea.URL})()
 
 	assert.Equal(t, http.StatusOK, post(artifactServicePath+"CreateArtifact"))
-	assert.Equal(t, giteaHost.Host, gotHost, "Gitea must see the host it mints its URLs from")
+	assert.Equal(t, strings.TrimPrefix(gitea.URL, "http://"), gotHost, "Gitea must see the host it mints its URLs from")
 	assert.Empty(t, gotProto, "a forwarded scheme would make an https Gitea mint http URLs")
 	assert.Equal(t, artifactServicePath+"CreateArtifact", gotPath)
 

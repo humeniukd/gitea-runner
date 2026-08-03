@@ -11,17 +11,13 @@ import (
 	"strings"
 )
 
-// The results service is one origin serving every github.actions.results.api.v1 service. Gitea
-// implements the artifact half of it and this server the cache half, so neither address is the
-// results service on its own, and a client told otherwise reaches for a cache service that is not
-// there. That is what breaks the clients this runner cannot patch, docker buildx among them.
+// The results service is one origin serving every github.actions.results.api.v1 service, and
+// Gitea implements only the artifact half of it. Forwarding that half from here makes this origin
+// the whole service, so ACTIONS_RESULTS_URL can point at it truthfully, which is what the clients
+// this runner cannot patch need, docker buildx among them.
 //
-// Forwarding the artifact service from here makes this origin the whole results service, so
-// ACTIONS_RESULTS_URL can point at it truthfully. The instance to forward to travels with the job
-// registration rather than with configuration, so a cache server shared between runners serves
-// each of their instances. The Host header is rewritten to the address the runner knows Gitea by,
-// which is the one a job container would have used itself, so Gitea keeps minting the same upload
-// and download URLs and the artifact bodies never travel through here.
+// The instance to forward to travels with the job registration rather than with configuration, so
+// a cache server shared between runners serves each of their instances.
 const artifactServicePath = "/twirp/github.actions.results.api.v1.ArtifactService/"
 
 // forwardOrNotFound is the router's fallback: the artifact service of the instance the job
@@ -43,10 +39,9 @@ func (h *Handler) forwardOrNotFound(w http.ResponseWriter, r *http.Request) {
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
-			// Gitea derives the URLs it hands back from the Host, and their scheme from the
-			// connection unless a forwarded header overrides it. Presenting the target's host and
-			// forwarding no headers of our own is what keeps those URLs pointing at Gitea, over
-			// the scheme the runner reaches it by.
+			// Gitea builds the URLs it hands back from this Host, and their scheme from the
+			// connection unless a forwarded header overrides it, so artifact bodies go to Gitea
+			// directly and never through here.
 			r.Out.Host = target.Host
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {

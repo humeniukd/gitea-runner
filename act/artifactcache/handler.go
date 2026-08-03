@@ -52,13 +52,13 @@ type credKey struct{}
 // poison another repo's cache, even from inside a container that reaches the
 // cache server over the docker bridge network.
 type JobCredential struct {
-	Repo string
+	Repo string `json:"repo"`
 
-	// Results is the Gitea instance whose artifact service this server forwards for the job, and
-	// InsecureTLS how the runner reaches it. They travel with the registration so a cache server
-	// shared by several instances forwards each job to its own; see results.go.
-	Results     string
-	InsecureTLS bool
+	// Results is the instance whose artifact service this server forwards for the job, and
+	// InsecureTLS how the runner reaches it; see results.go. The tags are the wire format a
+	// remote runner registers with.
+	Results     string `json:"results"`
+	InsecureTLS bool   `json:"insecure_tls"`
 }
 
 // credEntry holds a registered job's credential along with an active
@@ -626,10 +626,8 @@ func (h *Handler) internalAuth(handler httprouter.Handle) httprouter.Handle {
 }
 
 type internalRegisterBody struct {
-	Token       string `json:"token"`
-	Repo        string `json:"repo"`
-	Results     string `json:"results"`
-	InsecureTLS bool   `json:"insecure_tls"`
+	Token string `json:"token"`
+	JobCredential
 }
 
 type internalRevokeBody struct {
@@ -637,9 +635,8 @@ type internalRevokeBody struct {
 }
 
 // POST /_internal/register
-// ResultsURL is what a job registered with cred should be given as ACTIONS_RESULTS_URL: this
-// server, which serves the cache service and forwards the artifact service to the instance the
-// credential names, or "" when it names none and this is only half of that service.
+// ResultsURL is what a job registered with cred should be given as ACTIONS_RESULTS_URL, or "" when
+// the credential names no instance to forward the artifact half to.
 func (h *Handler) ResultsURL(cred JobCredential) string {
 	if h == nil || cred.Results == "" {
 		return ""
@@ -657,11 +654,9 @@ func (h *Handler) internalRegister(w http.ResponseWriter, r *http.Request, _ htt
 		h.responseJSON(w, r, http.StatusBadRequest, errors.New("token is required"))
 		return
 	}
-	cred := JobCredential{Repo: body.Repo, Results: body.Results, InsecureTLS: body.InsecureTLS}
-	h.RegisterJob(body.Token, cred)
-	// The caller learns from this whether it may hand jobs this address as ACTIONS_RESULTS_URL: a
-	// server too old to forward the artifact service answers without it.
-	h.responseJSON(w, r, http.StatusOK, map[string]any{"results_url": h.ResultsURL(cred)})
+	h.RegisterJob(body.Token, body.JobCredential)
+	// A server too old to forward answers without this, which is how the caller knows.
+	h.responseJSON(w, r, http.StatusOK, map[string]any{"results_url": h.ResultsURL(body.JobCredential)})
 }
 
 // POST /_internal/revoke

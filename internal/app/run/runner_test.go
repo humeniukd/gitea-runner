@@ -157,9 +157,8 @@ func TestNewRunnerNormalizesTheExternalCacheServer(t *testing.T) {
 	r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
 
 	assert.Equal(t, "http://cache.local:8088/", r.envs["ACTIONS_CACHE_URL"])
-	// No local server to front the results service with, so the variable stays untrue and unset,
-	// but the bundles are still patched: that is what artifacts v4 need, and it costs the cache
-	// client nothing, because the patch keeps it on the cache URL either way.
+	// Nothing to front the results service with, so the variable stays unset, but the bundles are
+	// still patched: artifacts v4 need that, and the patch keeps the cache client on the cache URL.
 	assert.Equal(t, "https://gitea.example", r.envs["ACTIONS_RESULTS_URL"])
 	assert.Empty(t, r.envs[runner.CacheServiceV2Env])
 	assert.True(t, r.patchToolkit())
