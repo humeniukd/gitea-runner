@@ -153,6 +153,7 @@ Every option is described in [config.example.yaml](internal/pkg/config/config.ex
 
 ```bash
 ./gitea-runner -c config.yaml config set runner.capacity 4
+./gitea-runner -c config.yaml config set runner.timeout 90m  # written as 1h30m0s
 ./gitea-runner -c config.yaml config set runner.envs.MY_VAR value
 ./gitea-runner -c config.yaml config add runner.labels 'ubuntu:docker://node:22'
 ./gitea-runner -c config.yaml config remove runner.labels 'ubuntu:docker://node:22'
