@@ -160,6 +160,12 @@ Every option is described in [config.example.yaml](internal/pkg/config/config.ex
 ./gitea-runner -c config.yaml config get runner.labels
 ```
 
+`-c` is optional for these subcommands: without it they use `config.yaml` (or `config.yml`) from the working directory, falling back to the directory of the `gitea-runner` binary, and print which file they picked to stderr.
+
+```bash
+./gitea-runner config set runner.capacity 4
+```
+
 Keys are the dotted YAML path and are validated against the known options, so a typo is rejected instead of being written. `add` and `remove` only work on list options such as `runner.labels` and `container.valid_volumes`; `set` replaces the whole list when given several values.
 
 #### Without a config file

@@ -23,7 +23,7 @@ func Execute(ctx context.Context) {
 		SilenceUsage: true,
 	}
 	configFile := ""
-	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path")
+	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path. `config` subcommands fall back to config.yaml in the working directory or next to the executable")
 
 	// ./gitea-runner register
 	var regArgs registerArgs

@@ -42,6 +42,8 @@ func TestConfigCmdGeneratePrintsTheExample(t *testing.T) {
 }
 
 func TestConfigCmdRequiresConfigFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+
 	configFile := ""
 	cmd := loadConfigCmd(&configFile)
 	cmd.SetArgs([]string{"set", "runner.capacity", "4"})
@@ -51,6 +53,23 @@ func TestConfigCmdRequiresConfigFile(t *testing.T) {
 	err := cmd.Execute()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--config")
+}
+
+func TestConfigCmdFallsBackToWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("runner:\n  capacity: 2\n"), 0o600))
+	t.Chdir(dir)
+
+	configFile := ""
+	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
+	cmd := loadConfigCmd(&configFile)
+	cmd.SetOut(out)
+	cmd.SetErr(errOut)
+	cmd.SetArgs([]string{"get", "runner.capacity"})
+
+	require.NoError(t, cmd.Execute())
+	assert.Equal(t, "2\n", out.String())
+	assert.Contains(t, errOut.String(), "using config file")
 }
 
 func TestConfigCmdAddAndGet(t *testing.T) {
