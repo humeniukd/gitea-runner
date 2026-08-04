@@ -46,13 +46,17 @@ func (rc *RunContext) commandHandler(ctx context.Context) common.LineHandler {
 			return true
 		}
 
-		if resumeCommand != "" && command != resumeCommand {
+		if resumeCommand != "" {
 			// There should not be any emojis in the log output for Gitea.
-			// The code in the switch statement is the same.
 			// Return true (not false) so the line still reaches the raw_output
 			// log handler; otherwise everything between ::stop-commands:: and
 			// its end token is silently dropped from the step log.
 			logger.Infof("%s", line)
+			// Resumed here rather than from the switch, because the end token is arbitrary
+			// and a token naming a real command would otherwise never resume.
+			if command == resumeCommand {
+				resumeCommand = ""
+			}
 			return true
 		}
 		arg = UnescapeCommandData(arg)
@@ -70,14 +74,10 @@ func (rc *RunContext) commandHandler(ctx context.Context) common.LineHandler {
 		case "add-mask":
 			rc.AddMask(arg)
 			logger.Infof("%s", "***")
-			// Never forward the raw line, it carries the secret: the reporter drops the
-			// ::add-mask:: form itself but cannot see the ##[add-mask] one. GitHub echoes neither.
-			return false
+			// The raw line is still forwarded, carrying the secret: that is how the reporter
+			// learns the mask, and it drops the row rather than writing it out.
 		case "stop-commands":
 			resumeCommand = arg
-			logger.Infof("%s", line)
-		case resumeCommand:
-			resumeCommand = ""
 			logger.Infof("%s", line)
 		case "save-state":
 			logger.Infof("%s", line)

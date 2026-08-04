@@ -168,6 +168,24 @@ func TestReporter_parseLogRow(t *testing.T) {
 			},
 		},
 		{
+			// a token naming a real command must still resume
+			"stop-commands with a command-named token", false,
+			[]string{
+				"::stop-commands::add-mask",
+				"::set-output name=x::suppressed",
+				"::add-mask::",
+				"::add-mask::masked",
+				"masked",
+			},
+			[]string{
+				"<nil>",
+				"::set-output name=x::suppressed",
+				"<nil>",
+				"<nil>",
+				"***",
+			},
+		},
+		{
 			"unknown command", false,
 			[]string{
 				"::set-mask::foo",
@@ -194,6 +212,19 @@ func TestReporter_parseLogRow(t *testing.T) {
 				assert.Equal(t, tt.want[idx], got)
 			}
 		})
+	}
+}
+
+// Both add-mask forms must register the secret and drop their own row: the runner forwards
+// the raw line, so failing to consume it writes the secret straight to the job log.
+func TestReporter_parseLogRowAddMask(t *testing.T) {
+	for _, line := range []string{"::add-mask::supersecret", "##[add-mask]supersecret"} {
+		r := &Reporter{logReplacer: strings.NewReplacer()}
+
+		assert.Nil(t, r.parseLogRow(&log.Entry{Message: line}), line)
+
+		row := r.parseLogRow(&log.Entry{Message: "using supersecret now"})
+		assert.Equal(t, "using *** now", row.Content, line)
 	}
 }
 

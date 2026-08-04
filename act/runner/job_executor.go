@@ -260,7 +260,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 
 			logger.Infof("Cleaning up container for job %s", rc.JobName)
 			if err = info.stopContainer()(ctx); err != nil {
-				logger.Errorf("Error while stop job container: %v", err)
+				logger.Errorf("##[error]%s", EscapeCommandData("Error while stop job container: "+err.Error()))
 			}
 
 			// For Gitea

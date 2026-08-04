@@ -121,6 +121,22 @@ func TestStopCommands(t *testing.T) {
 	a.Contains(messages, "::set-env name=x::abcd\n")
 }
 
+// The end token is arbitrary, so one that happens to name a real command must still resume
+// rather than being swallowed by that command's case.
+func TestStopCommandsResumesOnCommandNamedToken(t *testing.T) {
+	a := assert.New(t)
+	rc := new(RunContext)
+	handler := rc.commandHandler(context.Background())
+
+	handler("::stop-commands::add-mask\n")
+	handler("::set-env name=x::suppressed\n")
+	a.NotContains(rc.Env, "x")
+
+	handler("::add-mask::\n")
+	handler("::set-env name=x::resumed\n")
+	a.Equal("resumed", rc.Env["x"])
+}
+
 func TestAddpathADO(t *testing.T) {
 	a := assert.New(t)
 	ctx := context.Background()
@@ -174,15 +190,6 @@ func captureOutput(t *testing.T, f func()) string {
 	out := <-outC
 
 	return out
-}
-
-// The raw add-mask line carries the secret, so it must not be forwarded to the job log in
-// either form. A false return stops the line writer's handler chain.
-func TestAddmaskIsNotForwarded(t *testing.T) {
-	handler := new(RunContext).commandHandler(context.Background())
-
-	assert.False(t, handler("##[add-mask]supersecret\n"))
-	assert.False(t, handler("::add-mask::othersecret\n"))
 }
 
 func TestAddmaskUsemask(t *testing.T) {

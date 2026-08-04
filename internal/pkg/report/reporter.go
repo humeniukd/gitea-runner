@@ -255,6 +255,9 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 	if step.StartedAt == nil {
 		step.StartedAt = timestamppb.New(timestamp)
 		urgentState = true
+		// The runner's own handler is per step, so an unresumed ::stop-commands:: must not
+		// leave the reporter suppressed, and no longer registering masks, for the whole job.
+		r.stopCommandEndToken = ""
 	}
 
 	// Force reporting log errors as raw output to prevent silent failures
@@ -706,8 +709,14 @@ var cmdRegex = regexp.MustCompile(`^::([^ :]+)( [^:]*)?::(.*)$`)
 // handleCommand takes value still escaped, so that the web UI decodes it exactly once. Only
 // the branches that consume the payload here decode it.
 func (r *Reporter) handleCommand(originalContent, command, properties, value string) *string {
-	if r.stopCommandEndToken != "" && command != r.stopCommandEndToken {
-		return &originalContent
+	if r.stopCommandEndToken != "" {
+		if command != r.stopCommandEndToken {
+			return &originalContent
+		}
+		// Resumed here rather than from the switch, because the end token is arbitrary and a
+		// token naming a real command would otherwise never resume.
+		r.stopCommandEndToken = ""
+		return nil
 	}
 
 	switch command {
@@ -731,9 +740,6 @@ func (r *Reporter) handleCommand(originalContent, command, properties, value str
 		return &originalContent
 	case "stop-commands":
 		r.stopCommandEndToken = runner.UnescapeCommandData(value)
-		return nil
-	case r.stopCommandEndToken:
-		r.stopCommandEndToken = ""
 		return nil
 	}
 	return &originalContent
@@ -793,6 +799,13 @@ func parseCommandProperties(properties string) map[string]string {
 
 func (r *Reporter) parseLogRow(entry *log.Entry) *runnerv1.LogRow {
 	content := strings.TrimRight(entry.Message, "\r\n")
+
+	// cmdRegex only covers the ::cmd:: form, so the ##[add-mask] one would otherwise reach
+	// the log carrying its own secret. Registered and dropped like its ::add-mask:: twin.
+	if arg, ok := strings.CutPrefix(content, "##[add-mask]"); ok {
+		r.addMask(runner.UnescapeCommandData(arg))
+		return nil
+	}
 
 	matches := cmdRegex.FindStringSubmatch(content)
 	if matches != nil {
