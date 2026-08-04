@@ -217,6 +217,13 @@ func TestSaveState(t *testing.T) {
 	assert.Equal(t, "state-value", rc.IntraActionState["step"]["state-name"])
 }
 
+func TestEscapeCommandData(t *testing.T) {
+	a := assert.New(t)
+
+	a.Equal("a%25b%0Dc%0Ad%250A", escapeCommandData("a%b\rc\nd%0A"))
+	a.Equal("a%b\rc\nd%0A", UnescapeCommandData("a%25b%0Dc%0Ad%250A"))
+}
+
 func TestUnsecureCommandsAreRefusedWhenDisabled(t *testing.T) {
 	a := assert.New(t)
 	ctx := context.Background()

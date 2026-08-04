@@ -4,9 +4,9 @@ DIST_DIRS := $(DIST)/binaries $(DIST)/release
 GO ?= go
 SHASUM ?= shasum -a 256
 HAS_GO = $(shell hash $(GO) > /dev/null 2>&1 && echo "GO" || echo "NOGO" )
-XGO_PACKAGE ?= src.techknowlogick.com/xgo@latest
+XGO_PACKAGE ?= src.techknowlogick.com/xgo@v1.9.0 # renovate: datasource=go
 XGO_VERSION := go-1.26.x
-GXZ_PACKAGE ?= github.com/ulikunitz/xz/cmd/gxz@v0.5.10
+GXZ_PACKAGE ?= github.com/ulikunitz/xz/cmd/gxz@v0.5.16 # renovate: datasource=go
 
 LINUX_ARCHS ?= linux/amd64,linux/arm64
 DARWIN_ARCHS ?= darwin-12/amd64,darwin-12/arm64
@@ -18,8 +18,10 @@ DOCKER_TAG ?= nightly
 DOCKER_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)
 DOCKER_ROOTLESS_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)-dind-rootless
 
-GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.3.0
+GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # renovate: datasource=go
+GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.6.0 # renovate: datasource=go
+
+GOTEST_FLAGS ?= -race -timeout 20m -parallel 8
 
 STATIC ?=
 EXTLDFLAGS ?=
@@ -95,7 +97,7 @@ go-check:
 
 .PHONY: fmt-check
 fmt-check: fmt
-	@diff=$$(git diff --color=always); \
+	@diff=$$(git diff --color=always -- '*.go'); \
 	if [ -n "$$diff" ]; then \
 		echo "Please run 'make fmt' and commit the result:"; \
 		printf "%s" "$${diff}"; \
@@ -109,6 +111,9 @@ deps-tools: ## install tool dependencies
 	$(GO) install $(XGO_PACKAGE) & \
 	$(GO) install $(GOVULNCHECK_PACKAGE) & \
 	wait
+
+.PHONY: checks
+checks: tidy-check fmt-check security-check ## run the non-lint source checks
 
 .PHONY: lint
 lint: lint-go lint-go-windows ## lint everything
@@ -131,7 +136,7 @@ lint-pr-title: ## lint PR title against Conventional Commits (set PR_TITLE=...)
 	@node ./tools/lint-pr-title.ts
 
 .PHONY: security-check
-security-check: deps-tools
+security-check:
 	GOEXPERIMENT= $(GO) run $(GOVULNCHECK_PACKAGE) -show color ./... || true
 
 .PHONY: tidy
@@ -148,8 +153,8 @@ tidy-check: tidy
 	fi
 
 .PHONY: test
-test: fmt-check security-check ## test everything (integration tests self-skip without docker/network)
-	@$(GO) test -race -timeout 20m -v -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
+test: ## test everything (integration tests self-skip without docker/network)
+	@$(GO) test $(GOTEST_FLAGS) -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
 
 .PHONY: coverage-report
 coverage-report: ## turn coverage.txt from `make test` into .tmp/coverage.md

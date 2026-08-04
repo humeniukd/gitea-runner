@@ -52,7 +52,13 @@ type credKey struct{}
 // poison another repo's cache, even from inside a container that reaches the
 // cache server over the docker bridge network.
 type JobCredential struct {
-	Repo string
+	Repo string `json:"repo"`
+
+	// Results is the instance whose artifact service this server forwards for the job, and
+	// InsecureTLS how the runner reaches it; see results.go. The tags are the wire format a
+	// remote runner registers with.
+	Results     string `json:"results"`
+	InsecureTLS bool   `json:"insecure_tls"`
 }
 
 // credEntry holds a registered job's credential along with an active
@@ -70,6 +76,7 @@ type Handler struct {
 	storage  *Storage
 	router   *httprouter.Router
 	listener net.Listener
+	port     int
 	server   *http.Server
 	logger   logrus.FieldLogger
 
@@ -157,12 +164,14 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret string, lo
 	router.POST(apiPath+"/clean", h.bearerAuth(h.clean))
 	// Artifact GET is signed via query-string HMAC because @actions/cache
 	// does not attach Authorization when downloading archiveLocation.
-	router.GET(apiPath+"/artifacts/:id", h.signedURLAuth(h.get))
+	router.GET(apiPath+"/artifacts/:id", h.signedAuth("", h.get))
 	// Control-plane: a remote runner registers/revokes per-job tokens so the
 	// cache API can authenticate them. Always wired so the routes exist; the
 	// handlers themselves 401 when internalSecret is unset.
 	router.POST(internalPath+"/register", h.internalAuth(h.internalRegister))
 	router.POST(internalPath+"/revoke", h.internalAuth(h.internalRevoke))
+	h.registerV2Routes(router)
+	router.NotFound = http.HandlerFunc(h.forwardOrNotFound)
 
 	h.router = router
 
@@ -177,6 +186,12 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret string, lo
 	if err != nil {
 		return nil, err
 	}
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		listener.Close()
+		return nil, fmt.Errorf("cache server listens on %T, want a TCP address", listener.Addr())
+	}
+	h.port = addr.Port
 	server := &http.Server{
 		ReadHeaderTimeout: 2 * time.Second,
 		Handler:           router,
@@ -194,9 +209,7 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret string, lo
 
 func (h *Handler) ExternalURL() string {
 	// TODO: make the external url configurable if necessary
-	return fmt.Sprintf("http://%s:%d",
-		h.outboundIP,
-		h.listener.Addr().(*net.TCPAddr).Port)
+	return fmt.Sprintf("http://%s:%d", h.outboundIP, h.port)
 }
 
 // RegisterJob makes token a valid bearer credential for cache requests from
@@ -205,10 +218,11 @@ func (h *Handler) ExternalURL() string {
 // is only accepted while the job is running.
 //
 // Registrations are reference-counted: if a token is already registered, the
-// existing repo is kept and the refcount is incremented. The entry is
-// removed only when every revoker returned by RegisterJob has been called.
+// credential it was registered with is kept and the refcount is incremented.
+// The entry is removed only when every revoker returned by RegisterJob has
+// been called.
 // This keeps a stray re-registration from silently revoking a live job.
-func (h *Handler) RegisterJob(token, repo string) func() {
+func (h *Handler) RegisterJob(token string, cred JobCredential) func() {
 	if h == nil || token == "" {
 		return func() {}
 	}
@@ -217,7 +231,7 @@ func (h *Handler) RegisterJob(token, repo string) func() {
 		existing.refs++
 	} else {
 		h.creds[token] = &credEntry{
-			cred: JobCredential{Repo: repo},
+			cred: cred,
 			refs: 1,
 		}
 	}
@@ -334,7 +348,7 @@ func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Para
 	}
 	defer db.Close()
 
-	cache, err := findCache(db, cred.Repo, keys, version)
+	cache, err := h.lookupCache(db, cred.Repo, keys, version)
 	if err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
@@ -343,20 +357,30 @@ func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Para
 		h.responseJSON(w, r, 204)
 		return
 	}
-
-	if ok, err := h.storage.Exist(cache.ID); err != nil {
-		h.responseJSON(w, r, 500, err)
-		return
-	} else if !ok {
-		_ = db.Delete(cache.ID, cache)
-		h.responseJSON(w, r, 204)
-		return
-	}
 	h.responseJSON(w, r, 200, map[string]any{
 		"result":          "hit",
 		"archiveLocation": h.signedArtifactURL(cache.ID, time.Now().Add(artifactURLTTL)),
 		"cacheKey":        cache.Key,
 	})
+}
+
+// lookupCache returns the entry to restore for these keys, or (nil, nil) when there is none:
+// either nothing matched, or the match had lost its blob to a prune, in which case the dangling
+// entry is dropped on the way out.
+func (h *Handler) lookupCache(db *bolthold.Store, repo string, keys []string, version string) (*Cache, error) {
+	cache, err := findCache(db, repo, keys, version)
+	if err != nil || cache == nil {
+		return nil, err
+	}
+	ok, err := h.storage.Exist(cache.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		_ = db.Delete(cache.ID, cache)
+		return nil, nil //nolint:nilnil // absence is not an error here
+	}
+	return cache, nil
 }
 
 // POST /_apis/artifactcache/caches
@@ -433,7 +457,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, params httprout
 		h.responseJSON(w, r, 500, err)
 		return
 	}
-	h.useCache(id)
+	_ = h.touchCache(uint64(id), false)
 	h.responseJSON(w, r, 200)
 }
 
@@ -474,23 +498,7 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 
 	db.Close()
 
-	size, err := h.storage.Commit(cache.ID, cache.Size)
-	if err != nil {
-		h.responseJSON(w, r, 500, err)
-		return
-	}
-	// write real size back to cache, it may be different from the current value when the request doesn't specify it.
-	cache.Size = size
-
-	db, err = h.openDB()
-	if err != nil {
-		h.responseJSON(w, r, 500, err)
-		return
-	}
-	defer db.Close()
-
-	cache.Complete = true
-	if err := db.Update(cache.ID, cache); err != nil {
+	if err := h.commitCache(cache); err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
 	}
@@ -498,8 +506,28 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 	h.responseJSON(w, r, 200)
 }
 
+// commitCache assembles the uploaded parts and marks the entry complete. The caller must
+// have closed its store first: Commit concatenates the whole archive and would otherwise
+// hold bolt's exclusive file lock for the duration.
+func (h *Handler) commitCache(cache *Cache) error {
+	written, err := h.storage.Commit(cache.ID, cache.Size)
+	if err != nil {
+		return err
+	}
+	// write real size back to cache, it may be different from the current value when the request doesn't specify it.
+	cache.Size = written
+	cache.Complete = true
+
+	db, err := h.openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.Update(cache.ID, cache)
+}
+
 // GET /_apis/artifactcache/artifacts/:id
-// Authenticated via signed URL (see signedURLAuth), not bearer, because the
+// Authenticated via signed URL (see signedAuth), not bearer, because the
 // @actions/cache toolkit downloads archiveLocation without Authorization.
 // Repository scoping is already enforced at find() time; the signature binds
 // the URL to the specific cache ID and an expiry.
@@ -509,7 +537,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, params httprouter.
 		h.responseJSON(w, r, 400, err)
 		return
 	}
-	h.useCache(id)
+	_ = h.touchCache(uint64(id), false)
 	h.storage.Serve(w, r, uint64(id))
 }
 
@@ -543,7 +571,9 @@ func (h *Handler) bearerAuth(handler httprouter.Handle) httprouter.Handle {
 	}
 }
 
-func (h *Handler) signedURLAuth(handler httprouter.Handle) httprouter.Handle {
+// signedAuth authenticates a signed URL. purpose separates the flavours of URL the
+// handler hands out, so one cannot be replayed as another; see computeSignature.
+func (h *Handler) signedAuth(purpose string, handler httprouter.Handle) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 		h.logger.Debugf("%s %s", r.Method, r.URL.Path)
 		id, err := strconv.ParseInt(params.ByName("id"), 10, 64)
@@ -566,7 +596,7 @@ func (h *Handler) signedURLAuth(handler httprouter.Handle) httprouter.Handle {
 			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("signature expired"))
 			return
 		}
-		expected := h.computeSignature(id, exp)
+		expected := h.computeSignature(purpose, id, exp)
 		if !hmac.Equal([]byte(sig), []byte(expected)) {
 			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("bad signature"))
 			return
@@ -597,7 +627,7 @@ func (h *Handler) internalAuth(handler httprouter.Handle) httprouter.Handle {
 
 type internalRegisterBody struct {
 	Token string `json:"token"`
-	Repo  string `json:"repo"`
+	JobCredential
 }
 
 type internalRevokeBody struct {
@@ -605,6 +635,15 @@ type internalRevokeBody struct {
 }
 
 // POST /_internal/register
+// ResultsURL is what a job registered with cred should be given as ACTIONS_RESULTS_URL, or "" when
+// the credential names no instance to forward the artifact half to.
+func (h *Handler) ResultsURL(cred JobCredential) string {
+	if h == nil || cred.Results == "" {
+		return ""
+	}
+	return h.ExternalURL()
+}
+
 func (h *Handler) internalRegister(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	var body internalRegisterBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -615,8 +654,9 @@ func (h *Handler) internalRegister(w http.ResponseWriter, r *http.Request, _ htt
 		h.responseJSON(w, r, http.StatusBadRequest, errors.New("token is required"))
 		return
 	}
-	h.RegisterJob(body.Token, body.Repo)
-	h.responseJSON(w, r, http.StatusOK)
+	h.RegisterJob(body.Token, body.JobCredential)
+	// A server too old to forward answers without this, which is how the caller knows.
+	h.responseJSON(w, r, http.StatusOK, map[string]any{"results_url": h.ResultsURL(body.JobCredential)})
 }
 
 // POST /_internal/revoke
@@ -650,19 +690,26 @@ func credFromContext(ctx context.Context) JobCredential {
 	return JobCredential{}
 }
 
-func (h *Handler) computeSignature(cacheID, exp int64) string {
+// computeSignature signs a URL for one cache entry and expiry. purpose is mixed into the
+// message so a URL handed out for writing an entry cannot be replayed to read one, and the
+// other way round. Downloads use the empty purpose, the message v1 has always signed.
+func (h *Handler) computeSignature(purpose string, cacheID, exp int64) string {
 	mac := hmac.New(sha256.New, h.secret)
-	fmt.Fprintf(mac, "%d:%d", cacheID, exp)
+	fmt.Fprintf(mac, "%s%d:%d", purpose, cacheID, exp)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func (h *Handler) signedArtifactURL(cacheID uint64, exp time.Time) string {
+// signedURL builds a URL under path that signedAuth accepts for the same purpose.
+func (h *Handler) signedURL(path, purpose string, cacheID uint64, exp time.Time) string {
 	expUnix := exp.Unix()
-	sig := h.computeSignature(int64(cacheID), expUnix)
 	q := url.Values{}
 	q.Set("exp", strconv.FormatInt(expUnix, 10))
-	q.Set("sig", sig)
-	return fmt.Sprintf("%s%s/artifacts/%d?%s", h.ExternalURL(), apiPath, cacheID, q.Encode())
+	q.Set("sig", h.computeSignature(purpose, int64(cacheID), expUnix))
+	return fmt.Sprintf("%s%s/%d?%s", h.ExternalURL(), path, cacheID, q.Encode())
+}
+
+func (h *Handler) signedArtifactURL(cacheID uint64, exp time.Time) string {
+	return h.signedURL(apiPath+"/artifacts", "", cacheID, exp)
 }
 
 // if not found, return (nil, nil) instead of an error.
@@ -670,16 +717,12 @@ func findCache(db *bolthold.Store, repo string, keys []string, version string) (
 	cache := &Cache{}
 	for _, prefix := range keys {
 		// if a key in the list matches exactly, don't return partial matches
-		if err := db.FindOne(cache,
-			bolthold.Where("Repo").Eq(repo).
-				And("Key").Eq(prefix).
-				And("Version").Eq(version).
-				And("Complete").Eq(true).
-				SortBy("CreatedAt").Reverse()); err == nil || !errors.Is(err, bolthold.ErrNotFound) {
-			if err != nil {
-				return nil, fmt.Errorf("find cache: %w", err)
-			}
-			return cache, nil
+		exact, err := findExactCache(db, repo, prefix, version, true)
+		if err != nil {
+			return nil, err
+		}
+		if exact != nil {
+			return exact, nil
 		}
 		prefixPattern := "^" + regexp.QuoteMeta(prefix)
 		re, err := regexp.Compile(prefixPattern)
@@ -702,6 +745,34 @@ func findCache(db *bolthold.Store, repo string, keys []string, version string) (
 	return nil, nil //nolint:nilnil // pre-existing issue from nektos/act
 }
 
+// findExactCache returns the entry for exactly this key and version, or (nil, nil) if there is
+// none. Unlike findCache it never falls back to a prefix (restore-key) match, which is what both
+// its callers need: a new key that is only a prefix of an existing key is not the same entry.
+//
+// A completed entry is the one to restore, sorted by when it was written. An incomplete one is a
+// reservation being uploaded to, sorted by when it was last written to, because the upload route
+// touches UsedAt on every part.
+func findExactCache(db *bolthold.Store, repo, key, version string, complete bool) (*Cache, error) {
+	sortBy := "UsedAt"
+	if complete {
+		sortBy = "CreatedAt"
+	}
+	cache := &Cache{}
+	err := db.FindOne(cache,
+		bolthold.Where("Repo").Eq(repo).
+			And("Key").Eq(key).
+			And("Version").Eq(version).
+			And("Complete").Eq(complete).
+			SortBy(sortBy).Reverse())
+	if errors.Is(err, bolthold.ErrNotFound) {
+		return nil, nil //nolint:nilnil // absence is not an error here
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find cache: %w", err)
+	}
+	return cache, nil
+}
+
 func insertCache(db *bolthold.Store, cache *Cache) error {
 	if err := db.Insert(bolthold.NextSequence(), cache); err != nil {
 		return fmt.Errorf("insert cache: %w", err)
@@ -713,18 +784,30 @@ func insertCache(db *bolthold.Store, cache *Cache) error {
 	return nil
 }
 
-func (h *Handler) useCache(id int64) {
+// touchCache stamps UsedAt so gcCache does not reap an entry mid-upload. With requireIncomplete
+// it also refuses an entry that is already complete, which is what the v2 blob route needs: its
+// upload URL outlives the finalize call, and overwriting a finished entry would leave the blob
+// other jobs restore no longer matching its recorded size. An entry missing from the store is
+// accepted, since the signature proves the id was handed out.
+func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
 	db, err := h.openDB()
 	if err != nil {
-		return
+		return err
 	}
 	defer db.Close()
+
 	cache := &Cache{}
 	if err := db.Get(id, cache); err != nil {
-		return
+		if errors.Is(err, bolthold.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if requireIncomplete && cache.Complete {
+		return fmt.Errorf("cache %d: already complete", id)
 	}
 	cache.UsedAt = time.Now().Unix()
-	_ = db.Update(cache.ID, cache)
+	return db.Update(cache.ID, cache)
 }
 
 const (

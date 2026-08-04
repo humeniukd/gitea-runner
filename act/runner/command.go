@@ -248,37 +248,30 @@ func parseKeyValuePairs(kvPairs, separator string) map[string]string {
 	return rtn
 }
 
-func UnescapeCommandData(arg string) string {
-	escapeMap := map[string]string{
-		"%25": "%",
-		"%0D": "\r",
-		"%0A": "\n",
-	}
-	for k, v := range escapeMap {
-		arg = strings.ReplaceAll(arg, k, v)
-	}
-	return arg
+// A Replacer never rescans what it wrote, so "%250A" stays a literal "%0A".
+var (
+	commandDataEscaper       = strings.NewReplacer("%", "%25", "\r", "%0D", "\n", "%0A")
+	commandDataUnescaper     = strings.NewReplacer("%25", "%", "%0D", "\r", "%0A", "\n")
+	commandPropertyUnescaper = strings.NewReplacer("%25", "%", "%0D", "\r", "%0A", "\n", "%3A", ":", "%2C", ",")
+)
+
+// escapeCommandData encodes the data part of a "::cmd::" or "##[cmd]" line the runner writes itself,
+// so the log renderer decodes it back. Lines forwarded from step output are already escaped.
+func escapeCommandData(arg string) string {
+	return commandDataEscaper.Replace(arg)
 }
 
-// UnescapeCommandProperty decodes a workflow command property value, whose escaping
-// covers the separators of the property list as well.
-func UnescapeCommandProperty(arg string) string {
-	escapeMap := map[string]string{
-		"%25": "%",
-		"%0D": "\r",
-		"%0A": "\n",
-		"%3A": ":",
-		"%2C": ",",
-	}
-	for k, v := range escapeMap {
-		arg = strings.ReplaceAll(arg, k, v)
-	}
-	return arg
+func UnescapeCommandData(arg string) string {
+	return commandDataUnescaper.Replace(arg)
+}
+
+func unescapeCommandProperty(arg string) string {
+	return commandPropertyUnescaper.Replace(arg)
 }
 
 func unescapeKvPairs(kvPairs map[string]string) map[string]string {
 	for k, v := range kvPairs {
-		kvPairs[k] = UnescapeCommandProperty(v)
+		kvPairs[k] = unescapeCommandProperty(v)
 	}
 	return kvPairs
 }

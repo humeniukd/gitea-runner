@@ -73,6 +73,8 @@ type Config struct {
 	ContainerNetworkMode               docker_container.NetworkMode                  // the network mode of job containers (the value of --network)
 	ContainerNetworkCreateOptions      container.NewDockerNetworkCreateExecutorInput // the default network create options
 	ActionCache                        ActionCache                                   // Use a custom ActionCache Implementation
+	ProxyEnv                           map[string]string                             // the proxy variables the job runs with, also given to service containers and image builds
+	PatchToolkit                       bool                                          // edit the @actions toolkit bundled into an action so it works against Gitea, see toolkit_patch.go
 
 	PresetGitHubContext   *model.GithubContext // the preset github context, overrides some fields like DefaultBranch, Env, Secrets etc.
 	EventJSON             string               // the content of JSON file to use for event.json in containers, overrides EventPath
@@ -92,10 +94,20 @@ type Config struct {
 	InsecureSkipTLS                   bool                         // whether to skip verifying TLS certificate of the Gitea instance
 	MaxParallel                       int                          // max parallel jobs to run across all workflows (0 = no limit, uses CPU count)
 	AllocatePTY                       bool                         // allocate a pseudo-TTY for each step's process
+	RunnerName                        string                       // name this runner registered with, reported as `runner.name`, defaults to the hostname
+	JobStartedHook                    string                       // script run inside the job environment before the job's first step; ACTIONS_RUNNER_HOOK_JOB_STARTED is read from Env when empty
+	JobCompletedHook                  string                       // script run inside the job environment after the job's last step; ACTIONS_RUNNER_HOOK_JOB_COMPLETED is read from Env when empty
 	// AllowUnsecureCommands keeps the deprecated ::set-env:: and ::add-path:: workflow
 	// commands working for workflows that never set ACTIONS_ALLOW_UNSECURE_COMMANDS. It is
 	// a pointer to distinguish false from not set; nil still allows them, with a warning.
 	AllowUnsecureCommands *bool
+}
+
+// RunnerDebug reports whether debug logging is on, exposed as `runner.debug` and
+// RUNNER_DEBUG. Only the secret also makes the reporter keep ::debug:: output, the env
+// is accepted for `exec` and for runners configured with it.
+func (c Config) RunnerDebug() bool {
+	return c.Secrets["ACTIONS_STEP_DEBUG"] == "true" || c.Env["ACTIONS_STEP_DEBUG"] == "true"
 }
 
 // GetToken: Adapt to Gitea
@@ -141,6 +153,11 @@ func New(runnerConfig *Config) (Runner, error) {
 }
 
 func (runner *runnerImpl) configure() (Runner, error) {
+	if runner.config.RunnerName == "" {
+		// Callers that do not register, such as `exec`, still get a `runner.name`.
+		runner.config.RunnerName, _ = os.Hostname()
+	}
+
 	runner.eventJSON = "{}"
 	if runner.config.EventJSON != "" {
 		runner.eventJSON = runner.config.EventJSON

@@ -22,6 +22,7 @@ import (
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/model"
 	"gitea.com/gitea/runner/act/runner"
+	"gitea.com/gitea/runner/internal/app/run"
 
 	"github.com/joho/godotenv"
 	"github.com/moby/moby/api/types/container"
@@ -131,6 +132,8 @@ func (i *executeArgs) LoadEnvs() map[string]string {
 	_ = readEnvs(i.Envfile(), envs)
 
 	envs["ACTIONS_CACHE_URL"] = i.cacheHandler.ExternalURL() + "/"
+	// The same server answers the cache service v2 API, so let the actions reach it.
+	envs[runner.CacheServiceV2Env] = "true"
 
 	return envs
 }
@@ -413,18 +416,25 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 			env[actionsRuntimeTokenEnvName] = actionsRuntimeToken
 			os.Setenv(actionsRuntimeTokenEnvName, actionsRuntimeToken)
 		}
-		handler.RegisterJob(actionsRuntimeToken, "__local/__exec")
+		handler.RegisterJob(actionsRuntimeToken, artifactcache.JobCredential{Repo: "__local/__exec"})
+
+		// no service aliases: exec builds one config for the whole plan
+		run.BypassProxyForDockerHost(os.Getenv("DOCKER_HOST"))
+		proxyEnv := run.JobProxyEnv(env, env["ACTIONS_CACHE_URL"], nil)
+		maps.Copy(env, proxyEnv)
 
 		// run the plan
 		config := &runner.Config{
 			Workdir:               execArgs.Workdir(),
 			BindWorkdir:           false,
+			PatchToolkit:          true, // the cache server started above is what the patch points at
 			ReuseContainers:       false,
 			ForcePull:             execArgs.forcePull,
 			ForceRebuild:          execArgs.forceRebuild,
 			LogOutput:             true,
 			JSONLogger:            execArgs.jsonLogger,
 			Env:                   env,
+			ProxyEnv:              proxyEnv,
 			Vars:                  execArgs.LoadVars(),
 			Secrets:               execArgs.LoadSecrets(),
 			InsecureSecrets:       execArgs.insecureSecrets,
