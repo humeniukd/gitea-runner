@@ -367,7 +367,7 @@ func TestRunStepExecutorDoesNotLeakRefusalToNextStep(t *testing.T) {
 	cm.On("UpdateFromEnv", mock.Anything, mock.Anything).Return(noop)
 
 	rc := &RunContext{
-		Config: &Config{DisableUnsecureCommands: true, Env: map[string]string{}},
+		Config: &Config{Env: map[string]string{}},
 		Run: &model.Run{
 			JobID:    "1",
 			Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}},

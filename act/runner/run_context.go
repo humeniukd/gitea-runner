@@ -89,10 +89,7 @@ type RunContext struct {
 	// the log-writer goroutine, hence unsecureCommandMu, which also guards unsecureCommandErr.
 	stepEnv            map[string]string
 	unsecureCommandErr error // refused ::set-env::/::add-path::, turned into a step failure
-	// unsecureCommandWarnOnce is used on the job's RunContext, since a composite action runs
-	// its steps on one of its own.
-	unsecureCommandWarnOnce sync.Once
-	unsecureCommandMu       sync.Mutex
+	unsecureCommandMu  sync.Mutex
 }
 
 // setCurrentStepEnv records the environment of the step about to run.

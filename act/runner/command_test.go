@@ -9,7 +9,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"strings"
 	"testing"
 
 	"gitea.com/gitea/runner/act/common"
@@ -20,10 +19,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// unsecureRC opts into ::set-env:: and ::add-path::, which are refused without it.
+func unsecureRC() *RunContext {
+	return &RunContext{Env: map[string]string{allowUnsecureCommandsVar: "true"}}
+}
+
 func TestSetEnv(t *testing.T) {
 	a := assert.New(t)
 	ctx := context.Background()
-	rc := new(RunContext)
+	rc := unsecureRC()
 	handler := rc.commandHandler(ctx)
 
 	handler("::set-env name=x::valz\n")
@@ -33,7 +37,7 @@ func TestSetEnv(t *testing.T) {
 func TestStopCommandsKeepsSuppressedLinesInLog(t *testing.T) {
 	a := assert.New(t)
 	ctx := context.Background()
-	rc := new(RunContext)
+	rc := unsecureRC()
 	handler := rc.commandHandler(ctx)
 
 	// Stop command processing until the matching end token is seen.
@@ -86,7 +90,7 @@ func TestSetOutput(t *testing.T) {
 func TestAddpath(t *testing.T) {
 	a := assert.New(t)
 	ctx := context.Background()
-	rc := new(RunContext)
+	rc := unsecureRC()
 	handler := rc.commandHandler(ctx)
 
 	handler("::add-path::/zoo\n")
@@ -101,7 +105,7 @@ func TestStopCommands(t *testing.T) {
 
 	a := assert.New(t)
 	ctx := common.WithLogger(context.Background(), logger)
-	rc := new(RunContext)
+	rc := unsecureRC()
 	handler := rc.commandHandler(ctx)
 
 	handler("::set-env name=x::valz\n")
@@ -125,7 +129,7 @@ func TestStopCommands(t *testing.T) {
 // rather than being swallowed by that command's case.
 func TestStopCommandsResumesOnCommandNamedToken(t *testing.T) {
 	a := assert.New(t)
-	rc := new(RunContext)
+	rc := unsecureRC()
 	handler := rc.commandHandler(context.Background())
 
 	handler("::stop-commands::add-mask\n")
@@ -140,7 +144,7 @@ func TestStopCommandsResumesOnCommandNamedToken(t *testing.T) {
 func TestAddpathADO(t *testing.T) {
 	a := assert.New(t)
 	ctx := context.Background()
-	rc := new(RunContext)
+	rc := unsecureRC()
 	handler := rc.commandHandler(ctx)
 
 	handler("##[add-path]/zoo\n")
@@ -240,7 +244,7 @@ func TestEscapeCommandData(t *testing.T) {
 	a.Equal("a%b\rc\nd%0A", UnescapeCommandData("a%25b%0Dc%0Ad%250A"))
 }
 
-func TestUnsecureCommandsWhenDisabled(t *testing.T) {
+func TestUnsecureCommands(t *testing.T) {
 	tests := []struct {
 		name    string
 		jobEnv  map[string]string
@@ -256,7 +260,7 @@ func TestUnsecureCommandsWhenDisabled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			a := assert.New(t)
-			rc := &RunContext{Config: &Config{DisableUnsecureCommands: true}, Env: tt.jobEnv}
+			rc := &RunContext{Env: tt.jobEnv}
 			rc.setCurrentStepEnv(tt.stepEnv)
 			handler := rc.commandHandler(context.Background())
 
@@ -276,30 +280,4 @@ func TestUnsecureCommandsWhenDisabled(t *testing.T) {
 			a.NoError(rc.takeUnsecureCommandError())
 		})
 	}
-}
-
-// Until the default flips, the commands still run, but the job log says so exactly once.
-func TestUnsecureCommandsWarnOnceWhenAllowed(t *testing.T) {
-	a := assert.New(t)
-	logger, hook := test.NewNullLogger()
-	ctx := common.WithLogger(context.Background(), logger.WithField("test", true))
-
-	rc := &RunContext{Config: &Config{}}
-	handler := rc.commandHandler(ctx)
-	handler("::set-env name=x::valz\n")
-	handler("::add-path::/opt/bin\n")
-
-	a.Equal("valz", rc.Env["x"])
-
-	// A composite action runs its steps on a RunContext of its own, which must not warn again.
-	composite := &RunContext{Config: rc.Config, Parent: rc}
-	composite.commandHandler(ctx)("::set-env name=y::valz\n")
-
-	warnings := 0
-	for _, entry := range hook.AllEntries() {
-		if strings.Contains(entry.Message, "##[warning]") {
-			warnings++
-		}
-	}
-	a.Equal(1, warnings)
 }

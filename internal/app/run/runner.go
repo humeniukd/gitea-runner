@@ -515,7 +515,6 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		DefaultActionInstance:             r.getDefaultActionsURL(task),
 		DefaultActionInstanceIsSelfHosted: r.isSelfHostedActionsURL(task),
 		PlatformPicker:                    r.labels.PickPlatform,
-		DisableUnsecureCommands:           r.cfg.Runner.AllowUnsecureCommands != nil && !*r.cfg.Runner.AllowUnsecureCommands,
 		JobStartedHook:                    r.cfg.Runner.Hooks.JobStarted,
 		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
 		Vars:                              task.Vars,

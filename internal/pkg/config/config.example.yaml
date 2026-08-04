@@ -110,15 +110,6 @@ runner:
   post_task_script: ''
   # Hard limit on post_task_script runtime. Default if omitted: 5m.
   post_task_script_timeout: 5m
-  # Whether the deprecated ::set-env:: and ::add-path:: workflow commands may still run.
-  # They let a step set the environment of every later step from its own output, so a step
-  # echoing untrusted content can inject PATH or NODE_OPTIONS. GitHub disabled them; write
-  # to $GITHUB_ENV / $GITHUB_PATH instead.
-  # Defaults to true with a deprecation warning in the job log. Set it to false to fail the
-  # step instead. This is advisory, not a restriction the instance can enforce: setting
-  # ACTIONS_ALLOW_UNSECURE_COMMANDS to true on a step or job opts back in either way, as it
-  # does on GitHub, including when an earlier step wrote it to $GITHUB_ENV.
-  allow_unsecure_commands: true
   # Scripts run inside the job environment before the job's first step and after its last
   # one, the equivalent of GitHub's ACTIONS_RUNNER_HOOK_JOB_STARTED and
   # ACTIONS_RUNNER_HOOK_JOB_COMPLETED, which are read when these are unset. The paths are

@@ -102,10 +102,6 @@ func (rc *RunContext) refuseUnsecureCommand(ctx context.Context, command string)
 	if rc.allowUnsecureCommandsOptIn() {
 		return false
 	}
-	if rc.Config == nil || !rc.Config.DisableUnsecureCommands {
-		rc.warnUnsecureCommandOnce(ctx, command)
-		return false
-	}
 
 	// The step executor logs the failure itself, so keep this line's wording distinct.
 	common.Logger(ctx).WithField(rawOutputField, true).Errorf("##[error]%s", EscapeCommandData(fmt.Sprintf(
@@ -132,15 +128,6 @@ func (rc *RunContext) allowUnsecureCommandsOptIn() bool {
 // isTruthyEnv mirrors GitHub's bool.TryParse: only "true", in any casing.
 func isTruthyEnv(v string) bool {
 	return strings.EqualFold(strings.TrimSpace(v), "true")
-}
-
-// warnUnsecureCommandOnce says what will stop working once the setting flips, once per job.
-func (rc *RunContext) warnUnsecureCommandOnce(ctx context.Context, command string) {
-	rc.topLevelRunContext().unsecureCommandWarnOnce.Do(func() {
-		common.Logger(ctx).WithField(rawOutputField, true).Warnf("##[warning]%s", EscapeCommandData(fmt.Sprintf(
-			"The `%s` workflow command is deprecated and will stop working. Write to $GITHUB_ENV or "+
-				"$GITHUB_PATH instead, or set ACTIONS_ALLOW_UNSECURE_COMMANDS to keep using it", command)))
-	})
 }
 
 // takeUnsecureCommandError returns and clears the error left by a refused command.

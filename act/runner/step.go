@@ -177,9 +177,9 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		err = executor(timeoutctx)
 		// Always take it, so the job-scoped error cannot leak onto a later step. A refusal
 		// fails the step as it does on GitHub, but the executor's own error wins.
-		unsecureErr := rc.takeUnsecureCommandError()
+		insecureErr := rc.takeUnsecureCommandError()
 		if err == nil {
-			err = unsecureErr
+			err = insecureErr
 		}
 
 		if err == nil {
