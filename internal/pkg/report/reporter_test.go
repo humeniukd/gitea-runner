@@ -72,9 +72,12 @@ func TestReporter_parseLogRow(t *testing.T) {
 			"Debug enabled", true,
 			[]string{
 				"::debug::GitHub Actions runtime token access controls",
+				// Left escaped: the web UI decodes it, and a real newline would not survive storage.
+				"::debug::first%0Asecond",
 			},
 			[]string{
-				"GitHub Actions runtime token access controls",
+				"::debug::GitHub Actions runtime token access controls",
+				"::debug::first%0Asecond",
 			},
 		},
 		{
@@ -86,30 +89,24 @@ func TestReporter_parseLogRow(t *testing.T) {
 				"<nil>",
 			},
 		},
+		// The three annotation levels share one code path, so the property shapes are only
+		// exercised under "error"; notice and warning just prove the level token round-trips.
 		{
 			"notice", false,
 			[]string{
-				"::notice file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
 				"::notice::Gosh, that's not going to work",
-				"::notice file=file.name,line=42,col=7::Gosh, that's not going to work",
 			},
 			[]string{
-				"##[notice]file.name:42: Cool Title: Gosh, that's not going to work",
-				"##[notice]Gosh, that's not going to work",
-				"##[notice]file.name:42:7: Gosh, that's not going to work",
+				"::notice::Gosh, that's not going to work",
 			},
 		},
 		{
 			"warning", false,
 			[]string{
-				"::warning file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
 				"::warning::Gosh, that's not going to work",
-				"::warning file=file.name,line=42,col=7::Gosh, that's not going to work",
 			},
 			[]string{
-				"##[warning]file.name:42: Cool Title: Gosh, that's not going to work",
-				"##[warning]Gosh, that's not going to work",
-				"##[warning]file.name:42:7: Gosh, that's not going to work",
+				"::warning::Gosh, that's not going to work",
 			},
 		},
 		{
@@ -118,11 +115,20 @@ func TestReporter_parseLogRow(t *testing.T) {
 				"::error file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
 				"::error::Gosh, that's not going to work",
 				"::error file=file.name,line=42,col=7::Gosh, that's not going to work",
+				// The message keeps its own '::', the property list ends at the first one.
+				"::error file=main.cpp,line=12::no member named 'foo' in 'std::vector<int>'",
+				// GitHub matches property names case-insensitively.
+				"::error File=file.name,Line=42,Col=7::Gosh, that's not going to work",
+				// Only the property separators are decoded here, %25/%0A are left for the web UI.
+				"::error file=a%3Ab.go,title=100%252C::still %25 escaped%0Aand multi-line",
 			},
 			[]string{
-				"##[error]file.name:42: Cool Title: Gosh, that's not going to work",
-				"##[error]Gosh, that's not going to work",
-				"##[error]file.name:42:7: Gosh, that's not going to work",
+				"::error::file.name:42: Cool Title: Gosh, that's not going to work",
+				"::error::Gosh, that's not going to work",
+				"::error::file.name:42:7: Gosh, that's not going to work",
+				"::error::main.cpp:12: no member named 'foo' in 'std::vector<int>'",
+				"::error::file.name:42:7: Gosh, that's not going to work",
+				"::error::a:b.go: 100%252C: still %25 escaped%0Aand multi-line",
 			},
 		},
 		{
@@ -1025,7 +1031,7 @@ func TestReporter_Result(t *testing.T) {
 }
 
 func TestReporter_SetOutputs(t *testing.T) {
-	r := &Reporter{state: &runnerv1.TaskState{}}
+	r := &Reporter{state: &runnerv1.TaskState{}, logReplacer: strings.NewReplacer()}
 
 	r.SetOutputs(map[string]string{"foo": "bar"})
 	got, ok := r.outputs["foo"]

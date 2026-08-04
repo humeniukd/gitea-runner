@@ -115,8 +115,9 @@ runner:
   # echoing untrusted content can inject PATH or NODE_OPTIONS. GitHub disabled them; write
   # to $GITHUB_ENV / $GITHUB_PATH instead.
   # Defaults to true with a deprecation warning in the job log. Set it to false to fail the
-  # step instead; a workflow that needs the old behaviour can set the
-  # ACTIONS_ALLOW_UNSECURE_COMMANDS environment variable on the step or job either way.
+  # step instead. This is advisory, not a restriction the instance can enforce: setting
+  # ACTIONS_ALLOW_UNSECURE_COMMANDS to true on a step or job opts back in either way, as it
+  # does on GitHub, including when an earlier step wrote it to $GITHUB_ENV.
   allow_unsecure_commands: true
   # Scripts run inside the job environment before the job's first step and after its last
   # one, the equivalent of GitHub's ACTIONS_RUNNER_HOOK_JOB_STARTED and

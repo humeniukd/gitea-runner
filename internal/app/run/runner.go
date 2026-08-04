@@ -515,7 +515,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		DefaultActionInstance:             r.getDefaultActionsURL(task),
 		DefaultActionInstanceIsSelfHosted: r.isSelfHostedActionsURL(task),
 		PlatformPicker:                    r.labels.PickPlatform,
-		AllowUnsecureCommands:             r.cfg.Runner.AllowUnsecureCommands,
+		DisableUnsecureCommands:           r.cfg.Runner.AllowUnsecureCommands != nil && !*r.cfg.Runner.AllowUnsecureCommands,
 		JobStartedHook:                    r.cfg.Runner.Hooks.JobStarted,
 		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
 		Vars:                              task.Vars,
@@ -608,7 +608,8 @@ func (r *Runner) registerExternalCacheJob(token string, cred artifactcache.JobCr
 	}); err != nil {
 		log.Warnf("cache external_server register failed (%s): %v", base, err)
 		if reporter != nil {
-			reporter.Logf("::warning::cache external_server register failed (%s): %v — cache requests from this job will be unauthenticated and likely return 401", base, err)
+			reporter.Logf("::warning::%s", runner.EscapeCommandData(fmt.Sprintf(
+				"cache external_server register failed (%s): %v — cache requests from this job will be unauthenticated and likely return 401", base, err)))
 		}
 	} else {
 		resultsURL, _ = body["results_url"].(string) // absent from a server too old to forward
@@ -618,7 +619,8 @@ func (r *Runner) registerExternalCacheJob(token string, cred artifactcache.JobCr
 			map[string]any{"token": token}); err != nil {
 			log.Warnf("cache external_server revoke failed (%s): %v", base, err)
 			if reporter != nil {
-				reporter.Logf("::warning::cache external_server revoke failed (%s): %v", base, err)
+				reporter.Logf("::warning::%s", runner.EscapeCommandData(fmt.Sprintf(
+					"cache external_server revoke failed (%s): %v", base, err)))
 			}
 		}
 	}, resultsURL

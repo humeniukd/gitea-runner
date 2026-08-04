@@ -357,25 +357,6 @@ func TestIsContinueOnError(t *testing.T) {
 	assertObject.Error(err)
 }
 
-// fakeStep is a minimal step for driving runStepExecutor without the shell/action machinery.
-type fakeStep struct {
-	rc     *RunContext
-	model  *model.Step
-	env    map[string]string
-	ifExpr string
-}
-
-func (s *fakeStep) pre() common.Executor       { return func(context.Context) error { return nil } }
-func (s *fakeStep) main() common.Executor      { return func(context.Context) error { return nil } }
-func (s *fakeStep) post() common.Executor      { return func(context.Context) error { return nil } }
-func (s *fakeStep) getRunContext() *RunContext { return s.rc }
-func (s *fakeStep) getGithubContext(ctx context.Context) *model.GithubContext {
-	return s.rc.getGithubContext(ctx)
-}
-func (s *fakeStep) getStepModel() *model.Step                         { return s.model }
-func (s *fakeStep) getEnv() *map[string]string                        { return &s.env }
-func (s *fakeStep) getIfExpression(context.Context, stepStage) string { return s.ifExpr }
-
 // A refused ::set-env::/::add-path:: records a job-scoped error. When the step that
 // produced it also fails on its own, the refusal must be cleared at the step boundary, so
 // it fails only that step and never leaks onto a later step that runs anyway (if: always()).
@@ -385,9 +366,8 @@ func TestRunStepExecutorDoesNotLeakRefusalToNextStep(t *testing.T) {
 	cm.On("Copy", mock.Anything, mock.Anything).Return(noop)
 	cm.On("UpdateFromEnv", mock.Anything, mock.Anything).Return(noop)
 
-	disallow := false
 	rc := &RunContext{
-		Config: &Config{AllowUnsecureCommands: &disallow, Env: map[string]string{}},
+		Config: &Config{DisableUnsecureCommands: true, Env: map[string]string{}},
 		Run: &model.Run{
 			JobID:    "1",
 			Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}},
@@ -400,8 +380,14 @@ func TestRunStepExecutorDoesNotLeakRefusalToNextStep(t *testing.T) {
 	// Dryrun skips reading the path file back from the (mocked) container.
 	ctx := common.WithDryrun(context.Background(), true)
 
+	// A refusal parsed out of the job container's own output belongs to no step, so the
+	// first step must not be failed by it.
+	rc.commandHandler(ctx)("::set-env name=setup::y\n")
+	stepSetup := &stepRun{RunContext: rc, Step: &model.Step{ID: "setup"}, env: map[string]string{}}
+	require.NoError(t, runStepExecutor(stepSetup, stepStageMain, func(context.Context) error { return nil })(ctx))
+
 	// Step A refuses a ::set-env:: and then fails on its own.
-	stepA := &fakeStep{rc: rc, model: &model.Step{ID: "a"}, env: map[string]string{}}
+	stepA := &stepRun{RunContext: rc, Step: &model.Step{ID: "a"}, env: map[string]string{}}
 	errA := runStepExecutor(stepA, stepStageMain, func(context.Context) error {
 		rc.commandHandler(ctx)("::set-env name=x::y\n")
 		return errors.New("boom")
@@ -411,7 +397,7 @@ func TestRunStepExecutorDoesNotLeakRefusalToNextStep(t *testing.T) {
 
 	// Step B runs despite step A's failure (if: always()) and issues no unsecure command;
 	// it must not inherit step A's refusal.
-	stepB := &fakeStep{rc: rc, model: &model.Step{ID: "b"}, env: map[string]string{}, ifExpr: "always()"}
+	stepB := &stepRun{RunContext: rc, Step: &model.Step{ID: "b", If: yaml.Node{Value: "always()"}}, env: map[string]string{}}
 	errB := runStepExecutor(stepB, stepStageMain, func(context.Context) error { return nil })(ctx)
 	require.NoError(t, errB)
 }

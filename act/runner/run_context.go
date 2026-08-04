@@ -84,27 +84,25 @@ type RunContext struct {
 	// failures. Those failures must still make success() false and failure() true for later
 	// main-step if evaluation.
 	jobFailed bool
-	// stepEnv is the environment of the step currently running, so that workflow commands
-	// parsed out of the container's output can be judged against it. It is written by
-	// runStepExecutor and read by the command handler, which runs on the log-writer
-	// goroutine, so it is guarded by unsecureCommandMu.
-	stepEnv *map[string]string
-	// unsecureCommandErr holds the error of a refused ::set-env::/::add-path::, which the
-	// step executor turns into a step failure. unsecureCommandWarned keeps the deprecation
-	// warning to one line per job.
-	unsecureCommandErr    error
-	unsecureCommandWarned bool
-	unsecureCommandMu     sync.Mutex
+	// stepEnv is a copy of the running step's environment, so that workflow commands parsed out
+	// of the container's output can be judged against it. Written by runStepExecutor and read on
+	// the log-writer goroutine, hence unsecureCommandMu, which also guards unsecureCommandErr.
+	stepEnv            map[string]string
+	unsecureCommandErr error // refused ::set-env::/::add-path::, turned into a step failure
+	// unsecureCommandWarnOnce is used on the job's RunContext, since a composite action runs
+	// its steps on one of its own.
+	unsecureCommandWarnOnce sync.Once
+	unsecureCommandMu       sync.Mutex
 }
 
 // setCurrentStepEnv records the environment of the step about to run.
-func (rc *RunContext) setCurrentStepEnv(env *map[string]string) {
+func (rc *RunContext) setCurrentStepEnv(env map[string]string) {
 	rc.unsecureCommandMu.Lock()
 	defer rc.unsecureCommandMu.Unlock()
 	rc.stepEnv = env
 }
 
-func (rc *RunContext) currentStepEnv() *map[string]string {
+func (rc *RunContext) currentStepEnv() map[string]string {
 	rc.unsecureCommandMu.Lock()
 	defer rc.unsecureCommandMu.Unlock()
 	return rc.stepEnv

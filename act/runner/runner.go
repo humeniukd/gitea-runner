@@ -97,10 +97,7 @@ type Config struct {
 	RunnerName                        string                       // name this runner registered with, reported as `runner.name`, defaults to the hostname
 	JobStartedHook                    string                       // script run inside the job environment before the job's first step; ACTIONS_RUNNER_HOOK_JOB_STARTED is read from Env when empty
 	JobCompletedHook                  string                       // script run inside the job environment after the job's last step; ACTIONS_RUNNER_HOOK_JOB_COMPLETED is read from Env when empty
-	// AllowUnsecureCommands keeps the deprecated ::set-env:: and ::add-path:: workflow
-	// commands working for workflows that never set ACTIONS_ALLOW_UNSECURE_COMMANDS. It is
-	// a pointer to distinguish false from not set; nil still allows them, with a warning.
-	AllowUnsecureCommands *bool
+	DisableUnsecureCommands           bool                         // fail the step on the deprecated ::set-env:: and ::add-path:: commands, see config.Runner.AllowUnsecureCommands
 }
 
 // RunnerDebug reports whether debug logging is on, exposed as `runner.debug` and

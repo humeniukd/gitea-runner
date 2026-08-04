@@ -396,10 +396,9 @@ func (r *Reporter) Logf(format string, a ...any) {
 
 func (r *Reporter) logf(format string, a ...any) {
 	if !r.duringSteps() {
-		r.logRows = append(r.logRows, &runnerv1.LogRow{
-			Time:    timestamppb.Now(),
-			Content: fmt.Sprintf(format, a...),
-		})
+		// Masked like any other row: these bypass parseLogRow, but a caller can still
+		// interpolate a secret, such as a configured URL carrying credentials.
+		r.logRows = append(r.logRows, r.newLogRow(timestamppb.Now(), fmt.Sprintf(format, a...)))
 	}
 }
 
@@ -700,8 +699,12 @@ func (r *Reporter) parseResult(result any) (runnerv1.Result, bool) {
 	return ret, ok
 }
 
-var cmdRegex = regexp.MustCompile(`^::([^ :]+)( .*)?::(.*)$`)
+// A property value never contains a raw ':' (GitHub escapes it as %3A), so excluding ':' ends
+// the property list at the first '::' as GitHub does; greedily would swallow a '::' message.
+var cmdRegex = regexp.MustCompile(`^::([^ :]+)( [^:]*)?::(.*)$`)
 
+// handleCommand takes value still escaped, so that the web UI decodes it exactly once. Only
+// the branches that consume the payload here decode it.
 func (r *Reporter) handleCommand(originalContent, command, properties, value string) *string {
 	if r.stopCommandEndToken != "" && command != r.stopCommandEndToken {
 		return &originalContent
@@ -709,11 +712,11 @@ func (r *Reporter) handleCommand(originalContent, command, properties, value str
 
 	switch command {
 	case "add-mask":
-		r.addMask(value)
+		r.addMask(runner.UnescapeCommandData(value))
 		return nil
 	case "debug":
 		if r.debugOutputEnabled {
-			return &value
+			return &originalContent // kept as ::debug::, so the web UI labels and decodes it
 		}
 		return nil
 
@@ -723,15 +726,11 @@ func (r *Reporter) handleCommand(originalContent, command, properties, value str
 		// of the command for compiler and linter output.
 		annotation := formatAnnotation(command, properties, value)
 		return &annotation
-	case "group":
-		// Returning the original content, because I think the frontend
-		// will use it when rendering the output.
-		return &originalContent
-	case "endgroup":
-		// Ditto
+	case "group", "endgroup":
+		// Passed through: the web UI folds the log on these and decodes the payload itself.
 		return &originalContent
 	case "stop-commands":
-		r.stopCommandEndToken = value
+		r.stopCommandEndToken = runner.UnescapeCommandData(value)
 		return nil
 	case r.stopCommandEndToken:
 		r.stopCommandEndToken = ""
@@ -740,36 +739,32 @@ func (r *Reporter) handleCommand(originalContent, command, properties, value str
 	return &originalContent
 }
 
-// formatAnnotation renders ::notice::, ::warning:: and ::error:: as one log line, keeping
-// the file, line, column and title the command carries:
+// formatAnnotation folds the file, line, column and title the command carries into its message,
+// which the web UI otherwise drops along with the rest of the properties:
 //
 //	::error file=main.go,line=12,col=5,title=vet::undefined: x
-//	##[error]main.go:12:5: vet: undefined: x
+//	::error::main.go:12:5: vet: undefined: x
+//
+// The ::-form prefix is deliberate, and value is not escaped here because it arrived escaped
+// and must stay that way.
 func formatAnnotation(level, properties, value string) string {
 	props := parseCommandProperties(properties)
 
-	var b strings.Builder
-	b.WriteString("##[" + level + "]")
-	if file := props["file"]; file != "" {
-		b.WriteString(file)
-		if line := props["line"]; line != "" {
-			b.WriteString(":" + line)
-			if col := props["col"]; col != "" {
-				b.WriteString(":" + col)
+	prefix := props["file"]
+	if prefix != "" {
+		if props["line"] != "" {
+			prefix += ":" + props["line"]
+			if props["col"] != "" {
+				prefix += ":" + props["col"]
 			}
 		}
-		b.WriteString(": ")
+		prefix += ": "
 	}
-	if title := props["title"]; title != "" {
-		b.WriteString(title + ": ")
+	if props["title"] != "" {
+		prefix += props["title"] + ": "
 	}
-	b.WriteString(value)
-	return b.String()
+	return "::" + level + "::" + prefix + value
 }
-
-// commandPropertyUnescaper decodes a workflow command property value, whose escaping covers
-// the separators of the property list as well.
-var commandPropertyUnescaper = strings.NewReplacer("%25", "%", "%0D", "\r", "%0A", "\n", "%3A", ":", "%2C", ",")
 
 // parseCommandProperties parses the `file=main.go,line=12` part of a workflow command.
 func parseCommandProperties(properties string) map[string]string {
@@ -784,10 +779,13 @@ func parseCommandProperties(properties string) map[string]string {
 		if !ok {
 			continue
 		}
-		props[strings.TrimSpace(key)] = commandPropertyUnescaper.Replace(value)
+		// Only the property-list separators are decoded, the web UI decodes the rest.
+		value = strings.ReplaceAll(strings.ReplaceAll(value, "%3A", ":"), "%2C", ",")
+		// GitHub keys its property dictionary case-insensitively, so `File=` works there too.
+		props[strings.ToLower(strings.TrimSpace(key))] = value
 	}
-	// GitHub documents `col`, but its own actions have used `column` as well.
-	if props["col"] == "" && props["column"] != "" {
+	// GitHub's toolkit emits `col`; accept `column` as well, which some tools write instead.
+	if props["col"] == "" {
 		props["col"] = props["column"]
 	}
 	return props
@@ -798,18 +796,21 @@ func (r *Reporter) parseLogRow(entry *log.Entry) *runnerv1.LogRow {
 
 	matches := cmdRegex.FindStringSubmatch(content)
 	if matches != nil {
-		if output := r.handleCommand(content, matches[1], matches[2], runner.UnescapeCommandData(matches[3])); output != nil {
+		if output := r.handleCommand(content, matches[1], matches[2], matches[3]); output != nil {
 			content = *output
 		} else {
 			return nil
 		}
 	}
 
-	content = r.logReplacer.Replace(content)
+	return r.newLogRow(timestamppb.New(entry.Time), content)
+}
 
+// newLogRow applies the masking and validation every row must carry, whatever built it.
+func (r *Reporter) newLogRow(t *timestamppb.Timestamp, content string) *runnerv1.LogRow {
 	return &runnerv1.LogRow{
-		Time:    timestamppb.New(entry.Time),
-		Content: strings.ToValidUTF8(content, "?"),
+		Time:    t,
+		Content: strings.ToValidUTF8(r.logReplacer.Replace(content), "?"),
 	}
 }
 

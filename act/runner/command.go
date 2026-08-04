@@ -57,28 +57,22 @@ func (rc *RunContext) commandHandler(ctx context.Context) common.LineHandler {
 		}
 		arg = UnescapeCommandData(arg)
 		kvPairs = unescapeKvPairs(kvPairs)
+		if (command == "set-env" || command == "add-path") && rc.refuseUnsecureCommand(ctx, command) {
+			return true
+		}
 		switch command {
 		case "set-env":
-			if rc.refuseUnsecureCommand(ctx, command) {
-				return true
-			}
 			rc.setEnv(ctx, kvPairs, arg)
 		case "set-output":
 			rc.setOutput(ctx, kvPairs, arg)
 		case "add-path":
-			if rc.refuseUnsecureCommand(ctx, command) {
-				return true
-			}
 			rc.addPath(ctx, arg)
-		case "debug":
-			logger.Infof("%s", line)
-		case "warning":
-			logger.Infof("%s", line)
-		case "error":
-			logger.Infof("%s", line)
 		case "add-mask":
 			rc.AddMask(arg)
 			logger.Infof("%s", "***")
+			// Never forward the raw line, it carries the secret: the reporter drops the
+			// ::add-mask:: form itself but cannot see the ##[add-mask] one. GitHub echoes neither.
+			return false
 		case "stop-commands":
 			resumeCommand = arg
 			logger.Infof("%s", line)
@@ -88,9 +82,9 @@ func (rc *RunContext) commandHandler(ctx context.Context) common.LineHandler {
 		case "save-state":
 			logger.Infof("%s", line)
 			rc.saveState(ctx, kvPairs, arg)
-		case "add-matcher":
-			logger.Infof("%s", line)
 		default:
+			// ::debug::, ::error::, ::warning::, ::add-matcher:: and anything unrecognised are
+			// passed through for the reporter and Gitea's web UI to render.
 			logger.Infof("%s", line)
 		}
 
@@ -99,85 +93,57 @@ func (rc *RunContext) commandHandler(ctx context.Context) common.LineHandler {
 	}
 }
 
-// refuseUnsecureCommand reports whether a deprecated ::set-env:: or ::add-path:: command
-// must not run, recording the error that fails the step. GitHub disabled both because a
-// step that echoes untrusted content can use them to set variables such as NODE_OPTIONS
-// or PATH for every later step of the job; opting back in requires the step or job to set
-// ACTIONS_ALLOW_UNSECURE_COMMANDS.
+const allowUnsecureCommandsVar = "ACTIONS_ALLOW_UNSECURE_COMMANDS"
+
+// refuseUnsecureCommand reports whether a deprecated ::set-env:: or ::add-path:: command must
+// not run, recording the error that fails the step. GitHub disabled both because a step that
+// echoes untrusted content can use them to set NODE_OPTIONS or PATH for every later step.
 func (rc *RunContext) refuseUnsecureCommand(ctx context.Context, command string) bool {
-	if rc.allowUnsecureCommands() {
+	if rc.allowUnsecureCommandsOptIn() {
+		return false
+	}
+	if rc.Config == nil || !rc.Config.DisableUnsecureCommands {
 		rc.warnUnsecureCommandOnce(ctx, command)
 		return false
 	}
 
-	err := fmt.Errorf("the `%s` workflow command is disabled: it can set the environment of every later step from untrusted output. "+
-		"Write to $GITHUB_ENV or $GITHUB_PATH instead, or set ACTIONS_ALLOW_UNSECURE_COMMANDS to allow it", command)
-	common.Logger(ctx).WithField(rawOutputField, true).Errorf("##[error]%v", err)
+	// The step executor logs the failure itself, so keep this line's wording distinct.
+	common.Logger(ctx).WithField(rawOutputField, true).Errorf("##[error]%s", EscapeCommandData(fmt.Sprintf(
+		"The `%s` command is disabled: it can set the environment of every later step from untrusted output. "+
+			"Write to $GITHUB_ENV or $GITHUB_PATH instead, or set ACTIONS_ALLOW_UNSECURE_COMMANDS to allow it",
+		command)))
 
 	rc.unsecureCommandMu.Lock()
 	defer rc.unsecureCommandMu.Unlock()
 	if rc.unsecureCommandErr == nil {
-		rc.unsecureCommandErr = err
+		rc.unsecureCommandErr = fmt.Errorf("the `%s` workflow command is disabled", command)
 	}
 	return true
 }
 
-// allowUnsecureCommands reports whether ::set-env:: and ::add-path:: may still run. The
-// step's own environment is checked first, since that is where GitHub's documentation
-// puts ACTIONS_ALLOW_UNSECURE_COMMANDS.
-func (rc *RunContext) allowUnsecureCommands() bool {
-	const allowVar = "ACTIONS_ALLOW_UNSECURE_COMMANDS"
-
-	if env := rc.currentStepEnv(); env != nil && isTruthyEnv((*env)[allowVar]) {
-		return true
-	}
-	if isTruthyEnv(rc.Env[allowVar]) || isTruthyEnv(rc.GlobalEnv[allowVar]) {
-		return true
-	}
-	// Not opted in: the runner setting decides, and still allows them by default.
-	return rc.Config == nil || rc.Config.AllowUnsecureCommands == nil || *rc.Config.AllowUnsecureCommands
-}
-
-func isTruthyEnv(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "true", "1", "y", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
-// warnUnsecureCommandOnce warns the first time a job runs a deprecated command without
-// opting in, so the log says what will stop working once the setting flips.
-func (rc *RunContext) warnUnsecureCommandOnce(ctx context.Context, command string) {
-	if rc.allowUnsecureCommandsOptIn() {
-		return
-	}
-
-	rc.unsecureCommandMu.Lock()
-	defer rc.unsecureCommandMu.Unlock()
-	if rc.unsecureCommandWarned {
-		return
-	}
-	rc.unsecureCommandWarned = true
-	common.Logger(ctx).WithField(rawOutputField, true).Warnf(
-		"##[warning]The `%s` workflow command is deprecated and will stop working. "+
-			"Write to $GITHUB_ENV or $GITHUB_PATH instead, or set ACTIONS_ALLOW_UNSECURE_COMMANDS to keep using it", command)
-}
-
 // allowUnsecureCommandsOptIn reports whether the workflow itself asked for the deprecated
-// commands, in which case there is nothing to warn about.
+// commands, from any env scope, as it can on GitHub.
 func (rc *RunContext) allowUnsecureCommandsOptIn() bool {
-	const allowVar = "ACTIONS_ALLOW_UNSECURE_COMMANDS"
-
-	if env := rc.currentStepEnv(); env != nil && isTruthyEnv((*env)[allowVar]) {
-		return true
-	}
-	return isTruthyEnv(rc.Env[allowVar]) || isTruthyEnv(rc.GlobalEnv[allowVar])
+	return isTruthyEnv(rc.currentStepEnv()[allowUnsecureCommandsVar]) ||
+		isTruthyEnv(rc.Env[allowUnsecureCommandsVar]) ||
+		isTruthyEnv(rc.GlobalEnv[allowUnsecureCommandsVar])
 }
 
-// takeUnsecureCommandError returns and clears the error left by a refused command, so the
-// step that produced it fails the way GitHub fails it.
+// isTruthyEnv mirrors GitHub's bool.TryParse: only "true", in any casing.
+func isTruthyEnv(v string) bool {
+	return strings.EqualFold(strings.TrimSpace(v), "true")
+}
+
+// warnUnsecureCommandOnce says what will stop working once the setting flips, once per job.
+func (rc *RunContext) warnUnsecureCommandOnce(ctx context.Context, command string) {
+	rc.topLevelRunContext().unsecureCommandWarnOnce.Do(func() {
+		common.Logger(ctx).WithField(rawOutputField, true).Warnf("##[warning]%s", EscapeCommandData(fmt.Sprintf(
+			"The `%s` workflow command is deprecated and will stop working. Write to $GITHUB_ENV or "+
+				"$GITHUB_PATH instead, or set ACTIONS_ALLOW_UNSECURE_COMMANDS to keep using it", command)))
+	})
+}
+
+// takeUnsecureCommandError returns and clears the error left by a refused command.
 func (rc *RunContext) takeUnsecureCommandError() error {
 	rc.unsecureCommandMu.Lock()
 	defer rc.unsecureCommandMu.Unlock()
@@ -255,9 +221,9 @@ var (
 	commandPropertyUnescaper = strings.NewReplacer("%25", "%", "%0D", "\r", "%0A", "\n", "%3A", ":", "%2C", ",")
 )
 
-// escapeCommandData encodes the data part of a "::cmd::" or "##[cmd]" line the runner writes itself,
+// EscapeCommandData encodes the data part of a "::cmd::" or "##[cmd]" line the runner writes itself,
 // so the log renderer decodes it back. Lines forwarded from step output are already escaped.
-func escapeCommandData(arg string) string {
+func EscapeCommandData(arg string) string {
 	return commandDataEscaper.Replace(arg)
 }
 

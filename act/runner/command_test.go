@@ -176,6 +176,15 @@ func captureOutput(t *testing.T, f func()) string {
 	return out
 }
 
+// The raw add-mask line carries the secret, so it must not be forwarded to the job log in
+// either form. A false return stops the line writer's handler chain.
+func TestAddmaskIsNotForwarded(t *testing.T) {
+	handler := new(RunContext).commandHandler(context.Background())
+
+	assert.False(t, handler("##[add-mask]supersecret\n"))
+	assert.False(t, handler("::add-mask::othersecret\n"))
+}
+
 func TestAddmaskUsemask(t *testing.T) {
 	rc := new(RunContext)
 	rc.StepResults = make(map[string]*model.StepResult)
@@ -220,56 +229,46 @@ func TestSaveState(t *testing.T) {
 func TestEscapeCommandData(t *testing.T) {
 	a := assert.New(t)
 
-	a.Equal("a%25b%0Dc%0Ad%250A", escapeCommandData("a%b\rc\nd%0A"))
+	a.Equal("a%25b%0Dc%0Ad%250A", EscapeCommandData("a%b\rc\nd%0A"))
 	a.Equal("a%b\rc\nd%0A", UnescapeCommandData("a%25b%0Dc%0Ad%250A"))
 }
 
-func TestUnsecureCommandsAreRefusedWhenDisabled(t *testing.T) {
-	a := assert.New(t)
-	ctx := context.Background()
-	disallow := false
-	rc := &RunContext{Config: &Config{AllowUnsecureCommands: &disallow}}
-	handler := rc.commandHandler(ctx)
+func TestUnsecureCommandsWhenDisabled(t *testing.T) {
+	tests := []struct {
+		name    string
+		jobEnv  map[string]string
+		stepEnv map[string]string
+		optedIn bool
+	}{
+		{name: "refused with no opt-in"},
+		// GitHub reads the opt-in with bool.TryParse, so "1" is not one.
+		{name: "refused for a value bool.TryParse rejects", jobEnv: map[string]string{allowUnsecureCommandsVar: "1"}},
+		{name: "opted in through the step environment", stepEnv: map[string]string{allowUnsecureCommandsVar: "true"}, optedIn: true},
+		{name: "opted in through the job environment", jobEnv: map[string]string{allowUnsecureCommandsVar: "TRUE"}, optedIn: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := assert.New(t)
+			rc := &RunContext{Config: &Config{DisableUnsecureCommands: true}, Env: tt.jobEnv}
+			rc.setCurrentStepEnv(tt.stepEnv)
+			handler := rc.commandHandler(context.Background())
 
-	handler("::set-env name=x::valz\n")
-	handler("::add-path::/opt/bin\n")
+			handler("::set-env name=x::valz\n")
+			handler("::add-path::/opt/bin\n")
 
-	a.Empty(rc.Env["x"])
-	a.Empty(rc.ExtraPath)
-
-	// The refusal fails the step that produced it, once.
-	err := rc.takeUnsecureCommandError()
-	require.ErrorContains(t, err, "set-env")
-	a.NoError(rc.takeUnsecureCommandError())
-}
-
-func TestUnsecureCommandsOptIn(t *testing.T) {
-	disallow := false
-
-	t.Run("through the step environment", func(t *testing.T) {
-		a := assert.New(t)
-		rc := &RunContext{Config: &Config{AllowUnsecureCommands: &disallow}}
-		env := map[string]string{"ACTIONS_ALLOW_UNSECURE_COMMANDS": "true"}
-		rc.setCurrentStepEnv(&env)
-
-		rc.commandHandler(context.Background())("::set-env name=x::valz\n")
-
-		a.Equal("valz", rc.Env["x"])
-		a.NoError(rc.takeUnsecureCommandError())
-	})
-
-	t.Run("through the job environment", func(t *testing.T) {
-		a := assert.New(t)
-		rc := &RunContext{
-			Config: &Config{AllowUnsecureCommands: &disallow},
-			Env:    map[string]string{"ACTIONS_ALLOW_UNSECURE_COMMANDS": "1"},
-		}
-
-		rc.commandHandler(context.Background())("::add-path::/opt/bin\n")
-
-		a.Equal([]string{"/opt/bin"}, rc.ExtraPath)
-		a.NoError(rc.takeUnsecureCommandError())
-	})
+			if !tt.optedIn {
+				a.Empty(rc.Env["x"])
+				a.Empty(rc.ExtraPath)
+				// The refusal fails the step that produced it, once.
+				require.ErrorContains(t, rc.takeUnsecureCommandError(), "set-env")
+				a.NoError(rc.takeUnsecureCommandError())
+				return
+			}
+			a.Equal("valz", rc.Env["x"])
+			a.Equal([]string{"/opt/bin"}, rc.ExtraPath)
+			a.NoError(rc.takeUnsecureCommandError())
+		})
+	}
 }
 
 // Until the default flips, the commands still run, but the job log says so exactly once.
@@ -284,6 +283,10 @@ func TestUnsecureCommandsWarnOnceWhenAllowed(t *testing.T) {
 	handler("::add-path::/opt/bin\n")
 
 	a.Equal("valz", rc.Env["x"])
+
+	// A composite action runs its steps on a RunContext of its own, which must not warn again.
+	composite := &RunContext{Config: rc.Config, Parent: rc}
+	composite.commandHandler(ctx)("::set-env name=y::valz\n")
 
 	warnings := 0
 	for _, entry := range hook.AllEntries() {

@@ -55,7 +55,7 @@ type Runner struct {
 	AllocatePTY           bool              `yaml:"allocate_pty"`             // AllocatePTY allocates a pseudo-TTY for each step's process. Default is false, matching GitHub's actions/runner. Enable only for jobs that need an interactive terminal; tools like docker build emit redrawing progress frames into the captured log when a TTY is present. Applies to both host and docker backends.
 	PostTaskScript        string            `yaml:"post_task_script"`         // PostTaskScript is the path to an executable script run on the host after each task's cleanup completes. Empty disables the hook. On Windows use .exe/.bat/.cmd; PowerShell (.ps1) is not supported yet as the configured path.
 	PostTaskScriptTimeout time.Duration     `yaml:"post_task_script_timeout"` // PostTaskScriptTimeout caps how long the post-task script may run. Default is 5m when post_task_script is set.
-	AllowUnsecureCommands *bool             `yaml:"allow_unsecure_commands"`  // AllowUnsecureCommands keeps the deprecated ::set-env:: and ::add-path:: workflow commands working for workflows that do not set ACTIONS_ALLOW_UNSECURE_COMMANDS. It is a pointer to distinguish false from not set; if not set, they are allowed and a deprecation warning is logged.
+	AllowUnsecureCommands *bool             `yaml:"allow_unsecure_commands"`  // AllowUnsecureCommands keeps the deprecated ::set-env:: and ::add-path:: workflow commands working for workflows that do not set ACTIONS_ALLOW_UNSECURE_COMMANDS. It is a pointer to distinguish false from not set; if not set, it defaults to true and a deprecation warning is logged. It is advisory, not an enforced restriction: a workflow can always opt back in with ACTIONS_ALLOW_UNSECURE_COMMANDS.
 	Hooks                 RunnerHooks       `yaml:"hooks"`                    // Hooks are scripts run inside the job environment around the job's steps.
 }
 
@@ -185,6 +185,10 @@ func LoadDefault(file string) (*Config, error) {
 	if cfg.Runner.SetActEnv == nil {
 		b := true
 		cfg.Runner.SetActEnv = &b
+	}
+	if cfg.Runner.AllowUnsecureCommands == nil {
+		b := true
+		cfg.Runner.AllowUnsecureCommands = &b
 	}
 	if cfg.Cache.Enabled == nil {
 		b := true
