@@ -244,23 +244,11 @@ services:
       --health-retries 10
 ```
 
-A service that reports unhealthy or exits fails the job right away. One that never becomes healthy fails it after `container.service_ready_timeout` (default `5m`); set that to a negative value to start the steps immediately instead.
+A service that reports unhealthy or exits fails the job right away. One that never becomes healthy fails it after `container.service_ready_timeout` (default `5m`, negative disables the wait).
 
-A job running in a container reaches a service by its id on the job network, on the port the service itself listens on:
+A job in a container reaches a service by its id on the job network, on the port the service listens on, for example `psql -h postgres -p 5432`. The started containers also fill the `job` context: `job.container.{id,network}` and `job.services.<id>.{id,network,ports}`, where `ports` maps a container port to the host port Docker published it on, for the services that publish one.
 
-```yaml
-- run: psql -h postgres -p 5432 -U postgres -c 'select 1'
-```
-
-Once started, services are described by the `job` context, keyed by the id the workflow gave them:
-
-```yaml
-- run: echo "${{ job.services.postgres.id }} on network ${{ job.services.postgres.network }}"
-```
-
-`job.services.<id>.ports` maps a container port to the host port Docker published it on, for the services that publish one through `ports:` or `options: --publish`. It is what something outside the job network connects to, such as a process on the Docker host.
-
-Unlike GitHub, a job whose steps run on the host (a `host` label, and no `container:` in the workflow) starts no service containers at all, so `job.services` and `job.container` stay empty for it. Give such a job a `container:` when it needs services.
+Unlike GitHub, a job whose steps run on the host (a `host` label without `container:`) starts no service containers, so `job.services` and `job.container` stay empty. Give such a job a `container:` when it needs services.
 
 #### Proxy
 
