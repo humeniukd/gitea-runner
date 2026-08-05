@@ -549,7 +549,7 @@ func TestRejectsMissingContainer(t *testing.T) {
 	cr := &containerReference{cli: client, input: &NewContainerInput{Name: "job-1"}}
 	check := func(op string, err error) {
 		t.Helper()
-		require.Error(t, err, op)
+		require.ErrorIs(t, err, ErrContainerNotFound, op)
 		assert.Contains(t, err.Error(), `container "job-1" does not exist`, op)
 	}
 	check("copyContent", cr.copyContent("/var/run/act", &FileEntry{Name: "x", Mode: 0o644})(ctx))
@@ -558,6 +558,15 @@ func TestRejectsMissingContainer(t *testing.T) {
 	check("exec", cr.exec([]string{"echo"}, nil, "", "")(ctx))
 	_, err := cr.GetContainerArchive(ctx, "/var/run/act/x")
 	check("GetContainerArchive", err)
+	_, err = cr.Inspect(ctx)
+	check("Inspect", err)
+
+	// A known id the daemon has since dropped, which is how an AutoRemove service exits.
+	client.On("ContainerInspect", ctx, "gone", mobyclient.ContainerInspectOptions{}).
+		Return(mobyclient.ContainerInspectResult{}, cerrdefs.ErrNotFound)
+	removed := &containerReference{id: "gone", cli: client, input: &NewContainerInput{Name: "job-1"}}
+	_, err = removed.Inspect(ctx)
+	check("Inspect after removal", err)
 }
 
 // End-to-end: a stale cr.id is cleared, repopulated from name lookup,
@@ -607,6 +616,32 @@ func TestDockerCopyToSymlinkPath(t *testing.T) {
 	// exact step that fails on a broken daemon.
 	err := rc.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
 	require.NoError(t, err)
+}
+
+// The readiness wait reads a gone container as an exit, which only holds while the daemon
+// really drops an AutoRemove container the moment it exits. This catches a daemon that stops.
+func TestDockerInspectAutoRemovedContainer(t *testing.T) {
+	requireDocker(t)
+	ctx := context.Background()
+
+	rc := NewContainer(&NewContainerInput{
+		Image:      "alpine:latest",
+		Entrypoint: []string{"true"},
+		Name:       "act-test-inspect-" + time.Now().Format("20060102150405.000000"),
+		AutoRemove: true,
+	})
+	require.NoError(t, rc.Pull(false)(ctx))
+	require.NoError(t, rc.Create(nil, nil)(ctx))
+	require.NoError(t, rc.Start(false)(ctx))
+	t.Cleanup(func() {
+		_ = rc.Remove()(ctx)
+		_ = rc.Close()(ctx)
+	})
+
+	require.Eventually(t, func() bool {
+		_, err := rc.Inspect(ctx)
+		return errors.Is(err, ErrContainerNotFound)
+	}, 30*time.Second, 100*time.Millisecond)
 }
 
 // Type assert containerReference implements ExecutionsEnvironment
@@ -857,7 +892,7 @@ func TestContainerInfoFromInspect(t *testing.T) {
 		assert.Equal(t, "connection refused", info.HealthOutput)
 	})
 
-	t.Run("reports the published ports and networks", func(t *testing.T) {
+	t.Run("reports the published ports", func(t *testing.T) {
 		info := containerInfoFromInspect(container.InspectResponse{
 			State: &container.State{Status: "running"},
 			NetworkSettings: &container.NetworkSettings{
@@ -865,15 +900,10 @@ func TestContainerInfoFromInspect(t *testing.T) {
 					network.MustParsePort("5432/tcp"): []network.PortBinding{{HostPort: "49153"}},
 					network.MustParsePort("6379/tcp"): nil,
 				},
-				Networks: map[string]*network.EndpointSettings{
-					"job-network": {},
-					"bridge":      {},
-				},
 			},
 		})
 
 		assert.Equal(t, map[string]string{"5432/tcp": "49153"}, info.Ports)
-		assert.Equal(t, []string{"bridge", "job-network"}, info.Networks)
 	})
 
 	t.Run("tolerates a container without state", func(t *testing.T) {

@@ -209,9 +209,6 @@ func LoadDefault(file string) (*Config, error) {
 	if cfg.Container.WorkdirParent == "" {
 		cfg.Container.WorkdirParent = "workspace"
 	}
-	if cfg.Container.ServiceReadyTimeout == 0 {
-		cfg.Container.ServiceReadyTimeout = 5 * time.Minute
-	}
 	if cfg.Host.WorkdirParent == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {

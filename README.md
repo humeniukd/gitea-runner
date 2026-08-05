@@ -252,11 +252,15 @@ A job running in a container reaches a service by its id on the job network, on 
 - run: psql -h postgres -p 5432 -U postgres -c 'select 1'
 ```
 
-Once started, services are described by the `job` context. `ports` maps a service port to the host port it was published on, which is what a job whose steps run on the host (a `host` label) connects to. It is only filled for services that declare `ports:`:
+Once started, services are described by the `job` context, keyed by the id the workflow gave them:
 
 ```yaml
-- run: psql -h localhost -p ${{ job.services.postgres.ports['5432'] }} -U postgres -c 'select 1'
+- run: echo "${{ job.services.postgres.id }} on network ${{ job.services.postgres.network }}"
 ```
+
+`job.services.<id>.ports` maps a container port to the host port Docker published it on, for the services that publish one through `ports:` or `options: --publish`. It is what something outside the job network connects to, such as a process on the Docker host.
+
+Unlike GitHub, a job whose steps run on the host (a `host` label, and no `container:` in the workflow) starts no service containers at all, so `job.services` and `job.container` stay empty for it. Give such a job a `container:` when it needs services.
 
 #### Proxy
 

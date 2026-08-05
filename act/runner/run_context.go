@@ -85,10 +85,10 @@ type RunContext struct {
 	// failures. Those failures must still make success() false and failure() true for later
 	// main-step if evaluation.
 	jobFailed bool
-	// jobContainerInfo and jobNetworkName describe the started job container for the
+	// jobContainerID and jobNetworkName describe the started job container for the
 	// `job.container` context. Both stay empty for a host-mode job.
-	jobContainerInfo *container.Info
-	jobNetworkName   string
+	jobContainerID string
+	jobNetworkName string
 	// stepEnv is a copy of the running step's environment, so that workflow commands parsed out
 	// of the container's output can be judged against it. Written by runStepExecutor and read on
 	// the log-writer goroutine, hence unsecureCommandMu, which also guards unsecureCommandErr.
@@ -102,8 +102,7 @@ type RunContext struct {
 type serviceContainer struct {
 	name      string
 	container container.ExecutionsEnvironment
-	// info is the container's state as of the last readiness poll, and the source of
-	// the id and ports the `job.services` context reports.
+	// info is the last readiness poll's state, the source of the `job.services` entry.
 	info *container.Info
 }
 
@@ -732,19 +731,14 @@ func (rc *RunContext) stopServiceContainers() common.Executor {
 	}
 }
 
-// defaultServiceReadyTimeout bounds how long a job waits for its service containers to
-// report healthy before the job fails.
 const defaultServiceReadyTimeout = 5 * time.Minute
 
-// serviceReadyPollInterval is how often a starting service container is polled. It is a
-// variable so tests do not have to wait a second per poll.
-var serviceReadyPollInterval = time.Second
+var serviceReadyPollInterval = time.Second // a variable so tests need not wait a second per poll
 
 // waitForServiceContainers blocks until every service container that declares a
-// healthcheck reports healthy, which is what GitHub does before it runs a job's steps.
-// Without it a workflow has to poll for its own services, and the common failure mode is
-// a first step that connects before the service is listening. Containers with no
-// healthcheck are ready as soon as they run: that is all docker can tell us about them.
+// healthcheck reports healthy, as GitHub does before it runs a job's steps. Without it a
+// first step can connect before the service is listening, which is why workflows carry
+// their own wait loops. A container without a healthcheck is ready as soon as it runs.
 func (rc *RunContext) waitForServiceContainers() common.Executor {
 	return func(ctx context.Context) error {
 		if len(rc.serviceContainers) == 0 {
@@ -757,87 +751,101 @@ func (rc *RunContext) waitForServiceContainers() common.Executor {
 			// Explicitly disabled: start the steps as soon as the containers are created,
 			// but still describe them for the `job.services` context.
 			for _, svc := range rc.serviceContainers {
-				info, err := svc.container.Inspect(ctx)
-				if err != nil {
-					return fmt.Errorf("failed to inspect service '%s': %w", svc.name, err)
+				if _, err := svc.inspect(ctx); err != nil {
+					return err
 				}
-				svc.info = info
 			}
 			return nil
 		case timeout == 0:
 			timeout = defaultServiceReadyTimeout
 		}
 
-		// Wait for every service in parallel, but stop as soon as one fails: errgroup
-		// cancels the derived context on the first error, so a service that exits or turns
-		// unhealthy fails the job right away instead of waiting for a slower sibling to time
-		// out. group.Wait returns that first error; the siblings' cancellation errors are
-		// discarded.
+		// Wait in parallel, and let the first error cancel the rest, so a service that exits
+		// or turns unhealthy fails the job at once instead of after a slower sibling's timeout.
 		group, groupCtx := errgroup.WithContext(ctx)
 		for _, svc := range rc.serviceContainers {
 			group.Go(func() error {
-				return rc.waitForServiceContainer(svc, timeout)(groupCtx)
+				return svc.waitUntilHealthy(groupCtx, timeout)
 			})
 		}
 		return group.Wait()
 	}
 }
 
-func (rc *RunContext) waitForServiceContainer(svc *serviceContainer, timeout time.Duration) common.Executor {
-	return func(ctx context.Context) error {
-		rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
-		waiting := false
+func (svc *serviceContainer) waitUntilHealthy(ctx context.Context, timeout time.Duration) error {
+	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+	waiting := false
 
-		ctx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-		for {
-			info, err := svc.container.Inspect(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to inspect service '%s': %w", svc.name, err)
+	for {
+		info, err := svc.inspect(ctx)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil { // the wait ended, the inspect only noticed it
+				return svc.waitEnded(timeout, ctxErr)
 			}
-			svc.info = info
+			return err
+		}
 
-			switch {
-			case info.State == "exited" || info.State == "dead":
-				return fmt.Errorf("the service '%s' exited with code %d before the job could use it", svc.name, info.ExitCode)
-			case info.Health == container.HealthUnhealthy:
-				return fmt.Errorf("the service '%s' is unhealthy%s", svc.name, healthOutputSuffix(info.HealthOutput))
-			case info.Health != container.HealthStarting:
-				// Healthy, or an image that declares no healthcheck.
-				if waiting {
-					rawLogger.Infof("Service '%s' is healthy", svc.name)
-				}
-				return nil
+		switch {
+		case info.Stopped():
+			return fmt.Errorf("the service '%s' exited with code %d before the job could use it", svc.name, info.ExitCode)
+		case info.Health == container.HealthUnhealthy:
+			return fmt.Errorf("the service '%s' is unhealthy%s", svc.name, svc.healthOutputSuffix())
+		case info.Health != container.HealthStarting:
+			// Healthy, or an image that declares no healthcheck.
+			if waiting {
+				rawLogger.Infof("Service '%s' is healthy", svc.name)
 			}
+			return nil
+		}
 
-			if !waiting {
-				rawLogger.Infof("Waiting for service '%s' to be healthy", svc.name)
-				waiting = true
-			}
+		if !waiting {
+			rawLogger.Infof("Waiting for service '%s' to be healthy", svc.name)
+			waiting = true
+		}
 
-			select {
-			case <-ctx.Done():
-				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					return fmt.Errorf("the service '%s' did not become healthy within %s%s", svc.name, timeout, healthOutputSuffix(info.HealthOutput))
-				}
-				return ctx.Err()
-			case <-time.After(serviceReadyPollInterval):
-			}
+		select {
+		case <-ctx.Done():
+			return svc.waitEnded(timeout, ctx.Err())
+		case <-time.After(serviceReadyPollInterval):
 		}
 	}
 }
 
-func healthOutputSuffix(output string) string {
-	if output == "" {
+// inspect records the container's state for the `job.services` context. The daemon drops
+// a service that exits under AutoRemove, so a missing container is that exit.
+func (svc *serviceContainer) inspect(ctx context.Context) (*container.Info, error) {
+	info, err := svc.container.Inspect(ctx)
+	switch {
+	case errors.Is(err, container.ErrContainerNotFound):
+		return nil, fmt.Errorf("the service '%s' exited before the job could use it", svc.name)
+	case err != nil:
+		return nil, fmt.Errorf("failed to inspect service '%s': %w", svc.name, err)
+	}
+	svc.info = info
+	return info, nil
+}
+
+// waitEnded reports why the wait stopped: its own deadline is the ready timeout, any
+// other end belongs to the job going away.
+func (svc *serviceContainer) waitEnded(timeout time.Duration, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("the service '%s' did not become healthy within %s%s", svc.name, timeout, svc.healthOutputSuffix())
+	}
+	return err
+}
+
+func (svc *serviceContainer) healthOutputSuffix() string {
+	if svc.info == nil || svc.info.HealthOutput == "" {
 		return ""
 	}
-	return ": " + output
+	return ": " + svc.info.HealthOutput
 }
 
 // captureJobContainerInfo records the started job container for the `job.container`
-// context. The context is a convenience, so a daemon that cannot describe the container
-// must not fail the job over it.
+// context, which is a convenience: failing to describe it must not fail the job.
 func (rc *RunContext) captureJobContainerInfo() common.Executor {
 	return func(ctx context.Context) error {
 		info, err := rc.JobContainer.Inspect(ctx)
@@ -845,7 +853,7 @@ func (rc *RunContext) captureJobContainerInfo() common.Executor {
 			common.Logger(ctx).Debugf("unable to inspect the job container: %v", err)
 			return nil
 		}
-		rc.jobContainerInfo = info
+		rc.jobContainerID = info.ID
 		return nil
 	}
 }
@@ -1192,18 +1200,16 @@ func (rc *RunContext) getJobContext() *model.JobContext {
 	}
 
 	jobContext := &model.JobContext{
-		Status: jobStatus,
+		Status:   jobStatus,
+		Services: map[string]model.JobService{}, // an empty map, never null, as on GitHub
 	}
-	if rc.jobContainerInfo != nil {
-		jobContext.Container.ID = rc.jobContainerInfo.ID
+	if rc.jobContainerID != "" {
+		jobContext.Container.ID = rc.jobContainerID
 		jobContext.Container.Network = rc.jobNetworkName
 	}
 	for _, svc := range rc.serviceContainers {
 		if svc.info == nil {
 			continue
-		}
-		if jobContext.Services == nil {
-			jobContext.Services = map[string]model.JobService{}
 		}
 		jobContext.Services[svc.name] = model.JobService{
 			ID:      svc.info.ID,
@@ -1214,17 +1220,12 @@ func (rc *RunContext) getJobContext() *model.JobContext {
 	return jobContext
 }
 
-// jobServicePorts rewrites docker's "5432/tcp" port keys to the plain port numbers the
-// `job.services.<id>.ports` context is keyed by, so `ports['5432']` resolves as it does
-// on GitHub.
+// jobServicePorts rewrites docker's "5432/tcp" keys to the plain port numbers
+// `job.services.<id>.ports` is keyed by, so `ports['5432']` resolves as it does on GitHub.
 func jobServicePorts(ports map[string]string) map[string]string {
-	if len(ports) == 0 {
-		return nil
-	}
 	mapped := make(map[string]string, len(ports))
 	for port, hostPort := range ports {
-		number, _, _ := strings.Cut(port, "/")
-		mapped[number] = hostPort
+		mapped[nat.Port(port).Port()] = hostPort
 	}
 	return mapped
 }

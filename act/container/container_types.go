@@ -6,12 +6,14 @@ package container
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
 	"gitea.com/gitea/runner/act/common"
 
 	"github.com/docker/go-connections/nat"
+	"github.com/moby/moby/api/types/container"
 )
 
 // ExitCodeError reports a non-zero process exit code from a container command.
@@ -57,18 +59,21 @@ type FileEntry struct {
 	Body string
 }
 
-// Health states of a container, as reported by its healthcheck. A container whose image
-// and options declare no healthcheck reports HealthNone.
+// Health states of a container, as reported by its healthcheck. They stay plain strings,
+// so a caller of Info needs no docker SDK of its own.
 const (
-	HealthNone      = "none"
-	HealthStarting  = "starting"
-	HealthHealthy   = "healthy"
-	HealthUnhealthy = "unhealthy"
+	HealthNone      = string(container.NoHealthcheck)
+	HealthStarting  = string(container.Starting)
+	HealthHealthy   = string(container.Healthy)
+	HealthUnhealthy = string(container.Unhealthy)
 )
 
-// Info describes a created container. It carries what the `job` context needs
-// (the id, the networks and the published ports) plus the state the runner waits on
-// before it lets a job's steps talk to a service.
+// ErrContainerNotFound is what an AutoRemove container becomes moments after it exits.
+// Its text is a fragment, missingContainerError composes it into the shared message.
+var ErrContainerNotFound = errors.New("does not exist")
+
+// Info describes a created container: what the `job` context reports about it, plus the
+// state the runner waits on before it lets a job's steps talk to a service.
 type Info struct {
 	ID string
 	// State is the docker container state: "created", "running", "exited", ...
@@ -76,12 +81,21 @@ type Info struct {
 	ExitCode int
 	// Health is one of the Health* constants, HealthNone when nothing is declared.
 	Health string
-	// HealthOutput is the output of the last healthcheck probe, for reporting failures.
+	// HealthOutput is the last healthcheck probe's output, for reporting failures.
 	HealthOutput string
 	// Ports maps a container port ("5432/tcp") to the host port it is published on.
 	Ports map[string]string
-	// Networks are the names of the networks the container is attached to.
-	Networks []string
+}
+
+// Stopped reports a container that will not run again, including one the daemon is
+// already dropping because it exited under AutoRemove.
+func (i *Info) Stopped() bool {
+	switch container.ContainerState(i.State) {
+	case container.StateExited, container.StateDead, container.StateRemoving:
+		return true
+	default:
+		return false
+	}
 }
 
 // Container for managing docker run containers

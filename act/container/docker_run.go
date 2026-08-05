@@ -198,9 +198,8 @@ func (cr *containerReference) GetContainerArchive(ctx context.Context, srcPath s
 	return result.Content, nil
 }
 
-// Inspect reports the container's current state. It is used to wait for a service
-// container to become healthy and to fill the `job` context, so it resolves the
-// container by name when the id is not known yet rather than failing.
+// Inspect reports the container's current state, resolving it by name when its id is not
+// known yet. A container the daemon no longer knows is reported as ErrContainerNotFound.
 func (cr *containerReference) Inspect(ctx context.Context) (*Info, error) {
 	if common.Dryrun(ctx) {
 		return &Info{Health: HealthNone}, nil
@@ -208,15 +207,19 @@ func (cr *containerReference) Inspect(ctx context.Context) (*Info, error) {
 	if err := cr.connect()(ctx); err != nil {
 		return nil, err
 	}
-	if err := cr.find()(ctx); err != nil {
-		return nil, err
+	if cr.id == "" { // a known id is trusted here, find() would spend a call of its own to validate it
+		if err := cr.find()(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if cr.id == "" {
 		return nil, cr.missingContainerError("inspect it")
 	}
 
 	result, err := cr.cli.ContainerInspect(ctx, cr.id, client.ContainerInspectOptions{})
-	if err != nil {
+	if cerrdefs.IsNotFound(err) {
+		return nil, cr.missingContainerError("inspect it")
+	} else if err != nil {
 		return nil, err
 	}
 	return containerInfoFromInspect(result.Container), nil
@@ -240,23 +243,16 @@ func containerInfoFromInspect(inspect container.InspectResponse) *Info {
 	}
 
 	if settings := inspect.NetworkSettings; settings != nil {
+		info.Ports = map[string]string{}
 		for port, bindings := range settings.Ports {
 			// The last binding wins, matching how a workflow reads a single host port
 			// for a service port.
 			for _, binding := range bindings {
-				if binding.HostPort == "" {
-					continue
+				if binding.HostPort != "" {
+					info.Ports[port.String()] = binding.HostPort
 				}
-				if info.Ports == nil {
-					info.Ports = map[string]string{}
-				}
-				info.Ports[port.String()] = binding.HostPort
 			}
 		}
-		for name := range settings.Networks {
-			info.Networks = append(info.Networks, name)
-		}
-		slices.Sort(info.Networks)
 	}
 
 	return info
@@ -408,9 +404,10 @@ func (cr *containerReference) Close() common.Executor {
 }
 
 // missingContainerError is the shared "container X does not exist" error
-// used by ops that need a live cr.id.
+// used by ops that need a live cr.id. It wraps ErrContainerNotFound so a caller can tell
+// a container the daemon dropped from a daemon that is failing.
 func (cr *containerReference) missingContainerError(format string, args ...any) error {
-	return fmt.Errorf("container %q does not exist; cannot "+format, append([]any{cr.input.Name}, args...)...)
+	return fmt.Errorf("container %q %w; cannot "+format, append([]any{cr.input.Name, ErrContainerNotFound}, args...)...)
 }
 
 func (cr *containerReference) find() common.Executor {

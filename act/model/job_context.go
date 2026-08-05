@@ -18,8 +18,7 @@ type JobContainerContext struct {
 }
 
 // JobService describes one of a job's service containers. Ports maps a container port
-// ("5432/tcp") to the host port it was published on, which is how a workflow finds the
-// port docker picked for it.
+// to the host port it was published on, which is how a workflow finds it.
 type JobService struct {
 	ID      string            `json:"id"`
 	Network string            `json:"network"`

@@ -154,8 +154,7 @@ func (e *HostEnvironment) CopyDir(destPath, srcPath string, useGitIgnore bool) c
 	}
 }
 
-// Inspect reports no container: steps run directly on the host, so there is nothing
-// with an id, a healthcheck or published ports for the `job` context to describe.
+// Inspect reports no container: steps run on the host, so there is nothing to describe.
 func (e *HostEnvironment) Inspect(_ context.Context) (*Info, error) {
 	return &Info{Health: HealthNone}, nil
 }
