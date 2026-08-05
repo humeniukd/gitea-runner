@@ -129,23 +129,22 @@ Same idea as `dind`, but built on `docker:dind-rootless` so the bundled daemon a
 
 ### Configuration
 
-The runner is configured with a YAML file. Generate a starting point (this matches what ships in the tree):
+The runner is configured with a YAML file. `config init` writes one in which every option is left at its default, `config generate` prints [config.example.yaml](internal/pkg/config/config.example.yaml), which documents every option with its default, all commented out:
 
 ```bash
-./gitea-runner config generate > config.yaml
+./gitea-runner config init
+./gitea-runner config generate | less
 ```
 
-> The top-level `generate-config` command still does the same thing, but is deprecated in favour of `config generate`.
+> The top-level `generate-config` command still does what `config generate` does, but is deprecated in favour of it.
 
-Pass it with `-c` / `--config` on any command that loads configuration (`register`, `daemon`, `cache-server`):
+Pass the config file with `-c` / `--config` on any command that loads configuration (`register`, `daemon`, `cache-server`):
 
 ```bash
 ./gitea-runner -c config.yaml register
 ./gitea-runner -c config.yaml daemon
 ./gitea-runner -c config.yaml cache-server
 ```
-
-Every option is described in [config.example.yaml](internal/pkg/config/config.example.yaml) (the same content `config generate` prints).
 
 #### Editing a config file
 
@@ -160,11 +159,11 @@ Every option is described in [config.example.yaml](internal/pkg/config/config.ex
 ./gitea-runner -c config.yaml config get runner.labels
 ```
 
-`-c` is optional for these subcommands: without it they use `config.yaml` (or `config.yml`) from the working directory, falling back to the directory of the `gitea-runner` binary, and print which file they picked to stderr.
+`-c` is optional for these subcommands: without it they use `config.yaml` (or `config.yml`) from the working directory, falling back to the directory of the `gitea-runner` binary, and print which file they picked to stderr. `config init` writes `config.yaml` there too, and refuses to overwrite an existing file without `--force`.
 
 Keys are the dotted YAML path and are validated against the known options, so a typo is rejected instead of being written. `add` and `remove` only work on list options such as `runner.labels` and `container.valid_volumes`, and fail if the value is already present or missing. `set` replaces the whole list when given several values.
 
-The file is re-encoded on every edit, so indentation is normalised to two spaces and blank lines inside a section are dropped.
+Every edit re-encodes the file: indentation becomes two spaces, comments keep their place, and a blank line between two values of a section is dropped.
 
 #### Without a config file
 
