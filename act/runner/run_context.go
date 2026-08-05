@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
@@ -88,6 +89,12 @@ type RunContext struct {
 	// `job.container` context. Both stay empty for a host-mode job.
 	jobContainerInfo *container.Info
 	jobNetworkName   string
+	// stepEnv is a copy of the running step's environment, so that workflow commands parsed out
+	// of the container's output can be judged against it. Written by runStepExecutor and read on
+	// the log-writer goroutine, hence unsecureCommandMu, which also guards unsecureCommandErr.
+	stepEnv            map[string]string
+	unsecureCommandErr error // refused ::set-env::/::add-path::, turned into a step failure
+	unsecureCommandMu  sync.Mutex
 }
 
 // serviceContainer is a job's service container together with the id the workflow gave
@@ -98,6 +105,19 @@ type serviceContainer struct {
 	// info is the container's state as of the last readiness poll, and the source of
 	// the id and ports the `job.services` context reports.
 	info *container.Info
+}
+
+// setCurrentStepEnv records the environment of the step about to run.
+func (rc *RunContext) setCurrentStepEnv(env map[string]string) {
+	rc.unsecureCommandMu.Lock()
+	defer rc.unsecureCommandMu.Unlock()
+	rc.stepEnv = env
+}
+
+func (rc *RunContext) currentStepEnv() map[string]string {
+	rc.unsecureCommandMu.Lock()
+	defer rc.unsecureCommandMu.Unlock()
+	return rc.stepEnv
 }
 
 // markCancelled flags the job as cancelled so subsequent step `if` evaluations and the
