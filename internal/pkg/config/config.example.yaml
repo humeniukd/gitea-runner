@@ -226,11 +226,8 @@ container:
   # from the DinD daemon's filesystem. When enabled, ensure the workspace parent
   # directory is also mounted into the runner container and listed in valid_volumes.
   bind_workdir: false
-  # How long a job waits for its service containers to report healthy before it fails.
-  # Only services whose image or `options` declare a healthcheck are waited for, the
-  # others are ready as soon as they run. A service that reports unhealthy or exits
-  # fails the job right away, without waiting for this timeout.
-  # Defaults to 5m. Set a negative value (e.g. -1s) to start the steps immediately.
+  # How long a job waits for a service container that declares a healthcheck to become
+  # healthy. A negative value (e.g. -1s) starts the steps without waiting.
   service_ready_timeout: 5m
 
 host:

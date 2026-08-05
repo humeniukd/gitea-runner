@@ -244,7 +244,7 @@ services:
       --health-retries 10
 ```
 
-A service that reports unhealthy or exits fails the job right away. One that never becomes healthy fails it after `container.service_ready_timeout` (default `5m`, negative disables the wait).
+A service that reports unhealthy fails the job right away, with its container log. One that never becomes healthy fails it after `container.service_ready_timeout` (default `5m`, negative disables the wait). A service that exits without declaring a healthcheck only gets its log and a warning.
 
 A job in a container reaches a service by its id on the job network, on the port the service listens on, for example `psql -h postgres -p 5432`. The started containers also fill the `job` context: `job.container.{id,network}` and `job.services.<id>.{id,network,ports}`, where `ports` maps a container port to the host port Docker published it on, for the services that publish one.
 

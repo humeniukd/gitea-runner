@@ -561,7 +561,7 @@ func TestRejectsMissingContainer(t *testing.T) {
 	_, err = cr.Inspect(ctx)
 	check("Inspect", err)
 
-	// A known id the daemon has since dropped, which is how an AutoRemove service exits.
+	// a known id the daemon has since dropped
 	client.On("ContainerInspect", ctx, "gone", mobyclient.ContainerInspectOptions{}).
 		Return(mobyclient.ContainerInspectResult{}, cerrdefs.ErrNotFound)
 	removed := &containerReference{id: "gone", cli: client, input: &NewContainerInput{Name: "job-1"}}
@@ -616,32 +616,6 @@ func TestDockerCopyToSymlinkPath(t *testing.T) {
 	// exact step that fails on a broken daemon.
 	err := rc.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
 	require.NoError(t, err)
-}
-
-// The readiness wait reads a gone container as an exit, which only holds while the daemon
-// really drops an AutoRemove container the moment it exits. This catches a daemon that stops.
-func TestDockerInspectAutoRemovedContainer(t *testing.T) {
-	requireDocker(t)
-	ctx := context.Background()
-
-	rc := NewContainer(&NewContainerInput{
-		Image:      "alpine:latest",
-		Entrypoint: []string{"true"},
-		Name:       "act-test-inspect-" + time.Now().Format("20060102150405.000000"),
-		AutoRemove: true,
-	})
-	require.NoError(t, rc.Pull(false)(ctx))
-	require.NoError(t, rc.Create(nil, nil)(ctx))
-	require.NoError(t, rc.Start(false)(ctx))
-	t.Cleanup(func() {
-		_ = rc.Remove()(ctx)
-		_ = rc.Close()(ctx)
-	})
-
-	require.Eventually(t, func() bool {
-		_, err := rc.Inspect(ctx)
-		return errors.Is(err, ErrContainerNotFound)
-	}, 30*time.Second, 100*time.Millisecond)
 }
 
 // Type assert containerReference implements ExecutionsEnvironment
@@ -903,7 +877,7 @@ func TestContainerInfoFromInspect(t *testing.T) {
 			},
 		})
 
-		assert.Equal(t, map[string]string{"5432/tcp": "49153"}, info.Ports)
+		assert.Equal(t, map[string]string{"5432": "49153"}, info.Ports)
 	})
 
 	t.Run("tolerates a container without state", func(t *testing.T) {

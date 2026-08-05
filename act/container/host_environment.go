@@ -154,9 +154,12 @@ func (e *HostEnvironment) CopyDir(destPath, srcPath string, useGitIgnore bool) c
 	}
 }
 
-// Inspect reports no container: steps run on the host, so there is nothing to describe.
+func (e *HostEnvironment) DumpLogs(_ context.Context) error {
+	return nil
+}
+
 func (e *HostEnvironment) Inspect(_ context.Context) (*Info, error) {
-	return &Info{Health: HealthNone}, nil
+	return &Info{Health: HealthNone, Ports: map[string]string{}}, nil
 }
 
 func (e *HostEnvironment) GetContainerArchive(ctx context.Context, srcPath string) (io.ReadCloser, error) {

@@ -59,43 +59,30 @@ type FileEntry struct {
 	Body string
 }
 
-// Health states of a container, as reported by its healthcheck. They stay plain strings,
-// so a caller of Info needs no docker SDK of its own.
+// Container and healthcheck states, as plain strings so a caller of Info needs no docker
+// SDK of its own.
 const (
+	StateRunning = string(container.StateRunning)
+
 	HealthNone      = string(container.NoHealthcheck)
 	HealthStarting  = string(container.Starting)
 	HealthHealthy   = string(container.Healthy)
 	HealthUnhealthy = string(container.Unhealthy)
 )
 
-// ErrContainerNotFound is what an AutoRemove container becomes moments after it exits.
-// Its text is a fragment, missingContainerError composes it into the shared message.
+// ErrContainerNotFound reports a container the daemon no longer knows. Its text is a
+// fragment, missingContainerError composes it into the message every operation shares.
 var ErrContainerNotFound = errors.New("does not exist")
 
-// Info describes a created container: what the `job` context reports about it, plus the
-// state the runner waits on before it lets a job's steps talk to a service.
+// Info is a snapshot of a container, as of one inspect.
 type Info struct {
-	ID string
-	// State is the docker container state: "created", "running", "exited", ...
-	State    string
+	ID       string
+	State    string // the docker container state: "created", "running", "exited", ...
 	ExitCode int
-	// Health is one of the Health* constants, HealthNone when nothing is declared.
-	Health string
-	// HealthOutput is the last healthcheck probe's output, for reporting failures.
+	Health   string // one of the Health* constants
+	// HealthOutput is the last healthcheck probe's output.
 	HealthOutput string
-	// Ports maps a container port ("5432/tcp") to the host port it is published on.
-	Ports map[string]string
-}
-
-// Stopped reports a container that will not run again, including one the daemon is
-// already dropping because it exited under AutoRemove.
-func (i *Info) Stopped() bool {
-	switch container.ContainerState(i.State) {
-	case container.StateExited, container.StateDead, container.StateRemoving:
-		return true
-	default:
-		return false
-	}
+	Ports        map[string]string // container port ("5432") to the host port it is published on
 }
 
 // Container for managing docker run containers
@@ -107,6 +94,7 @@ type Container interface {
 	CopyDir(destPath, srcPath string, useGitIgnore bool) common.Executor
 	GetContainerArchive(ctx context.Context, srcPath string) (io.ReadCloser, error)
 	Inspect(ctx context.Context) (*Info, error)
+	DumpLogs(ctx context.Context) error
 	Pull(forcePull bool) common.Executor
 	Start(attach bool) common.Executor
 	Exec(command []string, env map[string]string, user, workdir string) common.Executor

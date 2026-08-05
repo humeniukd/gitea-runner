@@ -227,10 +227,11 @@ func (fakeContainer) Copy(string, ...*container.FileEntry) common.Executor {
 	return func(context.Context) error { return nil }
 }
 
-// A container without a healthcheck is ready at once, so the readiness wait passes through.
 func (fakeContainer) Inspect(context.Context) (*container.Info, error) {
 	return &container.Info{ID: "fake", State: "running", Health: container.HealthNone}, nil
 }
+
+func (fakeContainer) DumpLogs(context.Context) error { return nil }
 
 // Regression test: a service without a `credentials:` block resolves to empty
 // credentials, which used to overwrite the job container's own credentials.
@@ -1093,48 +1094,42 @@ func TestWaitForServiceContainers(t *testing.T) {
 			Health:       container.HealthUnhealthy,
 			HealthOutput: "connection refused",
 		}, nil).Once()
+		service.On("DumpLogs", mock.Anything).Return(nil).Once()
 
 		rc := newRunContext(0, &serviceContainer{name: "postgres", container: service})
 		err := rc.waitForServiceContainers()(context.Background())
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "the service 'postgres' is unhealthy: connection refused")
+		service.AssertExpectations(t)
 	})
 
-	// "removing" is what a service that exits under AutoRemove reports on its way out.
-	t.Run("fails when a service exits before the job uses it", func(t *testing.T) {
+	t.Run("lets the steps run when a service exits without a healthcheck", func(t *testing.T) {
 		service := &containerMock{}
 		service.On("Inspect", mock.Anything).
-			Return(&container.Info{State: "removing", ExitCode: 2}, nil).Once()
+			Return(&container.Info{State: "exited", ExitCode: 2, Health: container.HealthNone}, nil).Once()
 
 		rc := newRunContext(0, &serviceContainer{name: "postgres", container: service})
-		err := rc.waitForServiceContainers()(context.Background())
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "the service 'postgres' exited with code 2")
+		require.NoError(t, rc.waitForServiceContainers()(context.Background()))
 	})
 
-	// AutoRemove usually wins the race, leaving no container to inspect at all.
-	t.Run("reports a container the daemon already dropped as an exit", func(t *testing.T) {
+	t.Run("proceeds when the container is gone", func(t *testing.T) {
 		service := &containerMock{}
 		service.On("Inspect", mock.Anything).
 			Return((*container.Info)(nil), container.ErrContainerNotFound).Once()
 
 		rc := newRunContext(0, &serviceContainer{name: "postgres", container: service})
-		err := rc.waitForServiceContainers()(context.Background())
-		require.EqualError(t, err, "the service 'postgres' exited before the job could use it")
+		require.NoError(t, rc.waitForServiceContainers()(context.Background()))
 	})
 
-	// With several services, a failing one must fail the job immediately, not after a
-	// still-starting sibling reaches the full timeout.
 	t.Run("fails right away when one service fails while another is still starting", func(t *testing.T) {
 		failing := &containerMock{}
 		failing.On("Inspect", mock.Anything).
-			Return(&container.Info{State: "exited", ExitCode: 2}, nil)
+			Return(&container.Info{State: "running", Health: container.HealthUnhealthy}, nil)
+		failing.On("DumpLogs", mock.Anything).Return(nil).Once()
 		starting := &containerMock{}
 		starting.On("Inspect", mock.Anything).
 			Return(&container.Info{State: "running", Health: container.HealthStarting}, nil)
 
-		// A long timeout: without fail-fast the call would block on the starting service
-		// for the whole timeout instead of returning the exit error at once.
 		rc := newRunContext(10*time.Second,
 			&serviceContainer{name: "failing", container: failing},
 			&serviceContainer{name: "starting", container: starting})
@@ -1145,7 +1140,7 @@ func TestWaitForServiceContainers(t *testing.T) {
 		select {
 		case err := <-done:
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "the service 'failing' exited with code 2")
+			assert.Contains(t, err.Error(), "the service 'failing' is unhealthy")
 		case <-time.After(2 * time.Second):
 			t.Fatal("waitForServiceContainers did not fail fast; it waited for the starting service")
 		}
@@ -1202,14 +1197,31 @@ func TestWaitForServiceContainers(t *testing.T) {
 	})
 }
 
+func TestReportUnstartedServices(t *testing.T) {
+	dead := &containerMock{}
+	dead.On("Inspect", mock.Anything).Return(&container.Info{ID: "dead-id", State: "exited", ExitCode: 1}, nil).Once()
+	dead.On("DumpLogs", mock.Anything).Return(nil).Once()
+	running := &containerMock{}
+	running.On("Inspect", mock.Anything).Return(&container.Info{ID: "run-id", State: "running"}, nil).Once()
+
+	rc := &RunContext{serviceContainers: []*serviceContainer{
+		{name: "postgres", container: dead},
+		{name: "redis", container: running},
+	}}
+
+	require.NoError(t, rc.reportUnstartedServices()(context.Background()))
+	dead.AssertExpectations(t)
+	running.AssertExpectations(t)
+}
+
 func TestGetJobContextReportsContainers(t *testing.T) {
 	rc := &RunContext{
 		jobNetworkName: "job-network",
 		jobContainerID: "job-container-id",
 		serviceContainers: []*serviceContainer{
-			{name: "postgres", info: &container.Info{ID: "svc-id", Ports: map[string]string{"5432/tcp": "49153"}}},
+			{name: "postgres", info: &container.Info{ID: "svc-id", Ports: map[string]string{"5432": "49153"}}},
 			// A service that publishes no port reports an empty map, as GitHub does.
-			{name: "redis", info: &container.Info{ID: "redis-id"}},
+			{name: "redis", info: &container.Info{ID: "redis-id", Ports: map[string]string{}}},
 			// A service that never reported is left out rather than reported as empty.
 			{name: "mailhog"},
 		},
@@ -1219,15 +1231,13 @@ func TestGetJobContextReportsContainers(t *testing.T) {
 
 	assert.Equal(t, "job-container-id", jobContext.Container.ID)
 	assert.Equal(t, "job-network", jobContext.Container.Network)
-	// The context is keyed by the plain container port, as `ports['5432']` on GitHub.
 	assert.Equal(t, map[string]model.JobService{
 		"postgres": {ID: "svc-id", Network: "job-network", Ports: map[string]string{"5432": "49153"}},
 		"redis":    {ID: "redis-id", Network: "job-network", Ports: map[string]string{}},
 	}, jobContext.Services)
 }
 
-// A host-mode job has no container, so the context must stay empty instead of reporting
-// the placeholder values the host environment returns.
+// A job that never started a container reports an empty context, not a placeholder.
 func TestGetJobContextWithoutContainer(t *testing.T) {
 	jobContext := (&RunContext{}).getJobContext()
 
