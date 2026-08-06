@@ -129,27 +129,38 @@ Same idea as `dind`, but built on `docker:dind-rootless` so the bundled daemon a
 
 ### Configuration
 
-The runner is configured with a YAML file. Generate a starting point (this matches what ships in the tree):
+The runner reads a YAML file. Without one, every option keeps its default.
 
 ```bash
-./gitea-runner generate-config > config.yaml
+./gitea-runner config init             # write config.yaml, with no option set
+./gitea-runner config generate | less  # read what the options do
+./gitea-runner -c config.yaml daemon   # -c also works on register and cache-server
 ```
 
-Pass it with `-c` / `--config` on any command that loads configuration (`register`, `daemon`, `cache-server`):
+`config generate` prints [config.example.yaml](internal/pkg/config/config.example.yaml). Every value in it is commented out, so copy the lines you want to change into your own file and uncomment them.
+
+#### Editing a config file
+
+`config` edits a file in place, which is handy in provisioning scripts:
 
 ```bash
-./gitea-runner -c config.yaml register
-./gitea-runner -c config.yaml daemon
-./gitea-runner -c config.yaml cache-server
+./gitea-runner config set runner.capacity 4
+./gitea-runner config set runner.timeout 90m  # written as 1h30m0s
+./gitea-runner config set runner.envs.MY_VAR value
+./gitea-runner config add runner.labels 'ubuntu:docker://node:22'
+./gitea-runner config remove runner.labels 'ubuntu:docker://node:22'
+./gitea-runner config get runner.labels
 ```
 
-Every option is described in [config.example.yaml](internal/pkg/config/config.example.yaml) (the same content `generate-config` prints).
+A key is its dotted YAML path. An unknown key, a value of the wrong type, or `add`/`remove` on anything but a list is refused before the file is touched. `set` replaces a whole list when you give it several values.
 
-#### Without a config file
+An edit keeps the comments and the key order of the file. Indentation becomes two spaces, and a blank line between two values is dropped.
 
-If you omit `-c`, built-in defaults apply (same as an empty YAML document).
+`config get`, `set`, `add` and `remove` use `config.yaml` (or `config.yml`) from the working directory, then from the directory of the binary, and print their choice to stderr. `config init` writes `config.yaml` in the working directory, and refuses to overwrite an existing config without `--force`. Pass `-c` for another path.
 
-Earlier releases let a small set of environment variables (`GITEA_DEBUG`, `GITEA_TRACE`, `GITEA_RUNNER_CAPACITY`, `GITEA_RUNNER_FILE`, `GITEA_RUNNER_ENVIRON`, `GITEA_RUNNER_ENV_FILE`) override parts of the default config. Those overrides have been removed — use a YAML config file for all settings instead. For the Docker images, the entrypoint still understands a separate set of variables (such as `RUNNER_STATE_FILE`); see [scripts/run.sh](scripts/run.sh) and the container documentation below.
+#### Environment variables
+
+Earlier releases let a few environment variables (`GITEA_DEBUG`, `GITEA_TRACE`, `GITEA_RUNNER_CAPACITY`, `GITEA_RUNNER_FILE`, `GITEA_RUNNER_ENVIRON`, `GITEA_RUNNER_ENV_FILE`) override parts of the config. They are gone, use the YAML file for all settings. The Docker images still read their own variables, such as `RUNNER_STATE_FILE`, see [scripts/run.sh](scripts/run.sh) and the container documentation below.
 
 ### Labels
 
@@ -208,6 +219,26 @@ The `daemon` command also accepts `--labels` (which defaults to the `GITEA_RUNNE
 Whenever the resulting labels differ from the ones in the registration file, they are written back to it and re-declared to the Gitea instance on startup.
 
 > **Note:** A runner that only exposes `host` labels still needs access to a Docker daemon (e.g. a mounted `/var/run/docker.sock`) whenever a job uses a `docker://` action or a service container. `host` labels only change where the job's own steps run; container-based steps and actions are still executed with Docker.
+
+#### Service containers
+
+A job's `services` are started before its steps run. When a service's image or its `options` declare a healthcheck, the runner waits for it to report healthy, so a workflow does not have to poll for its own services:
+
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    options: >-
+      --health-cmd pg_isready
+      --health-interval 5s
+      --health-retries 10
+```
+
+A service that reports unhealthy fails the job right away, with its container log. One that never becomes healthy fails it after `container.service_ready_timeout` (default `5m`, negative disables the wait). A service that exits without declaring a healthcheck only gets its log and a warning.
+
+A job in a container reaches a service by its id on the job network, on the port the service listens on, for example `psql -h postgres -p 5432`. The started containers also fill the `job` context: `job.container.{id,network}` and `job.services.<id>.{id,network,ports}`, where `ports` maps a container port to the host port Docker published it on, for the services that publish one.
+
+Unlike GitHub, a job whose steps run on the host (a `host` label without `container:`) starts no service containers, so `job.services` and `job.container` stay empty. Give such a job a `container:` when it needs services.
 
 #### Proxy
 

@@ -24,6 +24,12 @@ import (
 // (so a programmatically built config still gets a sane bound).
 const DefaultPostTaskScriptTimeout = 5 * time.Minute
 
+// Minimal is the smallest config file that runs the runner: options it does not
+// name keep their default, and it names none.
+const Minimal = `# Minimal config file. Every option it does not set keeps its default.
+# "gitea-runner config generate" prints all options, "config set <key> <value>" sets one here.
+`
+
 // Log represents the configuration for logging.
 type Log struct {
 	Level string `yaml:"level"` // Level indicates the logging level.
@@ -92,6 +98,7 @@ type Container struct {
 	RequireDocker        bool                          `yaml:"require_docker"`         // Always require a reachable docker daemon, even if not required by runner
 	DockerTimeout        time.Duration                 `yaml:"docker_timeout"`         // Timeout to wait for the docker daemon to be reachable, if docker is required by require_docker or runner
 	BindWorkdir          bool                          `yaml:"bind_workdir"`           // BindWorkdir binds the workspace to the host filesystem instead of using Docker volumes. Required for DinD when jobs use docker compose with bind mounts.
+	ServiceReadyTimeout  time.Duration                 `yaml:"service_ready_timeout"`  // ServiceReadyTimeout bounds how long a job waits for a service container that declares a healthcheck to report healthy. Negative disables waiting.
 }
 
 type ContainerNetworkCreateOptions struct {
