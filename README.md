@@ -294,6 +294,8 @@ Run one dedicated `gitea-runner cache-server` that all runners point at.
    cache:
      dir: /data/actcache
      port: 8088
+     # Set this when jobs must reach the server through a reverse proxy or a different public URL.
+     # external_server: "https://cache.example.invalid/"
      external_secret: "replace-with-a-strong-random-secret"
      # external_secret_file: /path/to/secret # secret can also be passed via a file
    ```
