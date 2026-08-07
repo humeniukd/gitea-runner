@@ -718,7 +718,7 @@ func TestSanitizeOptionsHostConfig(t *testing.T) {
 	}
 
 	hostConfig := dangerous()
-	sanitizeOptionsHostConfig(logger, hostConfig)
+	sanitizeOptionsHostConfig(logger, hostConfig, &container.HostConfig{})
 
 	assert.Empty(t, string(hostConfig.PidMode))
 	assert.Empty(t, string(hostConfig.IpcMode))
@@ -743,23 +743,29 @@ func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.
 		"--security-opt apparmor=unconfined --volumes-from other " +
 		"--runtime runc --cgroup-parent /custom --sysctl net.ipv4.ip_forward=1"
 
-	t.Run("unprivileged strips host-escape options", func(t *testing.T) {
+	merge := func(t *testing.T, runnerOptions, workflowOptions string, privileged bool) *container.HostConfig {
+		t.Helper()
 		logger, _ := test.NewNullLogger()
-		ctx := common.WithLogger(context.Background(), logger)
 		cr := &containerReference{
 			input: &NewContainerInput{
-				Options:     dangerousOptions,
-				NetworkMode: "bridge",
-				UsernsMode:  "private",
+				RunnerOptions:   runnerOptions,
+				WorkflowOptions: workflowOptions,
+				NetworkMode:     "bridge",
+				UsernsMode:      "private",
 			},
 		}
 
-		_, hostConfig, err := cr.mergeContainerConfigs(ctx, &container.Config{}, &container.HostConfig{
-			Privileged:  false,
+		_, hostConfig, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{
+			Privileged:  privileged,
 			UsernsMode:  container.UsernsMode("private"),
 			NetworkMode: container.NetworkMode("bridge"),
 		})
 		require.NoError(t, err)
+		return hostConfig
+	}
+
+	t.Run("unprivileged strips host-escape options", func(t *testing.T) {
+		hostConfig := merge(t, "", dangerousOptions, false)
 
 		assert.False(t, hostConfig.Privileged)
 		assert.Empty(t, string(hostConfig.PidMode))
@@ -776,25 +782,33 @@ func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.
 		assert.Empty(t, hostConfig.Sysctls)
 	})
 
-	t.Run("privileged preserves options", func(t *testing.T) {
-		logger, _ := test.NewNullLogger()
-		ctx := common.WithLogger(context.Background(), logger)
-		cr := &containerReference{
-			input: &NewContainerInput{
-				Options:     "--pid=host --cap-add=ALL --security-opt seccomp=unconfined",
-				NetworkMode: "bridge",
-			},
-		}
+	// https://gitea.com/gitea/runner/issues/1142: the options the runner is configured
+	// with are the administrator's own, only the workflow's are untrusted.
+	t.Run("unprivileged keeps the runner's own options", func(t *testing.T) {
+		hostConfig := merge(t, "--security-opt seccomp=unconfined --cap-add SYS_ADMIN --sysctl net.ipv4.ip_forward=1", dangerousOptions, false)
 
-		_, hostConfig, err := cr.mergeContainerConfigs(ctx, &container.Config{}, &container.HostConfig{
-			Privileged:  true,
-			NetworkMode: container.NetworkMode("bridge"),
-		})
-		require.NoError(t, err)
+		assert.Equal(t, []string{"seccomp=unconfined"}, hostConfig.SecurityOpt)
+		assert.Equal(t, []string{"SYS_ADMIN"}, hostConfig.CapAdd)
+		assert.Equal(t, map[string]string{"net.ipv4.ip_forward": "1"}, hostConfig.Sysctls)
+		assert.Empty(t, string(hostConfig.PidMode))
+		assert.Equal(t, "private", string(hostConfig.UsernsMode))
+		assert.Empty(t, hostConfig.Runtime)
+	})
+
+	t.Run("unprivileged without workflow options keeps them all", func(t *testing.T) {
+		hostConfig := merge(t, dangerousOptions, "", false)
 
 		assert.Equal(t, "host", string(hostConfig.PidMode))
 		assert.Equal(t, []string{"ALL"}, hostConfig.CapAdd)
-		assert.Equal(t, []string{"seccomp=unconfined"}, hostConfig.SecurityOpt)
+		assert.Equal(t, "runc", hostConfig.Runtime)
+	})
+
+	t.Run("privileged preserves options", func(t *testing.T) {
+		hostConfig := merge(t, "", dangerousOptions, true)
+
+		assert.Equal(t, "host", string(hostConfig.PidMode))
+		assert.Equal(t, []string{"ALL"}, hostConfig.CapAdd)
+		assert.Equal(t, []string{"seccomp=unconfined", "apparmor=unconfined"}, hostConfig.SecurityOpt)
 	})
 }
 
@@ -893,8 +907,8 @@ func TestMergeContainerConfigsVolumesReplaceRunnerMounts(t *testing.T) {
 	ctx := common.WithLogger(context.Background(), logger)
 	cr := &containerReference{
 		input: &NewContainerInput{
-			NetworkMode: "bridge",
-			Options:     "--volume /host/tools:/opt/hostedtoolcache",
+			NetworkMode:   "bridge",
+			RunnerOptions: "--volume /host/tools:/opt/hostedtoolcache",
 		},
 	}
 
