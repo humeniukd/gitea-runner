@@ -62,6 +62,9 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 		if err != nil {
 			return err
 		}
+		if cfg.Cache.ExternalServer != "" {
+			cacheHandler.SetResultsURL(cfg.Cache.ExternalServer)
+		}
 
 		log.Infof("cache server is listening on %v", cacheHandler.ExternalURL())
 

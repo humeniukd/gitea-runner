@@ -84,6 +84,7 @@ type Handler struct {
 	gcAt  time.Time
 
 	outboundIP string
+	resultsURL string
 
 	// internalSecret guards /_internal/{register,revoke}. When set, a remote
 	// runner can use these endpoints to pre-register per-job
@@ -210,6 +211,15 @@ func StartHandler(dir, outboundIP string, port uint16, internalSecret string, lo
 func (h *Handler) ExternalURL() string {
 	// TODO: make the external url configurable if necessary
 	return fmt.Sprintf("http://%s:%d", h.outboundIP, h.port)
+}
+
+// SetResultsURL overrides the URL announced for ACTIONS_RESULTS_URL when this
+// handler is used as the cache service v2 endpoint behind a reverse proxy.
+func (h *Handler) SetResultsURL(resultsURL string) {
+	if h == nil {
+		return
+	}
+	h.resultsURL = strings.TrimRight(resultsURL, "/")
 }
 
 // RegisterJob makes token a valid bearer credential for cache requests from
@@ -640,6 +650,9 @@ type internalRevokeBody struct {
 func (h *Handler) ResultsURL(cred JobCredential) string {
 	if h == nil || cred.Results == "" {
 		return ""
+	}
+	if h.resultsURL != "" {
+		return h.resultsURL
 	}
 	return h.ExternalURL()
 }

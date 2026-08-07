@@ -52,6 +52,28 @@ func TestRunner_registerCacheForTask(t *testing.T) {
 		"token must be rejected after the revoker runs")
 }
 
+func TestRunner_ExternalCacheServer_UsesAdvertisedResultsURL(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "remote-cache")
+	const secret = "shared-secret-for-tests"
+	remote, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, secret, nil)
+	require.NoError(t, err)
+	defer remote.Close()
+	remote.SetResultsURL("https://cache.example.invalid/")
+
+	r := &Runner{
+		cfg: &config.Config{Cache: config.Cache{
+			ExternalServer: remote.ExternalURL(),
+			ExternalSecret: secret,
+		}},
+		envs: map[string]string{"ACTIONS_RESULTS_URL": "https://gitea.example.invalid"},
+	}
+
+	unregister, resultsURL := r.registerCacheForTask("external-task-token", "owner/repoX", nil)
+	defer unregister()
+
+	require.Equal(t, "https://cache.example.invalid", resultsURL)
+}
+
 func TestRunner_registerCacheForTask_NoOps(t *testing.T) {
 	t.Run("nil cacheHandler", func(t *testing.T) {
 		r := &Runner{cfg: emptyCfg()}
