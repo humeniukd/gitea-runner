@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -121,6 +122,24 @@ func TestCacheServiceV2RoundTrip(t *testing.T) {
 	downloadURL, _ := got["signed_download_url"].(string)
 	require.NotEmpty(t, downloadURL)
 	assert.Equal(t, content, getURL(t, downloadURL))
+}
+
+func TestCacheServiceV2SignedURLsUseAdvertisedResultsURL(t *testing.T) {
+	handler := startTestHandler(t)
+	_, _ = saveV2(t, handler, "deps-v1", "abc123", []byte("the cached archive"))
+	handler.SetResultsURL("https://cache.example.invalid/")
+
+	created := v2Call(t, handler, testClient, "CreateCacheEntry", map[string]any{"key": "deps-v2", "version": "def456"})
+	require.Equal(t, true, created["ok"])
+	uploadURL, _ := created["signed_upload_url"].(string)
+	require.NotEmpty(t, uploadURL)
+	assert.True(t, strings.HasPrefix(uploadURL, "https://cache.example.invalid"+blobPath+"/"))
+
+	got := v2Call(t, handler, testClient, "GetCacheEntryDownloadURL", map[string]any{"key": "deps-v1", "version": "abc123"})
+	require.Equal(t, true, got["ok"])
+	downloadURL, _ := got["signed_download_url"].(string)
+	require.NotEmpty(t, downloadURL)
+	assert.True(t, strings.HasPrefix(downloadURL, "https://cache.example.invalid"+apiPath+"/artifacts/"))
 }
 
 // A large archive is staged as blocks and only put in order by the final block list, so

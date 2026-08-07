@@ -213,6 +213,13 @@ func (h *Handler) ExternalURL() string {
 	return fmt.Sprintf("http://%s:%d", h.outboundIP, h.port)
 }
 
+func (h *Handler) publicURL() string {
+	if h != nil && h.resultsURL != "" {
+		return h.resultsURL
+	}
+	return h.ExternalURL()
+}
+
 // SetResultsURL overrides the URL announced for ACTIONS_RESULTS_URL when this
 // handler is used as the cache service v2 endpoint behind a reverse proxy.
 func (h *Handler) SetResultsURL(resultsURL string) {
@@ -651,10 +658,7 @@ func (h *Handler) ResultsURL(cred JobCredential) string {
 	if h == nil || cred.Results == "" {
 		return ""
 	}
-	if h.resultsURL != "" {
-		return h.resultsURL
-	}
-	return h.ExternalURL()
+	return h.publicURL()
 }
 
 func (h *Handler) internalRegister(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
@@ -718,7 +722,7 @@ func (h *Handler) signedURL(path, purpose string, cacheID uint64, exp time.Time)
 	q := url.Values{}
 	q.Set("exp", strconv.FormatInt(expUnix, 10))
 	q.Set("sig", h.computeSignature(purpose, int64(cacheID), expUnix))
-	return fmt.Sprintf("%s%s/%d?%s", h.ExternalURL(), path, cacheID, q.Encode())
+	return fmt.Sprintf("%s%s/%d?%s", h.publicURL(), path, cacheID, q.Encode())
 }
 
 func (h *Handler) signedArtifactURL(cacheID uint64, exp time.Time) string {
