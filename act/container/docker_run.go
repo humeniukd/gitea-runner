@@ -638,7 +638,8 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 	if cf.name != "" {
 		logger.Warn("--name in the options will be ignored.")
 	}
-	if len(copts.netMode.Value()) > 0 {
+	// the runner's own network mode was added above, so only the flags show what was given
+	if flags.Changed("network") || flags.Changed("net") {
 		logger.Warn("--network and --net in the options will be ignored.")
 	}
 	hostConfig.NetworkMode = networkMode

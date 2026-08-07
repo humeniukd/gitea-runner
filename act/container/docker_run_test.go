@@ -920,3 +920,17 @@ func TestMergeContainerConfigsVolumesReplaceRunnerMounts(t *testing.T) {
 	assert.Equal(t, []string{"/var/run/docker.sock:/var/run/docker.sock", "/host/tools:/opt/hostedtoolcache"}, hostConf.Binds)
 	assert.Empty(t, hostConf.Mounts)
 }
+
+func TestMergeContainerConfigsWarnsAboutNetworkOptionsOnlyWhenGiven(t *testing.T) {
+	warnings := func(options string) int {
+		logger, hook := test.NewNullLogger()
+		cr := &containerReference{input: &NewContainerInput{NetworkMode: "bridge", RunnerOptions: options}}
+
+		_, _, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{})
+		require.NoError(t, err)
+		return len(hook.AllEntries())
+	}
+
+	assert.Zero(t, warnings("--volume /host/tools:/opt/hostedtoolcache"))
+	assert.Equal(t, 1, warnings("--network host"))
+}
