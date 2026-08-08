@@ -11,8 +11,8 @@ import (
 	"testing"
 
 	"gitea.com/gitea/runner/v3/act/container"
-	"gitea.com/gitea/runner/v3/act/model"
 
+	"gitea.dev/actionslib/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )

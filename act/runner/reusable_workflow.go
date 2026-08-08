@@ -16,7 +16,8 @@ import (
 
 	"gitea.com/gitea/runner/v3/act/common"
 	"gitea.com/gitea/runner/v3/act/common/git"
-	"gitea.com/gitea/runner/v3/act/model"
+
+	"gitea.dev/actionslib/pkg/model"
 )
 
 func newLocalReusableWorkflowExecutor(rc *RunContext) common.Executor {

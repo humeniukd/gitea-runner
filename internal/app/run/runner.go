@@ -24,7 +24,6 @@ import (
 	"gitea.com/gitea/runner/v3/act/artifactcache"
 	"gitea.com/gitea/runner/v3/act/common"
 	"gitea.com/gitea/runner/v3/act/container"
-	"gitea.com/gitea/runner/v3/act/model"
 	"gitea.com/gitea/runner/v3/act/runner"
 	"gitea.com/gitea/runner/v3/internal/pkg/client"
 	"gitea.com/gitea/runner/v3/internal/pkg/config"
@@ -34,7 +33,8 @@ import (
 	"gitea.com/gitea/runner/v3/internal/pkg/ver"
 
 	"connectrpc.com/connect"
-	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
+	"gitea.dev/actionslib/pkg/model"
+	runnerv1 "gitea.dev/actionslib/runner/v1"
 	docker_container "github.com/moby/moby/api/types/container"
 	log "github.com/sirupsen/logrus"
 )
@@ -605,14 +605,15 @@ func (r *Runner) registerExternalCacheJob(token string, cred artifactcache.JobCr
 	resultsURL := ""
 	if body, err := postInternalCache(base+"/_internal/register", r.cfg.Cache.ExternalSecret, map[string]any{
 		"token": token, "repo": cred.Repo, "results": cred.Results, "insecure_tls": cred.InsecureTLS,
+		"public_url": base,
 	}); err != nil {
 		log.Warnf("cache external_server register failed (%s): %v", base, err)
 		if reporter != nil {
 			reporter.Logf("::warning::%s", runner.EscapeCommandData(fmt.Sprintf(
 				"cache external_server register failed (%s): %v — cache requests from this job will be unauthenticated and likely return 401", base, err)))
 		}
-	} else {
-		resultsURL, _ = body["results_url"].(string) // absent from a server too old to forward
+	} else if forwarded, _ := body["results_url"].(string); forwarded != "" {
+		resultsURL = base // the answer only says it forwards, its own address need not be the job's
 	}
 	return func() {
 		if _, err := postInternalCache(base+"/_internal/revoke", r.cfg.Cache.ExternalSecret,

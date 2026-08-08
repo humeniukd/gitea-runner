@@ -15,8 +15,8 @@ import (
 	"gitea.com/gitea/runner/v3/act/common"
 	"gitea.com/gitea/runner/v3/act/container"
 	"gitea.com/gitea/runner/v3/act/lookpath"
-	"gitea.com/gitea/runner/v3/act/model"
 
+	"gitea.dev/actionslib/pkg/model"
 	"github.com/kballard/go-shellquote"
 	"github.com/sirupsen/logrus"
 	yaml "go.yaml.in/yaml/v4"

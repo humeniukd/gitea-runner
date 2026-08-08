@@ -23,8 +23,8 @@ import (
 	"gitea.com/gitea/runner/v3/act/common"
 	"gitea.com/gitea/runner/v3/act/common/git"
 	"gitea.com/gitea/runner/v3/act/container"
-	"gitea.com/gitea/runner/v3/act/model"
 
+	"gitea.dev/actionslib/pkg/model"
 	"github.com/kballard/go-shellquote"
 )
 
@@ -597,7 +597,7 @@ func actionStagePaths(step actionStep) (actionDir, actionPath, actionName, conta
 
 	if sar, ok := step.(*stepActionRemote); ok {
 		actionDir = sar.actionDir()
-		actionPath = newRemoteAction(stepModel.Uses).Path
+		actionPath = sar.remoteAction.Path
 	} else {
 		actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)
 	}

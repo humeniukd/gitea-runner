@@ -20,10 +20,10 @@ import (
 	"gitea.com/gitea/runner/v3/act/artifactcache"
 	"gitea.com/gitea/runner/v3/act/artifacts"
 	"gitea.com/gitea/runner/v3/act/common"
-	"gitea.com/gitea/runner/v3/act/model"
 	"gitea.com/gitea/runner/v3/act/runner"
 	"gitea.com/gitea/runner/v3/internal/app/run"
 
+	"gitea.dev/actionslib/pkg/model"
 	"github.com/joho/godotenv"
 	"github.com/moby/moby/api/types/container"
 	log "github.com/sirupsen/logrus"

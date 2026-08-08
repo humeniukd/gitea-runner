@@ -13,7 +13,8 @@ import (
 	"strings"
 
 	"gitea.com/gitea/runner/v3/act/common"
-	"gitea.com/gitea/runner/v3/act/model"
+
+	"gitea.dev/actionslib/pkg/model"
 )
 
 func evaluateCompositeInputAndEnv(ctx context.Context, parent *RunContext, step actionStep) map[string]string {
