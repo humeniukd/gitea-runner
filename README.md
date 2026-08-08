@@ -313,7 +313,7 @@ Run one dedicated `gitea-runner cache-server` that all runners point at.
      # external_secret_file: /path/to/secret # secret can also be passed via a file
    ```
 
-Every URL the server hands a job is built on `external_server`, its cache uploads and downloads and its artifact service alike, so it must be the address jobs can reach. Put the public URL there when a reverse proxy fronts the cache server, which then needs no configuration of its own.
+Jobs reach the cache server at `external_server`, so when a reverse proxy fronts the server, point `external_server` at the proxy. The cache server itself needs no extra configuration.
 
 Alternatively, mount the same NFS/CIFS share on every runner and point `cache.dir` at it — simpler, but with weaker isolation between repositories.
 
