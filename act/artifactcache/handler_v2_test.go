@@ -124,24 +124,6 @@ func TestCacheServiceV2RoundTrip(t *testing.T) {
 	assert.Equal(t, content, getURL(t, downloadURL))
 }
 
-func TestCacheServiceV2SignedURLsUseAdvertisedResultsURL(t *testing.T) {
-	handler := startTestHandler(t)
-	_, _ = saveV2(t, handler, "deps-v1", "abc123", []byte("the cached archive"))
-	handler.SetResultsURL("https://cache.example.invalid/")
-
-	created := v2Call(t, handler, testClient, "CreateCacheEntry", map[string]any{"key": "deps-v2", "version": "def456"})
-	require.Equal(t, true, created["ok"])
-	uploadURL, _ := created["signed_upload_url"].(string)
-	require.NotEmpty(t, uploadURL)
-	assert.True(t, strings.HasPrefix(uploadURL, "https://cache.example.invalid"+blobPath+"/"))
-
-	got := v2Call(t, handler, testClient, "GetCacheEntryDownloadURL", map[string]any{"key": "deps-v1", "version": "abc123"})
-	require.Equal(t, true, got["ok"])
-	downloadURL, _ := got["signed_download_url"].(string)
-	require.NotEmpty(t, downloadURL)
-	assert.True(t, strings.HasPrefix(downloadURL, "https://cache.example.invalid"+apiPath+"/artifacts/"))
-}
-
 // A large archive is staged as blocks and only put in order by the final block list, so
 // blocks that arrive out of order must still be assembled the way the client asked.
 func TestCacheServiceV2BlockUpload(t *testing.T) {
@@ -215,6 +197,18 @@ func TestCacheServiceV2Lookups(t *testing.T) {
 		reserved := v2Call(t, handler, testClient, "CreateCacheEntry", map[string]any{"key": "deps", "version": "v1"})
 		require.Equal(t, true, reserved["ok"])
 		assert.NotEmpty(t, reserved["signed_upload_url"])
+	})
+
+	t.Run("a proxied job is handed the address its runner registered", func(t *testing.T) {
+		const proxy = "https://cache.example.invalid"
+		handler.RegisterJob("proxied", JobCredential{Repo: testRepo, PublicURL: proxy + "/"})
+		client := &http.Client{Transport: &bearerTransport{token: "proxied"}}
+
+		created := v2Call(t, handler, client, "CreateCacheEntry", map[string]any{"key": "proxied-key", "version": "v1"})
+		assert.True(t, strings.HasPrefix(created["signed_upload_url"].(string), proxy+blobPath+"/"))
+
+		got := v2Call(t, handler, client, "GetCacheEntryDownloadURL", map[string]any{"key": "deps-abc", "version": "v1"})
+		assert.True(t, strings.HasPrefix(got["signed_download_url"].(string), proxy+apiPath+"/artifacts/"))
 	})
 
 	t.Run("finalizing without a reservation is not ok", func(t *testing.T) {

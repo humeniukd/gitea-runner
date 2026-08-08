@@ -294,8 +294,6 @@ Run one dedicated `gitea-runner cache-server` that all runners point at.
    cache:
      dir: /data/actcache
      port: 8088
-     # Set this when jobs must reach the server through a reverse proxy or a different public URL.
-     # external_server: "https://cache.example.invalid/"
      external_secret: "replace-with-a-strong-random-secret"
      # external_secret_file: /path/to/secret # secret can also be passed via a file
    ```
@@ -314,6 +312,8 @@ Run one dedicated `gitea-runner cache-server` that all runners point at.
      external_secret: "replace-with-a-strong-random-secret"  # must match the server
      # external_secret_file: /path/to/secret # secret can also be passed via a file
    ```
+
+Every URL the server hands a job is built on `external_server`, its cache uploads and downloads and its artifact service alike, so it must be the address jobs can reach. Put the public URL there when a reverse proxy fronts the cache server, which then needs no configuration of its own.
 
 Alternatively, mount the same NFS/CIFS share on every runner and point `cache.dir` at it — simpler, but with weaker isolation between repositories.
 

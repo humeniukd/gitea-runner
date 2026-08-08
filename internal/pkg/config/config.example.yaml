@@ -136,10 +136,8 @@ cache:
   # Ignored when external_server is set.
   #port: 0
   # URL of a shared `gitea-runner cache-server` to use instead of starting a local one.
-  # On runners, set this on every runner that should share a cache pool.
-  # On the cache-server itself, set this to the public URL jobs should use when the
-  # server sits behind a reverse proxy or any other address translation.
-  # A trailing slash is optional.
+  # Set on every runner that should share a cache pool. A trailing slash is optional.
+  # Jobs are given this URL too, so use the public one when a reverse proxy fronts the server.
   # Example: "http://cache-host:8088/"
   # Requires external_secret (below) to match the value on the cache-server.
   #external_server: ""
