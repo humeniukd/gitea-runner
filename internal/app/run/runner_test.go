@@ -23,15 +23,19 @@ import (
 )
 
 func TestRunnerCapabilitiesAndDeclare(t *testing.T) {
-	require.Equal(t, []string{CapabilityCancelling}, RunnerCapabilities())
+	require.Equal(t, []string{
+		CapabilityCancelling,
+		CapabilityWorkflowCallOriginalEvent,
+	}, RunnerCapabilities())
 
 	cli := clientmocks.NewClient(t)
 	cli.On("Declare", mock.Anything, mock.MatchedBy(func(req *connect.Request[runnerv1.DeclareRequest]) bool {
 		return req.Msg.Version == ver.Version() &&
 			len(req.Msg.Labels) == 1 &&
 			req.Msg.Labels[0] == "ubuntu" &&
-			len(req.Msg.Capabilities) == 1 &&
-			req.Msg.Capabilities[0] == CapabilityCancelling
+			len(req.Msg.Capabilities) == 2 &&
+			req.Msg.Capabilities[0] == CapabilityCancelling &&
+			req.Msg.Capabilities[1] == CapabilityWorkflowCallOriginalEvent
 	})).Return(connect.NewResponse(&runnerv1.DeclareResponse{}), nil)
 
 	r := &Runner{client: cli}

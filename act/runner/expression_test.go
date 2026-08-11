@@ -355,4 +355,28 @@ on:
 			})
 		}
 	}
+
+	t.Run("workflow_call inputs with original trigger event", func(t *testing.T) {
+		wf, err := model.ReadWorkflow(strings.NewReader(workflows["workflow_call"]))
+		require.NoError(t, err)
+
+		rc := &RunContext{
+			Config: &Config{Workdir: "."},
+			Run:    &model.Run{JobID: "job1", Workflow: wf},
+		}
+		ghc := &model.GithubContext{
+			EventName: "push",
+			Event: map[string]any{
+				"inputs": map[string]any{
+					"flag": true,
+					"name": "from-caller",
+				},
+			},
+		}
+
+		inputs := getEvaluatorInputs(context.Background(), rc, nil, ghc)
+
+		assert.Equal(t, true, inputs["flag"])
+		assert.Equal(t, "from-caller", inputs["name"])
+	})
 }

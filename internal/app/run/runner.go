@@ -44,11 +44,18 @@ import (
 // finalizing a task as RESULT_CANCELLED.
 const CapabilityCancelling = "cancelling"
 
+// CapabilityWorkflowCallOriginalEvent tells the server this runner can
+// execute reusable workflows while preserving the caller's original event name.
+const CapabilityWorkflowCallOriginalEvent = "workflow-call-original-event"
+
 // RunnerCapabilities are the capability flags this runner advertises to the
 // server during registration and declaration. The server uses them to enable
 // transitional features that require runner-side support.
 func RunnerCapabilities() []string {
-	return []string{CapabilityCancelling}
+	return []string{
+		CapabilityCancelling,
+		CapabilityWorkflowCallOriginalEvent,
+	}
 }
 
 // Runner runs the pipeline.

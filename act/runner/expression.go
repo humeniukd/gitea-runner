@@ -12,6 +12,7 @@ import (
 	"path"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -298,7 +299,7 @@ func getEvaluatorInputs(ctx context.Context, rc *RunContext, step step, ghc *mod
 		}
 	}
 
-	if ghc.EventName == "workflow_call" {
+	if rc.caller == nil && (ghc.EventName == "workflow_call" || slices.Contains(rc.Run.Workflow.On(), "workflow_call")) {
 		config := rc.Run.Workflow.WorkflowCallConfig()
 		if config != nil && config.Inputs != nil {
 			for k, v := range config.Inputs {
