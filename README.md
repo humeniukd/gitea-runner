@@ -202,7 +202,7 @@ a workflow with `runs-on: ubuntu-latest` is executed in the `runner-images:ubunt
 
 Names may themselves contain a colon (for example `pool:e57e18d4-10d4-406f-93bf-60f127221bdd`); only `host` and `docker` are treated as schemas.
 
-If a job's `runs-on` matches none of the runner's labels, the job still runs, in the default `docker.gitea.com/runner-images:ubuntu-latest` image. Images maintained for this purpose are listed at [gitea/runner-images](https://gitea.com/gitea/runner-images).
+If a job's `runs-on` matches none of the runner's labels, the job still runs, in `runner.default_platform` when set, otherwise in `docker.gitea.com/runner-images:ubuntu-latest`. Set `default_platform: "-self-hosted"` on a host-only runner so unmatched jobs stay on the host. Images maintained for this purpose are listed at [gitea/runner-images](https://gitea.com/gitea/runner-images).
 
 Labels are chosen at registration time (`--labels`, or the interactive prompt) and can be changed afterwards by editing `runner.labels` in the config file, or in the Gitea UI under the runner's settings.
 

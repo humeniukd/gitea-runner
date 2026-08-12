@@ -11,6 +11,9 @@ import (
 const (
 	SchemeHost   = "host"
 	SchemeDocker = "docker"
+
+	// DefaultPlatform is used when a job's runs-on matches none of the runner's labels.
+	DefaultPlatform = "docker.gitea.com/runner-images:ubuntu-latest"
 )
 
 type Label struct {
@@ -61,7 +64,7 @@ func (l Labels) RequireDocker() bool {
 	return false
 }
 
-func (l Labels) PickPlatform(runsOn []string) string {
+func (l Labels) PickPlatform(runsOn []string, defaultPlatform string) string {
 	platforms := make(map[string]string, len(l))
 	for _, label := range l {
 		switch label.Schema {
@@ -87,11 +90,14 @@ func (l Labels) PickPlatform(runsOn []string) string {
 	//   ["with-gpu"] => "linux:with-gpu"
 	//   ["ubuntu-22.04", "with-gpu"] => "ubuntu:22.04_with-gpu"
 
-	// return default.
-	// So the runner receives a task with a label that the runner doesn't have,
-	// it happens when the user have edited the label of the runner in the web UI.
-	// TODO: it may be not correct, what if the runner is used as host mode only?
-	return "docker.gitea.com/runner-images:ubuntu-latest"
+	// No runs-on match: the runner still received the task (e.g. labels were
+	// edited in the UI after registration). Use the configured fallback, or the
+	// historical default image. Host-only runners can set default_platform to
+	// "-self-hosted".
+	if defaultPlatform != "" {
+		return defaultPlatform
+	}
+	return DefaultPlatform
 }
 
 func (l Labels) Names() []string {

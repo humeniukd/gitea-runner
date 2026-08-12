@@ -118,19 +118,23 @@ func TestPickPlatform(t *testing.T) {
 	)
 
 	tests := []struct {
-		name   string
-		runsOn []string
-		want   string
+		name     string
+		runsOn   []string
+		fallback string
+		want     string
 	}{
-		{"docker strips leading slashes", []string{"ubuntu"}, "node:18"},
-		{"host maps to self-hosted marker", []string{"self-hosted"}, "-self-hosted"},
-		{"first match wins", []string{"self-hosted", "ubuntu"}, "-self-hosted"},
-		{"unknown falls back to default", []string{"windows"}, "docker.gitea.com/runner-images:ubuntu-latest"},
-		{"no runsOn falls back to default", nil, "docker.gitea.com/runner-images:ubuntu-latest"},
+		{"docker strips leading slashes", []string{"ubuntu"}, "", "node:18"},
+		{"host maps to self-hosted marker", []string{"self-hosted"}, "", "-self-hosted"},
+		{"first match wins", []string{"self-hosted", "ubuntu"}, "", "-self-hosted"},
+		{"unknown falls back to default", []string{"windows"}, "", DefaultPlatform},
+		{"no runsOn falls back to default", nil, "", DefaultPlatform},
+		{"unknown uses configured fallback", []string{"windows"}, "mirror.example/ci:noble", "mirror.example/ci:noble"},
+		{"unknown can fall back to host", []string{"windows"}, "-self-hosted", "-self-hosted"},
+		{"match ignores fallback", []string{"ubuntu"}, "mirror.example/ci:noble", "node:18"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, ls.PickPlatform(tt.runsOn))
+			require.Equal(t, tt.want, ls.PickPlatform(tt.runsOn, tt.fallback))
 		})
 	}
 }
@@ -167,5 +171,5 @@ func TestOpaqueLabelRoundTrip(t *testing.T) {
 	require.Equal(t, ls, again)
 	require.Equal(t, []string{raw}, again.Names())
 	require.False(t, again.RequireDocker())
-	require.Equal(t, "-self-hosted", again.PickPlatform([]string{raw}))
+	require.Equal(t, "-self-hosted", again.PickPlatform([]string{raw}, ""))
 }

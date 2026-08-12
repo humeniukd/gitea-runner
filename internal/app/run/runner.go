@@ -515,13 +515,15 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		Privileged:                        r.cfg.Container.Privileged,
 		DefaultActionInstance:             r.getDefaultActionsURL(task),
 		DefaultActionInstanceIsSelfHosted: r.isSelfHostedActionsURL(task),
-		PlatformPicker:                    r.labels.PickPlatform,
-		JobStartedHook:                    r.cfg.Runner.Hooks.JobStarted,
-		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
-		Vars:                              task.Vars,
-		ValidVolumes:                      r.cfg.Container.ValidVolumes,
-		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
-		RunnerName:                        r.name,
+		PlatformPicker: func(runsOn []string) string {
+			return r.labels.PickPlatform(runsOn, r.cfg.Runner.DefaultPlatform)
+		},
+		JobStartedHook:   r.cfg.Runner.Hooks.JobStarted,
+		JobCompletedHook: r.cfg.Runner.Hooks.JobCompleted,
+		Vars:             task.Vars,
+		ValidVolumes:     r.cfg.Container.ValidVolumes,
+		InsecureSkipTLS:  r.cfg.Runner.Insecure,
+		RunnerName:       r.name,
 	}
 
 	rr, err := runner.New(runnerConfig)
