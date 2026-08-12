@@ -58,6 +58,11 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 			port,
 			secret,
 			log.StandardLogger().WithField("module", "cache_request"),
+			artifactcache.GCConfig{
+				KeepUsed:   cfg.Cache.KeepUsed,
+				KeepUnused: cfg.Cache.KeepUnused,
+				MaxSize:    cfg.Cache.MaxSize,
+			},
 		)
 		if err != nil {
 			return err

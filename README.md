@@ -296,6 +296,10 @@ Run one dedicated `gitea-runner cache-server` that all runners point at.
      port: 8088
      external_secret: "replace-with-a-strong-random-secret"
      # external_secret_file: /path/to/secret # secret can also be passed via a file
+     # Optional eviction (also apply on a runner that runs its own built-in cache):
+     # keep_used: 720h      # max age from creation (default 30 days)
+     # keep_unused: 168h    # idle TTL (default 7 days)
+     # max_size: 10737418240  # 10 GiB total; 0 = unlimited (default). LRU when over.
    ```
 
 2. Start the server:
@@ -313,13 +317,13 @@ Run one dedicated `gitea-runner cache-server` that all runners point at.
      # external_secret_file: /path/to/secret # secret can also be passed via a file
    ```
 
-Jobs reach the cache server at `external_server`, so when a reverse proxy fronts the server, point `external_server` at the proxy. The cache server itself needs no extra configuration.
+Jobs reach the cache server at `external_server`, so when a reverse proxy fronts the server, point `external_server` at the proxy. The cache server itself needs no extra configuration. Eviction settings (`keep_used`, `keep_unused`, `max_size`) are read by the process that owns the store — set them on the dedicated `cache-server`, or on a runner that uses the built-in cache; they are ignored on runners that only set `external_server`.
 
 Alternatively, mount the same NFS/CIFS share on every runner and point `cache.dir` at it — simpler, but with weaker isolation between repositories.
 
 **S3 / MinIO** — mount object storage as a FUSE filesystem (e.g. [s3fs](https://github.com/s3fs-fuse/s3fs-fuse) or [goofys](https://github.com/kahing/goofys)) and set `cache.dir` to the mount point.
 
-Flags `--dir`, `--host`, and `--port` on `cache-server` override the corresponding `cache.*` YAML keys; all other settings, including `external_secret`, require the config file.
+Flags `--dir`, `--host`, and `--port` on `cache-server` override the corresponding `cache.*` YAML keys; all other settings, including `external_secret` and eviction, require the config file.
 
 #### Official Docker image
 

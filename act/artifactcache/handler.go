@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,6 +75,24 @@ type credEntry struct {
 	refs int
 }
 
+// GCConfig controls cache eviction. Zero KeepUsed / KeepUnused keep the
+// historical defaults; MaxSize 0 means no size cap.
+type GCConfig struct {
+	KeepUsed   time.Duration // max age from CreatedAt; default 30d
+	KeepUnused time.Duration // idle age from UsedAt; default 7d
+	MaxSize    int64         // total complete-cache bytes; 0 = unlimited
+}
+
+func (c GCConfig) withDefaults() GCConfig {
+	if c.KeepUsed <= 0 {
+		c.KeepUsed = keepUsed
+	}
+	if c.KeepUnused <= 0 {
+		c.KeepUnused = keepUnused
+	}
+	return c
+}
+
 type Handler struct {
 	dir      string
 	storage  *Storage
@@ -85,6 +104,7 @@ type Handler struct {
 
 	gcing atomic.Bool
 	gcAt  time.Time
+	gc    GCConfig
 
 	outboundIP string
 
@@ -112,10 +132,18 @@ type Handler struct {
 // per-job ACTIONS_RUNTIME_TOKENs it expects this server to honor. The
 // embedded in-process handler leaves it empty and registers tokens via the
 // in-process RegisterJob method directly.
-func StartHandler(dir, outboundIP string, port uint16, internalSecret string, logger logrus.FieldLogger) (*Handler, error) {
+//
+// An optional GCConfig overrides eviction defaults; omit it for the historical
+// keep_used / keep_unused values and no size cap.
+func StartHandler(dir, outboundIP string, port uint16, internalSecret string, logger logrus.FieldLogger, gc ...GCConfig) (*Handler, error) {
+	var gcCfg GCConfig
+	if len(gc) > 0 {
+		gcCfg = gc[0]
+	}
 	h := &Handler{
 		creds:          make(map[string]*credEntry),
 		internalSecret: internalSecret,
+		gc:             gcCfg.withDefaults(),
 	}
 
 	if logger == nil {
@@ -821,8 +849,8 @@ func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
 }
 
 const (
-	keepUsed   = 30 * 24 * time.Hour
-	keepUnused = 7 * 24 * time.Hour
+	keepUsed   = 30 * 24 * time.Hour // default GCConfig.KeepUsed
+	keepUnused = 7 * 24 * time.Hour  // default GCConfig.KeepUnused
 	keepTemp   = 5 * time.Minute
 	keepOld    = 5 * time.Minute
 )
@@ -870,7 +898,7 @@ func (h *Handler) gcCache() {
 	// Remove the old caches which have not been used recently.
 	caches = caches[:0]
 	if err := db.Find(&caches, bolthold.
-		Where("UsedAt").Lt(time.Now().Add(-keepUnused).Unix()),
+		Where("UsedAt").Lt(time.Now().Add(-h.gc.KeepUnused).Unix()),
 	); err != nil {
 		h.logger.Warnf("find caches: %v", err)
 	} else {
@@ -887,7 +915,7 @@ func (h *Handler) gcCache() {
 	// Remove the old caches which are too old.
 	caches = caches[:0]
 	if err := db.Find(&caches, bolthold.
-		Where("CreatedAt").Lt(time.Now().Add(-keepUsed).Unix()),
+		Where("CreatedAt").Lt(time.Now().Add(-h.gc.KeepUsed).Unix()),
 	); err != nil {
 		h.logger.Warnf("find caches: %v", err)
 	} else {
@@ -936,6 +964,66 @@ func (h *Handler) gcCache() {
 			}
 		}
 	}
+
+	h.gcByMaxSize(db)
+}
+
+// gcByMaxSize evicts least-recently-used complete caches until total recorded
+// size is at or below MaxSize. No-op when MaxSize is unset.
+func (h *Handler) gcByMaxSize(db *bolthold.Store) {
+	if h.gc.MaxSize <= 0 {
+		return
+	}
+
+	var caches []*Cache
+	if err := db.Find(&caches, bolthold.Where("Complete").Eq(true)); err != nil {
+		h.logger.Warnf("find caches for size limit: %v", err)
+		return
+	}
+
+	var total int64
+	for _, cache := range caches {
+		total += h.cacheByteSize(cache)
+	}
+	if total <= h.gc.MaxSize {
+		return
+	}
+
+	sort.Slice(caches, func(i, j int) bool {
+		if caches[i].UsedAt != caches[j].UsedAt {
+			return caches[i].UsedAt < caches[j].UsedAt
+		}
+		if caches[i].CreatedAt != caches[j].CreatedAt {
+			return caches[i].CreatedAt < caches[j].CreatedAt
+		}
+		return caches[i].ID < caches[j].ID
+	})
+
+	for _, cache := range caches {
+		if total <= h.gc.MaxSize {
+			break
+		}
+		size := h.cacheByteSize(cache)
+		h.storage.Remove(cache.ID)
+		if err := db.Delete(cache.ID, cache); err != nil {
+			h.logger.Warnf("delete cache: %v", err)
+			continue
+		}
+		total -= size
+		h.logger.Infof("deleted cache (size limit): %+v", cache)
+	}
+}
+
+// cacheByteSize is the size counted toward MaxSize. Unknown sizes from old
+// actions/cache clients (Size < 0) fall back to the on-disk blob when present.
+func (h *Handler) cacheByteSize(cache *Cache) int64 {
+	if cache.Size >= 0 {
+		return cache.Size
+	}
+	if n, err := h.storage.Size(cache.ID); err == nil {
+		return n
+	}
+	return 0
 }
 
 func (h *Handler) responseJSON(w http.ResponseWriter, r *http.Request, code int, v ...any) {

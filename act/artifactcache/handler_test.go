@@ -829,6 +829,85 @@ func TestHandler_gcCache(t *testing.T) {
 	require.NoError(t, db.Close())
 }
 
+func TestHandler_gcCache_CustomTTL(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, "", nil, GCConfig{
+		KeepUsed:   time.Hour,
+		KeepUnused: 10 * time.Minute,
+	})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, handler.Close()) }()
+
+	now := time.Now()
+	kept := &Cache{
+		Key: "kept", Version: "v", Complete: true,
+		UsedAt: now.Unix(), CreatedAt: now.Add(-30 * time.Minute).Unix(), Size: 1,
+	}
+	idle := &Cache{
+		Key: "idle", Version: "v", Complete: true,
+		UsedAt: now.Add(-11 * time.Minute).Unix(), CreatedAt: now.Add(-30 * time.Minute).Unix(), Size: 1,
+	}
+	aged := &Cache{
+		Key: "aged", Version: "v", Complete: true,
+		UsedAt: now.Unix(), CreatedAt: now.Add(-(time.Hour + time.Second)).Unix(), Size: 1,
+	}
+
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	for _, cache := range []*Cache{kept, idle, aged} {
+		require.NoError(t, insertCache(db, cache))
+	}
+	require.NoError(t, db.Close())
+
+	handler.gcAt = time.Time{}
+	handler.gcCache()
+
+	db, err = handler.openDB()
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, db.Get(kept.ID, &Cache{}))
+	require.ErrorIs(t, db.Get(idle.ID, &Cache{}), bolthold.ErrNotFound)
+	require.ErrorIs(t, db.Get(aged.ID, &Cache{}), bolthold.ErrNotFound)
+}
+
+func TestHandler_gcCache_MaxSizeLRU(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(dir, "", 0, "", nil, GCConfig{MaxSize: 100})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, handler.Close()) }()
+
+	now := time.Now()
+	oldest := &Cache{
+		Key: "oldest", Version: "v", Complete: true, Size: 40,
+		UsedAt: now.Add(-3 * time.Hour).Unix(), CreatedAt: now.Add(-3 * time.Hour).Unix(),
+	}
+	middle := &Cache{
+		Key: "middle", Version: "v", Complete: true, Size: 40,
+		UsedAt: now.Add(-2 * time.Hour).Unix(), CreatedAt: now.Add(-2 * time.Hour).Unix(),
+	}
+	newest := &Cache{
+		Key: "newest", Version: "v", Complete: true, Size: 40,
+		UsedAt: now.Add(-time.Hour).Unix(), CreatedAt: now.Add(-time.Hour).Unix(),
+	}
+
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	for _, cache := range []*Cache{oldest, middle, newest} {
+		require.NoError(t, insertCache(db, cache))
+	}
+	require.NoError(t, db.Close())
+
+	handler.gcAt = time.Time{}
+	handler.gcCache()
+
+	db, err = handler.openDB()
+	require.NoError(t, err)
+	defer db.Close()
+	require.ErrorIs(t, db.Get(oldest.ID, &Cache{}), bolthold.ErrNotFound)
+	require.NoError(t, db.Get(middle.ID, &Cache{}))
+	require.NoError(t, db.Get(newest.ID, &Cache{}))
+}
+
 // TestHandler_RejectsMissingBearer covers the advisory's root cause:
 // unauthenticated access to management endpoints is now refused with 401.
 func TestHandler_RejectsMissingBearer(t *testing.T) {

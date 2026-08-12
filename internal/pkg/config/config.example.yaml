@@ -159,6 +159,13 @@ cache:
   # the action's own bundle, keeping the untouched copy beside it. The same edit lets the stock
   # upload-artifact and download-artifact work here. A bundle that does not match is left alone.
   #v2: true
+  # Eviction for the local or dedicated cache-server store. Applied when this process owns the
+  # store (built-in server or `gitea-runner cache-server`); ignored on runners that only point at
+  # cache.external_server. GC runs at most once an hour while the server handles requests.
+  #keep_used: 720h    # max age from creation (default: 30 days)
+  #keep_unused: 168h  # evict if not accessed within this duration (default: 7 days)
+  #max_size: 0        # max total size of complete entries in bytes; 0 = unlimited
+  # When max_size is exceeded, least-recently-used complete entries are deleted until under the limit.
 
 container:
   # Specifies the network to which the container will connect.

@@ -38,8 +38,48 @@ cache:
   external_secret: "shh"
 `), 0o600))
 
-	_, err := LoadDefault(path)
+	cfg, err := LoadDefault(path)
 	require.NoError(t, err)
+	assert.Equal(t, "shh", cfg.Cache.ExternalSecret)
+}
+
+func TestLoadDefault_CacheEvictionSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+cache:
+  keep_used: 48h
+  keep_unused: 12h
+  max_size: 1048576
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, 48*time.Hour, cfg.Cache.KeepUsed)
+	assert.Equal(t, 12*time.Hour, cfg.Cache.KeepUnused)
+	assert.Equal(t, int64(1048576), cfg.Cache.MaxSize)
+}
+
+func TestLoadDefault_RejectsNegativeCacheEviction(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{"keep_used", "cache:\n  keep_used: -1h\n", "keep_used"},
+		{"keep_unused", "cache:\n  keep_unused: -1s\n", "keep_unused"},
+		{"max_size", "cache:\n  max_size: -1\n", "max_size"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, tc.name+".yaml")
+			require.NoError(t, os.WriteFile(path, []byte(tc.yaml), 0o600))
+			_, err := LoadDefault(path)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
 }
 
 func TestLoadDefault_DefaultsWorkdirCleanupAge(t *testing.T) {

@@ -148,6 +148,15 @@ func (s *Storage) Remove(id uint64) {
 	_ = os.RemoveAll(s.tempDir(id))
 }
 
+// Size returns the on-disk byte length of a committed cache blob.
+func (s *Storage) Size(id uint64) (int64, error) {
+	info, err := os.Stat(s.filename(id))
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
 func (s *Storage) filename(id uint64) string {
 	return filepath.Join(s.rootDir, fmt.Sprintf("%02x", id%0xff), strconv.FormatUint(id, 10))
 }

@@ -72,15 +72,18 @@ type RunnerHooks struct {
 
 // Cache represents the configuration for caching.
 type Cache struct {
-	Enabled            *bool  `yaml:"enabled"`              // Enabled indicates whether caching is enabled. It is a pointer to distinguish between false and not set. If not set, it will be true.
-	Dir                string `yaml:"dir"`                  // Dir specifies the directory path for caching.
-	Host               string `yaml:"host"`                 // Host specifies the caching host.
-	Port               uint16 `yaml:"port"`                 // Port specifies the caching port.
-	ExternalServer     string `yaml:"external_server"`      // ExternalServer specifies the URL of external cache server
-	ExternalSecret     string `yaml:"external_secret"`      // ExternalSecret is a shared secret between this runner and an external gitea-runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Required whenever ExternalServer is set; ExternalSecretFile is the alternative way to provide it.
-	ExternalSecretFile string `yaml:"external_secret_file"` // ExternalSecretFile is the path to a file holding the ExternalSecret value, so the secret can be mounted instead of stored in the config file. LoadDefault reads it into ExternalSecret; setting both is an error.
-	OfflineMode        bool   `yaml:"offline_mode"`         // OfflineMode reuses a cached action without fetching from the remote; a moved tag or branch stays at the cached commit until the cache entry is removed.
-	V2                 *bool  `yaml:"v2"`                   // V2 serves the actions cache service v2 API to jobs, used by actions/cache@v4.2 and later, and edits the action bundles that would otherwise refuse it. Unset means enabled.
+	Enabled            *bool         `yaml:"enabled"`              // Enabled indicates whether caching is enabled. It is a pointer to distinguish between false and not set. If not set, it will be true.
+	Dir                string        `yaml:"dir"`                  // Dir specifies the directory path for caching.
+	Host               string        `yaml:"host"`                 // Host specifies the caching host.
+	Port               uint16        `yaml:"port"`                 // Port specifies the caching port.
+	ExternalServer     string        `yaml:"external_server"`      // ExternalServer specifies the URL of external cache server
+	ExternalSecret     string        `yaml:"external_secret"`      // ExternalSecret is a shared secret between this runner and an external gitea-runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Required whenever ExternalServer is set; ExternalSecretFile is the alternative way to provide it.
+	ExternalSecretFile string        `yaml:"external_secret_file"` // ExternalSecretFile is the path to a file holding the ExternalSecret value, so the secret can be mounted instead of stored in the config file. LoadDefault reads it into ExternalSecret; setting both is an error.
+	OfflineMode        bool          `yaml:"offline_mode"`         // OfflineMode reuses a cached action without fetching from the remote; a moved tag or branch stays at the cached commit until the cache entry is removed.
+	V2                 *bool         `yaml:"v2"`                   // V2 serves the actions cache service v2 API to jobs, used by actions/cache@v4.2 and later, and edits the action bundles that would otherwise refuse it. Unset means enabled.
+	KeepUsed           time.Duration `yaml:"keep_used"`            // KeepUsed is the maximum age of a cache entry from creation, regardless of access. Zero keeps the historical default of 30 days.
+	KeepUnused         time.Duration `yaml:"keep_unused"`          // KeepUnused evicts entries not accessed within this duration. Zero keeps the historical default of 7 days.
+	MaxSize            int64         `yaml:"max_size"`             // MaxSize is the maximum total size of complete cache entries in bytes. Zero means unlimited; when exceeded, least-recently-used entries are evicted.
 }
 
 // Container represents the configuration for the container.
@@ -211,6 +214,15 @@ func LoadDefault(file string) (*Config, error) {
 		if cfg.Cache.ExternalServer != "" && cfg.Cache.ExternalSecret == "" {
 			return nil, errors.New("cache.external_server is set but no shared secret is configured; set cache.external_secret (or cache.external_secret_file) to the same value used by the gitea-runner cache-server")
 		}
+	}
+	if cfg.Cache.KeepUsed < 0 {
+		return nil, errors.New("cache.keep_used must be zero (default) or a positive duration")
+	}
+	if cfg.Cache.KeepUnused < 0 {
+		return nil, errors.New("cache.keep_unused must be zero (default) or a positive duration")
+	}
+	if cfg.Cache.MaxSize < 0 {
+		return nil, errors.New("cache.max_size must be zero (unlimited) or a positive byte count")
 	}
 	if cfg.Container.WorkdirParent == "" {
 		cfg.Container.WorkdirParent = "workspace"

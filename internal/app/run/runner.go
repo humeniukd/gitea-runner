@@ -99,6 +99,11 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 				cfg.Cache.Port,
 				"",
 				log.StandardLogger().WithField("module", "cache_request"),
+				artifactcache.GCConfig{
+					KeepUsed:   cfg.Cache.KeepUsed,
+					KeepUnused: cfg.Cache.KeepUnused,
+					MaxSize:    cfg.Cache.MaxSize,
+				},
 			)
 			if err != nil {
 				log.Errorf("cannot init cache server, it will be disabled: %v", err)
