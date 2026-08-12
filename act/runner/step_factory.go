@@ -40,7 +40,7 @@ func (sf *stepFactoryImpl) newStep(stepModel *model.Step, rc *RunContext) (step,
 		// Classification used to be model.StepTypeUsesActionBuiltin in act/model;
 		// that package now lives in actionslib without the builtin type, so we
 		// detect the same pattern here.
-		if isBuiltinUses(stepModel.Uses) {
+		if builtin.ValidName(stepModel.Uses) {
 			a, ok := builtin.Lookup(stepModel.Uses)
 			if !ok {
 				return nil, fmt.Errorf("unknown built-in action %q (known: %v) for job:%s step:%+v",
@@ -66,25 +66,4 @@ func (sf *stepFactoryImpl) newStep(stepModel *model.Step, rc *RunContext) (step,
 	}
 
 	return nil, fmt.Errorf("Unable to determine how to run job:%s step:%+v", rc.Run, stepModel)
-}
-
-// isBuiltinUses reports whether uses is a reserved no-slash name the runner
-// resolves via its built-in action registry (`^[a-z0-9][a-z0-9-]*$`).
-func isBuiltinUses(uses string) bool {
-	if uses == "" {
-		return false
-	}
-	for i, r := range uses {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= '0' && r <= '9':
-		case r == '-':
-			if i == 0 {
-				return false
-			}
-		default:
-			return false
-		}
-	}
-	return true
 }

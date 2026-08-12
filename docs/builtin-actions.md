@@ -40,7 +40,7 @@ A built-in action is:
 - A Go type implementing the [`builtin.Action`](../act/runner/builtin/builtin.go)
   interface.
 - Registered into a process-wide registry at `init()` time (via a blank
-  import in [`act/runner/builtin/register.go`](../act/runner/builtin/register.go)).
+  import in [`act/runner/builtins_register.go`](../act/runner/builtins_register.go)).
 - Reached from a workflow with a reserved no-slash name in `uses:`, for
   example `uses: checkout`.
 - Executed in the runner process. It may drive the job container through
@@ -151,10 +151,10 @@ func init() {
 ```
 
 and surfaced to the rest of the runner via a blank import in
-`act/runner/builtin/register.go`:
+`act/runner/builtins_register.go`:
 
 ```go
-import _ "gitea.com/gitea/act_runner/act/runner/builtin/checkout"
+import _ "gitea.com/gitea/runner/act/runner/builtin/checkout"
 ```
 
 The registry is a simple `map[string]Action` guarded by a mutex, with
@@ -207,7 +207,7 @@ Behavior:
 
 1. Create `act/runner/builtin/<name>/<name>.go`.
 2. Implement `builtin.Action` and register in `init()`.
-3. Add a blank import to `act/runner/builtin/register.go`.
+3. Add a blank import to `act/runner/builtins_register.go`.
 4. Add a row to the table below and a unit test that drives the action
    against a mock `container.ExecutionsEnvironment` (see
    `act/runner/container_mock_test.go` for the pattern).

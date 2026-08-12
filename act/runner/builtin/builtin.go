@@ -15,8 +15,8 @@ import (
 	"sync"
 
 	"gitea.com/gitea/runner/act/container"
-	"gitea.dev/actionslib/pkg/model"
 
+	"gitea.dev/actionslib/pkg/model"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -148,7 +148,7 @@ func Register(a Action) {
 		panic("builtin: Register called with nil Action")
 	}
 	name := a.Name()
-	if !validName(name) {
+	if !ValidName(name) {
 		panic(fmt.Sprintf("builtin: invalid Action name %q (must match ^[a-z0-9][a-z0-9-]*$)", name))
 	}
 	reg.mu.Lock()
@@ -179,10 +179,11 @@ func Names() []string {
 	return out
 }
 
-// validName mirrors the regex used by `model.(*Step).Type()` to recognize
-// a built-in. Kept in code (not regexp) to avoid a one-shot compile per
-// registration.
-func validName(s string) bool {
+// ValidName reports whether s matches the built-in name pattern
+// (`^[a-z0-9][a-z0-9-]*$`), mirroring the regex used by
+// `model.(*Step).Type()` to recognize a built-in. Kept in code (not
+// regexp) to avoid a one-shot compile per registration.
+func ValidName(s string) bool {
 	if s == "" {
 		return false
 	}

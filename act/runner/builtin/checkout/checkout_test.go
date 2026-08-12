@@ -14,8 +14,8 @@ import (
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/runner/builtin"
-	"gitea.dev/actionslib/pkg/model"
 
+	"gitea.dev/actionslib/pkg/model"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

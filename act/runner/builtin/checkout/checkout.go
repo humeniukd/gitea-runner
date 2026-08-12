@@ -21,6 +21,7 @@ import (
 
 	"gitea.com/gitea/runner/act/common/git"
 	"gitea.com/gitea/runner/act/runner/builtin"
+
 	"gitea.dev/actionslib/pkg/model"
 )
 
@@ -50,7 +51,7 @@ func (a *Action) Main(c *builtin.Context) error {
 	cfg := c.RunContext.Config()
 
 	repository := firstNonEmpty(c.Inputs["repository"], ghc.Repository)
-	ref := firstNonEmpty(c.Inputs["ref"], ghc.Ref)
+	ref := shortRef(firstNonEmpty(c.Inputs["ref"], ghc.Ref))
 	token := firstNonEmpty(c.Inputs["token"], ghc.Token, cfg.Token())
 	subPath := strings.TrimSpace(c.Inputs["path"])
 
@@ -66,14 +67,14 @@ func (a *Action) Main(c *builtin.Context) error {
 			c.Logger.Debugf("checkout: workspace already bind-mounted, skipping")
 			return nil
 		}
-		container := c.RunContext.JobContainer()
-		if container == nil {
+		jobContainer := c.RunContext.JobContainer()
+		if jobContainer == nil {
 			return errors.New("checkout: no job container available")
 		}
 		dst := path.Join(c.RunContext.ContainerWorkdir(), subPath)
 		src := c.RunContext.Workdir() + string(filepath.Separator) + "."
 		c.Logger.Debugf("checkout: copying workspace %s -> %s", src, dst)
-		return container.CopyDir(dst, src, cfg.UseGitIgnore())(c.Ctx)
+		return jobContainer.CopyDir(dst, src, cfg.UseGitIgnore())(c.Ctx)
 	}
 
 	// Otherwise clone on the runner host into ActionCacheDir/<step-hash>,
@@ -105,14 +106,14 @@ func (a *Action) Main(c *builtin.Context) error {
 		return fmt.Errorf("checkout: clone %s @ %s: %w", cloneURL, ref, err)
 	}
 
-	container := c.RunContext.JobContainer()
-	if container == nil {
+	jobContainer := c.RunContext.JobContainer()
+	if jobContainer == nil {
 		return errors.New("checkout: no job container available")
 	}
 	dst := path.Join(c.RunContext.ContainerWorkdir(), subPath)
 	src := cloneDir + string(filepath.Separator) + "."
 	c.Logger.Debugf("checkout: copying clone %s -> %s", src, dst)
-	return container.CopyDir(dst, src, cfg.UseGitIgnore())(c.Ctx)
+	return jobContainer.CopyDir(dst, src, cfg.UseGitIgnore())(c.Ctx)
 }
 
 // isLocalCheckoutLike mirrors the precondition used by
@@ -155,6 +156,19 @@ func repoURL(ghc *model.GithubContext, cfg builtin.Config, repository string) st
 func stageDir(actionCacheDir, usesHash, repository string) string {
 	suffix := sha256.Sum256([]byte(repository))
 	return filepath.Join(actionCacheDir, "builtin-checkout", usesHash, hex.EncodeToString(suffix[:8]))
+}
+
+// shortRef strips a fully-qualified ref (as found in `github.ref`, e.g.
+// "refs/heads/main") down to the short name that git.NewGitCloneExecutor
+// expects, since it unconditionally re-qualifies its Ref input as
+// "refs/heads/<ref>".
+func shortRef(ref string) string {
+	for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
+		if s, ok := strings.CutPrefix(ref, prefix); ok {
+			return s
+		}
+	}
+	return ref
 }
 
 func firstNonEmpty(values ...string) string {
