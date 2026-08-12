@@ -45,6 +45,8 @@ type executeArgs struct {
 	forcePull             bool
 	forceRebuild          bool
 	jsonLogger            bool
+	inputs                []string
+	inputfile             string
 	envs                  []string
 	envfile               string
 	secrets               []string
@@ -90,6 +92,11 @@ func (i *executeArgs) Envfile() string {
 	return i.resolve(i.envfile)
 }
 
+// Inputfile returns path to .env-format inputfile
+func (i *executeArgs) Inputfile() string {
+	return i.resolve(i.inputfile)
+}
+
 func (i *executeArgs) LoadSecrets() map[string]string {
 	s := make(map[string]string)
 	for _, secretPair := range i.secrets {
@@ -128,19 +135,16 @@ func readEnvs(path string, envs map[string]string) bool {
 	return false
 }
 
+func (i *executeArgs) LoadVars() map[string]string {
+	return parseKVAndFile(i.vars, "")
+}
+
+func (i *executeArgs) LoadInputs() map[string]string {
+	return parseKVAndFile(i.inputs, i.Inputfile())
+}
+
 func (i *executeArgs) LoadEnvs() map[string]string {
-	envs := make(map[string]string)
-	if i.envs != nil {
-		for _, envVar := range i.envs {
-			e := strings.SplitN(envVar, `=`, 2)
-			if len(e) == 2 {
-				envs[e[0]] = e[1]
-			} else {
-				envs[e[0]] = ""
-			}
-		}
-	}
-	_ = readEnvs(i.Envfile(), envs)
+	envs := parseKVAndFile(i.envs, i.Envfile())
 
 	envs["ACTIONS_CACHE_URL"] = i.cacheHandler.ExternalURL() + "/"
 	// The same server answers the cache service v2 API, so let the actions reach it.
@@ -149,20 +153,22 @@ func (i *executeArgs) LoadEnvs() map[string]string {
 	return envs
 }
 
-func (i *executeArgs) LoadVars() map[string]string {
-	vars := make(map[string]string)
-	if i.vars != nil {
-		for _, runVar := range i.vars {
-			e := strings.SplitN(runVar, `=`, 2)
-			if len(e) == 2 {
-				vars[e[0]] = e[1]
-			} else {
-				vars[e[0]] = ""
-			}
-		}
+func parseKVAndFile(rawKVs []string, filePath string) map[string]string {
+	result := make(map[string]string)
+
+	if filePath != "" {
+		_ = readEnvs(filePath, result)
 	}
 
-	return vars
+	for _, raw := range rawKVs {
+		parts := strings.SplitN(raw, "=", 2)
+		if len(parts) == 2 {
+			result[parts[0]] = parts[1]
+		} else {
+			result[parts[0]] = ""
+		}
+	}
+	return result
 }
 
 // Workdir returns path to workdir
@@ -452,6 +458,7 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 			ForceRebuild:          execArgs.forceRebuild,
 			JSONLogger:            execArgs.jsonLogger,
 			Env:                   env,
+			Inputs:                execArgs.LoadInputs(),
 			ProxyEnv:              proxyEnv,
 			Vars:                  execArgs.LoadVars(),
 			Secrets:               execArgs.LoadSecrets(),
@@ -469,6 +476,7 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 			ArtifactServerPort:    execArgs.artifactServerPort,
 			ArtifactServerAddr:    execArgs.artifactServerAddr,
 			NoSkipCheckout:        execArgs.noSkipCheckout,
+			EventName:             eventName,
 			EventPath:             execArgs.resolve(execArgs.eventpath),
 			// PresetGitHubContext:   preset,
 			// EventJSON:             string(eventJSON),
@@ -536,7 +544,9 @@ func loadExecCmd(ctx context.Context) *cobra.Command {
 	execCmd.Flags().BoolVarP(&execArg.forcePull, "pull", "p", false, "pull docker image(s) even if already present")
 	execCmd.Flags().BoolVarP(&execArg.forceRebuild, "rebuild", "", false, "rebuild local action docker image(s) even if already present")
 	execCmd.PersistentFlags().BoolVar(&execArg.jsonLogger, "json", false, "Output logs in json format")
-	execCmd.Flags().StringArrayVarP(&execArg.envs, "env", "", []string{}, "env to make available to actions with optional value (e.g. --env myenv=foo or --env myenv)")
+	execCmd.Flags().StringArrayVarP(&execArg.inputs, "input", "", []string{}, "set a workflow input (e.g. --input name=bar; can be specified multiple times with highest precedence)")
+	execCmd.Flags().StringVarP(&execArg.inputfile, "input-file", "", "", "path to an .env-format file containing key=value pairs as baseline workflow inputs (override event inputs)")
+	execCmd.Flags().StringArrayVarP(&execArg.envs, "env", "", []string{}, "env to make available to actions with optional value (e.g. --env myenv=foo or --env myenv; override env-file)")
 	execCmd.PersistentFlags().StringVarP(&execArg.envfile, "env-file", "", ".env", "environment file to read and use as env in the containers")
 	execCmd.Flags().StringArrayVarP(&execArg.secrets, "secret", "s", []string{}, "secret to make available to actions with optional value (e.g. -s mysecret=foo or -s mysecret)")
 	execCmd.Flags().StringArrayVarP(&execArg.vars, "var", "", []string{}, "variable to make available to actions with optional value (e.g. --var myvar=foo or --var myvar)")

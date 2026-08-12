@@ -6,6 +6,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json/v2"
 	"fmt"
 	"maps"
 	"os"
@@ -34,6 +35,7 @@ type Config struct {
 	ForcePull                     bool                                          // force pulling of the image, even if already present
 	ForceRebuild                  bool                                          // force rebuilding local docker image action
 	JSONLogger                    bool                                          // use json or text logger
+	Inputs                        map[string]string                             // workflow inputs
 	Env                           map[string]string                             // env for containers
 	Secrets                       map[string]string                             // list of secrets
 	ExtraMasks                    []string                                      // values to hide that are not in Secrets, such as the proxy password
@@ -141,17 +143,41 @@ func (runner *runnerImpl) configure() (*runnerImpl, error) {
 		runner.config.RunnerName, _ = os.Hostname()
 	}
 
-	runner.eventJSON = "{}"
-	if runner.config.EventJSON != "" {
-		runner.eventJSON = runner.config.EventJSON
-	} else if runner.config.EventPath != "" {
+	var eventJSONBytes []byte
+	var err error
+	switch {
+	case runner.config.EventJSON != "":
+		eventJSONBytes = []byte(runner.config.EventJSON)
+	case runner.config.EventPath != "":
 		log.Debugf("Reading event.json from %s", runner.config.EventPath)
-		eventJSONBytes, err := os.ReadFile(runner.config.EventPath)
+		eventJSONBytes, err = os.ReadFile(runner.config.EventPath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to read event.json: %w", err)
 		}
-		runner.eventJSON = string(eventJSONBytes)
+	default:
+		eventJSONBytes = []byte("{}")
 	}
+
+	if len(runner.config.Inputs) != 0 {
+		var eventMap map[string]any
+		if err = json.Unmarshal(eventJSONBytes, &eventMap); err != nil {
+			return nil, fmt.Errorf("failed to parse event JSON: %w", err)
+		}
+		inputsMap, ok := eventMap["inputs"].(map[string]any)
+		if !ok || inputsMap == nil {
+			inputsMap = make(map[string]any)
+		}
+		for k, v := range runner.config.Inputs {
+			inputsMap[k] = v
+		}
+
+		eventMap["inputs"] = inputsMap
+		eventJSONBytes, err = json.Marshal(eventMap)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal event JSON: %w", err)
+		}
+	}
+	runner.eventJSON = string(eventJSONBytes)
 	return runner, nil
 }
 

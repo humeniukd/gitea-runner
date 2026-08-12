@@ -56,6 +56,23 @@ func TestExecuteArgsPaths(t *testing.T) {
 	require.Equal(t, workdir, args.Workdir())
 }
 
+func TestExecuteArgsLoadInputs(t *testing.T) {
+	require.Empty(t, (&executeArgs{}).LoadInputs())
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	require.NoError(t, os.WriteFile(envFile, []byte("BAZ=qux\nOVERRIDE=from_file\n"), 0o600))
+
+	args := &executeArgs{inputs: []string{"FOO=bar", "EMPTY", "WITH=eq=sign", "OVERRIDE=from_cli"}, inputfile: envFile}
+	require.Equal(t, map[string]string{
+		"FOO":      "bar",
+		"EMPTY":    "",
+		"WITH":     "eq=sign",
+		"BAZ":      "qux",
+		"OVERRIDE": "from_cli",
+	}, args.LoadInputs())
+}
+
 func TestExecuteArgsLoadVars(t *testing.T) {
 	require.Empty(t, (&executeArgs{}).LoadVars())
 

@@ -21,6 +21,7 @@ import (
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 	assert "github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -530,4 +531,61 @@ func TestRunEventPullRequest(t *testing.T) {
 	}
 
 	tjfi.runTest(context.Background(), t, &Config{EventPath: filepath.Join(workdir, workflowPath, "event.json")})
+}
+
+func TestRunnerConfigureInputs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		config        *Config
+		expectedError string
+		expectedJSON  string
+	}{
+		{
+			name: "merges CLI inputs with existing eventJSON",
+			config: &Config{
+				Inputs: map[string]string{
+					"new_cli_flag": "flag_value",
+				},
+				EventJSON: `{"inputs": {"existing_input": "old_value"}}`,
+			},
+			expectedJSON: `{"inputs": {"existing_input": "old_value", "new_cli_flag": "flag_value"}}`,
+		},
+		{
+			name: "creates inputs map in eventJSON if none exists",
+			config: &Config{
+				Inputs: map[string]string{
+					"my_flag": "my_value",
+				},
+				EventJSON: `{"repository": {"name": "test-repo"}}`,
+			},
+			expectedJSON: `{"repository": {"name": "test-repo"}, "inputs": {"my_flag": "my_value"}}`,
+		},
+		{
+			name: "handles empty event JSON",
+			config: &Config{
+				Inputs: map[string]string{
+					"flag": "val",
+				},
+				EventJSON: "",
+			},
+			expectedJSON: `{"inputs": {"flag": "val"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, err := New(tt.config)
+			if tt.expectedError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectedError)
+				return
+			}
+			require.NoError(t, err)
+			assert.JSONEq(t, tt.expectedJSON, r.eventJSON)
+		})
+	}
 }
