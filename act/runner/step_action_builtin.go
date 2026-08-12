@@ -8,10 +8,10 @@ import (
 	"regexp"
 	"strings"
 
-	"gitea.com/gitea/act_runner/act/common"
-	"gitea.com/gitea/act_runner/act/container"
-	"gitea.com/gitea/act_runner/act/model"
-	"gitea.com/gitea/act_runner/act/runner/builtin"
+	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/runner/builtin"
+	"gitea.dev/actionslib/pkg/model"
 )
 
 // stepActionBuiltin runs a built-in action (a `uses:` value with no `/`,

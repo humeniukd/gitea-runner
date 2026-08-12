@@ -2,7 +2,9 @@
 .env
 !/act/runner/testdata/secrets/.env
 .runner
+.runner.lock
 coverage.txt
+.tmp/
 /config.yaml
 
 # Jetbrains
@@ -12,3 +14,4 @@ coverage.txt
 __debug_bin
 # gorelease binary folder
 /dist
+.DS_Store

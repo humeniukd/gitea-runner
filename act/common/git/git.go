@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/internal/pkg/lock"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -32,7 +33,7 @@ var (
 	githubHTTPRegex     = regexp.MustCompile(`^https?://.*github.com.*/(.+)/(.+?)(?:.git)?$`)
 	githubSSHRegex      = regexp.MustCompile(`github.com[:/](.+)/(.+?)(?:.git)?$`)
 
-	cloneLocks sync.Map // key: clone target directory; value: *sync.Mutex
+	cloneLocks lock.Keyed[string] // key: clone target directory
 
 	ErrShortRef = errors.New("short SHA references are not supported")
 	ErrNoRepo   = errors.New("unable to find git repo")
@@ -43,10 +44,7 @@ var (
 // Callers reading files inside dir (e.g. tarring a checked-out action into a job container) must hold this lock too,
 // otherwise a concurrent NewGitCloneExecutor on the same dir can mutate the worktree mid-read.
 func AcquireCloneLock(dir string) func() {
-	v, _ := cloneLocks.LoadOrStore(dir, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	return cloneLocks.Lock(dir)
 }
 
 type Error struct {
@@ -257,6 +255,14 @@ type NewGitCloneExecutorInput struct {
 	Token       string
 	OfflineMode bool
 
+	// Depth limits the clone/fetch to the given number of commits from the tip of the requested ref.
+	// 0 for full clone.
+	Depth int
+
+	// Quiet drops the informational clone line to debug level, for callers that log their own
+	// download summary (the setup section's action report).
+	Quiet bool
+
 	// For Gitea
 	InsecureSkipTLS bool
 }
@@ -309,7 +315,7 @@ func CloneIfRequired(ctx context.Context, refName plumbing.ReferenceName, input 
 		}
 	}
 
-	r, err = git.PlainCloneContext(ctx, input.Dir, false, &cloneOptions)
+	r, err = cloneAtDepth(ctx, input, cloneOptions, logger)
 	if err != nil {
 		logger.Errorf("Unable to clone %v %s: %v", input.URL, refName, err)
 		return nil, false, err
@@ -343,7 +349,11 @@ func gitOptions(token string) (fetchOptions git.FetchOptions, pullOptions git.Pu
 func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
-		logger.Infof("git clone '%s' # ref=%s", input.URL, input.Ref)
+		if input.Quiet {
+			logger.Debugf("git clone '%s' # ref=%s", input.URL, input.Ref)
+		} else {
+			logger.Infof("git clone '%s' # ref=%s", input.URL, input.Ref)
+		}
 		logger.Debugf("  cloning %s to %s", input.URL, input.Dir)
 
 		defer AcquireCloneLock(input.Dir)()
@@ -362,6 +372,16 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 		if input.InsecureSkipTLS { // For Gitea
 			fetchOptions.InsecureSkipTLS = true
 			pullOptions.InsecureSkipTLS = true
+		}
+
+		// Action clones only ever need the tip commit, so keep a shallow cache cheap on update at depth 1 regardless of its original depth
+		// Turning action_shallow_clone off does not convert an existing shallow cache; evict it for a full clone.
+		shallow := isShallow(r)
+		if shallow {
+			fetchOptions.Depth = 1
+			if spec, ok := shallowFetchRefSpec(r, input.Ref); ok {
+				fetchOptions.RefSpecs = []config.RefSpec{spec}
+			}
 		}
 
 		if !isOfflineMode {
@@ -431,11 +451,13 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 
 		reusedMsg := ""
 
-		if !isOfflineMode {
+		switch {
+		case !isOfflineMode && !shallow:
+			// In shallow mode the depth-limited fetch above already advanced the ref.
 			if err = w.Pull(&pullOptions); err != nil && err != git.NoErrAlreadyUpToDate {
 				logger.Debugf("Unable to pull %s: %v", refName, err)
 			}
-		} else if reused {
+		case isOfflineMode && reused:
 			reusedMsg = " (reused in offline mode)"
 		}
 
@@ -467,4 +489,54 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 		logger.Debugf("Checked out %s", input.Ref)
 		return nil
 	}
+}
+
+// cloneAtDepth clones input.URL into input.Dir using opts.
+// With input.Depth > 0 it first tries a shallow, single-branch clone of input.Ref, falling back when error.
+func cloneAtDepth(ctx context.Context, input NewGitCloneExecutorInput, opts git.CloneOptions, logger log.FieldLogger) (*git.Repository, error) {
+	if input.Depth > 0 {
+		for _, refName := range []plumbing.ReferenceName{
+			plumbing.NewBranchReferenceName(input.Ref),
+			plumbing.NewTagReferenceName(input.Ref),
+		} {
+			shallowOpts := opts
+			shallowOpts.Depth = input.Depth
+			shallowOpts.SingleBranch = true
+			shallowOpts.ReferenceName = refName
+			shallowOpts.Tags = git.NoTags
+
+			r, err := git.PlainCloneContext(ctx, input.Dir, false, &shallowOpts)
+			if err == nil {
+				return r, nil
+			}
+			logger.Debugf("Shallow clone of %s as %s failed: %v", input.URL, refName, err)
+			if rmErr := os.RemoveAll(input.Dir); rmErr != nil {
+				return nil, fmt.Errorf("remove partial clone %s: %w", input.Dir, rmErr)
+			}
+		}
+		logger.Debugf("Falling back to a full clone of %s for ref %q", input.URL, input.Ref)
+	}
+
+	return git.PlainCloneContext(ctx, input.Dir, false, &opts)
+}
+
+// isShallow reports whether the local repository was cloned with a limited depth.
+func isShallow(r *git.Repository) bool {
+	shallows, err := r.Storer.Shallow()
+	return err == nil && len(shallows) > 0
+}
+
+// shallowFetchRefSpec returns the single refspec that updates only input.Ref, keeping a shallow clone from re-downloading every branch's history.
+// ok is false when the ref is not present locally as a tag or remote-tracking branch, in which case the broad default refspec is used.
+func shallowFetchRefSpec(r *git.Repository, ref string) (config.RefSpec, bool) {
+	tagRef := plumbing.NewTagReferenceName(ref)
+	if _, err := r.Reference(tagRef, false); err == nil {
+		return config.RefSpec(fmt.Sprintf("+%s:%s", tagRef, tagRef)), true
+	}
+	remoteRef := plumbing.NewRemoteReferenceName("origin", ref)
+	if _, err := r.Reference(remoteRef, false); err == nil {
+		branchRef := plumbing.NewBranchReferenceName(ref)
+		return config.RefSpec(fmt.Sprintf("+%s:%s", branchRef, remoteRef)), true
+	}
+	return "", false
 }

@@ -14,8 +14,8 @@ import (
 	"sort"
 	"sync"
 
-	"gitea.com/gitea/act_runner/act/container"
-	"gitea.com/gitea/act_runner/act/model"
+	"gitea.com/gitea/runner/act/container"
+	"gitea.dev/actionslib/pkg/model"
 
 	log "github.com/sirupsen/logrus"
 )

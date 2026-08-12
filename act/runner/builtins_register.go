@@ -13,5 +13,5 @@ package runner
 import (
 	// Importing the built-in sub-packages for their `init()`-time
 	// `builtin.Register` calls.
-	_ "gitea.com/gitea/act_runner/act/runner/builtin/checkout"
+	_ "gitea.com/gitea/runner/act/runner/builtin/checkout"
 )

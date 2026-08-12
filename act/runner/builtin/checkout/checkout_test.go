@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"gitea.com/gitea/act_runner/act/common"
-	"gitea.com/gitea/act_runner/act/container"
-	"gitea.com/gitea/act_runner/act/model"
-	"gitea.com/gitea/act_runner/act/runner/builtin"
+	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/runner/builtin"
+	"gitea.dev/actionslib/pkg/model"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -61,9 +61,13 @@ func (f *fakeContainer) UpdateFromEnv(_ string, _ *map[string]string) common.Exe
 	return nopExec
 }
 func (f *fakeContainer) UpdateFromImageEnv(_ *map[string]string) common.Executor { return nopExec }
-func (f *fakeContainer) Remove() common.Executor                                 { return nopExec }
-func (f *fakeContainer) Close() common.Executor                                  { return nopExec }
-func (f *fakeContainer) ReplaceLogWriter(_, _ io.Writer) (io.Writer, io.Writer)  { return nil, nil }
+func (f *fakeContainer) Inspect(_ context.Context) (*container.Info, error) {
+	return &container.Info{}, nil
+}
+func (f *fakeContainer) Remove() common.Executor                                { return nopExec }
+func (f *fakeContainer) Close() common.Executor                                 { return nopExec }
+func (f *fakeContainer) DumpLogs(_ context.Context) error                       { return nil }
+func (f *fakeContainer) ReplaceLogWriter(_, _ io.Writer) (io.Writer, io.Writer) { return nil, nil }
 
 // container.ExecutionsEnvironment surface.
 func (f *fakeContainer) ToContainerPath(p string) string {

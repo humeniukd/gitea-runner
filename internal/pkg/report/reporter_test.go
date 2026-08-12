@@ -5,18 +5,23 @@ package report
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"maps"
+	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"gitea.com/gitea/runner/act/runner"
 	"gitea.com/gitea/runner/internal/pkg/client/mocks"
 	"gitea.com/gitea/runner/internal/pkg/config"
 
 	connect_go "connectrpc.com/connect"
-	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
+	runnerv1 "gitea.dev/actionslib/runner/v1"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -67,9 +72,12 @@ func TestReporter_parseLogRow(t *testing.T) {
 			"Debug enabled", true,
 			[]string{
 				"::debug::GitHub Actions runtime token access controls",
+				// Left escaped: the web UI decodes it, and a real newline would not survive storage.
+				"::debug::first%0Asecond",
 			},
 			[]string{
-				"GitHub Actions runtime token access controls",
+				"::debug::GitHub Actions runtime token access controls",
+				"::debug::first%0Asecond",
 			},
 		},
 		{
@@ -81,31 +89,46 @@ func TestReporter_parseLogRow(t *testing.T) {
 				"<nil>",
 			},
 		},
+		// The three annotation levels share one code path, so the property shapes are only
+		// exercised under "error"; notice and warning just prove the level token round-trips.
 		{
 			"notice", false,
 			[]string{
-				"::notice file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"::notice::Gosh, that's not going to work",
 			},
 			[]string{
-				"::notice file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"::notice::Gosh, that's not going to work",
 			},
 		},
 		{
 			"warning", false,
 			[]string{
-				"::warning file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"::warning::Gosh, that's not going to work",
 			},
 			[]string{
-				"::warning file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"::warning::Gosh, that's not going to work",
 			},
 		},
 		{
 			"error", false,
 			[]string{
 				"::error file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"::error::Gosh, that's not going to work",
+				"::error file=file.name,line=42,col=7::Gosh, that's not going to work",
+				// The message keeps its own '::', the property list ends at the first one.
+				"::error file=main.cpp,line=12::no member named 'foo' in 'std::vector<int>'",
+				// GitHub matches property names case-insensitively.
+				"::error File=file.name,Line=42,Col=7::Gosh, that's not going to work",
+				// Only the property separators are decoded here, %25/%0A are left for the web UI.
+				"::error file=a%3Ab.go,title=100%252C::still %25 escaped%0Aand multi-line",
 			},
 			[]string{
-				"::error file=file.name,line=42,endLine=48,title=Cool Title::Gosh, that's not going to work",
+				"::error::file.name:42: Cool Title: Gosh, that's not going to work",
+				"::error::Gosh, that's not going to work",
+				"::error::file.name:42:7: Gosh, that's not going to work",
+				"::error::main.cpp:12: no member named 'foo' in 'std::vector<int>'",
+				"::error::file.name:42:7: Gosh, that's not going to work",
+				"::error::a:b.go: 100%252C: still %25 escaped%0Aand multi-line",
 			},
 		},
 		{
@@ -145,6 +168,24 @@ func TestReporter_parseLogRow(t *testing.T) {
 			},
 		},
 		{
+			// a token naming a real command must still resume
+			"stop-commands with a command-named token", false,
+			[]string{
+				"::stop-commands::add-mask",
+				"::set-output name=x::suppressed",
+				"::add-mask::",
+				"::add-mask::masked",
+				"masked",
+			},
+			[]string{
+				"<nil>",
+				"::set-output name=x::suppressed",
+				"<nil>",
+				"<nil>",
+				"***",
+			},
+		},
+		{
 			"unknown command", false,
 			[]string{
 				"::set-mask::foo",
@@ -171,6 +212,19 @@ func TestReporter_parseLogRow(t *testing.T) {
 				assert.Equal(t, tt.want[idx], got)
 			}
 		})
+	}
+}
+
+// Both add-mask forms must register the secret and drop their own row: the runner forwards
+// the raw line, so failing to consume it writes the secret straight to the job log.
+func TestReporter_parseLogRowAddMask(t *testing.T) {
+	for _, line := range []string{"::add-mask::supersecret", "##[add-mask]supersecret"} {
+		r := &Reporter{logReplacer: strings.NewReplacer()}
+
+		assert.Nil(t, r.parseLogRow(&log.Entry{Message: line}), line)
+
+		row := r.parseLogRow(&log.Entry{Message: "using supersecret now"})
+		assert.Equal(t, "using *** now", row.Content, line)
 	}
 }
 
@@ -982,4 +1036,136 @@ func TestReporter_StopHeartbeats(t *testing.T) {
 	require.NoError(t, reporter.Close(""))
 	assert.Greater(t, updateTaskCalls.Load(), beforeStop,
 		"Close() must still send a final UpdateTask after StopHeartbeats")
+}
+
+func TestAppendIfNotNil(t *testing.T) {
+	var s []*int
+	s = appendIfNotNil(s, nil)
+	assert.Empty(t, s)
+
+	v := 7
+	s = appendIfNotNil(s, &v)
+	require.Len(t, s, 1)
+	assert.Equal(t, &v, s[0])
+
+	s = appendIfNotNil(s, nil)
+	require.Len(t, s, 1)
+}
+
+func TestReporter_Levels(t *testing.T) {
+	assert.Equal(t, log.AllLevels, (&Reporter{}).Levels())
+}
+
+func TestReporter_Result(t *testing.T) {
+	r := &Reporter{state: &runnerv1.TaskState{Result: runnerv1.Result_RESULT_SUCCESS}}
+	assert.Equal(t, runnerv1.Result_RESULT_SUCCESS, r.Result())
+}
+
+func TestReporter_SetOutputs(t *testing.T) {
+	r := &Reporter{state: &runnerv1.TaskState{}, logReplacer: strings.NewReplacer()}
+
+	r.SetOutputs(map[string]string{"foo": "bar"})
+	got, ok := r.outputs["foo"]
+	require.True(t, ok)
+	assert.Equal(t, "bar", got.value)
+
+	// first value wins: a later write to the same key is ignored
+	r.SetOutputs(map[string]string{"foo": "baz"})
+	assert.Equal(t, "bar", r.outputs["foo"].value)
+
+	// keys longer than maxOutputKeyLen are dropped
+	longKey := strings.Repeat("k", maxOutputKeyLen+1)
+	r.SetOutputs(map[string]string{longKey: "v"})
+	_, ok = r.outputs[longKey]
+	assert.False(t, ok)
+
+	// values longer than maxOutputValueLen are dropped
+	longValue := strings.Repeat("v", maxOutputValueLen+1)
+	r.SetOutputs(map[string]string{"big": longValue})
+	_, ok = r.outputs["big"]
+	assert.False(t, ok)
+
+	// a value at exactly the limit is still stored
+	maxValue := strings.Repeat("v", maxOutputValueLen)
+	r.SetOutputs(map[string]string{"atlimit": maxValue})
+	got, ok = r.outputs["atlimit"]
+	require.True(t, ok)
+	assert.Len(t, got.value, maxOutputValueLen)
+}
+
+// An output the server acknowledged is not reported again.
+func TestReporter_OutputsSentOnce(t *testing.T) {
+	client := mocks.NewClient(t)
+	var reported []map[string]string
+	client.On("UpdateTask", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req *connect_go.Request[runnerv1.UpdateTaskRequest]) (*connect_go.Response[runnerv1.UpdateTaskResponse], error) {
+			reported = append(reported, req.Msg.Outputs)
+			return connect_go.NewResponse(&runnerv1.UpdateTaskResponse{SentOutputs: slices.Collect(maps.Keys(req.Msg.Outputs))}), nil
+		})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+	cfg, _ := config.LoadDefault("")
+	r := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx}, cfg)
+
+	r.SetOutputs(map[string]string{"foo": "bar"})
+	require.NoError(t, r.ReportState(false))
+	assert.True(t, r.outputs["foo"].sent)
+
+	require.NoError(t, r.ReportState(true))
+	require.Len(t, reported, 2)
+	assert.Equal(t, map[string]string{"foo": "bar"}, reported[0])
+	assert.Empty(t, reported[1])
+}
+
+func TestReporter_EffectiveCloseTimeout(t *testing.T) {
+	assert.Equal(t, 10*time.Second, (&Reporter{}).effectiveCloseTimeout())
+	assert.Equal(t, 5*time.Second, (&Reporter{closeTimeout: 5 * time.Second}).effectiveCloseTimeout())
+}
+
+func TestReporter_ParseResult(t *testing.T) {
+	r := &Reporter{}
+
+	tests := []struct {
+		name   string
+		input  any
+		want   runnerv1.Result
+		wantOk bool
+	}{
+		{"job result string", "success", runnerv1.Result_RESULT_SUCCESS, true},
+		{"failure string", "failure", runnerv1.Result_RESULT_FAILURE, true},
+		{"step result stringer", runnerv1.Result_RESULT_SKIPPED, runnerv1.Result_RESULT_UNSPECIFIED, false},
+		{"unknown string", "bogus", runnerv1.Result_RESULT_UNSPECIFIED, false},
+		{"unsupported type", 123, runnerv1.Result_RESULT_UNSPECIFIED, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := r.parseResult(tt.input)
+			assert.Equal(t, tt.wantOk, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// A secret leaked in an encoded form — the shape it takes once an action puts it in a
+// JSON body, a URL or a base64 payload — must be masked in the reported log as well.
+func TestReporter_masksEncodedSecrets(t *testing.T) {
+	secret := `p@ss w"rd/1`
+	r := &Reporter{logReplacer: strings.NewReplacer()}
+	r.oldnew = runner.AppendSecretMasker(r.oldnew, secret)
+	r.logReplacer = strings.NewReplacer(r.oldnew...)
+
+	for _, line := range []string{
+		"token: " + secret,
+		"basic " + base64.StdEncoding.EncodeToString([]byte(secret)),
+		"https://example.com/?token=" + url.QueryEscape(secret),
+	} {
+		row := r.parseLogRow(&log.Entry{Message: line})
+		require.NotNil(t, row)
+		assert.Contains(t, row.Content, "***")
+		assert.NotContains(t, row.Content, secret)
+		assert.NotContains(t, row.Content, base64.StdEncoding.EncodeToString([]byte(secret)))
+	}
 }

@@ -8,11 +8,13 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
 	"gitea.com/gitea/runner/act/common"
-	"gitea.com/gitea/runner/act/model"
+
+	"gitea.dev/actionslib/pkg/model"
 )
 
 func evaluateCompositeInputAndEnv(ctx context.Context, parent *RunContext, step actionStep) map[string]string {
@@ -85,6 +87,19 @@ func newCompositeRunContext(ctx context.Context, parent *RunContext, step action
 	return compositerc
 }
 
+// appendUniqueMasks appends the masks from src to dst, skipping any mask that
+// is already present in dst. This prevents the parent RunContext's Masks slice
+// from growing exponentially when composite actions are nested or repeated,
+// since each composite RunContext is seeded with its parent's masks.
+func appendUniqueMasks(dst, src []string) []string {
+	for _, m := range src {
+		if !slices.Contains(dst, m) {
+			dst = append(dst, m)
+		}
+	}
+	return dst
+}
+
 func execAsComposite(step actionStep) common.Executor {
 	rc := step.getRunContext()
 	action := step.getActionModel()
@@ -110,7 +125,11 @@ func execAsComposite(step actionStep) common.Executor {
 			}, eval.Interpolate(ctx, output.Value))
 		}
 
-		rc.Masks = append(rc.Masks, compositeRC.Masks...)
+		// compositeRC.Masks is seeded with rc.Masks (see newCompositeRunContext)
+		// and may have additional masks appended while the composite action runs.
+		// Only append masks that are not already present, otherwise nested or
+		// repeated composite actions grow rc.Masks exponentially.
+		rc.Masks = appendUniqueMasks(rc.Masks, compositeRC.Masks)
 		rc.ExtraPath = compositeRC.ExtraPath
 		// compositeRC.Env is dirty, contains INPUT_ and merged step env, only rely on compositeRC.GlobalEnv
 		mergeIntoMap := mergeIntoMapCaseSensitive
@@ -168,10 +187,10 @@ func (rc *RunContext) compositeExecutor(action *model.Action) *compositeSteps {
 			err := rc.newCompositeCommandExecutor(step.main())(ctx)
 
 			if err != nil {
-				logger.Errorf("%v", err)
+				logger.Errorf("##[error]%s", EscapeCommandData(err.Error()))
 				common.SetJobError(ctx, err)
 			} else if ctx.Err() != nil {
-				logger.Errorf("%v", ctx.Err())
+				logger.Errorf("##[error]%s", EscapeCommandData(ctx.Err().Error()))
 				common.SetJobError(ctx, ctx.Err())
 			}
 			return nil
@@ -230,10 +249,10 @@ func newCompositeStepLogExecutor(runStep common.Executor, stepID string) common.
 		logger := common.Logger(ctx)
 		err := runStep(ctx)
 		if err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf("##[error]%s", EscapeCommandData(err.Error()))
 			common.SetJobError(ctx, err)
 		} else if ctx.Err() != nil {
-			logger.Errorf("%v", ctx.Err())
+			logger.Errorf("##[error]%s", EscapeCommandData(ctx.Err().Error()))
 			common.SetJobError(ctx, ctx.Err())
 		}
 		return nil

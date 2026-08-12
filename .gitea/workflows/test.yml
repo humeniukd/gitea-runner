@@ -17,10 +17,11 @@ jobs:
       # to ~/.docker with the stale credentials.
       DOCKER_CONFIG: /tmp/docker-noauth
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: 'go.mod'
+          check-latest: true
       - name: prepare anonymous docker config
         run: mkdir -p "$DOCKER_CONFIG" && echo '{}' > "$DOCKER_CONFIG/config.json"
       # Pre-pull act/runner's two largest base images so a slow pull can't dominate `make test`;
@@ -33,6 +34,8 @@ jobs:
           done
       - name: lint
         run: make lint
+      - name: checks
+        run: make checks
       - name: build
         run: make build
       - name: test
@@ -42,3 +45,7 @@ jobs:
       # after `make test` so the images it needs are already present on the host daemon.
       - name: test against dind image
         run: make test-dind
+      - name: coverage report
+        run: |
+          make coverage-report
+          cat .tmp/coverage.md >> "$GITHUB_STEP_SUMMARY"

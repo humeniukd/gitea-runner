@@ -4,9 +4,9 @@ DIST_DIRS := $(DIST)/binaries $(DIST)/release
 GO ?= go
 SHASUM ?= shasum -a 256
 HAS_GO = $(shell hash $(GO) > /dev/null 2>&1 && echo "GO" || echo "NOGO" )
-XGO_PACKAGE ?= src.techknowlogick.com/xgo@latest
+XGO_PACKAGE ?= src.techknowlogick.com/xgo@v1.9.0 # renovate: datasource=go
 XGO_VERSION := go-1.26.x
-GXZ_PACKAGE ?= github.com/ulikunitz/xz/cmd/gxz@v0.5.10
+GXZ_PACKAGE ?= github.com/ulikunitz/xz/cmd/gxz@v0.5.16 # renovate: datasource=go
 
 LINUX_ARCHS ?= linux/amd64,linux/arm64
 DARWIN_ARCHS ?= darwin-12/amd64,darwin-12/arm64
@@ -18,8 +18,10 @@ DOCKER_TAG ?= nightly
 DOCKER_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)
 DOCKER_ROOTLESS_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)-dind-rootless
 
-GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.3.0
+GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # renovate: datasource=go
+GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.6.0 # renovate: datasource=go
+
+GOTEST_FLAGS ?= -race -timeout 20m -parallel 8
 
 STATIC ?=
 EXTLDFLAGS ?=
@@ -38,12 +40,15 @@ endif
 ifeq ($(OS), Windows_NT)
 	GOFLAGS := -v -buildmode=exe
 	EXECUTABLE ?= $(EXECUTABLE).exe
+	GO_ENV_WINDOWS := set GOOS=windows&&
 else ifeq ($(OS), Windows)
 	GOFLAGS := -v -buildmode=exe
 	EXECUTABLE ?= $(EXECUTABLE).exe
+	GO_ENV_WINDOWS := set GOOS=windows&&
 else
 	GOFLAGS := -v
 	EXECUTABLE ?= $(EXECUTABLE)
+	GO_ENV_WINDOWS := GOOS=windows
 endif
 
 STORED_VERSION_FILE := VERSION
@@ -92,7 +97,7 @@ go-check:
 
 .PHONY: fmt-check
 fmt-check: fmt
-	@diff=$$(git diff --color=always); \
+	@diff=$$(git diff --color=always -- '*.go'); \
 	if [ -n "$$diff" ]; then \
 		echo "Please run 'make fmt' and commit the result:"; \
 		printf "%s" "$${diff}"; \
@@ -107,12 +112,20 @@ deps-tools: ## install tool dependencies
 	$(GO) install $(GOVULNCHECK_PACKAGE) & \
 	wait
 
+.PHONY: checks
+checks: tidy-check fmt-check security-check ## run the non-lint source checks
+
 .PHONY: lint
-lint: lint-go ## lint everything
+lint: lint-go lint-go-windows ## lint everything
 
 .PHONY: lint-go
 lint-go: ## lint go files
 	$(GO) run $(GOLANGCI_LINT_PACKAGE) run
+
+.PHONY: lint-go-windows
+lint-go-windows: ## lint Windows go files
+	$(GO) install $(GOLANGCI_LINT_PACKAGE)
+	$(GO_ENV_WINDOWS) golangci-lint run
 
 .PHONY: lint-go-fix
 lint-go-fix: ## lint go files and fix issues
@@ -123,12 +136,17 @@ lint-pr-title: ## lint PR title against Conventional Commits (set PR_TITLE=...)
 	@node ./tools/lint-pr-title.ts
 
 .PHONY: security-check
-security-check: deps-tools
+security-check:
 	GOEXPERIMENT= $(GO) run $(GOVULNCHECK_PACKAGE) -show color ./... || true
 
 .PHONY: tidy
 tidy: ## run go mod tidy
+	$(eval GO_TOOLCHAIN := $(shell grep -Eo '^toolchain\s+go[0-9.]+' go.mod | cut -d' ' -f2))
 	$(GO) mod tidy
+	@# workaround https://github.com/golang/go/issues/75331: restore toolchain if tidy dropped it
+	@if [ -n "$(GO_TOOLCHAIN)" ] && ! grep -qE '^toolchain\s' go.mod; then \
+		$(GO) mod edit -toolchain=$(GO_TOOLCHAIN); \
+	fi
 
 .PHONY: tidy-check
 tidy-check: tidy
@@ -140,8 +158,14 @@ tidy-check: tidy
 	fi
 
 .PHONY: test
-test: fmt-check security-check ## test everything (integration tests self-skip without docker/network)
-	@$(GO) test -race -timeout 20m -v -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
+test: ## test everything (integration tests self-skip without docker/network)
+	@$(GO) test $(GOTEST_FLAGS) -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
+
+.PHONY: coverage-report
+coverage-report: ## turn coverage.txt from `make test` into .tmp/coverage.md
+	@mkdir -p .tmp
+	@node ./tools/coverage-report.ts -i coverage.txt -o .tmp/coverage.md
+	@echo "Wrote .tmp/coverage.md"
 
 .PHONY: test-dind
 test-dind: ## run the daemon-facing tests against the built dind image (TARGET=dind|dind-rootless)
@@ -210,7 +234,7 @@ docker: ## build the docker image
 .PHONY: clean
 clean: ## delete binary and coverage files
 	$(GO) clean -x -i ./...
-	rm -rf coverage.txt $(EXECUTABLE) $(DIST)
+	rm -rf coverage.txt .tmp $(EXECUTABLE) $(DIST)
 
 .PHONY: version
 version: ## print the version

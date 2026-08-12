@@ -16,10 +16,11 @@ import (
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/common/git"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/act/model"
 
+	"gitea.dev/actionslib/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 type closerMock struct {
@@ -147,6 +148,44 @@ runs:
 
 			closerMock.AssertExpectations(t)
 		})
+	}
+}
+
+// With AutoRemove the daemon reaps the container on exit, so act must not remove it afterwards.
+func TestExecAsDockerAutoRemove(t *testing.T) {
+	orig := ContainerNewContainer
+	defer func() { ContainerNewContainer = orig }()
+
+	for _, tc := range []struct {
+		autoRemove bool
+		removes    int
+	}{
+		{false, 2}, // stale + post-run
+		{true, 1},  // post-run skipped
+	} {
+		cm := &containerMock{}
+		ContainerNewContainer = func(*container.NewContainerInput) container.ExecutionsEnvironment { return cm }
+
+		step := &stepActionRemote{
+			Step: &model.Step{ID: "1", Uses: "org/action@v1"},
+			RunContext: &RunContext{
+				Config:       &Config{AutoRemove: tc.autoRemove},
+				Run:          &model.Run{JobID: "1", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}}},
+				JobContainer: cm,
+			},
+			action: &model.Action{Runs: model.ActionRuns{Using: "docker", Image: "docker://node:14"}},
+		}
+
+		removes := 0
+		cm.On("Pull", false).Return(func(context.Context) error { return nil })
+		cm.On("Remove").Return(func(context.Context) error { removes++; return nil })
+		cm.On("Create", []string(nil), []string(nil)).Return(func(context.Context) error { return nil })
+		cm.On("Start", true).Return(func(context.Context) error { return nil })
+		cm.On("Close").Return(func(context.Context) error { return nil })
+
+		require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, stepStageMain))
+		cm.AssertExpectations(t)
+		assert.Equal(t, tc.removes, removes)
 	}
 }
 
@@ -426,7 +465,7 @@ func TestExecAsDockerHoldsCloneLockForRemoteUncached(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- execAsDocker(ctx, step, "test-action", actionDir, actionDir, false) }()
+	go func() { done <- execAsDocker(ctx, step, "test-action", actionDir, actionDir, false, stepStageMain) }()
 
 	select {
 	case <-innerEntered:
@@ -454,4 +493,134 @@ func TestExecAsDockerHoldsCloneLockForRemoteUncached(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("execAsDocker did not return after inner was released and ctx was canceled")
 	}
+}
+
+func TestDockerActionImageTag(t *testing.T) {
+	// Remote actions already carry a unique, ref-scoped actionName (the uses
+	// hash), so the tag must be left untouched for backwards compatibility.
+	assert.Equal(t,
+		"act-abc123-dockeraction:latest",
+		dockerActionImageTag("owner/repo", "abc123", false),
+	)
+
+	// Local actions keep a human-readable, repository-namespaced prefix and gain a short hash suffix that makes the tag unique per (repository, actionName).
+	// See https://gitea.com/gitea/runner/issues/1039.
+	assert.Equal(t,
+		"act-owner-repo-baca2daaa2fe-dockeraction:latest",
+		dockerActionImageTag("owner/repo", "./", true),
+	)
+	assert.Equal(t,
+		"act-owner-repo-sub-e847b61255a8-dockeraction:latest",
+		dockerActionImageTag("owner/repo", "./sub", true),
+	)
+
+	// Sanitizing every non-alphanumeric character to "-" is lossy, so distinct inputs can collapse to the same readable prefix.
+	// The hash suffix must keep such cases apart, otherwise an image built for one repository is reused for another.
+	collisions := [][2]struct {
+		repoName   string
+		actionName string
+	}{
+		// Two different repositories, both `uses: ./`: "a/b-c" and "a-b/c" both sanitize to "a-b-c".
+		{{"a/b-c", "./"}, {"a-b/c", "./"}},
+		// A repository's root action vs another repository's sub-path action:
+		// "owner/repo-a" + "./" and "owner/repo" + "./a" both sanitize to "owner-repo-a".
+		{{"owner/repo-a", "./"}, {"owner/repo", "./a"}},
+	}
+	for _, c := range collisions {
+		assert.NotEqual(t,
+			dockerActionImageTag(c[0].repoName, c[0].actionName, true),
+			dockerActionImageTag(c[1].repoName, c[1].actionName, true),
+			"local docker action tags must differ for %q/%q vs %q/%q",
+			c[0].repoName, c[0].actionName, c[1].repoName, c[1].actionName,
+		)
+	}
+
+	// Distinct local actions within the same repository keep distinct tags.
+	assert.NotEqual(t,
+		dockerActionImageTag("owner/repo", "./", true),
+		dockerActionImageTag("owner/repo", "./sub", true),
+	)
+}
+
+// Only the entrypoint is stage specific: every stage of a docker action receives runs.args
+// and runs.env, and the `entrypoint` input applies to the main stage alone.
+func TestExecAsDockerStageEntrypoint(t *testing.T) {
+	orig := ContainerNewContainer
+	defer func() { ContainerNewContainer = orig }()
+
+	for _, tc := range []struct {
+		name           string
+		stage          stepStage
+		wantEntrypoint []string
+	}{
+		{
+			name:           "main stage prefers the entrypoint input",
+			stage:          stepStageMain,
+			wantEntrypoint: []string{"input.sh"},
+		},
+		{
+			name:           "pre stage uses runs.pre-entrypoint",
+			stage:          stepStagePre,
+			wantEntrypoint: []string{"pre.sh", "--verbose"},
+		},
+		{
+			name:           "post stage uses runs.post-entrypoint",
+			stage:          stepStagePost,
+			wantEntrypoint: []string{"post.sh"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cm := &containerMock{}
+			var input *container.NewContainerInput
+			ContainerNewContainer = func(in *container.NewContainerInput) container.ExecutionsEnvironment {
+				input = in
+				return cm
+			}
+
+			step := &stepActionRemote{
+				Step: &model.Step{ID: "1", Uses: "org/action@v1", With: map[string]string{"entrypoint": "input.sh"}},
+				RunContext: &RunContext{
+					Config:       &Config{},
+					Run:          &model.Run{JobID: "1", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}}},
+					JobContainer: cm,
+				},
+				action: &model.Action{Runs: model.ActionRuns{
+					Using:          "docker",
+					Image:          "docker://node:14",
+					PreEntrypoint:  "pre.sh --verbose",
+					Entrypoint:     "main.sh",
+					PostEntrypoint: "post.sh",
+					Args:           []string{"hello"},
+					Env:            map[string]string{"MY_VAR": "world"},
+				}},
+				env: map[string]string{},
+			}
+
+			cm.On("Pull", false).Return(func(context.Context) error { return nil })
+			cm.On("Remove").Return(func(context.Context) error { return nil })
+			cm.On("Create", []string(nil), []string(nil)).Return(func(context.Context) error { return nil })
+			cm.On("Start", true).Return(func(context.Context) error { return nil })
+			cm.On("Close").Return(func(context.Context) error { return nil })
+
+			require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, tc.stage))
+			require.NotNil(t, input)
+			assert.Equal(t, tc.wantEntrypoint, input.Entrypoint)
+			assert.Equal(t, []string{"hello"}, input.Cmd)
+			assert.Contains(t, input.Env, "MY_VAR=world")
+		})
+	}
+}
+
+func TestDockerActionHasPreAndPostStep(t *testing.T) {
+	newStep := func(runs model.ActionRuns) actionStep {
+		return &stepActionRemote{action: &model.Action{Runs: runs}}
+	}
+	ctx := context.Background()
+
+	assert.False(t, hasPreStep(newStep(model.ActionRuns{Using: "docker", Image: "Dockerfile"}))(ctx))
+	assert.False(t, hasPostStep(newStep(model.ActionRuns{Using: "docker", Image: "Dockerfile"}))(ctx))
+
+	withStages := model.ActionRuns{Using: "docker", Image: "Dockerfile", PreEntrypoint: "pre.sh", PostEntrypoint: "post.sh"}
+	assert.True(t, hasPreStep(newStep(withStages))(ctx))
+	assert.True(t, hasPostStep(newStep(withStages))(ctx))
 }

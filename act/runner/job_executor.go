@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,8 +23,9 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/act/exprparser"
-	"gitea.com/gitea/runner/act/model"
+
+	"gitea.dev/actionslib/pkg/exprparser"
+	"gitea.dev/actionslib/pkg/model"
 )
 
 const maxJobSummaryBytes = 1024 * 1024
@@ -56,16 +58,81 @@ type jobInfo interface {
 	result(result string)
 }
 
-// reportStepError emits the GitHub Actions ##[error] annotation and records
-// the error against the job so the job is reported as failed.
-func reportStepError(ctx context.Context, err error) {
-	common.Logger(ctx).Errorf("##[error]%v", err)
+// reportStepError records a step error so the job is reported failed — except a
+// cancellation, which is an interruption, not a failure.
+func reportStepError(ctx context.Context, rc *RunContext, err error) {
+	if errors.Is(err, context.Canceled) {
+		// Defer to the job context: a genuine cancel reports cancelled, a stray teardown
+		// cancellation on a live ctx is ignored — never a step FAILURE.
+		rc.markInterrupted(ctx.Err())
+		return
+	}
+	common.Logger(ctx).Errorf("##[error]%s", EscapeCommandData(err.Error()))
 	common.SetJobError(ctx, err)
+	rc.markFailed()
+}
+
+// actionPreparer is implemented by steps that download an action before they run, so the job
+// executor can fetch all of them up front.
+type actionPreparer interface {
+	prepareActionExecutor() common.Executor
+	actionDownloadInfo() (reference, sha string, ok bool)
+}
+
+// printPrepareActions downloads every action the job uses before its first step runs and reports
+// them as actions/runner's "Prepare all required actions" section does. The steps still call
+// prepareActionExecutor themselves; it is a no-op once the action is resolved here.
+func printPrepareActions(rc *RunContext, preparers []actionPreparer) common.Executor {
+	return func(ctx context.Context) error {
+		if len(preparers) == 0 {
+			return nil
+		}
+
+		rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+		rawLogger.Infof("Prepare all required actions")
+
+		for _, preparer := range preparers {
+			if err := preparer.prepareActionExecutor()(ctx); err != nil {
+				// No step has run yet, so the failure belongs to the job.
+				reportStepError(ctx, rc, err)
+				return err
+			}
+			reference, sha, ok := preparer.actionDownloadInfo()
+			if !ok {
+				continue
+			}
+			if sha == "" {
+				rawLogger.Infof("Download action repository '%s'", reference)
+			} else {
+				rawLogger.Infof("Download action repository '%s' (SHA:%s)", reference, sha)
+			}
+		}
+		return nil
+	}
+}
+
+// printCompleteJobName closes the setup section the way actions/runner ends its "Set up job" step.
+func printCompleteJobName(rc *RunContext) common.Executor {
+	return func(ctx context.Context) error {
+		// Name holds a matrix combination; JobName is the shared name GitHub reports.
+		name := rc.JobName
+		if name == "" {
+			name = rc.Name
+		}
+		if name == "" && rc.Run != nil {
+			name = rc.Run.JobID
+		}
+		common.Logger(ctx).WithField(rawOutputField, true).Infof("Complete job name: %s", name)
+		return nil
+	}
 }
 
 func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executor {
 	steps := make([]common.Executor, 0)
 	preSteps := make([]common.Executor, 0)
+	// Collected separately: every action is downloaded before the first pre step runs.
+	stepPreSteps := make([]common.Executor, 0)
+	preparers := make([]actionPreparer, 0)
 	var postExecutor common.Executor
 
 	steps = append(steps, func(ctx context.Context) error {
@@ -112,15 +179,19 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			return common.NewErrorExecutor(err)
 		}
 
+		if preparer, ok := step.(actionPreparer); ok {
+			preparers = append(preparers, preparer)
+		}
+
 		stepIdx := stepModel.Number
 		preExec := step.pre()
-		preSteps = append(preSteps, useStepLogger(rc, stepModel, stepStagePre, func(ctx context.Context) error {
+		stepPreSteps = append(stepPreSteps, useStepLogger(rc, stepModel, stepStagePre, func(ctx context.Context) error {
 			rc.CurrentStepIndex = stepIdx
 			preErr := preExec(ctx)
 			if preErr != nil {
-				reportStepError(ctx, preErr)
+				reportStepError(ctx, rc, preErr)
 			} else if ctx.Err() != nil {
-				reportStepError(ctx, ctx.Err())
+				reportStepError(ctx, rc, ctx.Err())
 			}
 			return preErr
 		}))
@@ -130,9 +201,9 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			rc.CurrentStepIndex = stepIdx
 			err := stepExec(ctx)
 			if err != nil {
-				reportStepError(ctx, err)
+				reportStepError(ctx, rc, err)
 			} else if ctx.Err() != nil {
-				reportStepError(ctx, ctx.Err())
+				reportStepError(ctx, rc, ctx.Err())
 			}
 			return nil
 		}))
@@ -142,9 +213,9 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			rc.CurrentStepIndex = stepIdx
 			err := postFn(ctx)
 			if err != nil {
-				reportStepError(ctx, err)
+				reportStepError(ctx, rc, err)
 			} else if ctx.Err() != nil {
-				reportStepError(ctx, ctx.Err())
+				reportStepError(ctx, rc, ctx.Err())
 			}
 			return err
 		})
@@ -156,10 +227,25 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		}
 	}
 
+	// The setup section of the job log. The started hook goes first, so what it sets up is
+	// in place for the first action download and the first step.
+	preSteps = append(preSteps, rc.runJobStartedHook)
+	preSteps = append(preSteps, printPrepareActions(rc, preparers))
+	preSteps = append(preSteps, stepPreSteps...)
+	preSteps = append(preSteps, printCompleteJobName(rc))
+
+	// Ahead of the teardown below, while the job environment is still up.
+	postExecutor = postExecutor.Finally(rc.runJobCompletedHook)
+
 	postExecutor = postExecutor.Finally(func(ctx context.Context) error {
 		jobError := common.JobError(ctx)
 		var err error
-		if rc.Config.AutoRemove || jobError == nil {
+		// jobError == nil keeps a failed job's container alive for post-mortem debugging when
+		// AutoRemove is off (the act-CLI --rm behavior; the shipped runner always sets
+		// AutoRemove). A cancelled run is not a failure to inspect, and the cancel-path post
+		// context now carries its own error container so a failing post step makes jobError
+		// non-nil — OR in rc.jobCancelled so cancellation still always tears the container down.
+		if rc.Config.AutoRemove || jobError == nil || rc.jobCancelled {
 			// always allow 1 min for stopping and removing the runner, even if we were cancelled
 			ctx, cancel := context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), time.Minute)
 			defer cancel()
@@ -175,7 +261,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 
 			logger.Infof("Cleaning up container for job %s", rc.JobName)
 			if err = info.stopContainer()(ctx); err != nil {
-				logger.Errorf("Error while stop job container: %v", err)
+				logger.Errorf("##[error]%s", EscapeCommandData("Error while stop job container: "+err.Error()))
 			}
 
 			// For Gitea
@@ -198,33 +284,105 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		return err
 	})
 
-	pipeline := make([]common.Executor, 0)
-	pipeline = append(pipeline, preSteps...)
-	pipeline = append(pipeline, steps...)
+	stepsExecutor := newStepsExecutor(rc, preSteps, steps)
 
-	return common.NewPipelineExecutor(info.startContainer(), common.NewPipelineExecutor(pipeline...).
+	return common.NewPipelineExecutor(info.startContainer(), stepsExecutor.
 		Finally(func(ctx context.Context) error {
-			var cancel context.CancelFunc
-			switch ctx.Err() {
-			case context.Canceled:
-				// in case of an aborted run, we still should execute the
-				// post steps to allow cleanup.
-				ctx, cancel = context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), 5*time.Minute)
-				defer cancel()
-			case context.DeadlineExceeded:
-				// The job hit its timeout-minutes. Without a fresh context the post
-				// steps would run against the already-expired context and be skipped,
-				// so cleanup post-hooks (e.g. actions/checkout post, cache save) would
-				// not run. Derive the context with WithoutCancel so the new deadline
-				// applies but the job error state is preserved: the job is still
-				// reported as failed and container teardown matches a normal failure.
-				ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
-				defer cancel()
-			}
-			return postExecutor(ctx)
+			// Record an interrupt (backstop for interrupts that land outside the main
+			// step loop) so the post steps observe the cancelled/failed job status.
+			rc.markInterrupted(ctx.Err())
+			postCtx, cancel := postStepsContext(ctx)
+			defer cancel()
+			return postExecutor(postCtx)
 		}).
 		Finally(info.interpolateOutputs()).
 		Finally(info.closeContainer()))
+}
+
+// postStepsContext derives the context used to run the job's post/cleanup steps from the
+// finished main-pipeline context. Cleanup has to run even when the run was interrupted, so the
+// returned context always carries a fresh bounded deadline and is never itself cancelled.
+//
+//   - context.Canceled (server cancel): detach from the cancelled context via a fresh root so
+//     the post steps can run.
+//   - context.DeadlineExceeded (job timeout): detach the deadline with WithoutCancel, which
+//     keeps the original values — including the job-error container — so the timeout failure and
+//     any post-step error are preserved and the job is still reported as failed.
+//   - otherwise: run on the live context unchanged.
+func postStepsContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	switch ctx.Err() {
+	case context.Canceled:
+		// The cancelled context is abandoned for a fresh root, which drops the job-error
+		// container installed at the job root. Re-attach a fresh one so a failing post step
+		// records its error via SetJobError instead of panicking on a nil container.
+		return context.WithTimeout(common.WithJobErrorContainer(common.WithLogger(context.Background(), common.Logger(ctx))), 5*time.Minute)
+	case context.DeadlineExceeded:
+		return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	default:
+		return ctx, func() {}
+	}
+}
+
+// newStepsExecutor sequences the job's pre steps and main steps.
+//
+// The pre steps run as a normal pipeline that short-circuits on the first failure or
+// cancellation. The main-steps executor then runs unconditionally — even if a pre step failed
+// or the job was interrupted — so always()/cancelled()/failure() main steps still run, mirroring
+// GitHub Actions. This is safe because each main step re-evaluates its own `if` (a pre-step
+// failure flips the expression job status to failure, so success()-default steps skip) and
+// newMainStepsExecutor detaches from an interrupted context before running the remaining steps.
+//
+// A pre-step failure or interrupt is still propagated so the job is reported with the correct
+// conclusion; the pre error takes precedence since it happened first.
+func newStepsExecutor(rc *RunContext, preSteps, steps []common.Executor) common.Executor {
+	preExecutor := common.NewPipelineExecutor(preSteps...)
+	mainExecutor := newMainStepsExecutor(rc, steps)
+	return func(ctx context.Context) error {
+		preErr := preExecutor(ctx)
+		mainErr := mainExecutor(ctx)
+		if preErr != nil {
+			return preErr
+		}
+		return mainErr
+	}
+}
+
+// newMainStepsExecutor runs the job's main-stage step executors in order. Unlike a plain
+// pipeline, an interruption (context.Canceled from a server cancel, or context.DeadlineExceeded
+// from the job timeout) does not abandon the remaining steps: it marks the job cancelled when
+// appropriate and keeps iterating under a fresh, bounded context so steps whose `if` still
+// evaluates true — always() and cancelled() — run for cleanup, mirroring GitHub Actions. Steps
+// that default to success() skip themselves because success() is false once the job is no longer
+// successful. The main-step wrappers report their own errors and return nil, so the loop drives
+// step ordering off the context, not return values.
+func newMainStepsExecutor(rc *RunContext, steps []common.Executor) common.Executor {
+	return func(ctx context.Context) error {
+		for i, step := range steps {
+			if ctx.Err() != nil {
+				return runMainStepsAfterInterrupt(ctx, rc, steps[i:])
+			}
+			_ = step(ctx)
+		}
+		// An interrupt can land during the final step, after the loop's last context
+		// check; record it so the post steps still observe the cancelled/failed status.
+		rc.markInterrupted(ctx.Err())
+		return nil
+	}
+}
+
+// runMainStepsAfterInterrupt runs the remaining main steps after the job context was cancelled or
+// timed out. It detaches from the interrupted context (keeping its values: logger and job error)
+// and applies a fresh deadline so always()/cancelled() steps run to completion. The original
+// interrupt error is returned so callers up the chain still see the job as cancelled/timed out.
+func runMainStepsAfterInterrupt(ctx context.Context, rc *RunContext, steps []common.Executor) error {
+	interruptErr := ctx.Err()
+	rc.markInterrupted(interruptErr)
+	freshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+	for _, step := range steps {
+		_ = step(freshCtx)
+	}
+	return interruptErr
 }
 
 func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success bool) {

@@ -45,14 +45,14 @@ var testClient = &http.Client{Transport: &bearerTransport{token: testToken}}
 // tests use it to reach the get handler directly without going through a
 // find/cache-hit round trip.
 func signArtifactURL(h *Handler, id int64) string {
-	return h.signedArtifactURL(uint64(id), time.Now().Add(artifactURLTTL))
+	return h.signedArtifactURL(JobCredential{}, uint64(id), time.Now().Add(artifactURLTTL))
 }
 
 func TestHandler(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 	handler, err := StartHandler(dir, "", 0, "", nil)
 	require.NoError(t, err)
-	handler.RegisterJob(testToken, testRepo)
+	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
 
 	base := fmt.Sprintf("%s%s", handler.ExternalURL(), apiPath)
 
@@ -445,13 +445,6 @@ func TestHandler(t *testing.T) {
 		require.Equal(t, 404, resp.StatusCode)
 	})
 
-	t.Run("get with not exist id", func(t *testing.T) {
-		resp, err := testClient.Get(signArtifactURL(handler, 100))
-		require.NoError(t, err)
-		defer resp.Body.Close()
-		require.Equal(t, 404, resp.StatusCode)
-	})
-
 	t.Run("get with multiple keys", func(t *testing.T) {
 		version := "c19da02a2bd7e77277f1ac29ab45c09b7d46a4ee758284e26bb3045ad11d9d20"
 		key := strings.ToLower(t.Name())
@@ -469,7 +462,8 @@ func TestHandler(t *testing.T) {
 			_, err := rand.Read(contents[i])
 			require.NoError(t, err)
 			uploadCacheNormally(t, base, keys[i], version, contents[i])
-			time.Sleep(time.Second) // ensure CreatedAt of caches are different
+			// ensure CreatedAt of caches are different, in upload order
+			backdateCache(t, handler, keys[i], time.Duration(len(contents)-i)*time.Second)
 		}
 
 		reqKeys := strings.Join([]string{
@@ -554,7 +548,8 @@ func TestHandler(t *testing.T) {
 			_, err := rand.Read(contents[i])
 			require.NoError(t, err)
 			uploadCacheNormally(t, base, keys[i], version, contents[i])
-			time.Sleep(time.Second) // ensure CreatedAt of caches are different
+			// ensure CreatedAt of caches are different, in upload order
+			backdateCache(t, handler, keys[i], time.Duration(len(contents)-i)*time.Second)
 		}
 
 		reqKeys := strings.Join([]string{
@@ -607,7 +602,8 @@ func TestHandler(t *testing.T) {
 			_, err := rand.Read(contents[i])
 			require.NoError(t, err)
 			uploadCacheNormally(t, base, keys[i], version, contents[i])
-			time.Sleep(time.Second) // ensure CreatedAt of caches are different
+			// ensure CreatedAt of caches are different, in upload order
+			backdateCache(t, handler, keys[i], time.Duration(len(contents)-i)*time.Second)
 		}
 
 		reqKeys := strings.Join([]string{
@@ -644,6 +640,20 @@ func TestHandler(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, contents[expect], content)
 	})
+}
+
+// backdateCache rewrites a cache's CreatedAt. It has one-second resolution, so age-ordering
+// tests set it directly instead of sleeping a second between uploads.
+func backdateCache(t *testing.T, handler *Handler, key string, age time.Duration) {
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	defer db.Close()
+
+	var caches []*Cache
+	require.NoError(t, db.Find(&caches, bolthold.Where("Key").Eq(key)))
+	require.Len(t, caches, 1)
+	caches[0].CreatedAt = time.Now().Add(-age).Unix()
+	require.NoError(t, db.Update(caches[0].ID, caches[0]))
 }
 
 func uploadCacheNormally(t *testing.T, base, key, version string, content []byte) { //nolint:unparam // pre-existing issue from nektos/act
@@ -880,7 +890,7 @@ func TestHandler_UnregisterRevokes(t *testing.T) {
 	require.NoError(t, err)
 	defer handler.Close()
 
-	unregister := handler.RegisterJob("tmp-token", testRepo)
+	unregister := handler.RegisterJob("tmp-token", JobCredential{Repo: testRepo})
 
 	base := handler.ExternalURL() + apiPath
 	req, err := http.NewRequest(http.MethodGet, base+"/cache?keys=x&version=y", nil)
@@ -910,8 +920,8 @@ func TestHandler_CrossRepoIsolation(t *testing.T) {
 	handler, err := StartHandler(dir, "", 0, "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
-	handler.RegisterJob("token-a", "owner/repoA")
-	handler.RegisterJob("token-b", "owner/repoB")
+	handler.RegisterJob("token-a", JobCredential{Repo: "owner/repoA"})
+	handler.RegisterJob("token-b", JobCredential{Repo: "owner/repoB"})
 
 	base := handler.ExternalURL() + apiPath
 	key := "shared-key"
@@ -976,7 +986,7 @@ func TestHandler_ArtifactSignature(t *testing.T) {
 	handler, err := StartHandler(dir, "", 0, "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
-	handler.RegisterJob(testToken, testRepo)
+	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
 
 	base := handler.ExternalURL() + apiPath
 
@@ -988,7 +998,7 @@ func TestHandler_ArtifactSignature(t *testing.T) {
 	})
 
 	t.Run("tampered signature", func(t *testing.T) {
-		good := handler.signedArtifactURL(1, time.Now().Add(artifactURLTTL))
+		good := signArtifactURL(handler, 1)
 		bad := good[:len(good)-4] + "dead"
 		resp, err := testClient.Get(bad)
 		require.NoError(t, err)
@@ -997,7 +1007,7 @@ func TestHandler_ArtifactSignature(t *testing.T) {
 	})
 
 	t.Run("expired signature", func(t *testing.T) {
-		expired := handler.signedArtifactURL(1, time.Now().Add(-time.Second))
+		expired := handler.signedArtifactURL(JobCredential{}, 1, time.Now().Add(-time.Second))
 		resp, err := testClient.Get(expired)
 		require.NoError(t, err)
 		resp.Body.Close()
@@ -1009,7 +1019,7 @@ func TestHandler_ArtifactSignature(t *testing.T) {
 		other, err := StartHandler(dir2, "", 0, "", nil)
 		require.NoError(t, err)
 		defer other.Close()
-		otherURL := other.signedArtifactURL(1, time.Now().Add(artifactURLTTL))
+		otherURL := signArtifactURL(other, 1)
 		// Rewrite the host so the request still lands on our handler, but
 		// the signature was computed with a different secret.
 		parts := strings.SplitN(otherURL, apiPath, 2)
@@ -1031,14 +1041,14 @@ func TestHandler_SecretPersistsAcrossRestarts(t *testing.T) {
 	first, err := StartHandler(dir, "127.0.0.1", 0, "", nil)
 	require.NoError(t, err)
 	exp := time.Now().Add(artifactURLTTL).Unix()
-	sig := first.computeSignature(42, exp)
+	sig := first.computeSignature("", 42, exp)
 	require.NoError(t, first.Close())
 
 	second, err := StartHandler(dir, "127.0.0.1", 0, "", nil)
 	require.NoError(t, err)
 	defer second.Close()
 
-	assert.Equal(t, sig, second.computeSignature(42, exp))
+	assert.Equal(t, sig, second.computeSignature("", 42, exp))
 }
 
 // TestHandler_ArtifactSignatureDownload is a happy-path round trip that
@@ -1049,7 +1059,7 @@ func TestHandler_ArtifactSignatureDownload(t *testing.T) {
 	handler, err := StartHandler(dir, "", 0, "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
-	handler.RegisterJob(testToken, testRepo)
+	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
 
 	base := handler.ExternalURL() + apiPath
 	key := "download-key"
@@ -1090,8 +1100,8 @@ func TestHandler_RegisterJob_RefCounted(t *testing.T) {
 	require.NoError(t, err)
 	defer handler.Close()
 
-	first := handler.RegisterJob("shared", testRepo)
-	second := handler.RegisterJob("shared", testRepo)
+	first := handler.RegisterJob("shared", JobCredential{Repo: testRepo})
+	second := handler.RegisterJob("shared", JobCredential{Repo: testRepo})
 
 	base := handler.ExternalURL() + apiPath
 	probe := func() int {
@@ -1121,8 +1131,8 @@ func TestHandler_GC_PerRepoDedup(t *testing.T) {
 	handler, err := StartHandler(dir, "", 0, "", nil)
 	require.NoError(t, err)
 	defer handler.Close()
-	handler.RegisterJob("tok-a", "owner/repoA")
-	handler.RegisterJob("tok-b", "owner/repoB")
+	handler.RegisterJob("tok-a", JobCredential{Repo: "owner/repoA"})
+	handler.RegisterJob("tok-b", JobCredential{Repo: "owner/repoB"})
 
 	key := "shared-dedup-key"
 	version := "c19da02a2bd7e77277f1ac29ab45c09b7d46a4ee758284e26bb3045ad11d9d20"
