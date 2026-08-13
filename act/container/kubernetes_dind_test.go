@@ -43,8 +43,13 @@ func (f *fakeExecEnv) CopyDir(_, _ string, _ bool) common.Executor { return noop
 func (f *fakeExecEnv) GetContainerArchive(_ context.Context, _ string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(nil)), nil
 }
-func (f *fakeExecEnv) Pull(_ bool) common.Executor  { return noopExecutor() }
-func (f *fakeExecEnv) Start(_ bool) common.Executor { return noopExecutor() }
+
+func (f *fakeExecEnv) Inspect(_ context.Context) (*Info, error) {
+	return &Info{Health: HealthNone, Ports: map[string]string{}}, nil
+}
+func (f *fakeExecEnv) DumpLogs(_ context.Context) error { return nil }
+func (f *fakeExecEnv) Pull(_ bool) common.Executor      { return noopExecutor() }
+func (f *fakeExecEnv) Start(_ bool) common.Executor     { return noopExecutor() }
 func (f *fakeExecEnv) UpdateFromEnv(_ string, _ *map[string]string) common.Executor {
 	return noopExecutor()
 }

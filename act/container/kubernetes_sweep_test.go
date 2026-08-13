@@ -183,7 +183,7 @@ func TestDeleteWithRetry(t *testing.T) {
 	// Succeeds on the first attempt.
 	t.Run("immediate success", func(t *testing.T) {
 		var calls int
-		err := deleteWithRetry(context.Background(), nil, sweepNS, "job pod", "job-x", func(context.Context) error {
+		err := deleteWithRetry(context.Background(), sweepNS, "job pod", "job-x", func(context.Context) error {
 			calls++
 			return nil
 		})
@@ -194,7 +194,7 @@ func TestDeleteWithRetry(t *testing.T) {
 	// A transient failure followed by success is retried.
 	t.Run("retries then succeeds", func(t *testing.T) {
 		var calls int
-		err := deleteWithRetry(context.Background(), nil, sweepNS, "job pod", "job-x", func(context.Context) error {
+		err := deleteWithRetry(context.Background(), sweepNS, "job pod", "job-x", func(context.Context) error {
 			calls++
 			if calls < 3 {
 				return apierrors.NewTimeoutError("transient", 0)
@@ -208,7 +208,7 @@ func TestDeleteWithRetry(t *testing.T) {
 	// A permanent error aborts immediately without retrying.
 	t.Run("permanent error fails fast", func(t *testing.T) {
 		var calls int
-		err := deleteWithRetry(context.Background(), nil, sweepNS, "job pod", "job-x", func(context.Context) error {
+		err := deleteWithRetry(context.Background(), sweepNS, "job pod", "job-x", func(context.Context) error {
 			calls++
 			return apierrors.NewForbidden(corev1.Resource("pods"), "job-x", errors.New("rbac"))
 		})
@@ -220,7 +220,7 @@ func TestDeleteWithRetry(t *testing.T) {
 	// Exhausting all attempts on a transient error surfaces a qualified error.
 	t.Run("exhausts attempts on persistent transient error", func(t *testing.T) {
 		var calls int
-		err := deleteWithRetry(context.Background(), nil, sweepNS, "job pod", "job-x", func(context.Context) error {
+		err := deleteWithRetry(context.Background(), sweepNS, "job pod", "job-x", func(context.Context) error {
 			calls++
 			return apierrors.NewTimeoutError("always", 0)
 		})

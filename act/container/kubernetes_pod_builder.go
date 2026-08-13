@@ -212,9 +212,9 @@ func (b *podBuilder) build() *corev1.Pod {
 	}
 
 	spec := corev1.PodSpec{
-		RestartPolicy:         corev1.RestartPolicyNever,
-		Containers:            containers,
-		InitContainers:        initContainers,
+		RestartPolicy:  corev1.RestartPolicyNever,
+		Containers:     containers,
+		InitContainers: initContainers,
 		Volumes: []corev1.Volume{
 			b.workspaceVolumeSpec(),
 			{Name: kubernetesActPathVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},

@@ -90,6 +90,23 @@ data:
 {{- end }}
 {{- end }}
 
+{{- with .Values.config.kubernetes.nodeSelector }}
+      node_selector:
+{{- range $k, $v := . }}
+        {{ $k }}: {{ $v | quote }}
+{{- end }}
+{{- end }}
+
+{{- with .Values.config.kubernetes.tolerations }}
+      tolerations:
+{{ toYaml . | nindent 8 }}
+{{- end }}
+
+{{- with .Values.config.kubernetes.affinity }}
+      affinity:
+{{ toYaml . | nindent 8 }}
+{{- end }}
+
       workspace_volume:
         type: {{ .Values.config.kubernetes.workspaceVolume.type }}
 {{- with .Values.config.kubernetes.workspaceVolume.size }}

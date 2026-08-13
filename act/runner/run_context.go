@@ -27,11 +27,16 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/act/exprparser"
-	"gitea.com/gitea/runner/act/model"
+	"gitea.com/gitea/runner/act/ghcontext"
+	"gitea.com/gitea/runner/internal/pkg/lock"
 
+	"gitea.dev/actionslib/pkg/exprparser"
+	"gitea.dev/actionslib/pkg/model"
+	"github.com/docker/cli/cli/compose/loader"
 	"github.com/docker/go-connections/nat"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/opencontainers/selinux/go-selinux"
+	"golang.org/x/sync/errgroup"
 )
 
 // RunContext contains info about current job
@@ -53,7 +58,7 @@ type RunContext struct {
 	IntraActionState    map[string]map[string]string
 	ExprEval            ExpressionEvaluator
 	JobContainer        container.ExecutionsEnvironment
-	ServiceContainers   []container.ExecutionsEnvironment
+	serviceContainers   []*serviceContainer
 	OutputMappings      map[MappableOutput]MappableOutput
 	JobName             string
 	ActionPath          string
@@ -81,6 +86,37 @@ type RunContext struct {
 	// failures. Those failures must still make success() false and failure() true for later
 	// main-step if evaluation.
 	jobFailed bool
+	// empty for a host-mode job, which starts no container
+	jobContainerID string
+	jobNetworkName string
+	// stepEnv is a copy of the running step's environment, so that workflow commands parsed out
+	// of the container's output can be judged against it. Written by runStepExecutor and read on
+	// the log-writer goroutine, hence unsecureCommandMu, which also guards unsecureCommandErr.
+	stepEnv            map[string]string
+	unsecureCommandErr error // refused ::set-env::/::add-path::, turned into a step failure
+	unsecureCommandMu  sync.Mutex
+}
+
+// serviceContainer pairs a service container with the workflow id that keys job.services.
+type serviceContainer struct {
+	name       string
+	image      string
+	container  container.ExecutionsEnvironment
+	logsDumped bool
+	info       *container.Info // last poll, the source of the `job.services` entry
+}
+
+// setCurrentStepEnv records the environment of the step about to run.
+func (rc *RunContext) setCurrentStepEnv(env map[string]string) {
+	rc.unsecureCommandMu.Lock()
+	defer rc.unsecureCommandMu.Unlock()
+	rc.stepEnv = env
+}
+
+func (rc *RunContext) currentStepEnv() map[string]string {
+	rc.unsecureCommandMu.Lock()
+	defer rc.unsecureCommandMu.Unlock()
+	return rc.stepEnv
 }
 
 // markCancelled flags the job as cancelled so subsequent step `if` evaluations and the
@@ -138,7 +174,9 @@ func (rc *RunContext) GetEnv() map[string]string {
 			}
 		}
 	}
-	rc.Env["ACT"] = "true"
+	if !rc.Config.DisableActEnv {
+		rc.Env["ACT"] = "true"
+	}
 
 	if !rc.Config.NoSkipCheckout {
 		rc.Env["ACT_SKIP_CHECKOUT"] = "true"
@@ -202,52 +240,93 @@ func (rc *RunContext) validVolumes() []string {
 		getDockerDaemonSocketMountPath(rc.containerDaemonSocket()))
 }
 
+// toolCache returns the tool cache path the job sees, relocatable through RUNNER_TOOL_CACHE.
+func (rc *RunContext) toolCache(fallback string) string {
+	if path := rc.GetEnv()["RUNNER_TOOL_CACHE"]; path != "" {
+		return path
+	}
+	return fallback
+}
+
+// runnerEnv returns a container's RUNNER_* variables, derived from the values runner.tool_cache
+// and friends report so the two cannot drift apart.
+func (rc *RunContext) runnerEnv(ctx context.Context) []string {
+	ext := container.LinuxContainerEnvironmentExtensions{}
+	runnerContext := ext.GetRunnerContext(ctx)
+	runnerContext["tool_cache"] = rc.toolCache(container.DefaultToolCache)
+
+	env := make([]string, 0, len(runnerContext))
+	for key, value := range runnerContext {
+		env = append(env, fmt.Sprintf("RUNNER_%s=%s", strings.ToUpper(key), value))
+	}
+	slices.Sort(env)
+	return env
+}
+
+// splitVolumes routes volume specs into binds and a source:target mount map, and returns the
+// container paths they mount onto. Only a plain source:target volume fits the map, everything
+// else (anonymous volumes, host binds, mount options) stays a bind.
+func splitVolumes(specs []string) ([]string, map[string]string, map[string]bool) {
+	binds := []string{}
+	mounts := map[string]string{}
+	targets := map[string]bool{}
+
+	for _, spec := range specs {
+		parsed, err := loader.ParseVolume(spec)
+		if err != nil {
+			binds = append(binds, spec) // let Docker report the malformed spec
+			continue
+		}
+		targets[parsed.Target] = true
+		if parsed.Type == string(mount.TypeVolume) && parsed.Source != "" && !parsed.ReadOnly {
+			mounts[parsed.Source] = parsed.Target
+		} else {
+			binds = append(binds, spec)
+		}
+	}
+	return binds, mounts, targets
+}
+
 // Returns the binds and mounts for the container, resolving paths as appopriate
 func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 	name := rc.jobContainerName()
-
-	binds := []string{}
-	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" {
-		daemonPath := getDockerDaemonSocketMountPath(daemonSocket)
-		binds = append(binds, fmt.Sprintf("%s:%s", daemonPath, "/var/run/docker.sock"))
-	}
-
 	ext := container.LinuxContainerEnvironmentExtensions{}
 
-	mounts := map[string]string{
-		"act-toolcache": "/opt/hostedtoolcache",
-		name + "-env":   ext.GetActPath(),
-	}
-
+	var volumes []string
 	if job := rc.Run.Job(); job != nil {
 		if container := job.Container(); container != nil {
 			for _, v := range container.Volumes {
 				if rc.ExprEval != nil {
 					v = rc.ExprEval.Interpolate(context.Background(), v)
 				}
-				if !strings.Contains(v, ":") || filepath.IsAbs(v) {
-					// Bind anonymous volume or host file.
-					binds = append(binds, v)
-				} else {
-					// Mount existing volume.
-					paths := strings.SplitN(v, ":", 2)
-					mounts[paths[0]] = paths[1]
-				}
+				volumes = append(volumes, v)
 			}
 		}
 	}
+	// the runner's own mounts below yield to the targets the job claims
+	binds, mounts, claimed := splitVolumes(volumes)
 
-	if rc.Config.BindWorkdir {
-		bindModifiers := ""
-		if runtime.GOOS == "darwin" {
-			bindModifiers = ":delegated"
+	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" && !claimed["/var/run/docker.sock"] {
+		binds = append(binds, getDockerDaemonSocketMountPath(daemonSocket)+":/var/run/docker.sock")
+	}
+	if toolCache := rc.toolCache(container.DefaultToolCache); !claimed[toolCache] {
+		mounts["act-toolcache"] = toolCache
+	}
+	mounts[name+"-env"] = ext.GetActPath() // runner-internal, never overridable
+
+	if workdir := ext.ToContainerPath(rc.Config.Workdir); !claimed[workdir] {
+		if rc.Config.BindWorkdir {
+			bindModifiers := ""
+			if runtime.GOOS == "darwin" {
+				bindModifiers = ":delegated"
+			}
+			if selinux.GetEnabled() {
+				bindModifiers = ":z"
+			}
+			binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, workdir, bindModifiers))
+		} else {
+			mounts[name] = workdir
 		}
-		if selinux.GetEnabled() {
-			bindModifiers = ":z"
-		}
-		binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, ext.ToContainerPath(rc.Config.Workdir), bindModifiers))
-	} else {
-		mounts[name] = ext.ToContainerPath(rc.Config.Workdir)
 	}
 
 	return binds, mounts
@@ -281,7 +360,10 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 		if err := os.MkdirAll(runnerTmp, 0o777); err != nil {
 			return err
 		}
-		toolCache := filepath.Join(cacheDir, "tool_cache")
+		toolCache := rc.toolCache(filepath.Join(cacheDir, "tool_cache"))
+		if err := os.MkdirAll(toolCache, 0o777); err != nil {
+			return err
+		}
 		rc.JobContainer = &container.HostEnvironment{
 			Path:         path,
 			TmpDir:       runnerTmp,
@@ -296,7 +378,7 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 			AllocatePTY: rc.Config.AllocatePTY,
 		}
 		rc.cleanUpJobContainer = rc.JobContainer.Remove()
-		for k, v := range rc.JobContainer.GetRunnerContext(ctx) {
+		for k, v := range rc.getRunnerContext(ctx) {
 			if v, ok := v.(string); ok {
 				rc.Env["RUNNER_"+strings.ToUpper(k)] = v
 			}
@@ -311,7 +393,15 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 		}
 
 		return common.NewPipelineExecutor(
-			rc.JobContainer.Copy(rc.JobContainer.GetActPath()+"/", rc.seedWorkspaceFiles()...),
+			rc.JobContainer.Copy(rc.JobContainer.GetActPath()+"/", &container.FileEntry{
+				Name: "workflow/event.json",
+				Mode: 0o644,
+				Body: rc.EventJSON,
+			}, &container.FileEntry{
+				Name: "workflow/envs.txt",
+				Mode: 0o666,
+				Body: "",
+			}),
 		)(ctx)
 	}
 }
@@ -329,9 +419,9 @@ func printStartJobContainerGroup(ctx context.Context, image, name, network strin
 	}
 }
 
-// seedWorkspaceFiles returns the workspace files act seeds into every backend's
-// act path before steps run: the event payload and an empty envs file. Both the
-// host/docker and Kubernetes backends copy this set, so it is shared here.
+// seedWorkspaceFiles returns the workspace files the Kubernetes backend seeds
+// into the job container before steps run. The docker/host paths keep their
+// inline copies in startJobContainer / startHostEnvironment.
 func (rc *RunContext) seedWorkspaceFiles() []*container.FileEntry {
 	return []*container.FileEntry{
 		{
@@ -347,21 +437,31 @@ func (rc *RunContext) seedWorkspaceFiles() []*container.FileEntry {
 	}
 }
 
+// newContainer is a variable so tests can substitute a container that needs no Docker daemon.
+var newContainer = container.NewContainer
+
 // buildServiceContainerInputs interpolates each service definition into a
-// container input. It is side-effect-free (RC3): it does NOT touch
-// rc.ServiceContainers — the caller accumulates — so both the Docker backend
-// (which constructs containers) and the Kubernetes backend (which builds sidecar
-// specs) can consume the same inputs. Per-service credentials are resolved in
-// loop order, after the job-container credentials, preserving the original
-// sequencing.
+// container input for the Kubernetes sidecar path. It is side-effect-free: it
+// does NOT touch rc.serviceContainers. The docker startJobContainer loop is
+// left intact upstream; this helper exists so the pod backend can reuse the
+// same interpolation/credential rules without going through docker network
+// executors. Empty images are skipped (GitHub compatibility). Per-service
+// credentials stay local so they cannot overwrite the job container's pull
+// credentials.
 func (rc *RunContext) buildServiceContainerInputs(ctx context.Context, logWriter io.Writer, networkName string) ([]*container.NewContainerInput, error) {
+	logger := common.Logger(ctx)
 	ext := container.LinuxContainerEnvironmentExtensions{}
 	services := rc.Run.Job().Services
 	inputs := make([]*container.NewContainerInput, 0, len(services))
 
 	for serviceID, spec := range services {
-		// interpolate env
-		interpolatedEnvs := make(map[string]string, len(spec.Env))
+		serviceImage := rc.ExprEval.Interpolate(ctx, spec.Image)
+		if serviceImage == "" {
+			logger.Infof("The service '%s' will not be started because the container definition has an empty image.", serviceID)
+			continue
+		}
+		interpolatedEnvs := make(map[string]string, len(spec.Env)+len(rc.Config.ProxyEnv))
+		maps0.Copy(interpolatedEnvs, rc.Config.ProxyEnv)
 		for k, v := range spec.Env {
 			interpolatedEnvs[k] = rc.ExprEval.Interpolate(ctx, v)
 		}
@@ -369,12 +469,11 @@ func (rc *RunContext) buildServiceContainerInputs(ctx context.Context, logWriter
 		for k, v := range interpolatedEnvs {
 			envs = append(envs, fmt.Sprintf("%s=%s", k, v))
 		}
-		// interpolate cmd
 		interpolatedCmd := make([]string, 0, len(spec.Cmd))
 		for _, v := range spec.Cmd {
 			interpolatedCmd = append(interpolatedCmd, rc.ExprEval.Interpolate(ctx, v))
 		}
-		username, password, err := rc.handleServiceCredentials(ctx, spec.Credentials)
+		serviceUsername, servicePassword, err := rc.handleServiceCredentials(ctx, spec.Credentials)
 		if err != nil {
 			return nil, fmt.Errorf("failed to handle service %s credentials: %w", serviceID, err)
 		}
@@ -398,9 +497,9 @@ func (rc *RunContext) buildServiceContainerInputs(ctx context.Context, logWriter
 		inputs = append(inputs, &container.NewContainerInput{
 			Name:           serviceContainerName,
 			WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
-			Image:          rc.ExprEval.Interpolate(ctx, spec.Image),
-			Username:       username,
-			Password:       password,
+			Image:          serviceImage,
+			Username:       serviceUsername,
+			Password:       servicePassword,
 			Cmd:            interpolatedCmd,
 			Env:            envs,
 			Mounts:         serviceMounts,
@@ -410,7 +509,7 @@ func (rc *RunContext) buildServiceContainerInputs(ctx context.Context, logWriter
 			Privileged:     rc.Config.Privileged,
 			UsernsMode:     rc.Config.UsernsMode,
 			Platform:       rc.Config.ContainerArchitecture,
-			AutoRemove:     rc.Config.AutoRemove,
+			AutoRemove:     false, // so a dead service's log survives, cleanupJobResources removes it
 			Options:        rc.ExprEval.Interpolate(ctx, spec.Options),
 			NetworkMode:    networkName,
 			NetworkAliases: []string{serviceID},
@@ -449,10 +548,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 
 		envList := make([]string, 0)
 
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
+		envList = append(envList, rc.runnerEnv(ctx)...)
 		envList = append(envList, fmt.Sprintf("%s=%s", "LANG", "C.UTF-8")) // Use same locale as GitHub Actions
 
 		ext := container.LinuxContainerEnvironmentExtensions{}
@@ -464,57 +560,85 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		networkName, createAndDeleteNetwork := rc.networkNameForGitea()
 
 		// add service containers
-		serviceInputs, err := rc.buildServiceContainerInputs(ctx, logWriter, networkName)
-		if err != nil {
-			return err
-		}
-		for _, input := range serviceInputs {
-			rc.ServiceContainers = append(rc.ServiceContainers, container.NewContainer(input))
-		}
-		// Preserve the pre-refactor credential sequencing (RC3): the job container
-		// historically reused the username/password variables left by the last
-		// service iteration, so keep that binding to avoid any behavior change.
-		if n := len(serviceInputs); n > 0 {
-			username = serviceInputs[n-1].Username
-			password = serviceInputs[n-1].Password
-		}
-
-		rc.cleanUpJobContainer = func(ctx context.Context) error {
-			reuseJobContainer := func(ctx context.Context) bool {
-				return rc.Config.ReuseContainers
+		for serviceID, spec := range rc.Run.Job().Services {
+			// GitHub compatibility: skip services whose image evaluates to an
+			// empty string, enabling conditional services via expressions
+			serviceImage := rc.ExprEval.Interpolate(ctx, spec.Image)
+			if serviceImage == "" {
+				logger.Infof("The service '%s' will not be started because the container definition has an empty image.", serviceID)
+				continue
+			}
+			// interpolate env
+			interpolatedEnvs := make(map[string]string, len(spec.Env)+len(rc.Config.ProxyEnv))
+			// a service reaches the internet the way the job does; its own env still wins
+			maps0.Copy(interpolatedEnvs, rc.Config.ProxyEnv)
+			for k, v := range spec.Env {
+				interpolatedEnvs[k] = rc.ExprEval.Interpolate(ctx, v)
+			}
+			envs := make([]string, 0, len(interpolatedEnvs))
+			for k, v := range interpolatedEnvs {
+				envs = append(envs, fmt.Sprintf("%s=%s", k, v))
+			}
+			// interpolate cmd
+			interpolatedCmd := make([]string, 0, len(spec.Cmd))
+			for _, v := range spec.Cmd {
+				interpolatedCmd = append(interpolatedCmd, rc.ExprEval.Interpolate(ctx, v))
+			}
+			// keep these local: reusing username/password would overwrite the
+			// credentials the job container is pulled with further down
+			serviceUsername, servicePassword, err := rc.handleServiceCredentials(ctx, spec.Credentials)
+			if err != nil {
+				return fmt.Errorf("failed to handle service %s credentials: %w", serviceID, err)
 			}
 
-			if rc.JobContainer != nil {
-				return rc.JobContainer.Remove().IfNot(reuseJobContainer).
-					Then(container.NewDockerVolumeRemoveExecutor(rc.jobContainerName(), false)).IfNot(reuseJobContainer).
-					Then(container.NewDockerVolumeRemoveExecutor(rc.jobContainerName()+"-env", false)).IfNot(reuseJobContainer).
-					Then(func(ctx context.Context) error {
-						if len(rc.ServiceContainers) > 0 {
-							logger.Infof("Cleaning up services for job %s", rc.JobName)
-							if err := rc.stopServiceContainers()(ctx); err != nil {
-								logger.Errorf("Error while cleaning services: %v", err)
-							}
-						}
-						if createAndDeleteNetwork {
-							// clean network if it has been created by act
-							// if using service containers
-							// it means that the network to which containers are connecting is created by `runner`,
-							// so, we should remove the network at last.
-							logger.Infof("Cleaning up network for job %s, and network name is: %s", rc.JobName, networkName)
-							if err := container.NewDockerNetworkRemoveExecutor(networkName)(ctx); err != nil {
-								logger.Errorf("Error while cleaning network: %v", err)
-							}
-						}
-						return nil
-					})(ctx)
+			interpolatedVolumes := make([]string, 0, len(spec.Volumes))
+			for _, volume := range spec.Volumes {
+				interpolatedVolumes = append(interpolatedVolumes, rc.ExprEval.Interpolate(ctx, volume))
 			}
-			return nil
+			serviceBinds, serviceMounts := rc.GetServiceBindsAndMounts(interpolatedVolumes)
+
+			interpolatedPorts := make([]string, 0, len(spec.Ports))
+			for _, port := range spec.Ports {
+				interpolatedPorts = append(interpolatedPorts, rc.ExprEval.Interpolate(ctx, port))
+			}
+			exposedPorts, portBindings, err := nat.ParsePortSpecs(interpolatedPorts)
+			if err != nil {
+				return fmt.Errorf("failed to parse service %s ports: %w", serviceID, err)
+			}
+
+			serviceContainerName := createContainerName(rc.jobContainerName(), serviceID)
+			c := newContainer(&container.NewContainerInput{
+				Name:           serviceContainerName,
+				WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
+				Image:          serviceImage,
+				Username:       serviceUsername,
+				Password:       servicePassword,
+				Cmd:            interpolatedCmd,
+				Env:            envs,
+				Mounts:         serviceMounts,
+				Binds:          serviceBinds,
+				Stdout:         logWriter,
+				Stderr:         logWriter,
+				Privileged:     rc.Config.Privileged,
+				UsernsMode:     rc.Config.UsernsMode,
+				Platform:       rc.Config.ContainerArchitecture,
+				AutoRemove:     false, // so a dead service's log survives, cleanupJobResources removes it
+				Options:        rc.ExprEval.Interpolate(ctx, spec.Options),
+				NetworkMode:    networkName,
+				NetworkAliases: []string{serviceID},
+				ExposedPorts:   exposedPorts,
+				PortBindings:   portBindings,
+				AllocatePTY:    rc.Config.AllocatePTY,
+			})
+			rc.serviceContainers = append(rc.serviceContainers, &serviceContainer{name: serviceID, image: serviceImage, container: c})
 		}
+
+		rc.cleanUpJobContainer = rc.cleanupJobResources(networkName, createAndDeleteNetwork)
 
 		// For Gitea, `jobContainerNetwork` should be the same as `networkName`
 		jobContainerNetwork := networkName
 
-		rc.JobContainer = container.NewContainer(&container.NewContainerInput{
+		rc.JobContainer = newContainer(&container.NewContainerInput{
 			Cmd:            nil,
 			Entrypoint:     []string{"/bin/sleep", fmt.Sprint(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds())},
 			WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
@@ -541,6 +665,8 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			return errors.New("Failed to create job container")
 		}
 
+		rc.jobNetworkName = networkName
+
 		defer printStartJobContainerGroup(ctx, image, name, networkName)()
 		return common.NewPipelineExecutor(
 			rc.pullServicesImages(rc.Config.ForcePull),
@@ -548,11 +674,57 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			rc.stopJobContainer(),
 			container.NewDockerNetworkCreateExecutor(networkName, rc.Config.ContainerNetworkCreateOptions).
 				IfBool(createAndDeleteNetwork),
-			rc.startServiceContainers(networkName),
+			rc.startServiceContainers(),
+			rc.reportUnstartedServices(),
+			rc.waitForServiceContainers(),
 			rc.JobContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 			rc.JobContainer.Start(false),
-			rc.JobContainer.Copy(rc.JobContainer.GetActPath()+"/", rc.seedWorkspaceFiles()...),
+			rc.captureJobContainerInfo(),
+			rc.JobContainer.Copy(rc.JobContainer.GetActPath()+"/", &container.FileEntry{
+				Name: "workflow/event.json",
+				Mode: 0o644,
+				Body: rc.EventJSON,
+			}, &container.FileEntry{
+				Name: "workflow/envs.txt",
+				Mode: 0o666,
+				Body: "",
+			}),
 		)(ctx)
+	}
+}
+
+// cleanupJobResources removes everything the job created, continuing past failures.
+// Only job container and volume errors are returned, the rest are logged.
+func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNetwork bool) common.Executor {
+	return func(ctx context.Context) error {
+		logger := common.Logger(ctx)
+		removeJobContainer := rc.JobContainer != nil && !rc.Config.ReuseContainers
+
+		var errs []error
+		if removeJobContainer {
+			errs = append(errs, rc.JobContainer.Remove()(ctx))
+		}
+		if len(rc.serviceContainers) > 0 {
+			logger.Infof("Cleaning up services for job %s", rc.JobName)
+			if err := rc.stopServiceContainers()(ctx); err != nil {
+				logger.Errorf("Error while cleaning services: %v", err)
+			}
+		}
+		if removeJobContainer {
+			// after the containers using them, services can hold these via `--volumes-from`
+			name := rc.jobContainerName()
+			errs = append(errs,
+				container.NewDockerVolumeRemoveExecutor(name, false)(ctx),
+				container.NewDockerVolumeRemoveExecutor(name+"-env", false)(ctx))
+		}
+		if createAndDeleteNetwork {
+			// last, once every container has detached
+			logger.Infof("Cleaning up network for job %s, and network name is: %s", rc.JobName, networkName)
+			if err := container.NewDockerNetworkRemoveExecutor(networkName)(ctx); err != nil {
+				logger.Errorf("Error while cleaning network: %v", err)
+			}
+		}
+		return errors.Join(errs...)
 	}
 }
 
@@ -629,21 +801,21 @@ func (rc *RunContext) stopJobContainer() common.Executor {
 func (rc *RunContext) pullServicesImages(forcePull bool) common.Executor {
 	return func(ctx context.Context) error {
 		execs := []common.Executor{}
-		for _, c := range rc.ServiceContainers {
-			execs = append(execs, c.Pull(forcePull))
+		for _, svc := range rc.serviceContainers {
+			execs = append(execs, svc.container.Pull(forcePull))
 		}
 		return common.NewParallelExecutor(len(execs), execs...)(ctx)
 	}
 }
 
-func (rc *RunContext) startServiceContainers(_ string) common.Executor {
+func (rc *RunContext) startServiceContainers() common.Executor {
 	return func(ctx context.Context) error {
 		execs := []common.Executor{}
-		for _, c := range rc.ServiceContainers {
+		for _, svc := range rc.serviceContainers {
 			execs = append(execs, common.NewPipelineExecutor(
-				c.Pull(false),
-				c.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
-				c.Start(false),
+				svc.container.Pull(false),
+				svc.container.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
+				svc.container.Start(false),
 			))
 		}
 		return common.NewParallelExecutor(len(execs), execs...)(ctx)
@@ -653,10 +825,170 @@ func (rc *RunContext) startServiceContainers(_ string) common.Executor {
 func (rc *RunContext) stopServiceContainers() common.Executor {
 	return func(ctx context.Context) error {
 		execs := []common.Executor{}
-		for _, c := range rc.ServiceContainers {
-			execs = append(execs, c.Remove().Finally(c.Close()))
+		for _, svc := range rc.serviceContainers {
+			execs = append(execs, svc.container.Remove().Finally(svc.container.Close()))
 		}
 		return common.NewParallelExecutor(len(execs), execs...)(ctx)
+	}
+}
+
+const (
+	defaultServiceReadyTimeout = 5 * time.Minute
+	serviceReadyPollMax        = 32 * time.Second
+)
+
+var serviceReadyPollInterval = 2 * time.Second // a variable so tests need not wait
+
+// reportUnstartedServices logs a service that did not start. The steps that need it
+// report it better than the runner can, so the job carries on.
+func (rc *RunContext) reportUnstartedServices() common.Executor {
+	return func(ctx context.Context) error {
+		logger := common.Logger(ctx)
+		for _, svc := range rc.serviceContainers {
+			info, err := svc.inspect(ctx)
+			if err != nil {
+				logger.Debugf("unable to inspect service '%s': %v", svc.name, err)
+				continue
+			}
+			if info.State == container.StateRunning {
+				continue
+			}
+			svc.dumpLogs(ctx)
+			logger.Warnf("Docker container %s is not in running state: %s (%d)", info.ID, info.State, info.ExitCode)
+		}
+		return nil
+	}
+}
+
+// waitForServiceContainers blocks until every service that declares a healthcheck reports
+// healthy, as GitHub does, so a first step cannot connect before the service listens.
+func (rc *RunContext) waitForServiceContainers() common.Executor {
+	return func(ctx context.Context) error {
+		if len(rc.serviceContainers) == 0 {
+			return nil
+		}
+
+		timeout := rc.Config.ServiceReadyTimeout
+		switch {
+		case timeout < 0:
+			// disabled, but still describe the containers for `job.services`
+			for _, svc := range rc.serviceContainers {
+				if _, err := svc.inspect(ctx); err != nil && !errors.Is(err, container.ErrContainerNotFound) {
+					return err
+				}
+			}
+			return nil
+		case timeout == 0:
+			timeout = defaultServiceReadyTimeout
+		}
+
+		// the first error cancels the rest, so a failure does not wait out a sibling's timeout
+		group, groupCtx := errgroup.WithContext(ctx)
+		for _, svc := range rc.serviceContainers {
+			group.Go(func() error {
+				return svc.waitUntilHealthy(groupCtx, timeout)
+			})
+		}
+		return group.Wait()
+	}
+}
+
+// waitUntilHealthy waits on the healthcheck alone, so a container that declares none is
+// ready at once and one that exited is left to the steps that need it.
+func (svc *serviceContainer) waitUntilHealthy(ctx context.Context, timeout time.Duration) error {
+	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+	interval := serviceReadyPollInterval
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	for {
+		info, err := svc.inspect(ctx)
+		if ctxErr := ctx.Err(); ctxErr != nil { // the wait ended, an inspect error only noticed it
+			if errors.Is(ctxErr, context.DeadlineExceeded) {
+				return fmt.Errorf("the service '%s' did not become healthy within %s%s", svc.name, timeout, svc.healthOutputSuffix())
+			}
+			return ctxErr
+		}
+		switch {
+		case errors.Is(err, container.ErrContainerNotFound):
+			return nil // gone, so there is no health left to wait on
+		case err != nil:
+			return err
+		}
+
+		switch {
+		case info.Health == container.HealthUnhealthy:
+			svc.dumpLogs(ctx)
+			common.Logger(ctx).Errorf("Failed to initialize container %s", svc.image)
+			return fmt.Errorf("the service '%s' is unhealthy%s", svc.name, svc.healthOutputSuffix())
+		case info.Health != container.HealthStarting:
+			rawLogger.Infof("%s service is healthy.", svc.name)
+			return nil
+		}
+
+		rawLogger.Infof("%s service is starting, waiting %d seconds before checking again.", svc.name, int(interval.Seconds()))
+		select {
+		case <-ctx.Done(): // reported at the top of the loop
+		case <-time.After(interval):
+		}
+		interval = min(interval*2, serviceReadyPollMax)
+	}
+}
+
+// dumpLogs writes the container's log to the job log once, however often it is reported.
+func (svc *serviceContainer) dumpLogs(ctx context.Context) {
+	if svc.logsDumped {
+		return
+	}
+	svc.logsDumped = true
+	if err := svc.container.DumpLogs(ctx); err != nil {
+		common.Logger(ctx).Debugf("unable to read the log of service '%s': %v", svc.name, err)
+	}
+}
+
+// recordServiceInfos snapshots each service into job.services after the
+// backend-specific readiness wait. Failures are logged, not fatal: a missing
+// inspect must not fail a job whose sidecars are already Ready.
+func (rc *RunContext) recordServiceInfos() common.Executor {
+	return func(ctx context.Context) error {
+		for _, svc := range rc.serviceContainers {
+			if _, err := svc.inspect(ctx); err != nil {
+				common.Logger(ctx).Debugf("unable to inspect service '%s': %v", svc.name, err)
+			}
+		}
+		return nil
+	}
+}
+
+// inspect also records the state for the `job.services` context.
+func (svc *serviceContainer) inspect(ctx context.Context) (*container.Info, error) {
+	info, err := svc.container.Inspect(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect service '%s': %w", svc.name, err)
+	}
+	svc.info = info
+	return info, nil
+}
+
+func (svc *serviceContainer) healthOutputSuffix() string {
+	if svc.info == nil || svc.info.HealthOutput == "" {
+		return ""
+	}
+	return ": " + svc.info.HealthOutput
+}
+
+// captureJobContainerInfo is a convenience: failing to describe the container must not
+// fail the job.
+func (rc *RunContext) captureJobContainerInfo() common.Executor {
+	return func(ctx context.Context) error {
+		info, err := rc.JobContainer.Inspect(ctx)
+		if err != nil {
+			common.Logger(ctx).Debugf("unable to inspect the job container: %v", err)
+			return nil
+		}
+		rc.jobContainerID = info.ID
+		return nil
 	}
 }
 
@@ -684,13 +1016,10 @@ func (rc *RunContext) ActionCacheDir() string {
 // jobMutexes serializes per-job result/output aggregation across the matrix combinations that
 // share one *model.Job and run in parallel. Keyed by the shared *model.Job (mirrors the
 // per-directory AcquireCloneLock pattern).
-var jobMutexes sync.Map // key: *model.Job; value: *sync.Mutex
+var jobMutexes lock.Keyed[*model.Job]
 
 func lockJob(job *model.Job) func() {
-	v, _ := jobMutexes.LoadOrStore(job, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	return jobMutexes.Lock(job)
 }
 
 func (rc *RunContext) interpolateOutputs() common.Executor {
@@ -755,7 +1084,7 @@ func (rc *RunContext) IsHostEnv(ctx context.Context) bool {
 // Selection is global: when enabled it takes precedence over the host/docker
 // branches so every job runs as a Pod.
 func (rc *RunContext) usesKubernetes() bool {
-	return rc.Config.Kubernetes != nil && rc.Config.Kubernetes.Enabled
+	return rc.Config != nil && rc.Config.Kubernetes != nil && rc.Config.Kubernetes.Enabled
 }
 
 // jobHasDockerURLStep reports whether the job contains at least one
@@ -859,8 +1188,10 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 			return fmt.Errorf("failed to initialize kubernetes pod backend: %w", err)
 		}
 
+		// Resolve RUNNER_* locally. runnerEnv() pings a host docker daemon
+		// for arch; the pod backend has no host socket.
 		envList := []string{
-			fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"),
+			fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", rc.toolCache(container.DefaultToolCache)),
 			fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"),
 			fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArchLocal()),
 			fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"),
@@ -887,7 +1218,15 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 			return err
 		}
 		for _, input := range serviceInputs {
-			rc.ServiceContainers = append(rc.ServiceContainers, pod.NewServiceContainer(input))
+			serviceID := ""
+			if len(input.NetworkAliases) > 0 {
+				serviceID = input.NetworkAliases[0]
+			}
+			rc.serviceContainers = append(rc.serviceContainers, &serviceContainer{
+				name:      serviceID,
+				image:     input.Image,
+				container: pod.NewServiceContainer(input),
+			})
 			// NetworkAliases carries the service id; map it to localhost so the
 			// job step resolves servicename:port in addition to localhost:port.
 			for _, alias := range input.NetworkAliases {
@@ -910,11 +1249,11 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 		// Sidecars must be registered into the pod builder (service Create) before
 		// the job container's Start submits the whole Pod. Service Start/Pull are
 		// no-ops; only Create matters for them.
-		executors := make([]common.Executor, 0, len(rc.ServiceContainers)*2+5)
-		for _, service := range rc.ServiceContainers {
+		executors := make([]common.Executor, 0, len(rc.serviceContainers)*2+5)
+		for _, svc := range rc.serviceContainers {
 			executors = append(executors,
-				service.Pull(rc.Config.ForcePull),
-				service.Create(nil, nil),
+				svc.container.Pull(rc.Config.ForcePull),
+				svc.container.Create(nil, nil),
 			)
 		}
 		executors = append(executors,
@@ -924,6 +1263,8 @@ func (rc *RunContext) startKubernetesEnvironment() common.Executor {
 			// C3: hold the first step until every service sidecar is Ready so a DB
 			// step issued immediately after pod-Ready does not race the service.
 			pod.WaitForServicesReady(ctx),
+			rc.captureJobContainerInfo(),
+			rc.recordServiceInfos(),
 			rc.JobContainer.Copy(rc.JobContainer.GetActPath()+"/", rc.seedWorkspaceFiles()...),
 		)
 
@@ -997,7 +1338,13 @@ func (rc *RunContext) Executor() (common.Executor, error) {
 	return func(ctx context.Context) error {
 		res, err := rc.isEnabled(ctx)
 		if err != nil {
-			rc.caller.setReusedWorkflowJobResult(rc.JobName, "failure") // For Gitea
+			// Record the failure so a job whose if-expression fails to evaluate
+			// gets a result (and therefore a stop time) instead of being left
+			// unfinished. rc.caller is only set for reusable workflows.
+			rc.result("failure")
+			if rc.caller != nil { // For Gitea
+				rc.caller.setReusedWorkflowJobResult(rc.JobName, "failure")
+			}
 			return err
 		}
 		if res {
@@ -1118,6 +1465,20 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// proxyBuildArgs returns the job's proxy variables as docker build args. The docker CLI
+// pre-populates these from its own client configuration, but act builds through the API,
+// so without them a Dockerfile action's RUN steps have no network behind a proxy.
+func (rc *RunContext) proxyBuildArgs() map[string]*string {
+	if len(rc.Config.ProxyEnv) == 0 {
+		return nil
+	}
+	args := make(map[string]*string, len(rc.Config.ProxyEnv))
+	for name, value := range rc.Config.ProxyEnv {
+		args[name] = &value
+	}
+	return args
+}
+
 func mergeMaps(maps ...map[string]string) map[string]string {
 	rtnMap := make(map[string]string)
 	for _, m := range maps {
@@ -1166,13 +1527,47 @@ func (rc *RunContext) getJobContext() *model.JobContext {
 	if rc.jobCancelled {
 		jobStatus = "cancelled"
 	}
-	return &model.JobContext{
-		Status: jobStatus,
+
+	jobContext := &model.JobContext{
+		Status:   jobStatus,
+		Services: map[string]model.JobService{}, // an empty map, never null
 	}
+	if rc.jobContainerID != "" {
+		jobContext.Container.ID = rc.jobContainerID
+		jobContext.Container.Network = rc.jobNetworkName
+	}
+	for _, svc := range rc.serviceContainers {
+		if svc.info == nil {
+			continue
+		}
+		jobContext.Services[svc.name] = model.JobService{
+			ID:      svc.info.ID,
+			Network: rc.jobNetworkName,
+			Ports:   svc.info.Ports,
+		}
+	}
+	return jobContext
 }
 
 func (rc *RunContext) getStepsContext() map[string]*model.StepResult {
 	return rc.StepResults
+}
+
+// getRunnerContext returns the `runner` context: what the execution environment knows
+// (os, arch, temp, tool_cache) plus what only the runner process knows.
+func (rc *RunContext) getRunnerContext(ctx context.Context) map[string]any {
+	runnerContext := map[string]any{}
+	if rc.JobContainer != nil {
+		maps0.Copy(runnerContext, rc.JobContainer.GetRunnerContext(ctx))
+		defaultToolCache, _ := runnerContext["tool_cache"].(string)
+		runnerContext["tool_cache"] = rc.toolCache(defaultToolCache)
+	}
+	runnerContext["name"] = rc.Config.RunnerName
+	runnerContext["environment"] = "self-hosted"
+	if rc.Config.RunnerDebug() {
+		runnerContext["debug"] = "1"
+	}
+	return runnerContext
 }
 
 func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext {
@@ -1270,12 +1665,12 @@ func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext
 
 	ghc.SetBaseAndHeadRef()
 	repoPath := rc.Config.Workdir
-	ghc.SetRepositoryAndOwner(ctx, rc.Config.GitHubInstance, rc.Config.RemoteName, repoPath)
+	ghcontext.SetRepositoryAndOwner(ctx, ghc, rc.Config.GitHubInstance, rc.Config.RemoteName, repoPath)
 	if ghc.Ref == "" {
-		ghc.SetRef(ctx, rc.Config.DefaultBranch, repoPath)
+		ghcontext.SetRef(ctx, ghc, rc.Config.DefaultBranch, repoPath)
 	}
 	if ghc.Sha == "" {
-		ghc.SetSha(ctx, repoPath)
+		ghcontext.SetSha(ctx, ghc, repoPath)
 	}
 
 	ghc.SetRefTypeAndName()
@@ -1359,7 +1754,7 @@ func nestedMapLookup(m map[string]any, ks ...string) (rval any) {
 	}
 }
 
-func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubContext, env map[string]string) map[string]string { //nolint:unparam // pre-existing issue from nektos/act
+func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubContext, env map[string]string) {
 	env["CI"] = "true"
 	env["GITHUB_WORKFLOW"] = github.Workflow
 	env["GITHUB_RUN_ID"] = github.RunID
@@ -1401,23 +1796,71 @@ func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubCon
 		env["GITHUB_RUN_ATTEMPT"] = github.RunAttempt
 	}
 
+	env["RUNNER_NAME"] = rc.Config.RunnerName
+	env["RUNNER_ENVIRONMENT"] = "self-hosted"
+	if workspace := parentDir(github.Workspace); workspace != "" {
+		env["RUNNER_WORKSPACE"] = workspace
+	}
+	if rc.Config.RunnerDebug() {
+		env["RUNNER_DEBUG"] = "1"
+	}
+
 	if rc.Config.ArtifactServerPath != "" {
 		setActionRuntimeVars(rc, env)
 	}
 
-	for _, platformName := range rc.runsOnPlatformNames(ctx) {
-		if platformName != "" {
-			if platformName == "ubuntu-latest" {
-				// hardcode current ubuntu-latest since we have no way to check that 'on the fly'
-				env["ImageOS"] = "ubuntu20"
-			} else {
-				platformName = strings.SplitN(strings.Replace(platformName, `-`, ``, 1), `.`, 2)[0]
-				env["ImageOS"] = platformName
-			}
-		}
+	if imageOS := rc.imageOS(ctx); imageOS != "" {
+		env["ImageOS"] = imageOS
+	}
+}
+
+// parentDir returns the directory containing p, or "" when p names no parent. Both
+// separators are accepted rather than filepath's, as p may describe a container while
+// the runner itself runs on Windows, or the other way round.
+func parentDir(p string) string {
+	if slash := strings.LastIndexAny(p, `/\`); slash > 0 {
+		return p[:slash]
+	}
+	return ""
+}
+
+// imageOS returns ImageOS, which setup-* actions use to tell one runner image release
+// from another. The resolved image tag is preferred over the runs-on label because it
+// still names a release when the label is a rolling one such as ubuntu-latest.
+func (rc *RunContext) imageOS(ctx context.Context) string {
+	if rc.Run.Job().RunsOn() == nil {
+		// A composite action runs on a synthetic job, and resolving its image would only
+		// log that runs-on is missing.
+		return ""
+	}
+	if imageOS := imageOSFromImage(rc.platformImage(ctx)); imageOS != "" {
+		return imageOS
 	}
 
-	return env
+	for _, platformName := range slices.Backward(rc.runsOnPlatformNames(ctx)) {
+		if platformName == "ubuntu-latest" {
+			// Rolling label whose image names no release either, so keep the historical value.
+			return "ubuntu20"
+		} else if platformName != "" {
+			return strings.SplitN(strings.Replace(platformName, `-`, ``, 1), `.`, 2)[0]
+		}
+	}
+	return ""
+}
+
+// imageOSTag matches an image reference tagged with an OS family ImageOS can report plus
+// its release, such as "docker.gitea.com/runner-images:ubuntu-24.04". Anything else
+// ("ubuntu-latest", "app:22.04", "catthehacker/ubuntu:act-22.04", or a registry port) is
+// left to the runs-on label rather than turned into a bogus OS.
+var imageOSTag = regexp.MustCompile(`:(ubuntu|win|macos)-?([0-9]+)[^/]*$`)
+
+// imageOSFromImage derives ImageOS from an image reference, e.g.
+// "docker.gitea.com/runner-images:ubuntu-24.04" yields "ubuntu24".
+func imageOSFromImage(image string) string {
+	if match := imageOSTag.FindStringSubmatch(image); match != nil {
+		return match[1] + match[2]
+	}
+	return ""
 }
 
 func setActionRuntimeVars(rc *RunContext, env map[string]string) {
@@ -1489,24 +1932,9 @@ func (rc *RunContext) handleServiceCredentials(ctx context.Context, creds map[st
 
 // GetServiceBindsAndMounts returns the binds and mounts for the service container, resolving paths as appopriate
 func (rc *RunContext) GetServiceBindsAndMounts(svcVolumes []string) ([]string, map[string]string) {
-	binds := []string{}
-	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" {
-		daemonPath := getDockerDaemonSocketMountPath(daemonSocket)
-		binds = append(binds, fmt.Sprintf("%s:%s", daemonPath, "/var/run/docker.sock"))
+	binds, mounts, claimed := splitVolumes(svcVolumes)
+	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" && !claimed["/var/run/docker.sock"] {
+		binds = append(binds, getDockerDaemonSocketMountPath(daemonSocket)+":/var/run/docker.sock")
 	}
-
-	mounts := map[string]string{}
-
-	for _, v := range svcVolumes {
-		if !strings.Contains(v, ":") || filepath.IsAbs(v) {
-			// Bind anonymous volume or host file.
-			binds = append(binds, v)
-		} else {
-			// Mount existing volume.
-			paths := strings.SplitN(v, ":", 2)
-			mounts[paths[0]] = paths[1]
-		}
-	}
-
 	return binds, mounts
 }

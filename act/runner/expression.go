@@ -17,17 +17,19 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/act/exprparser"
-	"gitea.com/gitea/runner/act/model"
 
 	_ "embed"
 
+	"gitea.dev/actionslib/pkg/expreval"
+	"gitea.dev/actionslib/pkg/exprparser"
+	"gitea.dev/actionslib/pkg/model"
 	"go.yaml.in/yaml/v4"
 )
 
 // ExpressionEvaluator is the interface for evaluating expressions
 type ExpressionEvaluator interface {
 	evaluate(context.Context, string, exprparser.DefaultStatusCheck) (any, error)
+	interpolate(context.Context, string) (string, error)
 	EvaluateYamlNode(context.Context, *yaml.Node) error
 	Interpolate(context.Context, string) string
 }
@@ -95,9 +97,7 @@ func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map
 		Inputs:    inputs,
 		HashFiles: getHashFilesFunction(ctx, rc),
 	}
-	if rc.JobContainer != nil {
-		ee.Runner = rc.JobContainer.GetRunnerContext(ctx)
-	}
+	ee.Runner = rc.getRunnerContext(ctx)
 	return expressionEvaluator{
 		interpreter: exprparser.NewInterpeter(ee, exprparser.Config{
 			Run:        rc.Run,
@@ -149,9 +149,7 @@ func (rc *RunContext) NewStepExpressionEvaluator(ctx context.Context, step step)
 		Inputs:    inputs,
 		HashFiles: getHashFilesFunction(ctx, rc),
 	}
-	if rc.JobContainer != nil {
-		ee.Runner = rc.JobContainer.GetRunnerContext(ctx)
-	}
+	ee.Runner = rc.getRunnerContext(ctx)
 	return expressionEvaluator{
 		interpreter: exprparser.NewInterpeter(ee, exprparser.Config{
 			Run:        rc.Run,
@@ -229,246 +227,44 @@ func (ee expressionEvaluator) evaluate(ctx context.Context, in string, defaultSt
 	logger.Debugf("evaluating expression '%s'", in)
 	evaluated, err := ee.interpreter.Evaluate(in, defaultStatusCheck)
 
-	printable := regexp.MustCompile(`::add-mask::.*`).ReplaceAllString(fmt.Sprintf("%t", evaluated), "::add-mask::***)")
+	// evaluated is an any: %t renders everything but a bool as "%!t(string=...)"
+	printable := regexp.MustCompile(`::add-mask::.*`).ReplaceAllString(fmt.Sprintf("%v", evaluated), "::add-mask::***)")
 	logger.Debugf("expression '%s' evaluated to '%s'", in, printable)
 
 	return evaluated, err
 }
 
-func (ee expressionEvaluator) evaluateScalarYamlNode(ctx context.Context, node *yaml.Node) (*yaml.Node, error) {
-	var in string
-	if err := node.Decode(&in); err != nil {
-		return nil, err
-	}
-	if !strings.Contains(in, "${{") || !strings.Contains(in, "}}") {
-		return nil, nil //nolint:nilnil // pre-existing issue from nektos/act
-	}
-	expr, _ := rewriteSubExpression(ctx, in, false)
-	res, err := ee.evaluate(ctx, expr, exprparser.DefaultStatusCheckNone)
-	if err != nil {
-		return nil, err
-	}
-	ret := &yaml.Node{}
-	if err := ret.Encode(res); err != nil {
-		return nil, err
-	}
-	return ret, err
-}
-
-func (ee expressionEvaluator) evaluateMappingYamlNode(ctx context.Context, node *yaml.Node) (*yaml.Node, error) {
-	var ret *yaml.Node
-	// GitHub has this undocumented feature to merge maps, called insert directive
-	insertDirective := regexp.MustCompile(`\${{\s*insert\s*}}`)
-	for i := 0; i < len(node.Content)/2; i++ {
-		changed := func() error {
-			if ret == nil {
-				ret = &yaml.Node{}
-				if err := ret.Encode(node); err != nil {
-					return err
-				}
-				ret.Content = ret.Content[:i*2]
-			}
-			return nil
-		}
-		k := node.Content[i*2]
-		v := node.Content[i*2+1]
-		ev, err := ee.evaluateYamlNodeInternal(ctx, v)
-		if err != nil {
-			return nil, err
-		}
-		if ev != nil {
-			if err := changed(); err != nil {
-				return nil, err
-			}
-		} else {
-			ev = v
-		}
-		var sk string
-		// Merge the nested map of the insert directive
-		if k.Decode(&sk) == nil && insertDirective.MatchString(sk) {
-			if ev.Kind != yaml.MappingNode {
-				return nil, fmt.Errorf("failed to insert node %v into mapping %v unexpected type %v expected MappingNode", ev, node, ev.Kind)
-			}
-			if err := changed(); err != nil {
-				return nil, err
-			}
-			ret.Content = append(ret.Content, ev.Content...)
-		} else {
-			ek, err := ee.evaluateYamlNodeInternal(ctx, k)
-			if err != nil {
-				return nil, err
-			}
-			if ek != nil {
-				if err := changed(); err != nil {
-					return nil, err
-				}
-			} else {
-				ek = k
-			}
-			if ret != nil {
-				ret.Content = append(ret.Content, ek, ev)
-			}
-		}
-	}
-	return ret, nil
-}
-
-func (ee expressionEvaluator) evaluateSequenceYamlNode(ctx context.Context, node *yaml.Node) (*yaml.Node, error) {
-	var ret *yaml.Node
-	for i := 0; i < len(node.Content); i++ {
-		v := node.Content[i]
-		// Preserve nested sequences
-		wasseq := v.Kind == yaml.SequenceNode
-		ev, err := ee.evaluateYamlNodeInternal(ctx, v)
-		if err != nil {
-			return nil, err
-		}
-		if ev != nil {
-			if ret == nil {
-				ret = &yaml.Node{}
-				if err := ret.Encode(node); err != nil {
-					return nil, err
-				}
-				ret.Content = ret.Content[:i]
-			}
-			// GitHub has this undocumented feature to merge sequences / arrays
-			// We have a nested sequence via evaluation, merge the arrays
-			if ev.Kind == yaml.SequenceNode && !wasseq {
-				ret.Content = append(ret.Content, ev.Content...)
-			} else {
-				ret.Content = append(ret.Content, ev)
-			}
-		} else if ret != nil {
-			ret.Content = append(ret.Content, v)
-		}
-	}
-	return ret, nil
-}
-
-func (ee expressionEvaluator) evaluateYamlNodeInternal(ctx context.Context, node *yaml.Node) (*yaml.Node, error) {
-	switch node.Kind {
-	case yaml.ScalarNode:
-		return ee.evaluateScalarYamlNode(ctx, node)
-	case yaml.MappingNode:
-		return ee.evaluateMappingYamlNode(ctx, node)
-	case yaml.SequenceNode:
-		return ee.evaluateSequenceYamlNode(ctx, node)
-	default:
-		return nil, nil //nolint:nilnil // pre-existing issue from nektos/act
-	}
+// shared returns the evaluation layer of the shared library, bound to this context so the
+// evaluation of every single expression is still logged and masked here.
+func (ee expressionEvaluator) shared(ctx context.Context) expreval.Evaluator {
+	return expreval.New(func(in string, defaultStatusCheck exprparser.DefaultStatusCheck) (any, error) {
+		return ee.evaluate(ctx, in, defaultStatusCheck)
+	})
 }
 
 func (ee expressionEvaluator) EvaluateYamlNode(ctx context.Context, node *yaml.Node) error {
-	ret, err := ee.evaluateYamlNodeInternal(ctx, node)
-	if err != nil {
-		return err
-	}
-	if ret != nil {
-		return ret.Decode(node)
-	}
-	return nil
+	return ee.shared(ctx).EvaluateYamlNode(node)
 }
 
 func (ee expressionEvaluator) Interpolate(ctx context.Context, in string) string {
-	if !strings.Contains(in, "${{") || !strings.Contains(in, "}}") {
-		return in
-	}
-
-	expr, _ := rewriteSubExpression(ctx, in, true)
-	evaluated, err := ee.evaluate(ctx, expr, exprparser.DefaultStatusCheckNone)
+	out, err := ee.interpolate(ctx, in)
 	if err != nil {
-		common.Logger(ctx).Errorf("Unable to interpolate expression '%s': %s", expr, err)
+		common.Logger(ctx).Errorf("Unable to interpolate expression '%s': %s", in, err)
 		return ""
 	}
-
-	value, ok := evaluated.(string)
-	if !ok {
-		panic(fmt.Sprintf("Expression %s did not evaluate to a string", expr))
-	}
-
-	return value
+	return out
 }
 
-// EvalBool evaluates an expression against given evaluator
+func (ee expressionEvaluator) interpolate(ctx context.Context, in string) (string, error) {
+	return ee.shared(ctx).Interpolate(in)
+}
+
+// EvalBool evaluates an expression against given evaluator. An `if:` is an expression even without
+// `${{ }}`, while literal text around one makes the whole value a string.
 func EvalBool(ctx context.Context, evaluator ExpressionEvaluator, expr string, defaultStatusCheck exprparser.DefaultStatusCheck) (bool, error) {
-	nextExpr, _ := rewriteSubExpression(ctx, expr, false)
-
-	evaluated, err := evaluator.evaluate(ctx, nextExpr, defaultStatusCheck)
-	if err != nil {
-		return false, err
-	}
-
-	return exprparser.IsTruthy(evaluated), nil
-}
-
-func escapeFormatString(in string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(in, "{", "{{"), "}", "}}")
-}
-
-func rewriteSubExpression(ctx context.Context, in string, forceFormat bool) (string, error) { //nolint:unparam // pre-existing issue from nektos/act
-	if !strings.Contains(in, "${{") || !strings.Contains(in, "}}") {
-		return in, nil
-	}
-
-	strPattern := regexp.MustCompile("(?:''|[^'])*'")
-	pos := 0
-	exprStart := -1
-	strStart := -1
-	var results []string
-	var formatOut strings.Builder
-	for pos < len(in) {
-		if strStart > -1 {
-			matches := strPattern.FindStringIndex(in[pos:])
-			if matches == nil {
-				panic("unclosed string.")
-			}
-
-			strStart = -1
-			pos += matches[1]
-		} else if exprStart > -1 {
-			exprEnd := strings.Index(in[pos:], "}}")
-			strStart = strings.Index(in[pos:], "'")
-
-			if exprEnd > -1 && strStart > -1 {
-				if exprEnd < strStart {
-					strStart = -1
-				} else {
-					exprEnd = -1
-				}
-			}
-
-			if exprEnd > -1 {
-				fmt.Fprintf(&formatOut, "{%d}", len(results))
-				results = append(results, strings.TrimSpace(in[exprStart:pos+exprEnd]))
-				pos += exprEnd + 2
-				exprStart = -1
-			} else if strStart > -1 {
-				pos += strStart + 1
-			} else {
-				panic("unclosed expression.")
-			}
-		} else {
-			exprStart = strings.Index(in[pos:], "${{")
-			if exprStart != -1 {
-				formatOut.WriteString(escapeFormatString(in[pos : pos+exprStart]))
-				exprStart = pos + exprStart + 3
-				pos = exprStart
-			} else {
-				formatOut.WriteString(escapeFormatString(in[pos:]))
-				pos = len(in)
-			}
-		}
-	}
-
-	if len(results) == 1 && formatOut.String() == "{0}" && !forceFormat {
-		return in, nil
-	}
-
-	out := fmt.Sprintf("format('%s', %s)", strings.ReplaceAll(formatOut.String(), "'", "''"), strings.Join(results, ", "))
-	if in != out {
-		common.Logger(ctx).Debugf("expression '%s' rewritten to '%s'", in, out)
-	}
-	return out, nil
+	return expreval.New(func(in string, dsc exprparser.DefaultStatusCheck) (any, error) {
+		return evaluator.evaluate(ctx, in, dsc)
+	}).EvalBool(expr, defaultStatusCheck)
 }
 
 func getEvaluatorInputs(ctx context.Context, rc *RunContext, step step, ghc *model.GithubContext) map[string]any {
@@ -497,11 +293,7 @@ func getEvaluatorInputs(ctx context.Context, rc *RunContext, step step, ghc *mod
 				if value == nil {
 					value = v.Default
 				}
-				if v.Type == "boolean" {
-					inputs[k] = value == "true"
-				} else {
-					inputs[k] = value
-				}
+				inputs[k] = coerceInputValue(value, v.Type)
 			}
 		}
 	}
@@ -514,15 +306,24 @@ func getEvaluatorInputs(ctx context.Context, rc *RunContext, step step, ghc *mod
 				if value == nil {
 					value = v.Default
 				}
-				if v.Type == "boolean" {
-					inputs[k] = value == "true"
-				} else {
-					inputs[k] = value
-				}
+				inputs[k] = coerceInputValue(value, v.Type)
 			}
 		}
 	}
 	return inputs
+}
+
+// coerceInputValue converts an input value to the type declared by the workflow.
+// The event payload carries natively typed JSON values on newer Gitea versions,
+// while defaults and older servers provide strings.
+func coerceInputValue(value any, inputType string) any {
+	if inputType != "boolean" {
+		return value
+	}
+	if b, ok := value.(bool); ok {
+		return b
+	}
+	return value == "true"
 }
 
 func setupWorkflowInputs(ctx context.Context, inputs *map[string]any, rc *RunContext) {
@@ -548,7 +349,7 @@ func setupWorkflowInputs(ctx context.Context, inputs *map[string]any, rc *RunCon
 				}
 			}
 
-			(*inputs)[name] = value
+			(*inputs)[name] = coerceInputValue(value, input.Type)
 		}
 	}
 }

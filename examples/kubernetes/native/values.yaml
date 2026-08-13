@@ -183,6 +183,24 @@ config:
     podLabels: {}
     podAnnotations: {}
 
+    # Job-pod scheduling. These apply to every job pod this runner creates
+    # (operator policy; workflows cannot override). Distinct from runner.affinity
+    # / runner.nodeSelector, which schedule the runner Deployment itself.
+    nodeSelector: {}
+    #   kubernetes.io/arch: amd64
+    tolerations: []
+    #   - key: node-role.kubernetes.io/control-plane
+    #     operator: Exists
+    #     effect: NoSchedule
+    affinity: {}
+    #   nodeAffinity:
+    #     requiredDuringSchedulingIgnoredDuringExecution:
+    #       nodeSelectorTerms:
+    #         - matchExpressions:
+    #             - key: node-role.kubernetes.io/control-plane
+    #               operator: NotIn
+    #               values: ["true"]
+
     # Shared workspace volume across the init/job/service containers.
     # type: emptyDir | ephemeral | pvc (requires size for ephemeral/pvc).
     workspaceVolume:

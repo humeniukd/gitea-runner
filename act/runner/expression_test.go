@@ -6,12 +6,13 @@ package runner
 
 import (
 	"context"
+	"strings"
 	"testing"
 
-	"gitea.com/gitea/runner/act/exprparser"
-	"gitea.com/gitea/runner/act/model"
-
+	"gitea.dev/actionslib/pkg/exprparser"
+	"gitea.dev/actionslib/pkg/model"
 	assert "github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	yaml "go.yaml.in/yaml/v4"
 )
 
@@ -257,6 +258,15 @@ func TestInterpolate(t *testing.T) {
 		{"${{ env.SOMETHING_FALSE || false }}", "false"},
 		{"${{ env.SOMETHING_FALSE }} && ${{ env.SOMETHING_TRUE }}", "false && true"},
 		{"${{ fromJSON('{}') < 2 }}", "false"},
+		{"${{ 1 }}", "1"},
+		{"${{ 1.0 }}", "1"},
+		{"${{ null }}", ""},
+		{"${{ fromJSON('[1,2]') }}", "Array"},
+		{"${{ fromJSON('{\"a\":1}') }}", "Object"},
+		// a malformed part must not restructure its neighbours, and it interpolates to nothing
+		{"${{ 1) && (2 }}", ""},
+		{"run ${{ 1) && (2 }} now", ""},
+		{"${{ 1", "${{ 1"},
 	}
 
 	for _, table := range tables {
@@ -268,56 +278,81 @@ func TestInterpolate(t *testing.T) {
 	}
 }
 
-func TestRewriteSubExpression(t *testing.T) {
-	table := []struct {
-		in  string
-		out string
+func TestGetEvaluatorInputsBoolean(t *testing.T) {
+	workflows := map[string]string{
+		"workflow_call": `
+on:
+  workflow_call:
+    inputs:
+      flag:
+        type: boolean
+        default: true
+      name:
+        type: string
+        default: gitea
+`,
+		"workflow_dispatch": `
+on:
+  workflow_dispatch:
+    inputs:
+      flag:
+        type: boolean
+        default: true
+      name:
+        type: string
+        default: gitea
+`,
+	}
+
+	tables := []struct {
+		name  string
+		event map[string]any
+		flag  any
 	}{
-		{in: "Hello World", out: "Hello World"},
-		{in: "${{ true }}", out: "${{ true }}"},
-		{in: "${{ true }} ${{ true }}", out: "format('{0} {1}', true, true)"},
-		{in: "${{ true || false }} ${{ true && true }}", out: "format('{0} {1}', true || false, true && true)"},
-		{in: "${{ '}}' }}", out: "${{ '}}' }}"},
-		{in: "${{ '''}}''' }}", out: "${{ '''}}''' }}"},
-		{in: "${{ '''' }}", out: "${{ '''' }}"},
-		{in: `${{ fromJSON('"}}"') }}`, out: `${{ fromJSON('"}}"') }}`},
-		{in: `${{ fromJSON('"\"}}\""') }}`, out: `${{ fromJSON('"\"}}\""') }}`},
-		{in: `${{ fromJSON('"''}}"') }}`, out: `${{ fromJSON('"''}}"') }}`},
-		{in: "Hello ${{ 'World' }}", out: "format('Hello {0}', 'World')"},
+		{
+			// Gitea >= 1.27 resolves the inputs server-side and sends native JSON types
+			name:  "native bool true",
+			event: map[string]any{"inputs": map[string]any{"flag": true}},
+			flag:  true,
+		},
+		{
+			name:  "native bool false",
+			event: map[string]any{"inputs": map[string]any{"flag": false}},
+			flag:  false,
+		},
+		{
+			name:  "string true",
+			event: map[string]any{"inputs": map[string]any{"flag": "true"}},
+			flag:  true,
+		},
+		{
+			name:  "string false",
+			event: map[string]any{"inputs": map[string]any{"flag": "false"}},
+			flag:  false,
+		},
+		{
+			name:  "default is used when the event carries no inputs",
+			event: map[string]any{},
+			flag:  true,
+		},
 	}
 
-	for _, table := range table {
-		t.Run("TestRewriteSubExpression", func(t *testing.T) {
-			assertObject := assert.New(t)
-			out, err := rewriteSubExpression(context.Background(), table.in, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertObject.Equal(table.out, out, table.in)
-		})
-	}
-}
+	for eventName, workflow := range workflows {
+		for _, table := range tables {
+			t.Run(eventName+"/"+table.name, func(t *testing.T) {
+				wf, err := model.ReadWorkflow(strings.NewReader(workflow))
+				require.NoError(t, err)
 
-func TestRewriteSubExpressionForceFormat(t *testing.T) {
-	table := []struct {
-		in  string
-		out string
-	}{
-		{in: "Hello World", out: "Hello World"},
-		{in: "${{ true }}", out: "format('{0}', true)"},
-		{in: "${{ '}}' }}", out: "format('{0}', '}}')"},
-		{in: `${{ fromJSON('"}}"') }}`, out: `format('{0}', fromJSON('"}}"'))`},
-		{in: "Hello ${{ 'World' }}", out: "format('Hello {0}', 'World')"},
-	}
+				rc := &RunContext{
+					Config: &Config{Workdir: "."},
+					Run:    &model.Run{JobID: "job1", Workflow: wf},
+				}
+				ghc := &model.GithubContext{EventName: eventName, Event: table.event}
 
-	for _, table := range table {
-		t.Run("TestRewriteSubExpressionForceFormat", func(t *testing.T) {
-			assertObject := assert.New(t)
-			out, err := rewriteSubExpression(context.Background(), table.in, true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertObject.Equal(table.out, out, table.in)
-		})
+				inputs := getEvaluatorInputs(context.Background(), rc, nil, ghc)
+				assert.Equal(t, table.flag, inputs["flag"])
+				assert.Equal(t, "gitea", inputs["name"])
+			})
+		}
 	}
 }

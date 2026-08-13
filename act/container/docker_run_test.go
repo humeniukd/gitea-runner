@@ -5,6 +5,7 @@
 package container
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
@@ -23,6 +24,8 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
 	mobyclient "github.com/moby/moby/client"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
@@ -114,6 +117,31 @@ func (m *mockDockerClient) ContainerInspect(ctx context.Context, id string, opts
 func (m *mockDockerClient) ContainerList(ctx context.Context, opts mobyclient.ContainerListOptions) (mobyclient.ContainerListResult, error) {
 	args := m.Called(ctx, opts)
 	return args.Get(0).(mobyclient.ContainerListResult), args.Error(1)
+}
+
+func (m *mockDockerClient) ContainerRemove(ctx context.Context, id string, opts mobyclient.ContainerRemoveOptions) (mobyclient.ContainerRemoveResult, error) {
+	args := m.Called(ctx, id, opts)
+	return args.Get(0).(mobyclient.ContainerRemoveResult), args.Error(1)
+}
+
+func (m *mockDockerClient) ContainerKill(ctx context.Context, id string, opts mobyclient.ContainerKillOptions) (mobyclient.ContainerKillResult, error) {
+	args := m.Called(ctx, id, opts)
+	return args.Get(0).(mobyclient.ContainerKillResult), args.Error(1)
+}
+
+func (m *mockDockerClient) NetworkList(ctx context.Context, opts mobyclient.NetworkListOptions) (mobyclient.NetworkListResult, error) {
+	args := m.Called(ctx, opts)
+	return args.Get(0).(mobyclient.NetworkListResult), args.Error(1)
+}
+
+func (m *mockDockerClient) NetworkInspect(ctx context.Context, id string, opts mobyclient.NetworkInspectOptions) (mobyclient.NetworkInspectResult, error) {
+	args := m.Called(ctx, id, opts)
+	return args.Get(0).(mobyclient.NetworkInspectResult), args.Error(1)
+}
+
+func (m *mockDockerClient) NetworkRemove(ctx context.Context, id string, opts mobyclient.NetworkRemoveOptions) (mobyclient.NetworkRemoveResult, error) {
+	args := m.Called(ctx, id, opts)
+	return args.Get(0).(mobyclient.NetworkRemoveResult), args.Error(1)
 }
 
 type endlessReader struct {
@@ -332,6 +360,44 @@ func TestDockerCopyTarStream(t *testing.T) {
 	client.AssertExpectations(t)
 }
 
+// Docker 29.5+ rejects absolute names in the mkdir tarball with
+// "path escapes from parent", since it is extracted relative to "/".
+func TestDockerCopyTarStreamMkdirEntryIsRelative(t *testing.T) {
+	ctx := context.Background()
+
+	var mkdirNames []string
+	client := &mockDockerClient{}
+	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
+		if opts.DestinationPath != "/" || opts.Content == nil {
+			return false
+		}
+		tr := tar.NewReader(opts.Content)
+		for {
+			hdr, err := tr.Next()
+			if err != nil {
+				break
+			}
+			mkdirNames = append(mkdirNames, hdr.Name)
+		}
+		return true
+	})).Return(mobyclient.CopyToContainerResult{}, nil)
+	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
+		return opts.DestinationPath == "/var/run/act" && opts.Content != nil
+	})).Return(mobyclient.CopyToContainerResult{}, nil)
+	cr := &containerReference{
+		id:  "123",
+		cli: client,
+		input: &NewContainerInput{
+			Image: "image",
+		},
+	}
+
+	require.NoError(t, cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{}))
+	assert.Equal(t, []string{"var/run/act"}, mkdirNames)
+
+	client.AssertExpectations(t)
+}
+
 func TestDockerCopyTarStreamErrorInCopyFiles(t *testing.T) {
 	ctx := context.Background()
 
@@ -378,6 +444,64 @@ func TestDockerCopyTarStreamErrorInMkdir(t *testing.T) {
 	err := cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
 	assert.ErrorIs(t, err, merr) //nolint:testifylint // pre-existing issue from nektos/act
 
+	client.AssertExpectations(t)
+}
+
+// A remove that raced the daemon's AutoRemove teardown is not a failure and must not
+// be logged as one.
+func TestRemoveIgnoresAutoRemoveRace(t *testing.T) {
+	removeOpts := mobyclient.ContainerRemoveOptions{RemoveVolumes: true, Force: true}
+	killOpts := mobyclient.ContainerKillOptions{Signal: "SIGKILL"}
+	for _, tc := range []struct {
+		name        string
+		err         error
+		wantWait    bool
+		wantFailure bool
+	}{
+		{name: "removal in progress", err: cerrdefs.ErrConflict.WithMessage("removal of container abc is already in progress"), wantWait: true},
+		{name: "already removed", err: cerrdefs.ErrNotFound.WithMessage("No such container: abc")},
+		{name: "removed cleanly", err: nil},
+		{name: "real failure", err: errors.New("driver failed to remove root filesystem"), wantFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, hook := test.NewNullLogger()
+			ctx := common.WithLogger(context.Background(), logger)
+			client := &mockDockerClient{}
+			client.On("ContainerKill", ctx, "abc", killOpts).Return(mobyclient.ContainerKillResult{}, nil)
+			client.On("ContainerRemove", ctx, "abc", removeOpts).Return(mobyclient.ContainerRemoveResult{}, tc.err)
+			if tc.wantWait {
+				removed := make(chan container.WaitResponse, 1)
+				removed <- container.WaitResponse{}
+				client.On("ContainerWait", mock.Anything, "abc", mobyclient.ContainerWaitOptions{Condition: container.WaitConditionRemoved}).
+					Return(mobyclient.ContainerWaitResult{Result: removed})
+			}
+			cr := &containerReference{id: "abc", cli: client}
+
+			require.NoError(t, cr.remove()(ctx))
+			// a failure keeps the id, so a later Remove() can retry it
+			if tc.wantFailure {
+				assert.Equal(t, "abc", cr.id)
+				assert.Len(t, hook.AllEntries(), 1)
+			} else {
+				assert.Empty(t, cr.id)
+				assert.Empty(t, hook.AllEntries())
+			}
+			client.AssertExpectations(t)
+		})
+	}
+}
+
+// A container whose id was never learned, because find() could not reach the daemon or
+// create() lost its reply, must still be removed rather than leaking with its network. It
+// was never started here, so it is not worth a kill of its own.
+func TestRemoveWithoutIDUsesName(t *testing.T) {
+	ctx := context.Background()
+	client := &mockDockerClient{}
+	client.On("ContainerRemove", ctx, "job-1", mobyclient.ContainerRemoveOptions{RemoveVolumes: true, Force: true}).
+		Return(mobyclient.ContainerRemoveResult{}, nil)
+	cr := &containerReference{cli: client, input: &NewContainerInput{Name: "job-1"}}
+
+	require.NoError(t, cr.remove()(ctx))
 	client.AssertExpectations(t)
 }
 
@@ -448,7 +572,7 @@ func TestRejectsMissingContainer(t *testing.T) {
 	cr := &containerReference{cli: client, input: &NewContainerInput{Name: "job-1"}}
 	check := func(op string, err error) {
 		t.Helper()
-		require.Error(t, err, op)
+		require.ErrorIs(t, err, ErrContainerNotFound, op)
 		assert.Contains(t, err.Error(), `container "job-1" does not exist`, op)
 	}
 	check("copyContent", cr.copyContent("/var/run/act", &FileEntry{Name: "x", Mode: 0o644})(ctx))
@@ -457,6 +581,15 @@ func TestRejectsMissingContainer(t *testing.T) {
 	check("exec", cr.exec([]string{"echo"}, nil, "", "")(ctx))
 	_, err := cr.GetContainerArchive(ctx, "/var/run/act/x")
 	check("GetContainerArchive", err)
+	_, err = cr.Inspect(ctx)
+	check("Inspect", err)
+
+	// a known id the daemon has since dropped
+	client.On("ContainerInspect", ctx, "gone", mobyclient.ContainerInspectOptions{}).
+		Return(mobyclient.ContainerInspectResult{}, cerrdefs.ErrNotFound)
+	removed := &containerReference{id: "gone", cli: client, input: &NewContainerInput{Name: "job-1"}}
+	_, err = removed.Inspect(ctx)
+	check("Inspect after removal", err)
 }
 
 // End-to-end: a stale cr.id is cleared, repopulated from name lookup,
@@ -505,7 +638,7 @@ func TestDockerCopyToSymlinkPath(t *testing.T) {
 	// CopyTarStream first creates the destination directory by extracting a tar at "/",
 	// which makes the daemon mkdir var, then var/run (the symlink), then act — the exact
 	// step that fails on the broken daemon.
-	err := rc.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
+	err := rc.CopyTarStream(ctx, "/var/run/act/actions/", &bytes.Buffer{})
 	require.NoError(t, err)
 }
 
@@ -585,6 +718,110 @@ func TestCheckVolumes(t *testing.T) {
 	}
 }
 
+func TestSanitizeOptionsHostConfig(t *testing.T) {
+	logger, _ := test.NewNullLogger()
+
+	dangerous := func() *container.HostConfig {
+		return &container.HostConfig{
+			PidMode:      "host",
+			IpcMode:      "host",
+			UTSMode:      "host",
+			CgroupnsMode: "host",
+			UsernsMode:   "host",
+			CapAdd:       []string{"ALL"},
+			SecurityOpt:  []string{"seccomp=unconfined", "apparmor=unconfined"},
+			VolumesFrom:  []string{"other"},
+			Runtime:      "runc",
+			Resources: container.Resources{
+				CgroupParent:      "/custom",
+				Devices:           []container.DeviceMapping{{PathOnHost: "/dev/sda", PathInContainer: "/dev/sda", CgroupPermissions: "rwm"}},
+				DeviceCgroupRules: []string{"a *:* rwm"},
+			},
+			Sysctls: map[string]string{"net.ipv4.ip_forward": "1"},
+		}
+	}
+
+	hostConfig := dangerous()
+	sanitizeOptionsHostConfig(logger, hostConfig)
+
+	assert.Empty(t, string(hostConfig.PidMode))
+	assert.Empty(t, string(hostConfig.IpcMode))
+	assert.Empty(t, string(hostConfig.UTSMode))
+	assert.Empty(t, string(hostConfig.CgroupnsMode))
+	assert.Empty(t, string(hostConfig.UsernsMode))
+	assert.Empty(t, hostConfig.CapAdd)
+	assert.Empty(t, hostConfig.SecurityOpt)
+	assert.Empty(t, hostConfig.Devices)
+	assert.Empty(t, hostConfig.DeviceCgroupRules)
+	assert.Empty(t, hostConfig.VolumesFrom)
+	assert.Empty(t, hostConfig.Runtime)
+	assert.Empty(t, hostConfig.CgroupParent)
+	assert.Empty(t, hostConfig.Sysctls)
+}
+
+func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.T) {
+	// OS-independent options only: --device parsing requires a linux/windows
+	// server OS, which is not guaranteed for the test host.
+	const dangerousOptions = "--pid=host --ipc=host --uts=host --cgroupns=host " +
+		"--userns=host --cap-add=ALL --security-opt seccomp=unconfined " +
+		"--security-opt apparmor=unconfined --volumes-from other " +
+		"--runtime runc --cgroup-parent /custom --sysctl net.ipv4.ip_forward=1"
+
+	t.Run("unprivileged strips host-escape options", func(t *testing.T) {
+		logger, _ := test.NewNullLogger()
+		ctx := common.WithLogger(context.Background(), logger)
+		cr := &containerReference{
+			input: &NewContainerInput{
+				Options:     dangerousOptions,
+				NetworkMode: "bridge",
+				UsernsMode:  "private",
+			},
+		}
+
+		_, hostConfig, err := cr.mergeContainerConfigs(ctx, &container.Config{}, &container.HostConfig{
+			Privileged:  false,
+			UsernsMode:  container.UsernsMode("private"),
+			NetworkMode: container.NetworkMode("bridge"),
+		})
+		require.NoError(t, err)
+
+		assert.False(t, hostConfig.Privileged)
+		assert.Empty(t, string(hostConfig.PidMode))
+		assert.Empty(t, string(hostConfig.IpcMode))
+		assert.Empty(t, string(hostConfig.UTSMode))
+		assert.Empty(t, string(hostConfig.CgroupnsMode))
+		// UsernsMode must keep the runner-controlled value, not the one from options.
+		assert.Equal(t, "private", string(hostConfig.UsernsMode))
+		assert.Empty(t, hostConfig.CapAdd)
+		assert.Empty(t, hostConfig.SecurityOpt)
+		assert.Empty(t, hostConfig.VolumesFrom)
+		assert.Empty(t, hostConfig.Runtime)
+		assert.Empty(t, hostConfig.CgroupParent)
+		assert.Empty(t, hostConfig.Sysctls)
+	})
+
+	t.Run("privileged preserves options", func(t *testing.T) {
+		logger, _ := test.NewNullLogger()
+		ctx := common.WithLogger(context.Background(), logger)
+		cr := &containerReference{
+			input: &NewContainerInput{
+				Options:     "--pid=host --cap-add=ALL --security-opt seccomp=unconfined",
+				NetworkMode: "bridge",
+			},
+		}
+
+		_, hostConfig, err := cr.mergeContainerConfigs(ctx, &container.Config{}, &container.HostConfig{
+			Privileged:  true,
+			NetworkMode: container.NetworkMode("bridge"),
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, "host", string(hostConfig.PidMode))
+		assert.Equal(t, []string{"ALL"}, hostConfig.CapAdd)
+		assert.Equal(t, []string{"seccomp=unconfined"}, hostConfig.SecurityOpt)
+	})
+}
+
 func TestCheckVolumesRejectsEscapingHostPaths(t *testing.T) {
 	logger, _ := test.NewNullLogger()
 	ctx := common.WithLogger(context.Background(), logger)
@@ -620,4 +857,76 @@ func TestCheckVolumesRejectsEscapingHostPaths(t *testing.T) {
 		Binds: []string{filepath.Join(linkPath, "missing") + ":/mnt"},
 	})
 	assert.Empty(t, hostConf.Binds)
+}
+
+func TestContainerInfoFromInspect(t *testing.T) {
+	t.Run("reports no healthcheck when the image declares none", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{
+			ID:    "abc123",
+			State: &container.State{Status: "running", Running: true},
+		})
+
+		assert.Equal(t, "abc123", info.ID)
+		assert.Equal(t, "running", info.State)
+		assert.Equal(t, HealthNone, info.Health)
+		assert.Empty(t, info.Ports)
+	})
+
+	t.Run("reports the health status and the last probe output", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{
+			State: &container.State{
+				Status: "running",
+				Health: &container.Health{
+					Status: container.Unhealthy,
+					Log: []*container.HealthcheckResult{
+						{Output: "first\n"},
+						{Output: "connection refused\n"},
+					},
+				},
+			},
+		})
+
+		assert.Equal(t, HealthUnhealthy, info.Health)
+		assert.Equal(t, "connection refused", info.HealthOutput)
+	})
+
+	t.Run("reports the published ports", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{
+			State: &container.State{Status: "running"},
+			NetworkSettings: &container.NetworkSettings{
+				Ports: network.PortMap{
+					network.MustParsePort("5432/tcp"): []network.PortBinding{{HostPort: "49153"}},
+					network.MustParsePort("6379/tcp"): nil,
+				},
+			},
+		})
+
+		assert.Equal(t, map[string]string{"5432": "49153"}, info.Ports)
+	})
+
+	t.Run("tolerates a container without state", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{ID: "abc123"})
+
+		assert.Equal(t, "abc123", info.ID)
+		assert.Equal(t, HealthNone, info.Health)
+	})
+}
+
+func TestMergeContainerConfigsVolumesReplaceRunnerMounts(t *testing.T) {
+	logger, _ := test.NewNullLogger()
+	ctx := common.WithLogger(context.Background(), logger)
+	cr := &containerReference{
+		input: &NewContainerInput{
+			NetworkMode: "bridge",
+			Options:     "--volume /host/tools:/opt/hostedtoolcache",
+		},
+	}
+
+	_, hostConf, err := cr.mergeContainerConfigs(ctx, &container.Config{}, &container.HostConfig{
+		Binds:  []string{"/var/run/docker.sock:/var/run/docker.sock"},
+		Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: "act-toolcache", Target: "/opt/hostedtoolcache"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/var/run/docker.sock:/var/run/docker.sock", "/host/tools:/opt/hostedtoolcache"}, hostConf.Binds)
+	assert.Empty(t, hostConf.Mounts)
 }

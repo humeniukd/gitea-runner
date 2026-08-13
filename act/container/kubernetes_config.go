@@ -4,8 +4,9 @@
 package container
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 // Pod cleanup policies select when a completed job Pod (and its per-job Secret

@@ -155,6 +155,9 @@ explicit error — they are not silently ignored.
 | `config.kubernetes.podCleanup` | `always` | `always`/`on-failure`/`never` |
 | `config.kubernetes.maxConcurrentJobs` | `0` (unlimited) | Bypasses `runner.capacity` in k8s mode |
 | `config.kubernetes.runtimeClassName` | _(unset)_ | Enforced on every job pod |
+| `config.kubernetes.nodeSelector` | `{}` | Applied to every job pod |
+| `config.kubernetes.tolerations` | `[]` | Applied to every job pod |
+| `config.kubernetes.affinity` | `{}` | Applied to every job pod |
 | `config.kubernetes.workspaceVolume.type` | `emptyDir` | `emptyDir`/`ephemeral`/`pvc` |
 | `config.kubernetes.resources.{job,service,dind}` | M3 defaults | dind needs ≥1Gi |
 | `runner.capacity` | `4` | Cosmetic in k8s mode (bypassed) |
@@ -237,6 +240,39 @@ cannot opt out of the sandbox. To offer different isolation levels, run **one
 runner per trust tier** (each with its own `runtimeClassName`, namespace, and
 node pool) and route jobs with `runs-on` — the label selects the runner, and
 each runner enforces its own runtime.
+
+---
+
+## Job-pod scheduling (nodeSelector / tolerations / affinity)
+
+`config.kubernetes.nodeSelector`, `tolerations`, and `affinity` are stamped on
+every job pod this runner creates. They are independent of `runner.nodeSelector`
+/ `runner.tolerations` / `runner.affinity`, which only place the runner
+Deployment itself.
+
+```yaml
+config:
+  kubernetes:
+    nodeSelector:
+      kubernetes.io/arch: amd64
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: NotIn
+                  values: ["true"]
+```
+
+These fields are operator policy: a workflow cannot override them. Use
+`nodeSelector`/`tolerations` to pin jobs onto a tainted build pool, and
+`affinity` for the richer Kubernetes rules (anti-affinity against control-plane
+nodes, zone spreading, and so on).
 
 Notes:
 

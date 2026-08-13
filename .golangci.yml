@@ -11,6 +11,7 @@ linters:
     - dupl
     - errcheck
     - forbidigo
+    - forcetypeassert
     - gocheckcompilerdirectives
     - gocritic
     - goheader
@@ -36,12 +37,8 @@ linters:
       rules:
         main:
           deny:
-            - pkg: io/ioutil
-              desc: use os or io instead
             - pkg: golang.org/x/exp
               desc: it's experimental and unreliable
-            - pkg: github.com/pkg/errors
-              desc: use builtin errors package instead
     nolintlint:
       allow-unused: false
       require-explanation: true
@@ -102,6 +99,9 @@ linters:
       - linters:
           - forbidigo
         path: cmd
+      - linters:
+          - forcetypeassert
+        path: _test\.go
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0

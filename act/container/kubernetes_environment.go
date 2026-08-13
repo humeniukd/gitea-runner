@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
@@ -190,14 +191,14 @@ func (p *KubernetesPod) remove(ctx context.Context) error {
 	var firstErr error
 	if p.builder != nil && p.builder.name != "" {
 		name := p.builder.name
-		if err := deleteWithRetry(ctx, p.clientset, p.namespace, "job pod", name, func(ctx context.Context) error {
+		if err := deleteWithRetry(ctx, p.namespace, "job pod", name, func(ctx context.Context) error {
 			return p.clientset.CoreV1().Pods(p.namespace).Delete(ctx, name, metav1.DeleteOptions{})
 		}); err != nil && !apierrors.IsNotFound(err) {
 			firstErr = err
 		}
 	}
 	for _, secret := range p.perJobSecrets {
-		if err := deleteWithRetry(ctx, p.clientset, p.namespace, "per-job secret", secret, func(ctx context.Context) error {
+		if err := deleteWithRetry(ctx, p.namespace, "per-job secret", secret, func(ctx context.Context) error {
 			return p.clientset.CoreV1().Secrets(p.namespace).Delete(ctx, secret, metav1.DeleteOptions{})
 		}); err != nil && !apierrors.IsNotFound(err) && firstErr == nil {
 			firstErr = err
@@ -211,7 +212,7 @@ func (p *KubernetesPod) remove(ctx context.Context) error {
 // bounded exponential backoff so a control-plane blip cannot strand a finished
 // job's Pod. Permanent errors (NotFound, Forbidden) abort immediately — retrying
 // cannot fix them. The returned error is already namespaced/qualified.
-func deleteWithRetry(ctx context.Context, clientset kubernetes.Interface, namespace, kind, name string, delete func(context.Context) error) error {
+func deleteWithRetry(ctx context.Context, namespace, kind, name string, doDelete func(context.Context) error) error {
 	err := retry.New(
 		retry.Context(ctx),
 		retry.Attempts(kubernetesDeleteRetryAttempts),
@@ -219,7 +220,7 @@ func deleteWithRetry(ctx context.Context, clientset kubernetes.Interface, namesp
 		retry.MaxDelay(kubernetesDeleteRetryMaxDelay),
 		retry.LastErrorOnly(true),
 		retry.RetryIf(isTransientDeleteError),
-	).Do(func() error { return delete(ctx) })
+	).Do(func() error { return doDelete(ctx) })
 	if err == nil {
 		return nil
 	}
@@ -507,6 +508,126 @@ func (e *KubernetesExecutionEnvironment) ReplaceLogWriter(stdout, stderr io.Writ
 	e.input.Stdout = stdout
 	e.input.Stderr = stderr
 	return prevOut, prevErr
+}
+
+// Inspect snapshots this container's status from the shared job Pod. A
+// not-yet-submitted or already-deleted pod is reported as ErrContainerNotFound
+// so the docker wait-for-healthy path can treat it as gone.
+func (e *KubernetesExecutionEnvironment) Inspect(ctx context.Context) (*Info, error) {
+	if e.pod == nil || e.pod.builder == nil || e.pod.builder.name == "" {
+		return nil, fmt.Errorf("inspect kubernetes container: %w", ErrContainerNotFound)
+	}
+	pod, err := e.pod.clientset.CoreV1().Pods(e.pod.namespace).Get(ctx, e.pod.builder.name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("inspect kubernetes container: %w", ErrContainerNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect kubernetes container %s/%s: %w", e.pod.namespace, e.pod.builder.name, err)
+	}
+	return kubernetesContainerInfo(pod, e.k8sContainerName(), e.input), nil
+}
+
+// DumpLogs copies this container's log so far onto its output writers. Used
+// when a service is unhealthy so the job log still shows why the sidecar died.
+func (e *KubernetesExecutionEnvironment) DumpLogs(ctx context.Context) error {
+	if e.pod == nil || e.pod.builder == nil || e.pod.builder.name == "" {
+		return fmt.Errorf("read kubernetes container logs: %w", ErrContainerNotFound)
+	}
+	req := e.pod.clientset.CoreV1().Pods(e.pod.namespace).GetLogs(e.pod.builder.name, &corev1.PodLogOptions{
+		Container: e.k8sContainerName(),
+	})
+	stream, err := req.Stream(ctx)
+	if apierrors.IsNotFound(err) {
+		return fmt.Errorf("read kubernetes container logs: %w", ErrContainerNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("read kubernetes container logs %s/%s: %w", e.pod.namespace, e.pod.builder.name, err)
+	}
+	defer stream.Close()
+
+	out := io.Discard
+	if e.input != nil && e.input.Stdout != nil {
+		out = e.input.Stdout
+	}
+	_, err = io.Copy(out, stream)
+	return err
+}
+
+// k8sContainerName is the Pod container this environment maps to: the
+// long-lived job container, or the RFC 1123-sanitized service sidecar name.
+func (e *KubernetesExecutionEnvironment) k8sContainerName() string {
+	if e.role == roleJob {
+		return kubernetesJobContainerName
+	}
+	sidecarName := ""
+	if e.input != nil {
+		sidecarName = e.input.Name
+		if len(e.input.NetworkAliases) > 0 {
+			sidecarName = e.input.NetworkAliases[0]
+		}
+	}
+	return serviceContainerName(sidecarName)
+}
+
+// kubernetesContainerInfo maps a Pod + named container status onto the
+// backend-agnostic Info the act engine consumes for job.container / job.services.
+func kubernetesContainerInfo(pod *corev1.Pod, containerName string, input *NewContainerInput) *Info {
+	info := &Info{
+		ID:     string(pod.UID),
+		Health: HealthNone,
+		Ports:  map[string]string{},
+	}
+	if input != nil {
+		for _, port := range sortedExposedPorts(input.ExposedPorts) {
+			// Sidecars share the job Pod's network namespace, so the container
+			// port is the address a step uses (via hostAliases → 127.0.0.1).
+			key := strconv.Itoa(port)
+			info.Ports[key] = key
+		}
+	}
+
+	status := findContainerStatus(pod, containerName)
+	if status == nil {
+		info.State = string(pod.Status.Phase)
+		return info
+	}
+	switch {
+	case status.State.Running != nil:
+		info.State = StateRunning
+		if status.Ready {
+			info.Health = HealthHealthy
+		} else {
+			info.Health = HealthStarting
+		}
+	case status.State.Waiting != nil:
+		info.State = "created"
+		info.Health = HealthStarting
+		info.HealthOutput = status.State.Waiting.Message
+	case status.State.Terminated != nil:
+		info.State = "exited"
+		info.ExitCode = int(status.State.Terminated.ExitCode)
+		if status.State.Terminated.ExitCode != 0 {
+			info.Health = HealthUnhealthy
+		}
+		info.HealthOutput = status.State.Terminated.Message
+	}
+	return info
+}
+
+// findContainerStatus looks up a container in both regular and init statuses:
+// service sidecars are native sidecars and surface under InitContainerStatuses.
+func findContainerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == name {
+			return &pod.Status.ContainerStatuses[i]
+		}
+	}
+	for i := range pod.Status.InitContainerStatuses {
+		if pod.Status.InitContainerStatuses[i].Name == name {
+			return &pod.Status.InitContainerStatuses[i]
+		}
+	}
+	return nil
 }
 
 // serviceContainerName converts an act service container name (mixed-case and

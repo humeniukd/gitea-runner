@@ -15,8 +15,9 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/act/exprparser"
-	"gitea.com/gitea/runner/act/model"
+
+	"gitea.dev/actionslib/pkg/exprparser"
+	"gitea.dev/actionslib/pkg/model"
 )
 
 type step interface {
@@ -107,7 +108,13 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		if strings.Contains(stepString, "::add-mask::") {
 			stepString = "add-mask command"
 		}
-		logger.Infof("Run %s %s", stage, stepString)
+		if stage == stepStageMain {
+			// Main steps print their own raw "Run <title>" header, so this line is redundant and
+			// only leaks into the "Set up job" section for the first step; keep it as a debug trace.
+			logger.Debugf("Run %s %s", stage, stepString)
+		} else {
+			logger.Infof("Run %s %s", stage, stepString)
+		}
 
 		// Prepare and clean Runner File Commands
 		actPath := rc.JobContainer.GetActPath()
@@ -159,9 +166,22 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		}
 		_ = rc.JobContainer.Copy(actPath, files...)(ctx)
 
+		// The command handler needs the step's env to judge ACTIONS_ALLOW_UNSECURE_COMMANDS.
+		// Cloned: the step executor keeps writing to its own env map after this point, on a
+		// different goroutine from the command handler that reads it.
+		rc.setCurrentStepEnv(maps0.Clone(*step.getEnv()))
+		defer rc.setCurrentStepEnv(nil)
+		_ = rc.takeUnsecureCommandError() // a refusal from before any step belongs to no step
+
 		timeoutctx, cancelTimeOut := evaluateStepTimeout(ctx, rc.ExprEval, stepModel)
 		defer cancelTimeOut()
 		err = executor(timeoutctx)
+		// Always take it, so the job-scoped error cannot leak onto a later step. A refusal
+		// fails the step as it does on GitHub, but the executor's own error wins.
+		insecureErr := rc.takeUnsecureCommandError()
+		if err == nil {
+			err = insecureErr
+		}
 
 		if err == nil {
 			logger.WithField("stepResult", stepResult.Outcome).Infof("Success - %s %s", stage, stepString)
@@ -175,7 +195,7 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 			}
 
 			if continueOnError {
-				logger.Errorf("##[error]%v", err)
+				logger.Errorf("##[error]%s", EscapeCommandData(err.Error()))
 				logger.Infof("Failed but continue next step")
 				err = nil
 				stepResult.Conclusion = model.StepStatusSuccess

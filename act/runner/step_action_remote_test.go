@@ -10,14 +10,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/common/git"
-	"gitea.com/gitea/runner/act/model"
 
+	"gitea.dev/actionslib/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -650,6 +653,8 @@ func TestStepActionRemotePost(t *testing.T) {
 				},
 				Step:   tt.stepModel,
 				action: tt.actionModel,
+				// post only ever runs after prepareActionExecutor resolved the action
+				remoteAction: newRemoteAction(tt.stepModel.Uses),
 			}
 			sar.RunContext.ExprEval = sar.RunContext.NewExpressionEvaluator(ctx)
 
@@ -816,6 +821,164 @@ func Test_newRemoteAction(t *testing.T) {
 			assert.Equalf(t, tt.wantCloneURL, cloneURL, "newRemoteAction(%v).CloneURL()", tt.action)
 		})
 	}
+}
+
+func Test_newSelfRepoAction(t *testing.T) {
+	workflow := &model.GithubContext{
+		ServerURL:  "https://gitea.example.com",
+		Repository: "owner/workflow-repo",
+		Sha:        "abc123",
+	}
+	composite := &model.GithubContext{
+		ServerURL:        "https://gitea.example.com",
+		Repository:       "owner/workflow-repo",
+		Sha:              "abc123",
+		ActionRepository: "other/action-repo",
+		ActionRef:        "v1",
+	}
+	tests := []struct {
+		name   string
+		action string
+		github *model.GithubContext
+		want   *remoteAction
+	}{
+		{
+			name:   "top level resolves to the workflow repo at its commit",
+			action: "$/.gitea/actions/build",
+			github: workflow,
+			want: &remoteAction{
+				URL:  "https://gitea.example.com",
+				Org:  "owner",
+				Repo: "workflow-repo",
+				Path: ".gitea/actions/build",
+				Ref:  "abc123",
+			},
+		},
+		{
+			name:   "inside a composite resolves to the enclosing action",
+			action: "$/.gitea/actions/build",
+			github: composite,
+			want: &remoteAction{
+				URL:  "https://gitea.example.com",
+				Org:  "other",
+				Repo: "action-repo",
+				Path: ".gitea/actions/build",
+				Ref:  "v1",
+			},
+		},
+		{name: "empty path", action: "$/", github: workflow},
+		{name: "ref suffix is not allowed", action: "$/.gitea/actions/build@v1", github: workflow},
+		{name: "path traversal", action: "$/../escape", github: workflow},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, newSelfRepoAction(tt.action, tt.github))
+		})
+	}
+}
+
+func Test_stepActionRemoteSelfRepoActionDir(t *testing.T) {
+	dirFor := func(repo string) string {
+		sar := &stepActionRemote{
+			Step:         &model.Step{Uses: "$/.gitea/actions/build"},
+			RunContext:   &RunContext{Config: &Config{ActionCacheDir: "/cache"}},
+			remoteAction: &remoteAction{Org: "owner", Repo: repo, Ref: "v1"},
+		}
+		return sar.actionDir()
+	}
+	// The same `$/x` in two repos must not share a cache directory.
+	assert.NotEqual(t, dirFor("one"), dirFor("two"))
+}
+
+func Test_remoteActionReference(t *testing.T) {
+	tests := []struct {
+		uses string
+		want string
+	}{
+		{uses: "actions/checkout@v7", want: "actions/checkout@v7"},
+		{uses: "actions/aws/ec2@main", want: "actions/aws/ec2@main"},
+		// The download source can be interpolated from a secret and must stay out of the log.
+		{uses: "https://gitea.example.com/actions/checkout@v7", want: "actions/checkout@v7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.uses, func(t *testing.T) {
+			assert.Equal(t, tt.want, newRemoteAction(tt.uses).Reference())
+		})
+	}
+}
+
+// TestStepActionRemotePreResolvesDownloadedCommit runs the real download path against a local
+// git repository standing in for the actions instance, so the reported commit is the one the
+// clone actually checked out.
+func TestStepActionRemotePreResolvesDownloadedCommit(t *testing.T) {
+	instance := t.TempDir()
+	actionDir := filepath.Join(instance, "actions", "setup-go")
+	require.NoError(t, os.MkdirAll(actionDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(actionDir, "action.yml"),
+		[]byte("name: setup-go\nruns:\n  using: node20\n  main: index.js\n"), 0o600))
+
+	// Supply an identity on the commit so the test does not depend on a
+	// git identity being configured in the environment; a CI runner without
+	// user.name/user.email would otherwise fail "commit" with exit code 128.
+	for _, args := range [][]string{
+		{"init", "--initial-branch=main", actionDir},
+		{"-C", actionDir, "add", "action.yml"},
+		{"-C", actionDir, "-c", "user.name=runner", "-c", "user.email=runner@example.com", "-c", "commit.gpgsign=false", "commit", "-m", "action"},
+	} {
+		cmd := exec.Command("git", args...)
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+	out, err := exec.Command("git", "-C", actionDir, "rev-parse", "HEAD").Output()
+	require.NoError(t, err)
+	wantSha := strings.TrimSpace(string(out))
+
+	sar := &stepActionRemote{
+		Step: &model.Step{Uses: "actions/setup-go@main"},
+		RunContext: &RunContext{
+			Config: &Config{
+				GitHubInstance:        "https://gitea.example.com",
+				DefaultActionInstance: instance,
+				ActionCacheDir:        t.TempDir(),
+			},
+			Run: &model.Run{
+				JobID:    "1",
+				Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}},
+			},
+		},
+		readAction: readActionImpl,
+	}
+
+	require.NoError(t, sar.prepareActionExecutor()(context.Background()))
+
+	reference, sha, ok := sar.actionDownloadInfo()
+	assert.True(t, ok)
+	assert.Equal(t, "actions/setup-go@main", reference)
+	assert.Equal(t, wantSha, sha)
+}
+
+func TestStepActionRemoteActionDownloadInfo(t *testing.T) {
+	t.Run("reports the action and its resolved commit", func(t *testing.T) {
+		sar := &stepActionRemote{
+			remoteAction: newRemoteAction("actions/checkout@v7"),
+			action:       &model.Action{},
+			resolvedSha:  "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+		}
+
+		reference, sha, ok := sar.actionDownloadInfo()
+
+		assert.True(t, ok)
+		assert.Equal(t, "actions/checkout@v7", reference)
+		assert.Equal(t, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0", sha)
+	})
+
+	t.Run("reports nothing when no action was downloaded", func(t *testing.T) {
+		// The local checkout of the workflow's own repository resolves no action.
+		sar := &stepActionRemote{remoteAction: newRemoteAction("actions/checkout@v7")}
+
+		_, _, ok := sar.actionDownloadInfo()
+
+		assert.False(t, ok)
+	})
 }
 
 func Test_safeFilename(t *testing.T) {

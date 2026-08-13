@@ -26,7 +26,6 @@ import (
 	"gitea.com/gitea/runner/act/filecollector"
 
 	"dario.cat/mergo"
-	"github.com/Masterminds/semver"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/cli/cli/compose/loader"
 	"github.com/docker/cli/cli/connhelper"
@@ -35,15 +34,15 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/gobwas/glob"
 	"github.com/joho/godotenv"
-	"github.com/kballard/go-shellquote"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/api/types/system"
 	"github.com/moby/moby/client"
+	"github.com/moby/moby/client/pkg/versions"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/spf13/pflag"
+	"github.com/sirupsen/logrus"
 )
 
 // drainGracePeriod bounds how long we wait for an output-copy goroutine to
@@ -57,6 +56,12 @@ const drainGracePeriod = 2 * time.Second
 func NewContainer(input *NewContainerInput) ExecutionsEnvironment {
 	cr := new(containerReference)
 	cr.input = input
+	// Resolved up front because the image pull runs before the container is created.
+	cf := createFlagsFromOptions(input.Options)
+	if cf.platform != "" {
+		cr.input.Platform = cf.platform
+	}
+	cr.pullPolicy = cf.pull
 	return cr
 }
 
@@ -86,19 +91,11 @@ func (cr *containerReference) connectToNetwork(name string, aliases []string) co
 // supportsContainerImagePlatform returns true if the underlying Docker server
 // API version is 1.41 and beyond
 func supportsContainerImagePlatform(ctx context.Context, cli client.APIClient) bool {
-	logger := common.Logger(ctx)
 	ver, err := cli.ServerVersion(ctx, client.ServerVersionOptions{})
 	if err != nil {
-		logger.Panicf("Failed to get Docker API Version: %s", err)
-		return false
+		common.Logger(ctx).Panicf("Failed to get Docker API Version: %s", err)
 	}
-	sv, err := semver.NewVersion(ver.APIVersion)
-	if err != nil {
-		logger.Panicf("Failed to unmarshal Docker Version: %s", err)
-		return false
-	}
-	constraint, _ := semver.NewConstraint(">= 1.41")
-	return constraint.Check(sv)
+	return versions.GreaterThanOrEqualTo(ver.APIVersion, "1.41")
 }
 
 func (cr *containerReference) Create(capAdd, capDrop []string) common.Executor {
@@ -137,6 +134,11 @@ func (cr *containerReference) Start(attach bool) common.Executor {
 }
 
 func (cr *containerReference) Pull(forcePull bool) common.Executor {
+	if cr.pullPolicy == pullPolicyNever {
+		return common.NewInfoExecutor("docker pull skipped image=%s, --pull=never in the options", cr.input.Image)
+	}
+	forcePull = forcePull || cr.pullPolicy == pullPolicyAlways
+
 	return common.
 		NewInfoExecutor("docker pull image=%s platform=%s username=%s forcePull=%t", cr.input.Image, cr.input.Platform, cr.input.Username, forcePull).
 		Then(
@@ -195,6 +197,109 @@ func (cr *containerReference) GetContainerArchive(ctx context.Context, srcPath s
 	return result.Content, nil
 }
 
+// Inspect resolves the container by name when its id is not known yet. One the daemon no
+// longer knows is reported as ErrContainerNotFound.
+func (cr *containerReference) Inspect(ctx context.Context) (*Info, error) {
+	if common.Dryrun(ctx) {
+		return &Info{Health: HealthNone, Ports: map[string]string{}}, nil
+	}
+	if err := cr.connect()(ctx); err != nil {
+		return nil, err
+	}
+	if cr.id == "" { // a known id is trusted, find() would spend a call validating it
+		if err := cr.find()(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if cr.id == "" {
+		return nil, cr.missingContainerError("inspect it")
+	}
+
+	result, err := cr.cli.ContainerInspect(ctx, cr.id, client.ContainerInspectOptions{})
+	if cerrdefs.IsNotFound(err) {
+		return nil, cr.missingContainerError("inspect it")
+	} else if err != nil {
+		return nil, err
+	}
+	return containerInfoFromInspect(result.Container), nil
+}
+
+// DumpLogs copies the container's log so far to its output writers.
+func (cr *containerReference) DumpLogs(ctx context.Context) error {
+	if common.Dryrun(ctx) {
+		return nil
+	}
+	if err := cr.connect()(ctx); err != nil {
+		return err
+	}
+	if cr.id == "" {
+		return cr.missingContainerError("read its logs")
+	}
+
+	logs, err := cr.cli.ContainerLogs(ctx, cr.id, client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true})
+	if err != nil {
+		return err
+	}
+	defer logs.Close()
+	return cr.copyOutput(logs)
+}
+
+// copyOutput writes a container stream to the writers the container was created with,
+// demultiplexing it unless the container has a TTY, which sends a single raw stream.
+func (cr *containerReference) copyOutput(stream io.Reader) error {
+	outWriter := cr.input.Stdout
+	if outWriter == nil {
+		outWriter = os.Stdout
+	}
+	errWriter := cr.input.Stderr
+	if errWriter == nil {
+		errWriter = os.Stderr
+	}
+
+	var err error
+	if !cr.input.AllocatePTY || os.Getenv("NORAW") != "" {
+		_, err = stdcopy.StdCopy(outWriter, errWriter, stream)
+	} else {
+		_, err = io.Copy(outWriter, stream)
+	}
+	// Flush any buffered, not-yet-newline-terminated trailing line so the final line of
+	// the output is not lost when it is not newline-terminated.
+	common.FlushWriter(outWriter)
+	common.FlushWriter(errWriter)
+	return err
+}
+
+func containerInfoFromInspect(inspect container.InspectResponse) *Info {
+	info := &Info{
+		ID:     inspect.ID,
+		Health: HealthNone,
+		Ports:  map[string]string{}, // an empty map, never null, in the expression context
+	}
+
+	if state := inspect.State; state != nil {
+		info.State = string(state.Status)
+		info.ExitCode = state.ExitCode
+		if health := state.Health; health != nil {
+			info.Health = string(health.Status)
+			if len(health.Log) > 0 {
+				info.HealthOutput = strings.TrimSpace(health.Log[len(health.Log)-1].Output)
+			}
+		}
+	}
+
+	if settings := inspect.NetworkSettings; settings != nil {
+		for port, bindings := range settings.Ports {
+			for _, binding := range bindings { // the last binding wins, a port maps to one host port
+				if binding.HostPort != "" {
+					info.Ports[port.Port()] = binding.HostPort
+				}
+			}
+		}
+	}
+
+	return info
+}
+
 func (cr *containerReference) UpdateFromEnv(srcPath string, env *map[string]string) common.Executor {
 	return parseEnvFile(cr, srcPath, env).IfNot(common.Dryrun)
 }
@@ -232,11 +337,12 @@ func (cr *containerReference) ReplaceLogWriter(stdout, stderr io.Writer) (io.Wri
 }
 
 type containerReference struct {
-	cli   client.APIClient
-	id    string
-	input *NewContainerInput
-	UID   int
-	GID   int
+	cli        client.APIClient
+	id         string
+	input      *NewContainerInput
+	pullPolicy string
+	UID        int
+	GID        int
 	// attachDone is closed by the attach() streaming goroutine once it has
 	// drained and flushed the container's output. wait() blocks on it so the
 	// tail of the log lands before the step proceeds.
@@ -339,10 +445,10 @@ func (cr *containerReference) Close() common.Executor {
 	}
 }
 
-// missingContainerError is the shared "container X does not exist" error
-// used by ops that need a live cr.id.
+// missingContainerError is the shared "container X does not exist" error used by ops that
+// need a live cr.id, wrapping ErrContainerNotFound so a caller can tell it from a failing daemon.
 func (cr *containerReference) missingContainerError(format string, args ...any) error {
-	return fmt.Errorf("container %q does not exist; cannot "+format, append([]any{cr.input.Name}, args...)...)
+	return fmt.Errorf("container %q %w; cannot "+format, append([]any{cr.input.Name, ErrContainerNotFound}, args...)...)
 }
 
 func (cr *containerReference) find() common.Executor {
@@ -378,22 +484,66 @@ func (cr *containerReference) find() common.Executor {
 
 func (cr *containerReference) remove() common.Executor {
 	return func(ctx context.Context) error {
-		if cr.id == "" {
+		idOrName := cr.id
+		if idOrName == "" && cr.input != nil {
+			idOrName = cr.input.Name
+		}
+		if idOrName == "" {
 			return nil
 		}
 
 		logger := common.Logger(ctx)
-		_, err := cr.cli.ContainerRemove(ctx, cr.id, client.ContainerRemoveOptions{
+		// Kill first so removal never waits out a daemon's stop timeout: Docker kills outright
+		// on a forced remove, Podman sends SIGTERM and waits. Only worth it for a container
+		// this started, and removal can still deal with one it could not kill.
+		if cr.id != "" {
+			_, err := cr.cli.ContainerKill(ctx, cr.id, client.ContainerKillOptions{Signal: "SIGKILL"})
+			if err != nil && !cerrdefs.IsConflict(err) && !cerrdefs.IsNotFound(err) {
+				logger.Debugf("Container %s could not be killed: %v", cr.id, err)
+			}
+		}
+		_, err := cr.cli.ContainerRemove(ctx, idOrName, client.ContainerRemoveOptions{
 			RemoveVolumes: true,
 			Force:         true,
 		})
-		if err != nil {
-			logger.Error(fmt.Errorf("failed to remove container: %w", err))
+		switch {
+		case cerrdefs.IsConflict(err):
+			// the daemon's own AutoRemove teardown is running, and it releases the volume
+			// references and the network endpoint only once it finishes
+			cr.waitForRemoval(ctx, idOrName)
+		case err != nil && !cerrdefs.IsNotFound(err):
+			logger.Error(fmt.Errorf("failed to remove container %s: %w", idOrName, err))
+			return nil // keep the id, the container is still there for a later Remove()
 		}
 
-		logger.Debugf("Removed container: %v", cr.id)
+		logger.Debugf("Removed container: %v", idOrName)
 		cr.id = ""
 		return nil
+	}
+}
+
+func (cr *containerReference) waitForRemoval(ctx context.Context, idOrName string) {
+	// per container, against the one minute the post-job executor allows for the whole
+	// cleanup, so a job with several services can spend most of that budget here
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	waitResult := cr.cli.ContainerWait(ctx, idOrName, client.ContainerWaitOptions{
+		Condition: container.WaitConditionRemoved,
+	})
+	select {
+	case <-waitResult.Result:
+	case <-waitResult.Error:
+	case <-ctx.Done():
+		// the client delivers the result over an unbuffered channel, so leave a receiver
+		// behind or its goroutine parks on the send for the lifetime of the process
+		go func() {
+			select {
+			case <-waitResult.Result:
+			case <-waitResult.Error:
+			}
+		}()
+		common.Logger(ctx).Warnf("Timed out waiting for the daemon to remove container %s, its volumes and network may be left behind", idOrName)
 	}
 }
 
@@ -406,17 +556,13 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 	}
 
 	// parse configuration from CLI container.options
-	flags := pflag.NewFlagSet("container_flags", pflag.ContinueOnError)
-	copts := addFlags(flags)
-
-	optionsArgs, err := shellquote.Split(input.Options)
+	flags, copts, cf, err := parseContainerOptions(input.Options)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Cannot split container options: '%s': '%w'", input.Options, err)
+		return nil, nil, err
 	}
 
-	err = flags.Parse(optionsArgs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Cannot parse container options: '%s': '%w'", input.Options, err)
+	if err := cf.validate(); err != nil {
+		return nil, nil, fmt.Errorf("Cannot process container options: '%s': '%w'", input.Options, err)
 	}
 
 	// FIXME: If everything is fine after gitea/act v0.260.0, remove the following comment.
@@ -450,6 +596,16 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 		return nil, nil, fmt.Errorf("Cannot process container options: '%s': '%w'", input.Options, err)
 	}
 
+	// For Gitea
+	// When privileged mode is disabled, container.options is workflow-controlled
+	// untrusted input. Strip the HostConfig fields that would let a workflow break
+	// out of the container (host namespaces, capability expansion, security profile
+	// overrides, device and runtime access). Otherwise these survive into the final
+	// HostConfig even though --privileged is forced off.
+	if !hostConfig.Privileged {
+		sanitizeOptionsHostConfig(logger, containerConfig.HostConfig)
+	}
+
 	logger.Debugf("Custom container.Config from options ==> %+v", containerConfig.Config)
 
 	err = mergo.Merge(config, containerConfig.Config, mergo.WithOverride, mergo.WithAppendSlice)
@@ -460,8 +616,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 
 	logger.Debugf("Custom container.HostConfig from options ==> %+v", containerConfig.HostConfig)
 
-	hostConfig.Binds = append(hostConfig.Binds, containerConfig.HostConfig.Binds...)
-	hostConfig.Mounts = append(hostConfig.Mounts, containerConfig.HostConfig.Mounts...)
+	overlayVolumes(hostConfig, containerConfig.HostConfig)
 	binds := hostConfig.Binds
 	mounts := hostConfig.Mounts
 	networkMode := hostConfig.NetworkMode
@@ -471,6 +626,9 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 	}
 	hostConfig.Binds = binds
 	hostConfig.Mounts = mounts
+	if cf.name != "" {
+		logger.Warn("--name in the options will be ignored.")
+	}
 	if len(copts.netMode.Value()) > 0 {
 		logger.Warn("--network and --net in the options will be ignored.")
 	}
@@ -524,7 +682,7 @@ func (cr *containerReference) create(capAdd, capDrop []string) common.Executor {
 		}
 
 		var platSpecs *specs.Platform
-		if supportsContainerImagePlatform(ctx, cr.cli) && cr.input.Platform != "" {
+		if cr.input.Platform != "" && supportsContainerImagePlatform(ctx, cr.cli) {
 			platSpecs, err = parsePlatform(cr.input.Platform)
 			if err != nil {
 				return err
@@ -681,7 +839,7 @@ func (cr *containerReference) exec(cmd []string, env map[string]string, user, wo
 		}
 		defer resp.Close()
 
-		err = cr.waitForCommand(ctx, isTerminal, resp.HijackedResponse, idResp, user, workdir)
+		err = cr.waitForCommand(ctx, resp.HijackedResponse, idResp, user, workdir)
 		if err != nil {
 			return err
 		}
@@ -739,7 +897,7 @@ func (cr *containerReference) tryReadGID() common.Executor {
 	return cr.tryReadID("-g", func(id int) { cr.GID = id })
 }
 
-func (cr *containerReference) waitForCommand(ctx context.Context, isTerminal bool, resp client.HijackedResponse, _ client.ExecCreateResult, _, _ string) error {
+func (cr *containerReference) waitForCommand(ctx context.Context, resp client.HijackedResponse, _ client.ExecCreateResult, _, _ string) error {
 	logger := common.Logger(ctx)
 
 	// Buffered so the copy goroutine never blocks on send if the grace-period
@@ -747,28 +905,7 @@ func (cr *containerReference) waitForCommand(ctx context.Context, isTerminal boo
 	cmdResponse := make(chan error, 1)
 
 	go func() {
-		var outWriter io.Writer
-		outWriter = cr.input.Stdout
-		if outWriter == nil {
-			outWriter = os.Stdout
-		}
-		errWriter := cr.input.Stderr
-		if errWriter == nil {
-			errWriter = os.Stderr
-		}
-
-		var err error
-		if !isTerminal || os.Getenv("NORAW") != "" {
-			_, err = stdcopy.StdCopy(outWriter, errWriter, resp.Reader)
-		} else {
-			_, err = io.Copy(outWriter, resp.Reader)
-		}
-		// Flush any buffered, not-yet-newline-terminated trailing line so the
-		// final line of a command's output is not lost (e.g. an error message
-		// printed without a trailing newline before the process exits).
-		common.FlushWriter(outWriter)
-		common.FlushWriter(errWriter)
-		cmdResponse <- err
+		cmdResponse <- cr.copyOutput(resp.Reader)
 	}()
 
 	select {
@@ -805,11 +942,12 @@ func (cr *containerReference) CopyTarStream(ctx context.Context, destPath string
 	if cr.id == "" {
 		return cr.missingContainerError("copy to %s", destPath)
 	}
-	// Mkdir
+	// Mkdir, with a path relative to the DestinationPath ("/") below. Docker 29.5+
+	// rejects absolute tar entry names with "path escapes from parent".
 	buf := &bytes.Buffer{}
 	tw := tar.NewWriter(buf)
 	_ = tw.WriteHeader(&tar.Header{
-		Name:     destPath,
+		Name:     strings.TrimPrefix(destPath, "/"),
 		Mode:     0o777,
 		Typeflag: tar.TypeDir,
 	})
@@ -963,33 +1101,11 @@ func (cr *containerReference) attach() common.Executor {
 		if err != nil {
 			return fmt.Errorf("failed to attach to container: %w", err)
 		}
-		isTerminal := cr.input.AllocatePTY
-
-		var outWriter io.Writer
-		outWriter = cr.input.Stdout
-		if outWriter == nil {
-			outWriter = os.Stdout
-		}
-		errWriter := cr.input.Stderr
-		if errWriter == nil {
-			errWriter = os.Stderr
-		}
 		done := make(chan struct{})
 		cr.attachDone = done
 		go func() {
 			defer close(done)
-			var copyErr error
-			if !isTerminal || os.Getenv("NORAW") != "" {
-				_, copyErr = stdcopy.StdCopy(outWriter, errWriter, out.Reader)
-			} else {
-				_, copyErr = io.Copy(outWriter, out.Reader)
-			}
-			// Flush any buffered, not-yet-newline-terminated trailing line once
-			// the stream reaches EOF, so the final line of the container's
-			// output is not lost when it is not newline-terminated.
-			common.FlushWriter(outWriter)
-			common.FlushWriter(errWriter)
-			if copyErr != nil {
+			if copyErr := cr.copyOutput(out.Reader); copyErr != nil {
 				common.Logger(ctx).Error(copyErr)
 			}
 		}()
@@ -1050,6 +1166,77 @@ func (cr *containerReference) wait() common.Executor {
 }
 
 // For Gitea
+// sanitizeOptionsHostConfig clears the HostConfig fields parsed from a
+// workflow-controlled container.options string that could be used to escape the
+// container when privileged mode is disabled. It must only be called when the
+// runner has privileged mode turned off; with privileged mode enabled the
+// administrator has already opted into host access.
+func sanitizeOptionsHostConfig(logger logrus.FieldLogger, hostConfig *container.HostConfig) {
+	warn := func(option string) {
+		logger.Warnf("container option %q is not allowed when privileged mode is disabled and will be ignored", option)
+	}
+
+	if hostConfig.PidMode != "" {
+		warn("--pid")
+		hostConfig.PidMode = ""
+	}
+	if hostConfig.IpcMode != "" {
+		warn("--ipc")
+		hostConfig.IpcMode = ""
+	}
+	if hostConfig.UTSMode != "" {
+		warn("--uts")
+		hostConfig.UTSMode = ""
+	}
+	if hostConfig.CgroupnsMode != "" {
+		warn("--cgroupns")
+		hostConfig.CgroupnsMode = ""
+	}
+	// UsernsMode is set from the runner-controlled input; never let options
+	// override it (e.g. --userns=host disables user namespace remapping).
+	if hostConfig.UsernsMode != "" {
+		warn("--userns")
+		hostConfig.UsernsMode = ""
+	}
+	if len(hostConfig.CapAdd) > 0 {
+		warn("--cap-add")
+		hostConfig.CapAdd = nil
+	}
+	if len(hostConfig.SecurityOpt) > 0 {
+		warn("--security-opt")
+		hostConfig.SecurityOpt = nil
+	}
+	if len(hostConfig.Devices) > 0 {
+		warn("--device")
+		hostConfig.Devices = nil
+	}
+	if len(hostConfig.DeviceCgroupRules) > 0 {
+		warn("--device-cgroup-rule")
+		hostConfig.DeviceCgroupRules = nil
+	}
+	if len(hostConfig.DeviceRequests) > 0 {
+		warn("--gpus")
+		hostConfig.DeviceRequests = nil
+	}
+	if len(hostConfig.VolumesFrom) > 0 {
+		warn("--volumes-from")
+		hostConfig.VolumesFrom = nil
+	}
+	if hostConfig.Runtime != "" {
+		warn("--runtime")
+		hostConfig.Runtime = ""
+	}
+	if hostConfig.CgroupParent != "" {
+		warn("--cgroup-parent")
+		hostConfig.CgroupParent = ""
+	}
+	if len(hostConfig.Sysctls) > 0 {
+		warn("--sysctl")
+		hostConfig.Sysctls = nil
+	}
+}
+
+// For Gitea
 // sanitizeConfig remove the invalid configurations from `config` and `hostConfig`
 func (cr *containerReference) sanitizeConfig(ctx context.Context, config *container.Config, hostConfig *container.HostConfig) (*container.Config, *container.HostConfig) {
 	logger := common.Logger(ctx)
@@ -1092,6 +1279,34 @@ func (cr *containerReference) sanitizeConfig(ctx context.Context, config *contai
 	}
 
 	return config, hostConfig
+}
+
+// bindTarget returns the container path a bind mounts onto, empty if it cannot be parsed.
+func bindTarget(bind string) string {
+	parsed, err := loader.ParseVolume(bind)
+	if err != nil {
+		return ""
+	}
+	return parsed.Target
+}
+
+// overlayVolumes appends src's volumes to dst, dropping the dst ones they mount over. Docker
+// rejects two mounts on one target, so the volumes declared last have to win.
+func overlayVolumes(dst, src *container.HostConfig) {
+	claimed := map[string]bool{}
+	for _, bind := range src.Binds {
+		if target := bindTarget(bind); target != "" {
+			claimed[target] = true
+		}
+	}
+	for _, mt := range src.Mounts {
+		claimed[mt.Target] = true
+	}
+
+	dst.Binds = append(slices.DeleteFunc(slices.Clone(dst.Binds),
+		func(bind string) bool { return claimed[bindTarget(bind)] }), src.Binds...)
+	dst.Mounts = append(slices.DeleteFunc(slices.Clone(dst.Mounts),
+		func(mt mount.Mount) bool { return claimed[mt.Target] }), src.Mounts...)
 }
 
 type validVolumeMatcher struct {

@@ -118,6 +118,39 @@ func TestKubernetesPodBuilder(t *testing.T) {
 	assert.Equal(t, "uid-123", string(pod.OwnerReferences[0].UID))
 }
 
+func TestKubernetesPodBuilderScheduling(t *testing.T) {
+	cfg := testKubernetesConfig()
+	cfg.NodeSelector = map[string]string{"kubernetes.io/arch": "amd64"}
+	cfg.Tolerations = []corev1.Toleration{{
+		Key:      "node-role.kubernetes.io/control-plane",
+		Operator: corev1.TolerationOpExists,
+		Effect:   corev1.TaintEffectNoSchedule,
+	}}
+	cfg.Affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+					MatchExpressions: []corev1.NodeSelectorRequirement{{
+						Key:      "node-role.kubernetes.io/control-plane",
+						Operator: corev1.NodeSelectorOpNotIn,
+						Values:   []string{"true"},
+					}},
+				}},
+			},
+		},
+	}
+
+	b := newPodBuilder("gitea-job-sched", cfg.Namespace, cfg, 0, nil)
+	b.setJobContainer(kubernetesContainerSpec(kubernetesJobContainerName, &NewContainerInput{Image: "alpine:3"}, cfg.Resources.Job, nil, nil, false))
+	pod := b.build()
+
+	assert.Equal(t, map[string]string{"kubernetes.io/arch": "amd64"}, pod.Spec.NodeSelector)
+	require.Len(t, pod.Spec.Tolerations, 1)
+	assert.Equal(t, "node-role.kubernetes.io/control-plane", pod.Spec.Tolerations[0].Key)
+	require.NotNil(t, pod.Spec.Affinity)
+	require.NotNil(t, pod.Spec.Affinity.NodeAffinity)
+}
+
 func TestKubernetesPodBuilderPVCWorkspace(t *testing.T) {
 	cfg := testKubernetesConfig()
 	cfg.WorkspaceVolume = KubernetesWorkspaceVolume{Type: "pvc", Size: "10Gi"}
@@ -397,6 +430,65 @@ func TestKubernetesCreateStartSubmitsReadyPod(t *testing.T) {
 	require.NoError(t, job.Remove()(ctx))
 	_, err = clientset.CoreV1().Pods("gitea-e2e").Get(ctx, "gitea-job-start", metav1.GetOptions{})
 	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func TestKubernetesInspectJobAndService(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	clientset.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		pod := action.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+		pod.UID = "pod-uid-1"
+		pod.Status.Phase = corev1.PodRunning
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  kubernetesJobContainerName,
+			Ready: true,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}
+		pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+			Name:  serviceContainerName("postgres"),
+			Ready: true,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}
+		return false, pod, nil
+	})
+
+	coord := newTestPod(t, clientset, "gitea-job-inspect")
+	job := coord.NewJobContainer(&NewContainerInput{Image: "alpine:3"})
+	exposedPorts, _, err := nat.ParsePortSpecs([]string{"5432:5432"})
+	require.NoError(t, err)
+	svc := coord.NewServiceContainer(&NewContainerInput{
+		Image:          "postgres:16",
+		Name:           "postgres",
+		NetworkAliases: []string{"postgres"},
+		ExposedPorts:   exposedPorts,
+	})
+
+	ctx := context.Background()
+	require.NoError(t, svc.Create(nil, nil)(ctx))
+	require.NoError(t, job.Create(nil, nil)(ctx))
+	require.NoError(t, job.Start(false)(ctx))
+
+	jobInfo, err := job.Inspect(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "pod-uid-1", jobInfo.ID)
+	assert.Equal(t, StateRunning, jobInfo.State)
+	assert.Equal(t, HealthHealthy, jobInfo.Health)
+
+	svcInfo, err := svc.Inspect(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, StateRunning, svcInfo.State)
+	assert.Equal(t, HealthHealthy, svcInfo.Health)
+	assert.Equal(t, "5432", svcInfo.Ports["5432"])
+}
+
+func TestKubernetesInspectMissingPod(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	coord := newTestPod(t, clientset, "gitea-job-missing")
+	job := coord.NewJobContainer(&NewContainerInput{Image: "alpine:3"})
+
+	_, err := job.Inspect(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrContainerNotFound)
 }
 
 func TestKubernetesServiceStartIsNoop(t *testing.T) {
