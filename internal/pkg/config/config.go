@@ -32,7 +32,10 @@ const Minimal = `# Minimal config file. Every option it does not set keeps its d
 
 // Log represents the configuration for logging.
 type Log struct {
-	Level string `yaml:"level"` // Level indicates the logging level.
+	Level        string        `yaml:"level"`         // Level indicates the logging level.
+	JobDir       string        `yaml:"job_dir"`       // JobDir is the directory the runner writes per-task diagnostic logs to. Empty disables them.
+	JobRetention time.Duration `yaml:"job_retention"` // JobRetention deletes a task's log directory once it is older than this. 0 or negative keeps them forever.
+	JobMaxSize   int64         `yaml:"job_max_size"`  // JobMaxSize caps each per-task log file in bytes. 0 or negative is unlimited.
 }
 
 // Runner represents the configuration for the runner.
@@ -174,6 +177,9 @@ func LoadDefault(file string) (*Config, error) {
 
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
+	}
+	if cfg.Log.JobRetention == 0 {
+		cfg.Log.JobRetention = 7 * 24 * time.Hour
 	}
 	if cfg.Runner.File == "" {
 		cfg.Runner.File = ".runner"

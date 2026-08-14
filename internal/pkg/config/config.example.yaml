@@ -8,6 +8,17 @@ log:
   # logrus severity: trace, debug, info, warn, error, fatal, panic.
   # trace and debug turn on caller/file:line in log lines. Default if omitted: info.
   #level: info
+  # Directory for per-task diagnostic logs kept on this host: job.log mirrors what was
+  # sent to Gitea, diag.log adds every entry the reporter saw, including the debug lines
+  # never uploaded. For postmortem on the runner, they do not change what Gitea shows.
+  # Empty (the default) writes nothing. The files hold repository output, so the runner
+  # creates them for its own user only.
+  #job_dir: ""
+  # Delete a task's log directory once it is older than this, checked whenever a task
+  # opens its own. Set to a negative value to keep them forever.
+  #job_retention: 168h
+  # Cap for each of the two files, in bytes. 0 is unlimited.
+  #job_max_size: 0
 
 runner:
   # Where to store the registration result.

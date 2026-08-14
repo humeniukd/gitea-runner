@@ -16,6 +16,7 @@ import (
 	"gitea.com/gitea/runner/act/runner"
 	"gitea.com/gitea/runner/internal/pkg/client"
 	"gitea.com/gitea/runner/internal/pkg/config"
+	"gitea.com/gitea/runner/internal/pkg/joblog"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 
 	"connectrpc.com/connect"
@@ -84,6 +85,9 @@ type Reporter struct {
 
 	debugOutputEnabled  bool
 	stopCommandEndToken string
+
+	// sink writes this task's logs to the runner's own disk, nil when log.job_dir is unset.
+	sink *joblog.Sink
 }
 
 // extraMasks are values known before the job starts that are not among its secrets, such as
@@ -127,6 +131,19 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 		rv.debugOutputEnabled = true
 	}
 
+	started := time.Now()
+	rv.sink = joblog.Open(joblog.Options{
+		Dir:       cfg.Log.JobDir,
+		Retention: cfg.Log.JobRetention,
+		MaxSize:   cfg.Log.JobMaxSize,
+		TaskID:    task.Id,
+		StartedAt: started,
+		Header:    rv.mask(taskHeader(task, started)),
+	})
+	if dir := rv.sink.Dir(); dir != "" {
+		log.Infof("writing the logs of task %d to %s", task.Id, dir)
+	}
+
 	return rv
 }
 
@@ -151,11 +168,15 @@ func (r *Reporter) Levels() []log.Level {
 	return log.AllLevels
 }
 
-func appendIfNotNil[T any](s []*T, v *T) []*T {
-	if v != nil {
-		return append(s, v)
+// appendLogRow buffers a row for the uploader and mirrors it into job.log, so the file
+// holds exactly what was handed over, in that order. A nil row is one the command handler
+// dropped, such as ::add-mask::, which must not reach either. Caller holds stateMu.
+func (r *Reporter) appendLogRow(row *runnerv1.LogRow) {
+	if row == nil {
+		return
 	}
-	return s
+	r.logRows = append(r.logRows, row)
+	r.sink.Job(row.Time.AsTime(), row.Content)
 }
 
 // isJobStepEntry is used to not report composite step results incorrectly as step result
@@ -197,6 +218,10 @@ func (r *Reporter) unlockAndNotify(urgentState bool) {
 }
 
 func (r *Reporter) Fire(entry *log.Entry) error {
+	// Deferred, so an ::add-mask:: the entry itself carries is registered before diag.log
+	// writes the entry, and stateMu is free again by then.
+	defer r.diagEntry(entry)
+
 	urgentState := false
 
 	r.stateMu.Lock()
@@ -232,7 +257,7 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 			}
 		}
 		if r.shouldAppendLogRow(entry) {
-			r.logRows = appendIfNotNil(r.logRows, r.parseLogRow(entry))
+			r.appendLogRow(r.parseLogRow(entry))
 		}
 		r.unlockAndNotify(urgentState)
 		return nil
@@ -246,7 +271,7 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 	}
 	if step == nil {
 		if r.shouldAppendLogRow(entry) {
-			r.logRows = appendIfNotNil(r.logRows, r.parseLogRow(entry))
+			r.appendLogRow(r.parseLogRow(entry))
 		}
 		r.unlockAndNotify(false)
 		return nil
@@ -272,11 +297,11 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 					step.LogIndex = int64(r.logOffset + len(r.logRows))
 				}
 				step.LogLength++
-				r.logRows = append(r.logRows, row)
+				r.appendLogRow(row)
 			}
 		}
 	} else if r.shouldAppendLogRow(entry) {
-		r.logRows = appendIfNotNil(r.logRows, r.parseLogRow(entry))
+		r.appendLogRow(r.parseLogRow(entry))
 	}
 	if v, ok := entry.Data["stepResult"]; ok && isJobStepEntry(entry) {
 		if stepResult, ok := r.parseResult(v); ok {
@@ -401,7 +426,7 @@ func (r *Reporter) logf(format string, a ...any) {
 	if !r.duringSteps() {
 		// Masked like any other row: these bypass parseLogRow, but a caller can still
 		// interpolate a secret, such as a configured URL carrying credentials.
-		r.logRows = append(r.logRows, r.newLogRow(timestamppb.Now(), fmt.Sprintf(format, a...)))
+		r.appendLogRow(r.newLogRow(timestamppb.Now(), fmt.Sprintf(format, a...)))
 	}
 }
 
@@ -457,13 +482,13 @@ func (r *Reporter) Close(lastWords string) error {
 		} else {
 			r.state.Result = runnerv1.Result_RESULT_FAILURE
 		}
-		r.logRows = append(r.logRows, &runnerv1.LogRow{
+		r.appendLogRow(&runnerv1.LogRow{
 			Time:    timestamppb.Now(),
 			Content: lastWords,
 		})
 		r.state.StoppedAt = timestamppb.Now()
 	} else if lastWords != "" {
-		r.logRows = append(r.logRows, &runnerv1.LogRow{
+		r.appendLogRow(&runnerv1.LogRow{
 			Time:    timestamppb.Now(),
 			Content: lastWords,
 		})
@@ -489,7 +514,7 @@ func (r *Reporter) Close(lastWords string) error {
 	// supported branches, e.g. v1.28+.
 	r.stateMu.Lock()
 	if len(r.logRows) == 0 {
-		r.logRows = append(r.logRows, &runnerv1.LogRow{
+		r.appendLogRow(&runnerv1.LogRow{
 			Time:    timestamppb.Now(),
 			Content: "",
 		})
@@ -498,10 +523,26 @@ func (r *Reporter) Close(lastWords string) error {
 
 	// Separate budgets so a slow ReportLog can't starve the ReportState that
 	// carries the cancel acknowledgement.
-	return errors.Join(
+	err := errors.Join(
 		r.flushFinal(func() error { return r.ReportLog(true) }),
 		r.flushFinal(func() error { return r.ReportState(true) }),
 	)
+
+	// Closed after the final flush, so its failures are in the file too.
+	r.sink.Close(r.mask(r.closeTrailer(err)))
+
+	return err
+}
+
+// closeTrailer is the last line of both log files, so a reader knows the file is complete
+// and whether Gitea ever received it.
+func (r *Reporter) closeTrailer(flushErr error) string {
+	trailer := fmt.Sprintf("task %d finished: %s", r.state.Id,
+		strings.ToLower(strings.TrimPrefix(r.Result().String(), "RESULT_")))
+	if flushErr != nil {
+		trailer += fmt.Sprintf(", the final flush to Gitea failed: %v", flushErr)
+	}
+	return trailer
 }
 
 // flushFinal retries fn on a detached, bounded context so a cancelled r.ctx
@@ -559,12 +600,14 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	if err != nil {
 		metrics.ReportLogTotal.WithLabelValues(metrics.LabelResultError).Inc()
 		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodUpdateLog).Inc()
+		r.diagf("UpdateLog(index=%d rows=%d no_more=%t) failed: %v", r.logOffset, len(rows), noMore, err)
 		return err
 	}
 	metrics.ReportLogTotal.WithLabelValues(metrics.LabelResultSuccess).Inc()
 
 	ack := int(resp.Msg.AckIndex)
 	if ack < r.logOffset {
+		r.diagf("UpdateLog acknowledged index %d below the %d already sent: Gitea lost rows", ack, r.logOffset)
 		return errors.New("submitted logs are lost")
 	}
 
@@ -580,6 +623,7 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	}
 
 	if noMore && ack < submitted {
+		r.diagf("the final UpdateLog acknowledged %d of %d rows", ack, submitted)
 		return errors.New("not all logs are submitted")
 	}
 
@@ -636,6 +680,7 @@ func (r *Reporter) ReportState(reportResult bool) error {
 		r.stateMu.Lock()
 		r.stateChanged = true
 		r.stateMu.Unlock()
+		r.diagf("UpdateTask(result=%s outputs=%d) failed: %v", state.Result, len(outputs), err)
 		return err
 	}
 	metrics.ReportStateTotal.WithLabelValues(metrics.LabelResultSuccess).Inc()
