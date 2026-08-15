@@ -184,3 +184,41 @@ func TestNewRunnerNormalizesTheExternalCacheServer(t *testing.T) {
 	assert.Empty(t, r.envs[runner.CacheServiceV2Env])
 	assert.True(t, r.patchToolkit())
 }
+
+func TestWorkflowCallInputsFromTask(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		taskContext, err := structpb.NewStruct(map[string]any{})
+		require.NoError(t, err)
+
+		inputs := workflowCallInputsFromTask(&runnerv1.Task{Context: taskContext})
+
+		assert.Nil(t, inputs)
+	})
+
+	t.Run("preserves typed values", func(t *testing.T) {
+		taskContext, err := structpb.NewStruct(map[string]any{
+			"workflow_call_inputs": map[string]any{
+				"flag": true,
+				"name": "from-caller",
+			},
+		})
+		require.NoError(t, err)
+
+		inputs := workflowCallInputsFromTask(&runnerv1.Task{Context: taskContext})
+
+		assert.Equal(t, true, inputs["flag"])
+		assert.Equal(t, "from-caller", inputs["name"])
+	})
+
+	t.Run("present empty map is not nil", func(t *testing.T) {
+		taskContext, err := structpb.NewStruct(map[string]any{
+			"workflow_call_inputs": map[string]any{},
+		})
+		require.NoError(t, err)
+
+		inputs := workflowCallInputsFromTask(&runnerv1.Task{Context: taskContext})
+
+		assert.NotNil(t, inputs)
+		assert.Empty(t, inputs)
+	})
+}

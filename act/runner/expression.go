@@ -301,12 +301,26 @@ func getEvaluatorInputs(ctx context.Context, rc *RunContext, step step, ghc *mod
 	if rc.caller == nil {
 		config := rc.Run.Workflow.WorkflowCallConfig()
 		if config != nil && config.Inputs != nil {
-			for k, v := range config.Inputs {
-				value := nestedMapLookup(ghc.Event, "inputs", k)
-				if value == nil {
-					value = v.Default
+			switch {
+			case rc.Config.WorkflowCallInputs != nil:
+				for k, v := range config.Inputs {
+					value := rc.Config.WorkflowCallInputs[k]
+					if value == nil {
+						value = v.Default
+					}
+					inputs[k] = coerceInputValue(value, v.Type)
 				}
-				inputs[k] = coerceInputValue(value, v.Type)
+
+			case ghc.EventName == "workflow_call":
+				// Compatibility with older Gitea servers, which transport
+				// reusable-workflow inputs through github.event.inputs.
+				for k, v := range config.Inputs {
+					value := nestedMapLookup(ghc.Event, "inputs", k)
+					if value == nil {
+						value = v.Default
+					}
+					inputs[k] = coerceInputValue(value, v.Type)
+				}
 			}
 		}
 	}

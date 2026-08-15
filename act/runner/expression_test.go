@@ -356,20 +356,26 @@ on:
 		}
 	}
 
-	t.Run("workflow_call inputs with original trigger event", func(t *testing.T) {
+	t.Run("server-expanded workflow_call inputs are separate from caller event", func(t *testing.T) {
 		wf, err := model.ReadWorkflow(strings.NewReader(workflows["workflow_call"]))
 		require.NoError(t, err)
 
 		rc := &RunContext{
-			Config: &Config{Workdir: "."},
-			Run:    &model.Run{JobID: "job1", Workflow: wf},
-		}
-		ghc := &model.GithubContext{
-			EventName: "push",
-			Event: map[string]any{
-				"inputs": map[string]any{
+			Config: &Config{
+				Workdir: ".",
+				WorkflowCallInputs: map[string]any{
 					"flag": true,
 					"name": "from-caller",
+				},
+			},
+			Run: &model.Run{JobID: "job1", Workflow: wf},
+		}
+		ghc := &model.GithubContext{
+			EventName: "workflow_dispatch",
+			Event: map[string]any{
+				"inputs": map[string]any{
+					"flag": "false",
+					"name": "original-dispatch",
 				},
 			},
 		}
@@ -378,5 +384,39 @@ on:
 
 		assert.Equal(t, true, inputs["flag"])
 		assert.Equal(t, "from-caller", inputs["name"])
+
+		eventInputs := ghc.Event["inputs"].(map[string]any)
+		assert.Equal(t, "false", eventInputs["flag"])
+		assert.Equal(t, "original-dispatch", eventInputs["name"])
+	})
+
+	t.Run("ordinary push does not use workflow_call defaults", func(t *testing.T) {
+		wf, err := model.ReadWorkflow(strings.NewReader(`on:
+  push:
+  workflow_call:
+    inputs:
+      flag:
+        type: boolean
+        default: true
+      name:
+        type: string
+        default: gitea
+`))
+		require.NoError(t, err)
+
+		rc := &RunContext{
+			Config: &Config{Workdir: "."},
+			Run:    &model.Run{JobID: "job1", Workflow: wf},
+		}
+
+		ghc := &model.GithubContext{
+			EventName: "push",
+			Event:     map[string]any{},
+		}
+
+		inputs := getEvaluatorInputs(context.Background(), rc, nil, ghc)
+
+		assert.NotContains(t, inputs, "flag")
+		assert.NotContains(t, inputs, "name")
 	})
 }

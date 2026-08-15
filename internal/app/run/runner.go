@@ -504,6 +504,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		NoSkipCheckout:       true,
 		DisableActEnv:        r.cfg.Runner.SetActEnv != nil && !*r.cfg.Runner.SetActEnv,
 		PresetGitHubContext:  preset,
+		WorkflowCallInputs:   workflowCallInputsFromTask(task),
 		EventJSON:            string(eventJSON),
 		ContainerNamePrefix:  fmt.Sprintf("GITEA-ACTIONS-TASK-%d", task.Id),
 		ContainerMaxLifetime: maxLifetime,
@@ -748,4 +749,21 @@ func warnIgnoredCacheSecret(cfg *config.Config) {
 		key = "cache.external_secret_file"
 	}
 	log.Warnf("%s is set but cache.external_server is not; the built-in cache server does not use a shared secret, so the value is ignored", key)
+}
+
+func workflowCallInputsFromTask(task *runnerv1.Task) map[string]any {
+	if task == nil || task.Context == nil {
+		return nil
+	}
+
+	value, ok := task.Context.Fields["workflow_call_inputs"]
+	if !ok {
+		return nil
+	}
+
+	inputs := value.GetStructValue()
+	if inputs == nil {
+		return nil
+	}
+	return inputs.AsMap()
 }
