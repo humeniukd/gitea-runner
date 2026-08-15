@@ -1,24 +1,25 @@
 # Every option with its default value, all commented out. Read this file, do not copy it.
 # `./gitea-runner config init` writes a config file to copy the lines you change into.
 
-# Logging for the runner process itself (messages printed to stderr).
-# This does not control how workflow step output is streamed to the Gitea UI;
-# tune that with runner.log_report_* below.
+# Logging for the runner process itself (messages printed to stderr), plus the per-task
+# job logs under log.job. Neither controls how workflow step output is streamed to the
+# Gitea UI; tune that with runner.log_report_* below.
 log:
   # logrus severity: trace, debug, info, warn, error, fatal, panic.
   # trace and debug turn on caller/file:line in log lines. Default if omitted: info.
   #level: info
-  # Directory for per-task diagnostic logs kept on this host: job.log mirrors what was
-  # sent to Gitea, diag.log adds every entry the reporter saw, including the debug lines
+  # Per-task job logs kept on this host: job.log mirrors what was sent to Gitea,
+  # diag.log adds every entry the reporter saw, including the debug lines
   # never uploaded. For postmortem on the runner, they do not change what Gitea shows.
-  # Empty (the default) writes nothing. The files hold repository output, so the runner
-  # creates them for its own user only.
-  #job_dir: ""
-  # Delete a task's log directory once it is older than this, checked whenever a task
-  # opens its own. Set to a negative value to keep them forever.
-  #job_retention: 168h
-  # Cap for each of the two files, in bytes. 0 is unlimited.
-  #job_max_size: 0
+  # dir empty (the default) writes nothing, retention is checked whenever a task opens its
+  # own directory and negative keeps them forever, max_size caps each file in bytes with 0
+  # unlimited. The files hold repository output, so the runner creates them for its own user
+  # only.
+  # Full guide: docs/job-logs.md
+  #job:
+  #  dir: ""
+  #  retention: 168h
+  #  max_size: 0
 
 runner:
   # Where to store the registration result.

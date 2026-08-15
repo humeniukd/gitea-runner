@@ -354,11 +354,11 @@ Both hooks are synchronous and block the job while they run. Either one exiting 
 
 See **[docs/job-hooks.md](docs/job-hooks.md)** for the execution order, environment, and platform notes.
 
-#### Local job logs (`log.job_dir`)
+#### Local job logs (`log.job.dir`)
 
-Job output otherwise lives only in Gitea, so a failure of the upload path takes the evidence with it. Setting `log.job_dir` keeps a copy of every task's log on the runner: `job.log` mirrors what was sent to Gitea, `diag.log` adds every entry the reporter saw — including the debug output and the failed `UpdateLog` calls that are never part of the job log.
+Job output otherwise lives only in Gitea, so a failure of the upload path takes the evidence with it. Setting `log.job.dir` keeps a copy of every task's log on the runner: `job.log` mirrors what was sent to Gitea, `diag.log` adds every entry the reporter saw — including the debug output and the failed `UpdateLog` calls that are never part of the job log.
 
-It is off by default. Task directories are pruned by `log.job_retention` (default `168h`) whenever a new task starts, and `log.job_max_size` caps each file. Writing never blocks or fails a job.
+It is off by default. Task directories are pruned by `log.job.retention` (default `168h`) whenever a new task starts, and `log.job.max_size` caps each file. Writing never blocks or fails a job.
 
 See **[docs/job-logs.md](docs/job-logs.md)** for the file layout, masking, and operational notes.
 

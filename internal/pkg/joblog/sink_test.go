@@ -85,12 +85,12 @@ func TestSink_MaxSize(t *testing.T) {
 	sink.Close("done")
 
 	job := read(t, sink, JobFileName)
-	assert.Equal(t, 1, strings.Count(job, "log.job_max_size"), "the cap is reported once")
+	assert.Equal(t, 1, strings.Count(job, "log.job.max_size"), "the cap is reported once")
 	assert.NotContains(t, job, "done", "nothing is written past the cap")
 	assert.Less(t, len(job), 300)
 
 	// The cap is per file, so the other one is unaffected.
-	assert.NotContains(t, read(t, sink, DiagFileName), "log.job_max_size")
+	assert.NotContains(t, read(t, sink, DiagFileName), "log.job.max_size")
 }
 
 func TestSink_DroppedLinesAreReported(t *testing.T) {

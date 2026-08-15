@@ -86,7 +86,7 @@ type Reporter struct {
 	debugOutputEnabled  bool
 	stopCommandEndToken string
 
-	// sink writes this task's logs to the runner's own disk, nil when log.job_dir is unset.
+	// sink writes this task's logs to the runner's own disk, nil when log.job.dir is unset.
 	sink *joblog.Sink
 }
 
@@ -133,9 +133,9 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 
 	started := time.Now()
 	rv.sink = joblog.Open(joblog.Options{
-		Dir:       cfg.Log.JobDir,
-		Retention: cfg.Log.JobRetention,
-		MaxSize:   cfg.Log.JobMaxSize,
+		Dir:       cfg.Log.Job.Dir,
+		Retention: cfg.Log.Job.Retention,
+		MaxSize:   cfg.Log.Job.MaxSize,
 		TaskID:    task.Id,
 		StartedAt: started,
 		Header:    rv.mask(taskHeader(task, started)),

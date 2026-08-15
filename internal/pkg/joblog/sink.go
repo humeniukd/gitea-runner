@@ -32,9 +32,9 @@ const (
 
 // Options configures one task's sink.
 type Options struct {
-	Dir       string        // log.job_dir; empty disables the sink
-	Retention time.Duration // log.job_retention; <=0 keeps every task directory
-	MaxSize   int64         // log.job_max_size per file; <=0 is unlimited
+	Dir       string        // log.job.dir; empty disables the sink
+	Retention time.Duration // log.job.retention; <=0 keeps every task directory
+	MaxSize   int64         // log.job.max_size per file; <=0 is unlimited
 	TaskID    int64
 	StartedAt time.Time
 	Header    string // metadata line written to both files, already masked
@@ -218,7 +218,7 @@ func (sf *sinkFile) write(line string) {
 	line = sanitize(line) + "\n"
 	if sf.max > 0 && sf.size+int64(len(line)) > sf.max {
 		sf.capped = true
-		line = runnerLine(fmt.Sprintf("truncated: log.job_max_size of %d bytes reached", sf.max)) + "\n"
+		line = runnerLine(fmt.Sprintf("truncated: log.job.max_size of %d bytes reached", sf.max)) + "\n"
 	}
 	n, err := sf.w.WriteString(line)
 	sf.size += int64(n)
@@ -245,7 +245,7 @@ func (sf *sinkFile) close() {
 }
 
 // taskDirPattern matches the directories Open creates, so pruning leaves anything else
-// under log.job_dir alone.
+// under log.job.dir alone.
 var taskDirPattern = regexp.MustCompile(`^(\d{8}-\d{6})-task-\d+$`)
 
 // prune removes the task directories older than retention. The age comes from the name

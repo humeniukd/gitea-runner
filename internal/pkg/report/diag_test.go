@@ -50,7 +50,7 @@ func newSinkReporter(t *testing.T, secrets map[string]string, updateLog func(cal
 	require.NoError(t, err)
 	cfg, err := config.LoadDefault("")
 	require.NoError(t, err)
-	cfg.Log.JobDir = t.TempDir()
+	cfg.Log.Job.Dir = t.TempDir()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
