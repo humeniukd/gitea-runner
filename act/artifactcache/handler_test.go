@@ -50,7 +50,7 @@ func signArtifactURL(h *Handler, id int64) string {
 
 func TestHandler(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: dir})
 	require.NoError(t, err)
 	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
 
@@ -722,7 +722,7 @@ func uploadCacheNormally(t *testing.T, base, key, version string, content []byte
 
 func TestHandler_gcCache(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: dir})
 	require.NoError(t, err)
 
 	defer func() {
@@ -752,8 +752,8 @@ func TestHandler_gcCache(t *testing.T) {
 				Key:       "test_key_2",
 				Version:   "test_version",
 				Complete:  false,
-				UsedAt:    now.Add(-(keepTemp + time.Second)).Unix(),
-				CreatedAt: now.Add(-(keepTemp + time.Hour)).Unix(),
+				UsedAt:    now.Add(-(defaultKeepTemp + time.Second)).Unix(),
+				CreatedAt: now.Add(-(defaultKeepTemp + time.Hour)).Unix(),
 			},
 			Kept: false,
 		},
@@ -763,8 +763,8 @@ func TestHandler_gcCache(t *testing.T) {
 				Key:       "test_key_3",
 				Version:   "test_version",
 				Complete:  true,
-				UsedAt:    now.Add(-(keepUnused + time.Second)).Unix(),
-				CreatedAt: now.Add(-(keepUnused + time.Hour)).Unix(),
+				UsedAt:    now.Add(-(defaultKeepUnused + time.Second)).Unix(),
+				CreatedAt: now.Add(-(defaultKeepUnused + time.Hour)).Unix(),
 			},
 			Kept: false,
 		},
@@ -775,7 +775,7 @@ func TestHandler_gcCache(t *testing.T) {
 				Version:   "test_version",
 				Complete:  true,
 				UsedAt:    now.Unix(),
-				CreatedAt: now.Add(-(keepUsed + time.Second)).Unix(),
+				CreatedAt: now.Add(-(defaultKeepUsed + time.Second)).Unix(),
 			},
 			Kept: false,
 		},
@@ -785,7 +785,7 @@ func TestHandler_gcCache(t *testing.T) {
 				Key:       "test_key_1",
 				Version:   "test_version",
 				Complete:  true,
-				UsedAt:    now.Add(-(keepOld - time.Minute)).Unix(),
+				UsedAt:    now.Add(-(defaultKeepOld - time.Minute)).Unix(),
 				CreatedAt: now.Add(-(time.Hour + time.Second)).Unix(),
 			},
 			Kept: true,
@@ -796,7 +796,7 @@ func TestHandler_gcCache(t *testing.T) {
 				Key:       "test_key_1",
 				Version:   "test_version",
 				Complete:  true,
-				UsedAt:    now.Add(-(keepOld + time.Second)).Unix(),
+				UsedAt:    now.Add(-(defaultKeepOld + time.Second)).Unix(),
 				CreatedAt: now.Add(-(time.Hour + time.Second)).Unix(),
 			},
 			Kept: false,
@@ -829,11 +829,84 @@ func TestHandler_gcCache(t *testing.T) {
 	require.NoError(t, db.Close())
 }
 
+func TestHandler_gcCacheRetention(t *testing.T) {
+	now := time.Now()
+	// Each entry is reaped by exactly one sweep under the defaults.
+	entries := []*Cache{
+		{Key: "temp", Version: "v", Complete: false, UsedAt: now.Add(-time.Hour).Unix(), CreatedAt: now.Add(-time.Hour).Unix()},
+		{Key: "unused", Version: "v", Complete: true, UsedAt: now.Add(-(defaultKeepUnused + time.Hour)).Unix(), CreatedAt: now.Add(-(defaultKeepUnused + time.Hour)).Unix()},
+		{Key: "old", Version: "v", Complete: true, UsedAt: now.Unix(), CreatedAt: now.Add(-(defaultKeepUsed + time.Hour)).Unix()},
+		{Key: "superseded", Version: "v", Complete: true, UsedAt: now.Add(-time.Hour).Unix(), CreatedAt: now.Add(-2 * time.Hour).Unix()},
+		{Key: "superseded", Version: "v", Complete: true, UsedAt: now.Unix(), CreatedAt: now.Add(-time.Hour).Unix()},
+	}
+
+	for _, tc := range []struct {
+		name      string
+		retention Retention
+		kept      int
+	}{
+		{"defaults", Retention{}, 1},
+		{"disabled", Retention{KeepUsed: -1, KeepUnused: -1, KeepTemp: -1, KeepOld: -1}, len(entries)},
+		// A window shorter than every entry's age reaps what the defaults would have kept.
+		{"tightened", Retention{KeepUsed: time.Second}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, err := StartHandler(Options{Dir: filepath.Join(t.TempDir(), "artifactcache"), Retention: tc.retention})
+			require.NoError(t, err)
+			defer func() { require.NoError(t, handler.Close()) }()
+
+			db, err := handler.openDB()
+			require.NoError(t, err)
+			ids := make([]uint64, 0, len(entries))
+			for _, e := range entries {
+				cache := *e
+				require.NoError(t, insertCache(db, &cache))
+				ids = append(ids, cache.ID)
+			}
+			require.NoError(t, db.Close())
+
+			handler.gcAt = time.Time{}
+			handler.gcCache()
+
+			db, err = handler.openDB()
+			require.NoError(t, err)
+			defer func() { require.NoError(t, db.Close()) }()
+			kept := 0
+			for _, id := range ids {
+				if err := db.Get(id, &Cache{}); err == nil {
+					kept++
+				}
+			}
+			assert.Equal(t, tc.kept, kept)
+		})
+	}
+}
+
+func TestHandler_gcCacheInterval(t *testing.T) {
+	handler, err := StartHandler(Options{Dir: filepath.Join(t.TempDir(), "artifactcache"), Retention: Retention{GCInterval: time.Hour}})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, handler.Close()) }()
+
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	cache := &Cache{Key: "temp", Version: "v", UsedAt: time.Now().Add(-time.Hour).Unix()}
+	require.NoError(t, insertCache(db, cache))
+	require.NoError(t, db.Close())
+
+	handler.gcAt = time.Now() // within the interval, so the run is skipped
+	handler.gcCache()
+
+	db, err = handler.openDB()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	assert.NoError(t, db.Get(cache.ID, &Cache{}))
+}
+
 // TestHandler_RejectsMissingBearer covers the advisory's root cause:
 // unauthenticated access to management endpoints is now refused with 401.
 func TestHandler_RejectsMissingBearer(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: dir})
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -866,7 +939,7 @@ func TestHandler_RejectsMissingBearer(t *testing.T) {
 // accepted after RegisterJob; stale/forged tokens cannot be replayed.
 func TestHandler_RejectsUnknownBearer(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: dir})
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -886,7 +959,7 @@ func TestHandler_RejectsUnknownBearer(t *testing.T) {
 // working the moment the job ends instead of living for the runner's lifetime.
 func TestHandler_UnregisterRevokes(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: dir})
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -917,7 +990,7 @@ func TestHandler_UnregisterRevokes(t *testing.T) {
 // invisible to queries scoped to repoB.
 func TestHandler_CrossRepoIsolation(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: dir})
 	require.NoError(t, err)
 	defer handler.Close()
 	handler.RegisterJob("token-a", JobCredential{Repo: "owner/repoA"})
@@ -983,7 +1056,7 @@ func TestHandler_CrossRepoIsolation(t *testing.T) {
 // working after artifactURLTTL even if the bearer token is still registered.
 func TestHandler_ArtifactSignature(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: dir})
 	require.NoError(t, err)
 	defer handler.Close()
 	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
@@ -1016,7 +1089,7 @@ func TestHandler_ArtifactSignature(t *testing.T) {
 
 	t.Run("signature from a different server", func(t *testing.T) {
 		dir2 := filepath.Join(t.TempDir(), "artifactcache2")
-		other, err := StartHandler(dir2, "", 0, "", nil)
+		other, err := StartHandler(Options{Dir: dir2})
 		require.NoError(t, err)
 		defer other.Close()
 		otherURL := signArtifactURL(other, 1)
@@ -1038,13 +1111,13 @@ func TestHandler_ArtifactSignature(t *testing.T) {
 func TestHandler_SecretPersistsAcrossRestarts(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 
-	first, err := StartHandler(dir, "127.0.0.1", 0, "", nil)
+	first, err := StartHandler(Options{Dir: dir, OutboundIP: "127.0.0.1"})
 	require.NoError(t, err)
 	exp := time.Now().Add(artifactURLTTL).Unix()
 	sig := first.computeSignature("", 42, exp)
 	require.NoError(t, first.Close())
 
-	second, err := StartHandler(dir, "127.0.0.1", 0, "", nil)
+	second, err := StartHandler(Options{Dir: dir, OutboundIP: "127.0.0.1"})
 	require.NoError(t, err)
 	defer second.Close()
 
@@ -1056,7 +1129,7 @@ func TestHandler_SecretPersistsAcrossRestarts(t *testing.T) {
 // the auth refactor.
 func TestHandler_ArtifactSignatureDownload(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: dir})
 	require.NoError(t, err)
 	defer handler.Close()
 	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
@@ -1096,7 +1169,7 @@ func TestHandler_ArtifactSignatureDownload(t *testing.T) {
 // (restart mid-task, retry), which must not kill the live job's auth.
 func TestHandler_RegisterJob_RefCounted(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: dir})
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -1125,10 +1198,10 @@ func TestHandler_RegisterJob_RefCounted(t *testing.T) {
 
 // TestHandler_GC_PerRepoDedup ensures duplicate-pruning does not evict
 // another repo's entry. Two repos reserve the same (key, version); after the
-// keepOld window, GC must keep the one from each repo.
+// defaultKeepOld window, GC must keep the one from each repo.
 func TestHandler_GC_PerRepoDedup(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: dir})
 	require.NoError(t, err)
 	defer handler.Close()
 	handler.RegisterJob("tok-a", JobCredential{Repo: "owner/repoA"})
@@ -1142,7 +1215,7 @@ func TestHandler_GC_PerRepoDedup(t *testing.T) {
 	db, err := handler.openDB()
 	require.NoError(t, err)
 	now := time.Now().Unix()
-	stale := time.Now().Add(-keepOld - time.Minute).Unix()
+	stale := time.Now().Add(-defaultKeepOld - time.Minute).Unix()
 	a := &Cache{Repo: "owner/repoA", Key: key, Version: version, Complete: true, CreatedAt: stale, UsedAt: stale, Size: 1}
 	b := &Cache{Repo: "owner/repoB", Key: key, Version: version, Complete: true, CreatedAt: now, UsedAt: now, Size: 1}
 	require.NoError(t, insertCache(db, a))
@@ -1179,7 +1252,7 @@ func TestHandler_GC_PerRepoDedup(t *testing.T) {
 // register/revoke when the feature is off.
 func TestHandler_InternalAPI_Disabled(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(dir, "", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: dir})
 	require.NoError(t, err)
 	defer handler.Close()
 
@@ -1197,7 +1270,7 @@ func TestHandler_InternalAPI_Disabled(t *testing.T) {
 func TestHandler_InternalAPI_AuthAndUsage(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 	const secret = "internal-secret"
-	handler, err := StartHandler(dir, "", 0, secret, nil)
+	handler, err := StartHandler(Options{Dir: dir, InternalSecret: secret})
 	require.NoError(t, err)
 	defer handler.Close()
 

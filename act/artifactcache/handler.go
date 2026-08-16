@@ -103,19 +103,37 @@ type Handler struct {
 
 	credMu sync.RWMutex
 	creds  map[string]*credEntry
+
+	retention Retention
+}
+
+// Options configures a cache server started by StartHandler. The zero value is
+// usable: an empty Dir falls back to $HOME/.cache/actcache, an empty OutboundIP
+// is detected, port 0 picks a free port, and Retention takes its defaults.
+type Options struct {
+	Dir        string
+	OutboundIP string
+	Port       uint16
+
+	// InternalSecret, when non-empty, enables a control-plane API at
+	// /_internal/{register,revoke} that lets a remote runner pre-register the
+	// per-job ACTIONS_RUNTIME_TOKENs it expects this server to honor. The
+	// embedded in-process handler leaves it empty and registers tokens via the
+	// in-process RegisterJob method directly.
+	InternalSecret string
+
+	Retention Retention
+	Logger    logrus.FieldLogger
 }
 
 // StartHandler opens the on-disk cache store and starts the HTTP server.
-//
-// internalSecret, when non-empty, enables a control-plane API at
-// /_internal/{register,revoke} that lets a remote runner pre-register the
-// per-job ACTIONS_RUNTIME_TOKENs it expects this server to honor. The
-// embedded in-process handler leaves it empty and registers tokens via the
-// in-process RegisterJob method directly.
-func StartHandler(dir, outboundIP string, port uint16, internalSecret string, logger logrus.FieldLogger) (*Handler, error) {
+func StartHandler(opts Options) (*Handler, error) {
+	dir, outboundIP, port := opts.Dir, opts.OutboundIP, opts.Port
+	logger := opts.Logger
 	h := &Handler{
 		creds:          make(map[string]*credEntry),
-		internalSecret: internalSecret,
+		internalSecret: opts.InternalSecret,
+		retention:      opts.Retention.withDefaults(),
 	}
 
 	if logger == nil {
@@ -821,11 +839,42 @@ func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
 }
 
 const (
-	keepUsed   = 30 * 24 * time.Hour
-	keepUnused = 7 * 24 * time.Hour
-	keepTemp   = 5 * time.Minute
-	keepOld    = 5 * time.Minute
+	defaultKeepUsed   = 30 * 24 * time.Hour
+	defaultKeepUnused = 7 * 24 * time.Hour
+	defaultKeepTemp   = 5 * time.Minute
+	defaultKeepOld    = 5 * time.Minute
+	defaultGCInterval = time.Hour
 )
+
+// Retention bounds how long gcCache keeps cache entries. A zero field takes the
+// default; a negative field disables that sweep, so entries it would have
+// removed are kept until something else reaps them.
+type Retention struct {
+	KeepUsed   time.Duration // KeepUsed is the maximum age of an entry, counted from when it was created.
+	KeepUnused time.Duration // KeepUnused is how long an entry survives without being read or written.
+	KeepTemp   time.Duration // KeepTemp is how long an incomplete upload survives before it is treated as broken.
+	KeepOld    time.Duration // KeepOld is the grace period before a superseded entry with the same key is removed, so a download in progress is not cut off.
+	GCInterval time.Duration // GCInterval is the minimum time between two garbage collection runs.
+}
+
+func (r Retention) withDefaults() Retention {
+	if r.KeepUsed == 0 {
+		r.KeepUsed = defaultKeepUsed
+	}
+	if r.KeepUnused == 0 {
+		r.KeepUnused = defaultKeepUnused
+	}
+	if r.KeepTemp == 0 {
+		r.KeepTemp = defaultKeepTemp
+	}
+	if r.KeepOld == 0 {
+		r.KeepOld = defaultKeepOld
+	}
+	if r.GCInterval <= 0 { // no sensible meaning for "never collect"; the individual sweeps are what get disabled
+		r.GCInterval = defaultGCInterval
+	}
+	return r
+}
 
 func (h *Handler) gcCache() {
 	if h.gcing.Load() {
@@ -836,7 +885,7 @@ func (h *Handler) gcCache() {
 	}
 	defer h.gcing.Store(false)
 
-	if time.Since(h.gcAt) < time.Hour {
+	if time.Since(h.gcAt) < h.retention.GCInterval {
 		h.logger.Debugf("skip gc: %v", h.gcAt.String())
 		return
 	}
@@ -849,63 +898,33 @@ func (h *Handler) gcCache() {
 	}
 	defer db.Close()
 
-	// Remove the caches which are not completed for a while, they are most likely to be broken.
-	var caches []*Cache
-	if err := db.Find(&caches, bolthold.
-		Where("UsedAt").Lt(time.Now().Add(-keepTemp).Unix()).
-		And("Complete").Eq(false),
-	); err != nil {
-		h.logger.Warnf("find caches: %v", err)
-	} else {
-		for _, cache := range caches {
-			h.storage.Remove(cache.ID)
-			if err := db.Delete(cache.ID, cache); err != nil {
-				h.logger.Warnf("delete cache: %v", err)
-				continue
-			}
-			h.logger.Infof("deleted cache: %+v", cache)
-		}
+	// A negative window disables its sweep, keeping what that sweep would have removed.
+	if h.retention.KeepTemp > 0 {
+		// Remove the caches which are not completed for a while, they are most likely to be broken.
+		h.sweep(db, bolthold.
+			Where("UsedAt").Lt(time.Now().Add(-h.retention.KeepTemp).Unix()).
+			And("Complete").Eq(false))
 	}
 
-	// Remove the old caches which have not been used recently.
-	caches = caches[:0]
-	if err := db.Find(&caches, bolthold.
-		Where("UsedAt").Lt(time.Now().Add(-keepUnused).Unix()),
-	); err != nil {
-		h.logger.Warnf("find caches: %v", err)
-	} else {
-		for _, cache := range caches {
-			h.storage.Remove(cache.ID)
-			if err := db.Delete(cache.ID, cache); err != nil {
-				h.logger.Warnf("delete cache: %v", err)
-				continue
-			}
-			h.logger.Infof("deleted cache: %+v", cache)
-		}
+	if h.retention.KeepUnused > 0 {
+		// Remove the old caches which have not been used recently.
+		h.sweep(db, bolthold.Where("UsedAt").Lt(time.Now().Add(-h.retention.KeepUnused).Unix()))
 	}
 
-	// Remove the old caches which are too old.
-	caches = caches[:0]
-	if err := db.Find(&caches, bolthold.
-		Where("CreatedAt").Lt(time.Now().Add(-keepUsed).Unix()),
-	); err != nil {
-		h.logger.Warnf("find caches: %v", err)
-	} else {
-		for _, cache := range caches {
-			h.storage.Remove(cache.ID)
-			if err := db.Delete(cache.ID, cache); err != nil {
-				h.logger.Warnf("delete cache: %v", err)
-				continue
-			}
-			h.logger.Infof("deleted cache: %+v", cache)
-		}
+	if h.retention.KeepUsed > 0 {
+		// Remove the old caches which are too old.
+		h.sweep(db, bolthold.Where("CreatedAt").Lt(time.Now().Add(-h.retention.KeepUsed).Unix()))
+	}
+
+	if h.retention.KeepOld <= 0 {
+		return
 	}
 
 	// Remove the old caches with the same key and version within the same
 	// repository, keep the latest one. Aggregation must include Repo so two
 	// repos that happen to share a (key, version) do not evict each other —
 	// otherwise per-repo scoping holds for reads but one repo can age
-	// another out after keepOld.
+	// another out after KeepOld.
 	// Also keep the olds which have been used recently for a while in case of the cache is still in use.
 	if results, err := db.FindAggregate(
 		&Cache{},
@@ -914,6 +933,7 @@ func (h *Handler) gcCache() {
 	); err != nil {
 		h.logger.Warnf("find aggregate caches: %v", err)
 	} else {
+		var caches []*Cache
 		for _, result := range results {
 			if result.Count() <= 1 {
 				continue
@@ -922,20 +942,35 @@ func (h *Handler) gcCache() {
 			caches = caches[:0]
 			result.Reduction(&caches)
 			for _, cache := range caches[:len(caches)-1] {
-				if time.Since(time.Unix(cache.UsedAt, 0)) < keepOld {
+				if time.Since(time.Unix(cache.UsedAt, 0)) < h.retention.KeepOld {
 					// Keep it since it has been used recently, even if it's old.
 					// Or it could break downloading in process.
 					continue
 				}
-				h.storage.Remove(cache.ID)
-				if err := db.Delete(cache.ID, cache); err != nil {
-					h.logger.Warnf("delete cache: %v", err)
-					continue
-				}
-				h.logger.Infof("deleted cache: %+v", cache)
+				h.deleteCache(db, cache)
 			}
 		}
 	}
+}
+
+func (h *Handler) sweep(db *bolthold.Store, query *bolthold.Query) {
+	var caches []*Cache
+	if err := db.Find(&caches, query); err != nil {
+		h.logger.Warnf("find caches: %v", err)
+		return
+	}
+	for _, cache := range caches {
+		h.deleteCache(db, cache)
+	}
+}
+
+func (h *Handler) deleteCache(db *bolthold.Store, cache *Cache) {
+	h.storage.Remove(cache.ID)
+	if err := db.Delete(cache.ID, cache); err != nil {
+		h.logger.Warnf("delete cache: %v", err)
+		return
+	}
+	h.logger.Infof("deleted cache: %+v", cache)
 }
 
 func (h *Handler) responseJSON(w http.ResponseWriter, r *http.Request, code int, v ...any) {

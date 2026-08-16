@@ -93,13 +93,13 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 			envs["ACTIONS_CACHE_URL"] = strings.TrimRight(cfg.Cache.ExternalServer, "/") + "/"
 		} else {
 			warnIgnoredCacheSecret(cfg)
-			handler, err := artifactcache.StartHandler(
-				cfg.Cache.Dir,
-				cfg.Cache.Host,
-				cfg.Cache.Port,
-				"",
-				log.StandardLogger().WithField("module", "cache_request"),
-			)
+			handler, err := artifactcache.StartHandler(artifactcache.Options{
+				Dir:        cfg.Cache.Dir,
+				OutboundIP: cfg.Cache.Host,
+				Port:       cfg.Cache.Port,
+				Retention:  CacheRetention(cfg),
+				Logger:     log.StandardLogger().WithField("module", "cache_request"),
+			})
 			if err != nil {
 				log.Errorf("cannot init cache server, it will be disabled: %v", err)
 				// go on
@@ -724,6 +724,18 @@ func (r *Runner) Declare(ctx context.Context, labels []string) (*connect.Respons
 		Labels:       labels,
 		Capabilities: RunnerCapabilities(),
 	}))
+}
+
+// CacheRetention maps the cache retention config onto the cache server's own type.
+func CacheRetention(cfg *config.Config) artifactcache.Retention {
+	r := cfg.Cache.Retention
+	return artifactcache.Retention{
+		KeepUsed:   r.KeepUsed,
+		KeepUnused: r.KeepUnused,
+		KeepTemp:   r.KeepTemp,
+		KeepOld:    r.KeepOld,
+		GCInterval: r.GCInterval,
+	}
 }
 
 // warnIgnoredCacheSecret flags an external cache server secret configured on a runner that uses the built-in cache server.

@@ -70,7 +70,7 @@ func getURL(t *testing.T, url string) []byte {
 func startTestHandler(t *testing.T) *Handler {
 	t.Helper()
 
-	handler, err := StartHandler(filepath.Join(t.TempDir(), "artifactcache"), "127.0.0.1", 0, "", nil)
+	handler, err := StartHandler(Options{Dir: filepath.Join(t.TempDir(), "artifactcache"), OutboundIP: "127.0.0.1"})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = handler.Close() })
 	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
