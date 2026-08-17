@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -912,6 +913,58 @@ func TestHandler_evictPolicy(t *testing.T) {
 				e.Complete = true // only completed entries carry a measured size, so only they count
 			}
 			assert.ElementsMatch(t, tc.kept, runGC(t, tc.policy, tc.entries))
+		})
+	}
+}
+
+// TestHandler_evictForFreeSpace proves the volume backstop sheds only what it must, and only
+// when the disk is actually short.
+func TestHandler_evictForFreeSpace(t *testing.T) {
+	now := time.Now()
+	entries := []*Cache{
+		{Key: "oldest", Complete: true, Size: 4 * miB, UsedAt: now.Add(-3 * time.Hour).Unix()},
+		{Key: "middle", Complete: true, Size: 4 * miB, UsedAt: now.Add(-2 * time.Hour).Unix()},
+		{Key: "newest", Complete: true, Size: 4 * miB, UsedAt: now.Add(-time.Hour).Unix()},
+	}
+
+	free := func(n uint64) func(string) (uint64, error) {
+		return func(string) (uint64, error) { return n, nil }
+	}
+
+	for _, tc := range []struct {
+		name     string
+		freeDisk func(string) (uint64, error)
+		kept     []string
+	}{
+		{"ample free space evicts nothing", free(minFreeDisk), []string{"oldest", "middle", "newest"}},
+		{"a small shortfall sheds one entry", free(minFreeDisk - 4*miB), []string{"middle", "newest"}},
+		{
+			"an unreadable volume is treated as unavailable, not as full",
+			func(string) (uint64, error) { return 0, errors.New("unsupported") },
+			[]string{"oldest", "middle", "newest"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seeded := make([]*Cache, len(entries))
+			for i, e := range entries {
+				cache := *e
+				seeded[i] = &cache
+			}
+			handler := newTestHandler(t, Policy{}, seeded...)
+			handler.freeDisk = tc.freeDisk
+
+			db, err := handler.openDB()
+			require.NoError(t, err)
+			defer func() { require.NoError(t, db.Close()) }()
+			handler.evictForFreeSpace(db)
+
+			var kept []string
+			for _, e := range seeded {
+				if err := db.Get(e.ID, &Cache{}); err == nil {
+					kept = append(kept, e.Key)
+				}
+			}
+			assert.ElementsMatch(t, tc.kept, kept)
 		})
 	}
 }

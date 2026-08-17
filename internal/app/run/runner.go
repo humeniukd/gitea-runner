@@ -27,6 +27,7 @@ import (
 	"gitea.com/gitea/runner/act/runner"
 	"gitea.com/gitea/runner/internal/pkg/client"
 	"gitea.com/gitea/runner/internal/pkg/config"
+	"gitea.com/gitea/runner/internal/pkg/disk"
 	"gitea.com/gitea/runner/internal/pkg/labels"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 	"gitea.com/gitea/runner/internal/pkg/report"
@@ -694,7 +695,7 @@ func checkFreeDisk(cfg *config.Config) (bool, string) {
 		root = filepath.FromSlash("/" + strings.TrimLeft(cfg.Container.WorkdirParent, "/"))
 	}
 	root = nearestExistingPath(root)
-	available, err := freeDiskBytes(root)
+	available, err := disk.FreeBytes(root)
 	if err != nil {
 		return false, fmt.Sprintf("cannot determine free disk space for %s: %v", root, err)
 	}

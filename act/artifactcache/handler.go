@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/internal/pkg/disk"
 
 	"github.com/julienschmidt/httprouter"
 	"github.com/sirupsen/logrus"
@@ -107,6 +108,9 @@ type Handler struct {
 	creds  map[string]*credEntry
 
 	policy Policy
+
+	// freeDisk is a field so tests can drive evictForFreeSpace without a full volume.
+	freeDisk func(string) (uint64, error)
 }
 
 // Options configures a cache server started by StartHandler. The zero value is
@@ -136,6 +140,7 @@ func StartHandler(opts Options) (*Handler, error) {
 		creds:          make(map[string]*credEntry),
 		internalSecret: opts.InternalSecret,
 		policy:         opts.Policy.withDefaults(),
+		freeDisk:       disk.FreeBytes,
 	}
 
 	if logger == nil {
@@ -864,6 +869,11 @@ const (
 	// before it is taken for abandoned. Widening it also widens the window in which
 	// findExactCache can hand a stale reservation to a finalize.
 	uploadStallTimeout = 5 * time.Minute
+
+	// minFreeDisk is headroom the cache will not eat into on the volume it shares with the
+	// jobs it serves. Not a Policy field: cache data is reconstructible, so giving it up
+	// under disk pressure is never something an operator wants tuned off.
+	minFreeDisk = 1024 * miB
 )
 
 // Policy bounds what the cache server keeps: a retention window counted from last access,
@@ -911,6 +921,28 @@ func (h *Handler) gcCache() {
 	h.evictExpired(db)
 	h.evictSuperseded(db)
 	h.evictOversized(db)
+	h.evictForFreeSpace(db)
+}
+
+// evictForFreeSpace is the backstop the size limits cannot be: they bound what the database
+// says the cache holds, where this bounds what the volume actually has left, so it also
+// covers bytes the cache never accounted for.
+func (h *Handler) evictForFreeSpace(db *bolthold.Store) {
+	free, err := h.freeDisk(h.dir)
+	if err != nil {
+		h.logger.Debugf("free disk check: %v", err) // unsupported platform, treat as unavailable rather than full
+		return
+	}
+	if free >= minFreeDisk {
+		return
+	}
+
+	caches := h.cachesByUse(db, bolthold.Where("Complete").Eq(true).Index("Complete"))
+	var held int64
+	for _, cache := range caches {
+		held += cache.Size
+	}
+	h.evictTo(db, caches, max(0, held-int64(minFreeDisk-free)), "the cache volume")
 }
 
 // evictIncomplete removes uploads that stopped part way, which are most likely broken.
@@ -999,7 +1031,7 @@ func (h *Handler) evictTo(db *bolthold.Store, caches []*Cache, limit int64, scop
 		freed += cache.Size
 	}
 	if freed > 0 {
-		h.logger.Warnf("%s went over its %d MiB cache limit, freed %d MiB least recently used", scope, limit/miB, freed/miB)
+		h.logger.Warnf("evicted %d MiB from %s, least recently used first", freed/miB, scope)
 	}
 }
 
