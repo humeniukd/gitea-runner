@@ -159,22 +159,16 @@ cache:
   # the action's own bundle, keeping the untouched copy beside it. The same edit lets the stock
   # upload-artifact and download-artifact work here. A bundle that does not match is left alone.
   #v2: true
-  # How long the cache server keeps entries before discarding them. Each window keeps its
-  # default when unset; a negative value disables that sweep, keeping those entries forever.
-  # Ignored when external_server is set, since the retention there is the cache-server's own.
-  #retention:
-    # Maximum age of an entry, counted from when it was created.
-    #keep_used: 720h
-    # How long an entry survives without being read or written.
-    #keep_unused: 168h
-    # How long an incomplete upload survives before it is treated as broken.
-    #keep_temp: 5m
-    # Grace period before an entry superseded by a newer one with the same key is removed,
-    # so a download already in progress is not cut off.
-    #keep_old: 5m
-    # Minimum time between two garbage collection runs. Disable the sweeps above instead of
-    # raising this; a negative value here only falls back to the default.
-    #gc_interval: 1h
+  # How the cache server discards entries. Ignored when external_server is set, since that
+  # server applies its own. A negative value lifts the limit it is set on.
+  # Remove entries nothing has read or written within this window. Age alone never counts.
+  #retention: 168h
+  # Cap one repository, in MiB, removing its least recently accessed entries until it fits.
+  #size_limit_mb: 10240
+  # Cap every repository together, in MiB, to bound the disk. No limit by default.
+  #total_size_limit_mb: 0
+  # Minimum time between two garbage collection runs.
+  #gc_interval: 1h
 
 container:
   # Specifies the network to which the container will connect.

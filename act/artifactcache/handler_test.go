@@ -656,7 +656,7 @@ func backdateCache(t *testing.T, handler *Handler, key string, age time.Duration
 	require.NoError(t, db.Update(caches[0].ID, caches[0]))
 }
 
-func uploadCacheNormally(t *testing.T, base, key, version string, content []byte) { //nolint:unparam // pre-existing issue from nektos/act
+func uploadCacheNormally(t *testing.T, base, key, version string, content []byte) {
 	var id uint64
 	{
 		body, err := json.Marshal(&Request{
@@ -752,8 +752,8 @@ func TestHandler_gcCache(t *testing.T) {
 				Key:       "test_key_2",
 				Version:   "test_version",
 				Complete:  false,
-				UsedAt:    now.Add(-(defaultKeepTemp + time.Second)).Unix(),
-				CreatedAt: now.Add(-(defaultKeepTemp + time.Hour)).Unix(),
+				UsedAt:    now.Add(-(inUseGrace + time.Second)).Unix(),
+				CreatedAt: now.Add(-(inUseGrace + time.Hour)).Unix(),
 			},
 			Kept: false,
 		},
@@ -763,21 +763,21 @@ func TestHandler_gcCache(t *testing.T) {
 				Key:       "test_key_3",
 				Version:   "test_version",
 				Complete:  true,
-				UsedAt:    now.Add(-(defaultKeepUnused + time.Second)).Unix(),
-				CreatedAt: now.Add(-(defaultKeepUnused + time.Hour)).Unix(),
+				UsedAt:    now.Add(-(defaultRetention + time.Second)).Unix(),
+				CreatedAt: now.Add(-(defaultRetention + time.Hour)).Unix(),
 			},
 			Kept: false,
 		},
 		{
-			// should be removed, since it's used but too old.
+			// should be kept, since age alone does not retire an entry that is still used.
 			Cache: &Cache{
 				Key:       "test_key_3",
 				Version:   "test_version",
 				Complete:  true,
 				UsedAt:    now.Unix(),
-				CreatedAt: now.Add(-(defaultKeepUsed + time.Second)).Unix(),
+				CreatedAt: now.Add(-365 * 24 * time.Hour).Unix(),
 			},
-			Kept: false,
+			Kept: true,
 		},
 		{
 			// should be kept, since it has a newer edition but be used recently.
@@ -785,7 +785,7 @@ func TestHandler_gcCache(t *testing.T) {
 				Key:       "test_key_1",
 				Version:   "test_version",
 				Complete:  true,
-				UsedAt:    now.Add(-(defaultKeepOld - time.Minute)).Unix(),
+				UsedAt:    now.Add(-(inUseGrace - time.Minute)).Unix(),
 				CreatedAt: now.Add(-(time.Hour + time.Second)).Unix(),
 			},
 			Kept: true,
@@ -796,7 +796,7 @@ func TestHandler_gcCache(t *testing.T) {
 				Key:       "test_key_1",
 				Version:   "test_version",
 				Complete:  true,
-				UsedAt:    now.Add(-(defaultKeepOld + time.Second)).Unix(),
+				UsedAt:    now.Add(-(inUseGrace + time.Second)).Unix(),
 				CreatedAt: now.Add(-(time.Hour + time.Second)).Unix(),
 			},
 			Kept: false,
@@ -829,77 +829,218 @@ func TestHandler_gcCache(t *testing.T) {
 	require.NoError(t, db.Close())
 }
 
-func TestHandler_gcCacheRetention(t *testing.T) {
+// TestHandler_evictPolicy covers the non-default policies; TestHandler_gcCache covers the
+// defaults across all four passes.
+func TestHandler_evictPolicy(t *testing.T) {
 	now := time.Now()
-	// Each entry is reaped by exactly one sweep under the defaults.
-	entries := []*Cache{
-		{Key: "temp", Version: "v", Complete: false, UsedAt: now.Add(-time.Hour).Unix(), CreatedAt: now.Add(-time.Hour).Unix()},
-		{Key: "unused", Version: "v", Complete: true, UsedAt: now.Add(-(defaultKeepUnused + time.Hour)).Unix(), CreatedAt: now.Add(-(defaultKeepUnused + time.Hour)).Unix()},
-		{Key: "old", Version: "v", Complete: true, UsedAt: now.Unix(), CreatedAt: now.Add(-(defaultKeepUsed + time.Hour)).Unix()},
-		{Key: "superseded", Version: "v", Complete: true, UsedAt: now.Add(-time.Hour).Unix(), CreatedAt: now.Add(-2 * time.Hour).Unix()},
-		{Key: "superseded", Version: "v", Complete: true, UsedAt: now.Unix(), CreatedAt: now.Add(-time.Hour).Unix()},
-	}
+	stale := func(d time.Duration) int64 { return now.Add(-d).Unix() }
+	mib := func(n int64) int64 { return n * miB }
 
 	for _, tc := range []struct {
-		name      string
-		retention Retention
-		kept      int
+		name    string
+		policy  Policy
+		entries []*Cache
+		kept    []string
 	}{
-		{"defaults", Retention{}, 1},
-		{"disabled", Retention{KeepUsed: -1, KeepUnused: -1, KeepTemp: -1, KeepOld: -1}, len(entries)},
-		// A window shorter than every entry's age reaps what the defaults would have kept.
-		{"tightened", Retention{KeepUsed: time.Second}, 0},
+		{
+			name:   "a negative retention keeps an entry nothing has touched",
+			policy: Policy{Retention: -1},
+			entries: []*Cache{
+				{Key: "idle", UsedAt: stale(defaultRetention + time.Hour)},
+			},
+			kept: []string{"idle"},
+		},
+		{
+			name:   "a retention shorter than the idle time takes what the default would keep",
+			policy: Policy{Retention: time.Minute},
+			entries: []*Cache{
+				{Key: "idle", UsedAt: stale(time.Hour)},
+				{Key: "just_read", UsedAt: stale(time.Second)},
+			},
+			kept: []string{"just_read"},
+		},
+		{
+			name:   "evicts least recently accessed until the repository fits",
+			policy: Policy{SizeLimit: mib(10)},
+			entries: []*Cache{
+				{Repo: "o/a", Key: "oldest", Size: mib(4), UsedAt: stale(3 * time.Hour)},
+				{Repo: "o/a", Key: "middle", Size: mib(4), UsedAt: stale(2 * time.Hour)},
+				{Repo: "o/a", Key: "newest", Size: mib(4), UsedAt: stale(time.Hour)},
+			},
+			kept: []string{"middle", "newest"},
+		},
+		{
+			name:   "spares entries that may still be downloading",
+			policy: Policy{SizeLimit: mib(10)},
+			entries: []*Cache{
+				{Repo: "o/a", Key: "fresh_1", Size: mib(6), UsedAt: stale(time.Minute)},
+				{Repo: "o/a", Key: "fresh_2", Size: mib(6), UsedAt: stale(time.Minute)},
+			},
+			kept: []string{"fresh_1", "fresh_2"},
+		},
+		{
+			name:   "one repository over its limit leaves another alone",
+			policy: Policy{SizeLimit: mib(10)},
+			entries: []*Cache{
+				{Repo: "o/a", Key: "a_old", Size: mib(6), UsedAt: stale(3 * time.Hour)},
+				{Repo: "o/a", Key: "a_new", Size: mib(6), UsedAt: stale(time.Hour)},
+				{Repo: "o/b", Key: "b_old", Size: mib(6), UsedAt: stale(4 * time.Hour)},
+			},
+			kept: []string{"a_new", "b_old"},
+		},
+		{
+			name:   "the total limit evicts across repositories once each fits its own",
+			policy: Policy{SizeLimit: mib(10), TotalSizeLimit: mib(12)},
+			entries: []*Cache{
+				{Repo: "o/a", Key: "a_old", Size: mib(8), UsedAt: stale(3 * time.Hour)},
+				{Repo: "o/b", Key: "b_new", Size: mib(8), UsedAt: stale(time.Hour)},
+			},
+			kept: []string{"b_new"},
+		},
+		{
+			name:   "a negative limit keeps everything",
+			policy: Policy{SizeLimit: -1},
+			entries: []*Cache{
+				{Repo: "o/a", Key: "huge_1", Size: mib(100), UsedAt: stale(3 * time.Hour)},
+				{Repo: "o/a", Key: "huge_2", Size: mib(100), UsedAt: stale(2 * time.Hour)},
+			},
+			kept: []string{"huge_1", "huge_2"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handler, err := StartHandler(Options{Dir: filepath.Join(t.TempDir(), "artifactcache"), Retention: tc.retention})
-			require.NoError(t, err)
-			defer func() { require.NoError(t, handler.Close()) }()
-
-			db, err := handler.openDB()
-			require.NoError(t, err)
-			ids := make([]uint64, 0, len(entries))
-			for _, e := range entries {
-				cache := *e
-				require.NoError(t, insertCache(db, &cache))
-				ids = append(ids, cache.ID)
+			for _, e := range tc.entries {
+				e.Complete = true // only completed entries carry a measured size, so only they count
 			}
-			require.NoError(t, db.Close())
-
-			handler.gcAt = time.Time{}
-			handler.gcCache()
-
-			db, err = handler.openDB()
-			require.NoError(t, err)
-			defer func() { require.NoError(t, db.Close()) }()
-			kept := 0
-			for _, id := range ids {
-				if err := db.Get(id, &Cache{}); err == nil {
-					kept++
-				}
-			}
-			assert.Equal(t, tc.kept, kept)
+			assert.ElementsMatch(t, tc.kept, runGC(t, tc.policy, tc.entries))
 		})
 	}
 }
 
-func TestHandler_gcCacheInterval(t *testing.T) {
-	handler, err := StartHandler(Options{Dir: filepath.Join(t.TempDir(), "artifactcache"), Retention: Retention{GCInterval: time.Hour}})
-	require.NoError(t, err)
-	defer func() { require.NoError(t, handler.Close()) }()
+// TestHandler_SweepKeepsEntryWhenBlobSurvives proves a failed unlink leaves the row in place,
+// so the next sweep retries rather than orphaning bytes no row points at and no limit counts.
+func TestHandler_SweepKeepsEntryWhenBlobSurvives(t *testing.T) {
+	cache := &Cache{Key: "stuck", Complete: true, UsedAt: time.Now().Add(-(defaultRetention + time.Hour)).Unix()}
+	handler := newTestHandler(t, Policy{}, cache)
+
+	// A non-empty directory where the blob belongs makes os.Remove fail on every platform.
+	blob := handler.storage.filename(cache.ID)
+	require.NoError(t, os.MkdirAll(blob, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(blob, "held"), []byte("x"), 0o600))
+
+	handler.gcAt = time.Time{}
+	handler.gcCache()
 
 	db, err := handler.openDB()
 	require.NoError(t, err)
-	cache := &Cache{Key: "temp", Version: "v", UsedAt: time.Now().Add(-time.Hour).Unix()}
-	require.NoError(t, insertCache(db, cache))
+	defer func() { require.NoError(t, db.Close()) }()
+	require.NoError(t, db.Get(cache.ID, &Cache{}), "the entry must outlive a blob that could not be removed")
+}
+
+// TestHandler_FindProtectsFromEviction covers the window between a find handing out a signed
+// download URL and the GET that redeems it: the entry promised to a job must not be the next
+// eviction victim just because its last access predates the find.
+func TestHandler_FindProtectsFromEviction(t *testing.T) {
+	// 12 MiB against a 10 MiB limit, so exactly one entry has to go.
+	wanted := &Cache{Repo: testRepo, Key: "wanted", Version: "v", Complete: true, Size: 4 * miB, UsedAt: time.Now().Add(-3 * time.Hour).Unix()}
+	other := &Cache{Repo: testRepo, Key: "other", Version: "v", Complete: true, Size: 4 * miB, UsedAt: time.Now().Add(-2 * time.Hour).Unix()}
+	newest := &Cache{Repo: testRepo, Key: "newest", Version: "v", Complete: true, Size: 4 * miB, UsedAt: time.Now().Add(-time.Hour).Unix()}
+	handler := newTestHandler(t, Policy{SizeLimit: 10 * miB}, wanted, other, newest)
+	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
+
+	// find only reports a hit when the blob is on disk.
+	require.NoError(t, handler.storage.Write(wanted.ID, 0, strings.NewReader("a")))
+	_, err := handler.storage.Commit(wanted.ID, 1)
+	require.NoError(t, err)
+
+	resp, err := testClient.Get(fmt.Sprintf("%s%s/cache?keys=wanted&version=v", handler.ExternalURL(), apiPath))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+
+	// Evict directly: the request above kicked off an async gcCache, and writing gcAt here
+	// to drive gcCache would race its read.
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	handler.evictOversized(db)
+
+	require.NoError(t, db.Get(wanted.ID, &Cache{}), "the entry just promised to a job must survive")
+	assert.ErrorIs(t, db.Get(other.ID, &Cache{}), bolthold.ErrNotFound, "the next least recently used goes instead")
+}
+
+// TestHandler_evictOnCommit proves a repository that goes over its limit gets space back at
+// once, rather than waiting out the collection interval.
+func TestHandler_evictOnCommit(t *testing.T) {
+	full := &Cache{Repo: testRepo, Key: "full", Version: "v", Complete: true, Size: 4 * miB, UsedAt: time.Now().Add(-time.Hour).Unix()}
+	handler := newTestHandler(t, Policy{SizeLimit: 4 * miB}, full)
+	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
+
+	// StartHandler already stamped gcAt, so the periodic sweep stays rate-limited out and
+	// only the commit path can evict.
+	uploadCacheNormally(t, handler.ExternalURL()+apiPath, "new", "v", []byte("some content"))
+
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	assert.ErrorIs(t, db.Get(full.ID, &Cache{}), bolthold.ErrNotFound)
+}
+
+func TestHandler_gcCacheInterval(t *testing.T) {
+	cache := &Cache{Key: "temp", UsedAt: time.Now().Add(-time.Hour).Unix()}
+	// Half the default, so a sweep 45m ago is still inside the default but past this one.
+	handler := newTestHandler(t, Policy{GCInterval: 30 * time.Minute}, cache)
+
+	handler.gcAt = time.Now().Add(-10 * time.Minute) // inside the configured interval, so the run is skipped
+	handler.gcCache()
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	require.NoError(t, db.Get(cache.ID, &Cache{}))
 	require.NoError(t, db.Close())
 
-	handler.gcAt = time.Now() // within the interval, so the run is skipped
+	handler.gcAt = time.Now().Add(-45 * time.Minute) // past the configured interval, still inside the default
 	handler.gcCache()
-
 	db, err = handler.openDB()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
-	assert.NoError(t, db.Get(cache.ID, &Cache{}))
+	assert.ErrorIs(t, db.Get(cache.ID, &Cache{}), bolthold.ErrNotFound)
+}
+
+// newTestHandler starts a handler on a temporary store, seeded with entries.
+func newTestHandler(t *testing.T, policy Policy, entries ...*Cache) *Handler {
+	t.Helper()
+	handler, err := StartHandler(Options{Dir: filepath.Join(t.TempDir(), "artifactcache"), Policy: policy})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handler.Close()) })
+
+	if len(entries) == 0 {
+		return handler
+	}
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.NoError(t, insertCache(db, e))
+	}
+	require.NoError(t, db.Close())
+	return handler
+}
+
+// runGC seeds a fresh handler with entries, sweeps once, and reports the keys left.
+func runGC(t *testing.T, policy Policy, entries []*Cache) []string {
+	t.Helper()
+	handler := newTestHandler(t, policy, entries...)
+	handler.gcAt = time.Time{} // ensure gcCache will not skip
+	handler.gcCache()
+
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	var kept []string
+	for _, e := range entries {
+		if err := db.Get(e.ID, &Cache{}); err == nil {
+			kept = append(kept, e.Key)
+		}
+	}
+	return kept
 }
 
 // TestHandler_RejectsMissingBearer covers the advisory's root cause:
@@ -1198,7 +1339,7 @@ func TestHandler_RegisterJob_RefCounted(t *testing.T) {
 
 // TestHandler_GC_PerRepoDedup ensures duplicate-pruning does not evict
 // another repo's entry. Two repos reserve the same (key, version); after the
-// defaultKeepOld window, GC must keep the one from each repo.
+// inUseGrace window, GC must keep the one from each repo.
 func TestHandler_GC_PerRepoDedup(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
 	handler, err := StartHandler(Options{Dir: dir})
@@ -1215,7 +1356,7 @@ func TestHandler_GC_PerRepoDedup(t *testing.T) {
 	db, err := handler.openDB()
 	require.NoError(t, err)
 	now := time.Now().Unix()
-	stale := time.Now().Add(-defaultKeepOld - time.Minute).Unix()
+	stale := time.Now().Add(-inUseGrace - time.Minute).Unix()
 	a := &Cache{Repo: "owner/repoA", Key: key, Version: version, Complete: true, CreatedAt: stale, UsedAt: stale, Size: 1}
 	b := &Cache{Repo: "owner/repoB", Key: key, Version: version, Complete: true, CreatedAt: now, UsedAt: now, Size: 1}
 	require.NoError(t, insertCache(db, a))

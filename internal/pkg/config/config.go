@@ -82,18 +82,11 @@ type Cache struct {
 	OfflineMode        bool   `yaml:"offline_mode"`         // OfflineMode reuses a cached action without fetching from the remote; a moved tag or branch stays at the cached commit until the cache entry is removed.
 	V2                 *bool  `yaml:"v2"`                   // V2 serves the actions cache service v2 API to jobs, used by actions/cache@v4.2 and later, and edits the action bundles that would otherwise refuse it. Unset means enabled.
 
-	Retention CacheRetention `yaml:"retention"` // Retention tunes when the cache server discards entries. Ignored when ExternalServer is set, since the retention there is the cache-server's own.
-}
-
-// CacheRetention represents how long the cache server keeps entries before
-// discarding them. Each window defaults when unset, and a negative value
-// disables its sweep so those entries are kept indefinitely.
-type CacheRetention struct {
-	KeepUsed   time.Duration `yaml:"keep_used"`   // KeepUsed is the maximum age of an entry, counted from when it was created. Default 720h.
-	KeepUnused time.Duration `yaml:"keep_unused"` // KeepUnused is how long an entry survives without being read or written. Default 168h.
-	KeepTemp   time.Duration `yaml:"keep_temp"`   // KeepTemp is how long an incomplete upload survives before it is treated as broken. Default 5m.
-	KeepOld    time.Duration `yaml:"keep_old"`    // KeepOld is the grace period before an entry superseded by a newer one with the same key is removed, so a download in progress is not cut off. Default 5m.
-	GCInterval time.Duration `yaml:"gc_interval"` // GCInterval is the minimum time between two garbage collection runs. Default 1h.
+	// The four below tune when the cache server discards entries, and are ignored when ExternalServer is set, since that server applies its own.
+	Retention        time.Duration `yaml:"retention"`           // Retention removes entries nothing has read or written within this window. Default 168h, negative keeps entries regardless of age.
+	SizeLimitMB      int64         `yaml:"size_limit_mb"`       // SizeLimitMB caps one repository's completed entries, evicting least recently accessed first. Default 10240, negative removes the limit.
+	TotalSizeLimitMB int64         `yaml:"total_size_limit_mb"` // TotalSizeLimitMB caps every repository's completed entries together, as a guard on the disk the cache lives on. No limit by default.
+	GCInterval       time.Duration `yaml:"gc_interval"`         // GCInterval is the minimum time between two garbage collection runs. Default 1h.
 }
 
 // Container represents the configuration for the container.

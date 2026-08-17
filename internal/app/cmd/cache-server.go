@@ -58,7 +58,7 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 			OutboundIP:     host,
 			Port:           port,
 			InternalSecret: secret,
-			Retention:      run.CacheRetention(cfg),
+			Policy:         run.CachePolicy(cfg),
 			Logger:         log.StandardLogger().WithField("module", "cache_request"),
 		})
 		if err != nil {

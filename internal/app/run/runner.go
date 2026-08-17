@@ -89,6 +89,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	var cacheHandler *artifactcache.Handler
 	if cfg.Cache.Enabled == nil || *cfg.Cache.Enabled {
 		if cfg.Cache.ExternalServer != "" {
+			warnIgnoredCachePolicy(cfg)
 			// The v1 client appends its path to this without a separator, so the slash is required.
 			envs["ACTIONS_CACHE_URL"] = strings.TrimRight(cfg.Cache.ExternalServer, "/") + "/"
 		} else {
@@ -97,7 +98,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 				Dir:        cfg.Cache.Dir,
 				OutboundIP: cfg.Cache.Host,
 				Port:       cfg.Cache.Port,
-				Retention:  CacheRetention(cfg),
+				Policy:     CachePolicy(cfg),
 				Logger:     log.StandardLogger().WithField("module", "cache_request"),
 			})
 			if err != nil {
@@ -726,16 +727,22 @@ func (r *Runner) Declare(ctx context.Context, labels []string) (*connect.Respons
 	}))
 }
 
-// CacheRetention maps the cache retention config onto the cache server's own type.
-func CacheRetention(cfg *config.Config) artifactcache.Retention {
-	r := cfg.Cache.Retention
-	return artifactcache.Retention{
-		KeepUsed:   r.KeepUsed,
-		KeepUnused: r.KeepUnused,
-		KeepTemp:   r.KeepTemp,
-		KeepOld:    r.KeepOld,
-		GCInterval: r.GCInterval,
+// CachePolicy maps the cache config onto the cache server's own type, in bytes not MiB.
+func CachePolicy(cfg *config.Config) artifactcache.Policy {
+	return artifactcache.Policy{
+		Retention:      cfg.Cache.Retention,
+		SizeLimit:      cfg.Cache.SizeLimitMB * 1024 * 1024,
+		TotalSizeLimit: cfg.Cache.TotalSizeLimitMB * 1024 * 1024,
+		GCInterval:     cfg.Cache.GCInterval,
 	}
+}
+
+// warnIgnoredCachePolicy flags eviction settings configured on a runner that points at an external cache server.
+func warnIgnoredCachePolicy(cfg *config.Config) {
+	if cfg.Cache.Retention == 0 && cfg.Cache.SizeLimitMB == 0 && cfg.Cache.TotalSizeLimitMB == 0 && cfg.Cache.GCInterval == 0 {
+		return
+	}
+	log.Warn("cache eviction settings are ignored when cache.external_server is set; configure them on that server instead")
 }
 
 // warnIgnoredCacheSecret flags an external cache server secret configured on a runner that uses the built-in cache server.

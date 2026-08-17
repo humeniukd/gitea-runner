@@ -273,6 +273,18 @@ A password in a proxy URL is hidden in job logs. Any step can still read it, bec
 
 Each runner starts its own cache server automatically. Cache entries are local to that runner — runners do not share a cache by default.
 
+**Eviction**
+
+An entry nothing has read or written for `retention` is removed, and a repository past `size_limit_mb` loses its least recently accessed entries until it fits. Age alone never retires an entry still in use.
+
+```yaml
+cache:
+  retention: 168h        # seven days since last access
+  size_limit_mb: 10240   # 10 GiB per repository
+```
+
+A negative value lifts either limit. `total_size_limit_mb` caps every repository together to bound the disk, off by default. These apply where the cache server runs, so on a shared server they belong in *its* config, not the runners'.
+
 **Cache service v2**
 
 `actions/cache@v4.2` and later can use the *cache service v2* API. The runner serves it from the same store as v1, on by default, and it works with `external_server`. Turn it off with:

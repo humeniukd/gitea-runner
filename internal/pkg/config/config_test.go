@@ -168,28 +168,23 @@ runner:
 	assert.Equal(t, 5*time.Minute, cfg.Runner.PostTaskScriptTimeout)
 }
 
-func TestLoadDefault_LoadsCacheRetention(t *testing.T) {
+func TestLoadDefault_LoadsCacheEviction(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 cache:
-  retention:
-    keep_used: -1s
-    keep_unused: 336h
-    keep_temp: 10m
-    keep_old: 1m
-    gc_interval: 15m
+  retention: 336h
+  size_limit_mb: -1
+  total_size_limit_mb: 51200
+  gc_interval: 15m
 `), 0o600))
 
 	cfg, err := LoadDefault(path)
 	require.NoError(t, err)
-	assert.Equal(t, CacheRetention{
-		KeepUsed:   -1 * time.Second,
-		KeepUnused: 336 * time.Hour,
-		KeepTemp:   10 * time.Minute,
-		KeepOld:    time.Minute,
-		GCInterval: 15 * time.Minute,
-	}, cfg.Cache.Retention)
+	assert.Equal(t, 336*time.Hour, cfg.Cache.Retention)
+	assert.Equal(t, int64(-1), cfg.Cache.SizeLimitMB)
+	assert.Equal(t, int64(51200), cfg.Cache.TotalSizeLimitMB)
+	assert.Equal(t, 15*time.Minute, cfg.Cache.GCInterval)
 }
 
 func TestLoadDefault_LoadsJobHooks(t *testing.T) {
