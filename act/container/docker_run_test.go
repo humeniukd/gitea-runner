@@ -759,6 +759,27 @@ func TestSanitizeOptionsHostConfig(t *testing.T) {
 	assert.Empty(t, hostConfig.Sysctls)
 }
 
+// mergeOptions merges both option sources into an otherwise bare container, returning the
+// HostConfig and the log the merge wrote.
+func mergeOptions(t *testing.T, runnerOptions, workflowOptions string, privileged bool) (*container.HostConfig, *test.Hook) {
+	t.Helper()
+	logger, hook := test.NewNullLogger()
+	cr := &containerReference{input: &NewContainerInput{
+		RunnerOptions:   runnerOptions,
+		WorkflowOptions: workflowOptions,
+		NetworkMode:     "bridge",
+		UsernsMode:      "private",
+	}}
+
+	_, hostConfig, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{
+		Privileged:  privileged,
+		UsernsMode:  container.UsernsMode("private"),
+		NetworkMode: container.NetworkMode("bridge"),
+	})
+	require.NoError(t, err)
+	return hostConfig, hook
+}
+
 func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.T) {
 	// OS-independent options only: --device parsing requires a linux/windows
 	// server OS, which is not guaranteed for the test host.
@@ -767,29 +788,8 @@ func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.
 		"--security-opt apparmor=unconfined --volumes-from other " +
 		"--runtime runc --cgroup-parent /custom --sysctl net.ipv4.ip_forward=1"
 
-	merge := func(t *testing.T, runnerOptions, workflowOptions string, privileged bool) *container.HostConfig {
-		t.Helper()
-		logger, _ := test.NewNullLogger()
-		cr := &containerReference{
-			input: &NewContainerInput{
-				RunnerOptions:   runnerOptions,
-				WorkflowOptions: workflowOptions,
-				NetworkMode:     "bridge",
-				UsernsMode:      "private",
-			},
-		}
-
-		_, hostConfig, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{
-			Privileged:  privileged,
-			UsernsMode:  container.UsernsMode("private"),
-			NetworkMode: container.NetworkMode("bridge"),
-		})
-		require.NoError(t, err)
-		return hostConfig
-	}
-
 	t.Run("unprivileged strips host-escape options", func(t *testing.T) {
-		hostConfig := merge(t, "", dangerousOptions, false)
+		hostConfig, _ := mergeOptions(t, "", dangerousOptions, false)
 
 		assert.False(t, hostConfig.Privileged)
 		assert.Empty(t, string(hostConfig.PidMode))
@@ -809,7 +809,7 @@ func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.
 	// https://gitea.com/gitea/runner/issues/1142: the options the runner is configured
 	// with are the administrator's own, only the workflow's are untrusted.
 	t.Run("unprivileged keeps the runner's own options", func(t *testing.T) {
-		hostConfig := merge(t, "--security-opt seccomp=unconfined --cap-add SYS_ADMIN --sysctl net.ipv4.ip_forward=1", dangerousOptions, false)
+		hostConfig, _ := mergeOptions(t, "--security-opt seccomp=unconfined --cap-add SYS_ADMIN --sysctl net.ipv4.ip_forward=1", dangerousOptions, false)
 
 		assert.Equal(t, []string{"seccomp=unconfined"}, hostConfig.SecurityOpt)
 		assert.Equal(t, []string{"SYS_ADMIN"}, hostConfig.CapAdd)
@@ -820,7 +820,7 @@ func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.
 	})
 
 	t.Run("unprivileged without workflow options keeps them all", func(t *testing.T) {
-		hostConfig := merge(t, dangerousOptions, "", false)
+		hostConfig, _ := mergeOptions(t, dangerousOptions, "", false)
 
 		assert.Equal(t, "host", string(hostConfig.PidMode))
 		assert.Equal(t, []string{"ALL"}, hostConfig.CapAdd)
@@ -828,7 +828,7 @@ func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.
 	})
 
 	t.Run("privileged preserves options", func(t *testing.T) {
-		hostConfig := merge(t, "", dangerousOptions, true)
+		hostConfig, _ := mergeOptions(t, "", dangerousOptions, true)
 
 		assert.Equal(t, "host", string(hostConfig.PidMode))
 		assert.Equal(t, []string{"ALL"}, hostConfig.CapAdd)
@@ -945,16 +945,13 @@ func TestMergeContainerConfigsVolumesReplaceRunnerMounts(t *testing.T) {
 	assert.Empty(t, hostConf.Mounts)
 }
 
-func TestMergeContainerConfigsWarnsAboutNetworkOptionsOnlyWhenGiven(t *testing.T) {
-	warnings := func(options string) int {
-		logger, hook := test.NewNullLogger()
-		cr := &containerReference{input: &NewContainerInput{NetworkMode: "bridge", RunnerOptions: options}}
-
-		_, _, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{})
-		require.NoError(t, err)
+func TestMergeContainerConfigsWarnsOnlyAboutOptionsThatWereGiven(t *testing.T) {
+	warnings := func(runnerOptions, workflowOptions string) int {
+		_, hook := mergeOptions(t, runnerOptions, workflowOptions, false)
 		return len(hook.AllEntries())
 	}
 
-	assert.Zero(t, warnings("--volume /host/tools:/opt/hostedtoolcache"))
-	assert.Equal(t, 1, warnings("--network host"))
+	assert.Zero(t, warnings("--volume /host/tools:/opt/hostedtoolcache", ""))
+	assert.Zero(t, warnings("", "--shm-size 1g"))
+	assert.Equal(t, 1, warnings("--network host", ""))
 }

@@ -548,8 +548,7 @@ func (cr *containerReference) waitForRemoval(ctx context.Context, idOrName strin
 	}
 }
 
-// allOptions joins both option sources into the one string they are parsed from, so that a
-// flag both of them repeat accumulates and a flag both of them set once ends up the workflow's.
+// allOptions puts the runner's options first, so a flag both sources set ends up the workflow's.
 func (input *NewContainerInput) allOptions() string {
 	return strings.TrimSpace(input.RunnerOptions + " " + input.WorkflowOptions)
 }
@@ -606,7 +605,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 	// For Gitea
 	// A workflow must not reach past the container the administrator granted it, and
 	// forcing --privileged off is not enough on its own.
-	if !hostConfig.Privileged && cr.input.WorkflowOptions != "" {
+	if !hostConfig.Privileged {
 		trusted, err := parseOptionsHostConfig(cr.input.RunnerOptions)
 		if err != nil {
 			return nil, nil, err
@@ -1175,10 +1174,9 @@ func (cr *containerReference) wait() common.Executor {
 }
 
 // For Gitea
-// sanitizeOptionsHostConfig resets the fields a workflow could escape the container with
-// (host namespaces, capability expansion, security profile overrides, device and runtime
-// access) to trusted, the HostConfig the runner's own options parse to. Only call it with
-// privileged mode off, since enabling it opts into host access already.
+// sanitizeOptionsHostConfig resets the fields a workflow could escape the container with to
+// trusted, the HostConfig the runner's own options parse to. Only call it with privileged
+// mode off, since enabling it opts into host access already.
 func sanitizeOptionsHostConfig(logger logrus.FieldLogger, hostConfig, trusted *container.HostConfig) {
 	resetOption(logger, "--pid", &hostConfig.PidMode, trusted.PidMode)
 	resetOption(logger, "--ipc", &hostConfig.IpcMode, trusted.IpcMode)
@@ -1196,8 +1194,8 @@ func sanitizeOptionsHostConfig(logger logrus.FieldLogger, hostConfig, trusted *c
 	resetOption(logger, "--sysctl", &hostConfig.Sysctls, trusted.Sysctls)
 }
 
-// resetOption puts a HostConfig field back to the value the runner's own options give it.
-// Only the workflow's options can have made it differ.
+// resetOption puts a field back to what the runner's own options give it, which only the
+// workflow's options can have changed.
 func resetOption[T any](logger logrus.FieldLogger, option string, field *T, trusted T) {
 	if reflect.DeepEqual(*field, trusted) {
 		return
@@ -1207,12 +1205,9 @@ func resetOption[T any](logger logrus.FieldLogger, option string, field *T, trus
 }
 
 // parseOptionsHostConfig parses an options string on its own, to know which part of a
-// HostConfig parsed from several of them that one is responsible for.
+// HostConfig parsed from several of them that one is responsible for. An empty string goes
+// through the parse too, since only that yields empty values comparable with a real parse's.
 func parseOptionsHostConfig(options string) (*container.HostConfig, error) {
-	if options == "" {
-		return &container.HostConfig{}, nil
-	}
-
 	flags, copts, _, err := parseContainerOptions(options)
 	if err != nil {
 		return nil, err

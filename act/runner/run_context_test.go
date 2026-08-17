@@ -234,8 +234,7 @@ func (fakeContainer) Inspect(context.Context) (*container.Info, error) {
 func (fakeContainer) DumpLogs(context.Context) error { return nil }
 
 // startJobContainerInputs runs startJobContainer against fakeContainer and returns the
-// inputs it built, one per container. cfg carries what the case is about, the rest is
-// what running without a daemon needs.
+// inputs it built, one per container.
 func startJobContainerInputs(t *testing.T, workflowYAML string, cfg *Config) []*container.NewContainerInput {
 	t.Helper()
 	workflow, err := model.ReadWorkflow(strings.NewReader(workflowYAML))
@@ -310,8 +309,8 @@ jobs:
 	require.Equal(t, [2]string{"", ""}, credentials["redis:latest"])
 }
 
-// The options the runner is configured with stay apart from the workflow's, so that only
-// the workflow's can be stripped. https://gitea.com/gitea/runner/issues/1142
+// https://gitea.com/gitea/runner/issues/1142: only the workflow's options may be stripped,
+// so the two sources have to reach the container apart.
 func TestStartJobContainerKeepsRunnerOptionsApartFromWorkflowOptions(t *testing.T) {
 	inputs := startJobContainerInputs(t, `
 name: test
