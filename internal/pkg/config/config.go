@@ -109,7 +109,7 @@ const (
 	ToolCacheModeShared = "shared"
 )
 
-var toolCacheModes = []string{ToolCacheModeNone, ToolCacheModeShared}
+var ToolCacheModes = []string{ToolCacheModeNone, ToolCacheModeShared}
 
 type ContainerNetworkCreateOptions struct {
 	EnableIPv4 *bool `yaml:"enable_ipv4"` // Enable or disable IPv4 for the network (true for docker by default)
@@ -228,8 +228,8 @@ func LoadDefault(file string) (*Config, error) {
 	if cfg.Runner.ToolCacheMode == "" {
 		cfg.Runner.ToolCacheMode = ToolCacheModeNone
 	}
-	if !slices.Contains(toolCacheModes, cfg.Runner.ToolCacheMode) {
-		return nil, fmt.Errorf("invalid runner.tool_cache_mode %q: must be one of %q", cfg.Runner.ToolCacheMode, toolCacheModes)
+	if !slices.Contains(ToolCacheModes, cfg.Runner.ToolCacheMode) {
+		return nil, fmt.Errorf("invalid runner.tool_cache_mode %q: must be one of %q", cfg.Runner.ToolCacheMode, ToolCacheModes)
 	}
 	if cfg.Host.WorkdirParent == "" {
 		home, err := os.UserHomeDir()
