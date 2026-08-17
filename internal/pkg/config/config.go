@@ -82,10 +82,10 @@ type Cache struct {
 	OfflineMode        bool   `yaml:"offline_mode"`         // OfflineMode reuses a cached action without fetching from the remote; a moved tag or branch stays at the cached commit until the cache entry is removed.
 	V2                 *bool  `yaml:"v2"`                   // V2 serves the actions cache service v2 API to jobs, used by actions/cache@v4.2 and later, and edits the action bundles that would otherwise refuse it. Unset means enabled.
 
-	// The four below tune when the cache server discards entries, and are ignored when ExternalServer is set, since that server applies its own.
-	Retention        time.Duration `yaml:"retention"`           // Retention removes entries nothing has read or written within this window. Default 168h, negative keeps entries regardless of age.
-	SizeLimitMB      int64         `yaml:"size_limit_mb"`       // SizeLimitMB caps one repository's completed entries, evicting least recently accessed first. Default 10240, negative removes the limit.
-	TotalSizeLimitMB int64         `yaml:"total_size_limit_mb"` // TotalSizeLimitMB caps every repository's completed entries together, as a guard on the disk the cache lives on. No limit by default.
+	// The four below decide when the cache server discards entries, and are ignored when ExternalServer is set, since that server applies its own.
+	Retention        time.Duration `yaml:"retention"`           // Retention removes entries nothing has read or written within this window. Default 168h, negative disables.
+	SizeLimitMB      int64         `yaml:"size_limit_mb"`       // SizeLimitMB caps one repository, evicting least recently accessed first. Default 10240, negative disables.
+	TotalSizeLimitMB int64         `yaml:"total_size_limit_mb"` // TotalSizeLimitMB caps every repository together. No limit by default.
 	GCInterval       time.Duration `yaml:"gc_interval"`         // GCInterval is the minimum time between two garbage collection runs. Default 1h.
 }
 

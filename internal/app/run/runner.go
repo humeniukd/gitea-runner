@@ -735,15 +735,16 @@ func CachePolicy(cfg *config.Config) artifactcache.Policy {
 		SizeLimit:      cfg.Cache.SizeLimitMB * 1024 * 1024,
 		TotalSizeLimit: cfg.Cache.TotalSizeLimitMB * 1024 * 1024,
 		GCInterval:     cfg.Cache.GCInterval,
+		// The cache must not grow past the point where the runner stops taking work.
+		MinFreeDisk: cfg.HealthCheck.MinFreeDiskSpaceMB * 1024 * 1024,
 	}
 }
 
 // warnIgnoredCachePolicy flags eviction settings configured on a runner that points at an external cache server.
 func warnIgnoredCachePolicy(cfg *config.Config) {
-	if cfg.Cache.Retention == 0 && cfg.Cache.SizeLimitMB == 0 && cfg.Cache.TotalSizeLimitMB == 0 && cfg.Cache.GCInterval == 0 {
-		return
+	if cfg.Cache.Retention != 0 || cfg.Cache.SizeLimitMB != 0 || cfg.Cache.TotalSizeLimitMB != 0 || cfg.Cache.GCInterval != 0 {
+		log.Warn("cache eviction settings are ignored when cache.external_server is set; configure them on that server instead")
 	}
-	log.Warn("cache eviction settings are ignored when cache.external_server is set; configure them on that server instead")
 }
 
 // warnIgnoredCacheSecret flags an external cache server secret configured on a runner that uses the built-in cache server.

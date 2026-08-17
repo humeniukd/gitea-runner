@@ -159,13 +159,15 @@ cache:
   # the action's own bundle, keeping the untouched copy beside it. The same edit lets the stock
   # upload-artifact and download-artifact work here. A bundle that does not match is left alone.
   #v2: true
-  # How the cache server discards entries. Ignored when external_server is set, since that
-  # server applies its own. A negative value lifts the limit it is set on.
-  # Remove entries nothing has read or written within this window. Age alone never counts.
+  # How the cache server discards entries, ignored when external_server is set since that
+  # server applies its own. A negative value lifts the limit it is set on, and whatever they
+  # allow, the cache still sheds entries to keep free space on its volume above
+  # health_check.min_free_disk_space_mb.
+  # Remove entries nothing has read or written within this window. Only last access counts.
   #retention: 168h
   # Cap one repository, in MiB, removing its least recently accessed entries until it fits.
   #size_limit_mb: 10240
-  # Cap every repository together, in MiB, to bound the disk. No limit by default.
+  # Cap every repository together, in MiB. No limit by default.
   #total_size_limit_mb: 0
   # Minimum time between two garbage collection runs.
   #gc_interval: 1h

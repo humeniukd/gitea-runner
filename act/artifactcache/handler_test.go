@@ -831,7 +831,7 @@ func TestHandler_gcCache(t *testing.T) {
 }
 
 // TestHandler_evictPolicy covers the non-default policies; TestHandler_gcCache covers the
-// defaults across all four passes.
+// defaults across every pass.
 func TestHandler_evictPolicy(t *testing.T) {
 	now := time.Now()
 	stale := func(d time.Duration) int64 { return now.Add(-d).Unix() }
@@ -920,15 +920,8 @@ func TestHandler_evictPolicy(t *testing.T) {
 // TestHandler_evictForFreeSpace proves the volume backstop sheds only what it must, and only
 // when the disk is actually short.
 func TestHandler_evictForFreeSpace(t *testing.T) {
-	now := time.Now()
-	entries := []*Cache{
-		{Key: "oldest", Complete: true, Size: 4 * miB, UsedAt: now.Add(-3 * time.Hour).Unix()},
-		{Key: "middle", Complete: true, Size: 4 * miB, UsedAt: now.Add(-2 * time.Hour).Unix()},
-		{Key: "newest", Complete: true, Size: 4 * miB, UsedAt: now.Add(-time.Hour).Unix()},
-	}
-
-	free := func(n uint64) func(string) (uint64, error) {
-		return func(string) (uint64, error) { return n, nil }
+	free := func(n int64) func(string) (uint64, error) {
+		return func(string) (uint64, error) { return uint64(n), nil }
 	}
 
 	for _, tc := range []struct {
@@ -936,8 +929,9 @@ func TestHandler_evictForFreeSpace(t *testing.T) {
 		freeDisk func(string) (uint64, error)
 		kept     []string
 	}{
-		{"ample free space evicts nothing", free(minFreeDisk), []string{"oldest", "middle", "newest"}},
-		{"a small shortfall sheds one entry", free(minFreeDisk - 4*miB), []string{"middle", "newest"}},
+		{"ample free space evicts nothing", free(defaultMinFreeDisk), []string{"oldest", "middle", "newest"}},
+		{"a small shortfall sheds one entry", free(defaultMinFreeDisk - 4*miB), []string{"middle", "newest"}},
+		{"a shortfall the cache cannot cover sheds all of it", free(0), nil},
 		{
 			"an unreadable volume is treated as unavailable, not as full",
 			func(string) (uint64, error) { return 0, errors.New("unsupported") },
@@ -945,26 +939,21 @@ func TestHandler_evictForFreeSpace(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			seeded := make([]*Cache, len(entries))
-			for i, e := range entries {
-				cache := *e
-				seeded[i] = &cache
+			now := time.Now()
+			entries := []*Cache{
+				{Key: "oldest", Complete: true, Size: 4 * miB, UsedAt: now.Add(-3 * time.Hour).Unix()},
+				{Key: "middle", Complete: true, Size: 4 * miB, UsedAt: now.Add(-2 * time.Hour).Unix()},
+				{Key: "newest", Complete: true, Size: 4 * miB, UsedAt: now.Add(-time.Hour).Unix()},
 			}
-			handler := newTestHandler(t, Policy{}, seeded...)
+			handler := newTestHandler(t, Policy{}, entries...)
 			handler.freeDisk = tc.freeDisk
 
 			db, err := handler.openDB()
 			require.NoError(t, err)
-			defer func() { require.NoError(t, db.Close()) }()
 			handler.evictForFreeSpace(db)
+			require.NoError(t, db.Close())
 
-			var kept []string
-			for _, e := range seeded {
-				if err := db.Get(e.ID, &Cache{}); err == nil {
-					kept = append(kept, e.Key)
-				}
-			}
-			assert.ElementsMatch(t, tc.kept, kept)
+			assert.ElementsMatch(t, tc.kept, keptKeys(t, handler, entries))
 		})
 	}
 }
@@ -983,10 +972,7 @@ func TestHandler_SweepKeepsEntryWhenBlobSurvives(t *testing.T) {
 	handler.gcAt = time.Time{}
 	handler.gcCache()
 
-	db, err := handler.openDB()
-	require.NoError(t, err)
-	defer func() { require.NoError(t, db.Close()) }()
-	require.NoError(t, db.Get(cache.ID, &Cache{}), "the entry must outlive a blob that could not be removed")
+	assert.Equal(t, []string{"stuck"}, keptKeys(t, handler, []*Cache{cache}), "the entry must outlive a blob that could not be removed")
 }
 
 // TestHandler_FindProtectsFromEviction covers the window between a find handing out a signed
@@ -998,12 +984,7 @@ func TestHandler_FindProtectsFromEviction(t *testing.T) {
 	other := &Cache{Repo: testRepo, Key: "other", Version: "v", Complete: true, Size: 4 * miB, UsedAt: time.Now().Add(-2 * time.Hour).Unix()}
 	newest := &Cache{Repo: testRepo, Key: "newest", Version: "v", Complete: true, Size: 4 * miB, UsedAt: time.Now().Add(-time.Hour).Unix()}
 	handler := newTestHandler(t, Policy{SizeLimit: 10 * miB}, wanted, other, newest)
-	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
-
-	// find only reports a hit when the blob is on disk.
-	require.NoError(t, handler.storage.Write(wanted.ID, 0, strings.NewReader("a")))
-	_, err := handler.storage.Commit(wanted.ID, 1)
-	require.NoError(t, err)
+	writeBlob(t, handler, wanted.ID) // find only reports a hit when the blob is on disk
 
 	resp, err := testClient.Get(fmt.Sprintf("%s%s/cache?keys=wanted&version=v", handler.ExternalURL(), apiPath))
 	require.NoError(t, err)
@@ -1026,7 +1007,6 @@ func TestHandler_FindProtectsFromEviction(t *testing.T) {
 func TestHandler_evictOnCommit(t *testing.T) {
 	full := &Cache{Repo: testRepo, Key: "full", Version: "v", Complete: true, Size: 4 * miB, UsedAt: time.Now().Add(-time.Hour).Unix()}
 	handler := newTestHandler(t, Policy{SizeLimit: 4 * miB}, full)
-	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
 
 	// StartHandler already stamped gcAt, so the periodic sweep stays rate-limited out and
 	// only the commit path can evict.
@@ -1058,16 +1038,19 @@ func TestHandler_gcCacheInterval(t *testing.T) {
 	assert.ErrorIs(t, db.Get(cache.ID, &Cache{}), bolthold.ErrNotFound)
 }
 
-// newTestHandler starts a handler on a temporary store, seeded with entries.
+// newTestHandler starts a handler on a temporary store with testToken registered, seeded
+// with entries.
 func newTestHandler(t *testing.T, policy Policy, entries ...*Cache) *Handler {
 	t.Helper()
-	handler, err := StartHandler(Options{Dir: filepath.Join(t.TempDir(), "artifactcache"), Policy: policy})
+	handler, err := StartHandler(Options{
+		Dir:        filepath.Join(t.TempDir(), "artifactcache"),
+		OutboundIP: "127.0.0.1",
+		Policy:     policy,
+	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, handler.Close()) })
+	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
 
-	if len(entries) == 0 {
-		return handler
-	}
 	db, err := handler.openDB()
 	require.NoError(t, err)
 	for _, e := range entries {
@@ -1077,16 +1060,13 @@ func newTestHandler(t *testing.T, policy Policy, entries ...*Cache) *Handler {
 	return handler
 }
 
-// runGC seeds a fresh handler with entries, sweeps once, and reports the keys left.
-func runGC(t *testing.T, policy Policy, entries []*Cache) []string {
+// keptKeys reports which of entries are still in the store.
+func keptKeys(t *testing.T, handler *Handler, entries []*Cache) []string {
 	t.Helper()
-	handler := newTestHandler(t, policy, entries...)
-	handler.gcAt = time.Time{} // ensure gcCache will not skip
-	handler.gcCache()
-
 	db, err := handler.openDB()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, db.Close()) }()
+
 	var kept []string
 	for _, e := range entries {
 		if err := db.Get(e.ID, &Cache{}); err == nil {
@@ -1094,6 +1074,23 @@ func runGC(t *testing.T, policy Policy, entries []*Cache) []string {
 		}
 	}
 	return kept
+}
+
+// writeBlob gives an entry the on-disk bytes that find and get require.
+func writeBlob(t *testing.T, handler *Handler, id uint64) {
+	t.Helper()
+	require.NoError(t, handler.storage.Write(id, 0, strings.NewReader("a")))
+	_, err := handler.storage.Commit(id, 1)
+	require.NoError(t, err)
+}
+
+// runGC seeds a fresh handler with entries, sweeps once, and reports the keys left.
+func runGC(t *testing.T, policy Policy, entries []*Cache) []string {
+	t.Helper()
+	handler := newTestHandler(t, policy, entries...)
+	handler.gcAt = time.Time{} // ensure gcCache will not skip
+	handler.gcCache()
+	return keptKeys(t, handler, entries)
 }
 
 // TestHandler_RejectsMissingBearer covers the advisory's root cause:

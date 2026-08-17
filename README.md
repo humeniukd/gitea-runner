@@ -283,7 +283,9 @@ cache:
   size_limit_mb: 10240   # 10 GiB per repository
 ```
 
-A negative value lifts either limit. `total_size_limit_mb` caps every repository together to bound the disk, off by default. These apply where the cache server runs, so on a shared server they belong in *its* config, not the runners'.
+A negative value lifts either limit, and `total_size_limit_mb` caps every repository together, off by default. Whatever these allow, the cache still sheds entries to keep free space above `health_check.min_free_disk_space_mb`, so it can never grow past the point where the runner stops accepting work.
+
+All of them apply where the cache server runs, so on a shared server they belong in *its* config, not the runners'.
 
 **Cache service v2**
 
