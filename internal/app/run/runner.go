@@ -731,10 +731,10 @@ func (r *Runner) Declare(ctx context.Context, labels []string) (*connect.Respons
 // CachePolicy maps the cache config onto the cache server's own type, in bytes not MiB.
 func CachePolicy(cfg *config.Config) artifactcache.Policy {
 	return artifactcache.Policy{
-		Retention:      cfg.Cache.Retention,
-		SizeLimit:      cfg.Cache.SizeLimitMB * 1024 * 1024,
-		TotalSizeLimit: cfg.Cache.TotalSizeLimitMB * 1024 * 1024,
-		GCInterval:     cfg.Cache.GCInterval,
+		Retention:     cfg.Cache.Retention,
+		RepoSizeLimit: int64(cfg.Cache.RepoSizeLimit),
+		SizeLimit:     int64(cfg.Cache.SizeLimit),
+		GCInterval:    cfg.Cache.GCInterval,
 		// The cache must not grow past the point where the runner stops taking work.
 		MinFreeDisk: cfg.HealthCheck.MinFreeDiskSpaceMB * 1024 * 1024,
 	}
@@ -742,7 +742,9 @@ func CachePolicy(cfg *config.Config) artifactcache.Policy {
 
 // warnIgnoredCachePolicy flags eviction settings configured on a runner that points at an external cache server.
 func warnIgnoredCachePolicy(cfg *config.Config) {
-	if cfg.Cache.Retention != 0 || cfg.Cache.SizeLimitMB != 0 || cfg.Cache.TotalSizeLimitMB != 0 || cfg.Cache.GCInterval != 0 {
+	defaults := config.DefaultCache()
+	if cfg.Cache.Retention != defaults.Retention || cfg.Cache.RepoSizeLimit != defaults.RepoSizeLimit ||
+		cfg.Cache.SizeLimit != defaults.SizeLimit || cfg.Cache.GCInterval != defaults.GCInterval {
 		log.Warn("cache eviction settings are ignored when cache.external_server is set; configure them on that server instead")
 	}
 }

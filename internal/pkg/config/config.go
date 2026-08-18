@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/go-units"
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 	"go.yaml.in/yaml/v4"
@@ -83,10 +84,53 @@ type Cache struct {
 	V2                 *bool  `yaml:"v2"`                   // V2 serves the actions cache service v2 API to jobs, used by actions/cache@v4.2 and later, and edits the action bundles that would otherwise refuse it. Unset means enabled.
 
 	// The four below decide when the cache server discards entries, and are ignored when ExternalServer is set, since that server applies its own.
-	Retention        time.Duration `yaml:"retention"`           // Retention removes entries nothing has read or written within this window. Default 168h, negative disables.
-	SizeLimitMB      int64         `yaml:"size_limit_mb"`       // SizeLimitMB caps one repository, evicting least recently accessed first. Default 10240, negative disables.
-	TotalSizeLimitMB int64         `yaml:"total_size_limit_mb"` // TotalSizeLimitMB caps every repository together. No limit by default.
-	GCInterval       time.Duration `yaml:"gc_interval"`         // GCInterval is the minimum time between two garbage collection runs. Default 1h.
+	Retention     time.Duration `yaml:"retention"`       // Retention removes entries nothing has read or written within this window. Default 168h, 0 keeps them regardless of age.
+	RepoSizeLimit Size          `yaml:"repo_size_limit"` // RepoSizeLimit caps one repository, evicting least recently accessed first. Default 10GB, 0 is no limit.
+	SizeLimit     Size          `yaml:"size_limit"`      // SizeLimit caps the whole cache the same way. No limit by default.
+	GCInterval    time.Duration `yaml:"gc_interval"`     // GCInterval is the minimum time between two garbage collection runs. Default 1h; a cadence has no "off".
+}
+
+const (
+	DefaultCacheRetention     = 7 * 24 * time.Hour
+	DefaultCacheRepoSizeLimit = 10 * 1024 * 1024 * 1024
+	DefaultCacheSizeLimit     = 0 // the free space floor bounds the cache as a whole
+	DefaultCacheGCInterval    = time.Hour
+)
+
+// DefaultCache returns the cache eviction defaults, seeded before the file is read so a
+// written 0 can mean off.
+func DefaultCache() Cache {
+	return Cache{
+		Retention:     DefaultCacheRetention,
+		RepoSizeLimit: DefaultCacheRepoSizeLimit,
+		SizeLimit:     DefaultCacheSizeLimit,
+		GCInterval:    DefaultCacheGCInterval,
+	}
+}
+
+// Size is a byte count written the way people say it: 10GB, 512mb, 1TiB, or a plain number
+// of bytes. Units are binary and case-insensitive, so GB and GiB both mean 1024³.
+type Size int64
+
+func (s *Size) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode {
+		return fmt.Errorf("line %d: size must be a scalar such as 10GB", value.Line)
+	}
+	size, err := ParseSize(value.Value)
+	if err != nil {
+		return fmt.Errorf("line %d: %w", value.Line, err)
+	}
+	*s = size
+	return nil
+}
+
+// ParseSize reads a Size such as 10GB, 512mb, 1TiB or a plain byte count.
+func ParseSize(value string) (Size, error) {
+	bytes, err := units.RAMInBytes(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a size such as 10GB, 512MB or a plain byte count", value)
+	}
+	return Size(bytes), nil
 }
 
 // Container represents the configuration for the container.
@@ -148,7 +192,7 @@ type Config struct {
 // LoadDefault returns the default configuration.
 // If file is not empty, it will be used to load the configuration.
 func LoadDefault(file string) (*Config, error) {
-	cfg := &Config{}
+	cfg := &Config{Cache: DefaultCache()}
 	definedRunnerKeys := map[string]bool{}
 	if file != "" {
 		content, err := os.ReadFile(file)

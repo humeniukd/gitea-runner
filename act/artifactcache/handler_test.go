@@ -42,6 +42,9 @@ func (b *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 var testClient = &http.Client{Transport: &bearerTransport{token: testToken}}
 
+// testRetention mirrors config.DefaultCacheRetention; Policy has no defaults of its own.
+const testRetention = 7 * 24 * time.Hour
+
 // signArtifactURL builds a signed download URL the same way the server does;
 // tests use it to reach the get handler directly without going through a
 // find/cache-hit round trip.
@@ -723,7 +726,7 @@ func uploadCacheNormally(t *testing.T, base, key, version string, content []byte
 
 func TestHandler_gcCache(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(Options{Dir: dir})
+	handler, err := StartHandler(Options{Dir: dir, Policy: Policy{Retention: testRetention}})
 	require.NoError(t, err)
 
 	defer func() {
@@ -764,8 +767,8 @@ func TestHandler_gcCache(t *testing.T) {
 				Key:       "test_key_3",
 				Version:   "test_version",
 				Complete:  true,
-				UsedAt:    now.Add(-(defaultRetention + time.Second)).Unix(),
-				CreatedAt: now.Add(-(defaultRetention + time.Hour)).Unix(),
+				UsedAt:    now.Add(-(testRetention + time.Second)).Unix(),
+				CreatedAt: now.Add(-(testRetention + time.Hour)).Unix(),
 			},
 			Kept: false,
 		},
@@ -844,10 +847,10 @@ func TestHandler_evictPolicy(t *testing.T) {
 		kept    []string
 	}{
 		{
-			name:   "a negative retention keeps an entry nothing has touched",
-			policy: Policy{Retention: -1},
+			name:   "a zero retention keeps an entry nothing has touched",
+			policy: Policy{Retention: 0},
 			entries: []*Cache{
-				{Key: "idle", UsedAt: stale(defaultRetention + time.Hour)},
+				{Key: "idle", UsedAt: stale(testRetention + time.Hour)},
 			},
 			kept: []string{"idle"},
 		},
@@ -862,7 +865,7 @@ func TestHandler_evictPolicy(t *testing.T) {
 		},
 		{
 			name:   "evicts least recently accessed until the repository fits",
-			policy: Policy{SizeLimit: mib(10)},
+			policy: Policy{RepoSizeLimit: mib(10)},
 			entries: []*Cache{
 				{Repo: "o/a", Key: "oldest", Size: mib(4), UsedAt: stale(3 * time.Hour)},
 				{Repo: "o/a", Key: "middle", Size: mib(4), UsedAt: stale(2 * time.Hour)},
@@ -872,7 +875,7 @@ func TestHandler_evictPolicy(t *testing.T) {
 		},
 		{
 			name:   "spares entries that may still be downloading",
-			policy: Policy{SizeLimit: mib(10)},
+			policy: Policy{RepoSizeLimit: mib(10)},
 			entries: []*Cache{
 				{Repo: "o/a", Key: "fresh_1", Size: mib(6), UsedAt: stale(time.Minute)},
 				{Repo: "o/a", Key: "fresh_2", Size: mib(6), UsedAt: stale(time.Minute)},
@@ -881,7 +884,7 @@ func TestHandler_evictPolicy(t *testing.T) {
 		},
 		{
 			name:   "one repository over its limit leaves another alone",
-			policy: Policy{SizeLimit: mib(10)},
+			policy: Policy{RepoSizeLimit: mib(10)},
 			entries: []*Cache{
 				{Repo: "o/a", Key: "a_old", Size: mib(6), UsedAt: stale(3 * time.Hour)},
 				{Repo: "o/a", Key: "a_new", Size: mib(6), UsedAt: stale(time.Hour)},
@@ -891,7 +894,7 @@ func TestHandler_evictPolicy(t *testing.T) {
 		},
 		{
 			name:   "the total limit evicts across repositories once each fits its own",
-			policy: Policy{SizeLimit: mib(10), TotalSizeLimit: mib(12)},
+			policy: Policy{RepoSizeLimit: mib(10), SizeLimit: mib(12)},
 			entries: []*Cache{
 				{Repo: "o/a", Key: "a_old", Size: mib(8), UsedAt: stale(3 * time.Hour)},
 				{Repo: "o/b", Key: "b_new", Size: mib(8), UsedAt: stale(time.Hour)},
@@ -899,8 +902,8 @@ func TestHandler_evictPolicy(t *testing.T) {
 			kept: []string{"b_new"},
 		},
 		{
-			name:   "a negative limit keeps everything",
-			policy: Policy{SizeLimit: -1},
+			name:   "a zero limit keeps everything",
+			policy: Policy{RepoSizeLimit: 0},
 			entries: []*Cache{
 				{Repo: "o/a", Key: "huge_1", Size: mib(100), UsedAt: stale(3 * time.Hour)},
 				{Repo: "o/a", Key: "huge_2", Size: mib(100), UsedAt: stale(2 * time.Hour)},
@@ -961,8 +964,8 @@ func TestHandler_evictForFreeSpace(t *testing.T) {
 // TestHandler_SweepKeepsEntryWhenBlobSurvives proves a failed unlink leaves the row in place,
 // so the next sweep retries rather than orphaning bytes no row points at and no limit counts.
 func TestHandler_SweepKeepsEntryWhenBlobSurvives(t *testing.T) {
-	cache := &Cache{Key: "stuck", Complete: true, UsedAt: time.Now().Add(-(defaultRetention + time.Hour)).Unix()}
-	handler := newTestHandler(t, Policy{}, cache)
+	cache := &Cache{Key: "stuck", Complete: true, UsedAt: time.Now().Add(-(testRetention + time.Hour)).Unix()}
+	handler := newTestHandler(t, Policy{Retention: testRetention}, cache)
 
 	// A non-empty directory where the blob belongs makes os.Remove fail on every platform.
 	blob := handler.storage.filename(cache.ID)
@@ -983,7 +986,7 @@ func TestHandler_FindProtectsFromEviction(t *testing.T) {
 	wanted := &Cache{Repo: testRepo, Key: "wanted", Version: "v", Complete: true, Size: 4 * miB, UsedAt: time.Now().Add(-3 * time.Hour).Unix()}
 	other := &Cache{Repo: testRepo, Key: "other", Version: "v", Complete: true, Size: 4 * miB, UsedAt: time.Now().Add(-2 * time.Hour).Unix()}
 	newest := &Cache{Repo: testRepo, Key: "newest", Version: "v", Complete: true, Size: 4 * miB, UsedAt: time.Now().Add(-time.Hour).Unix()}
-	handler := newTestHandler(t, Policy{SizeLimit: 10 * miB}, wanted, other, newest)
+	handler := newTestHandler(t, Policy{RepoSizeLimit: 10 * miB}, wanted, other, newest)
 	writeBlob(t, handler, wanted.ID) // find only reports a hit when the blob is on disk
 
 	resp, err := testClient.Get(fmt.Sprintf("%s%s/cache?keys=wanted&version=v", handler.ExternalURL(), apiPath))
@@ -1006,7 +1009,7 @@ func TestHandler_FindProtectsFromEviction(t *testing.T) {
 // once, rather than waiting out the collection interval.
 func TestHandler_evictOnCommit(t *testing.T) {
 	full := &Cache{Repo: testRepo, Key: "full", Version: "v", Complete: true, Size: 4 * miB, UsedAt: time.Now().Add(-time.Hour).Unix()}
-	handler := newTestHandler(t, Policy{SizeLimit: 4 * miB}, full)
+	handler := newTestHandler(t, Policy{RepoSizeLimit: 4 * miB}, full)
 
 	// StartHandler already stamped gcAt, so the periodic sweep stays rate-limited out and
 	// only the commit path can evict.

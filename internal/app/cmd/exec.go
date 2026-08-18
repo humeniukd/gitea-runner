@@ -22,6 +22,7 @@ import (
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/runner"
 	"gitea.com/gitea/runner/internal/app/run"
+	"gitea.com/gitea/runner/internal/pkg/config"
 
 	"gitea.dev/actionslib/pkg/model"
 	"github.com/joho/godotenv"
@@ -375,6 +376,7 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 
 		// init a cache server
 		handler, err := artifactcache.StartHandler(artifactcache.Options{
+			Policy: run.CachePolicy(&config.Config{Cache: config.DefaultCache()}),
 			Logger: log.StandardLogger().WithField("module", "cache_request"),
 		})
 		if err != nil {

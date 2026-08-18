@@ -275,15 +275,16 @@ Each runner starts its own cache server automatically. Cache entries are local t
 
 **Eviction**
 
-An entry nothing has read or written for `retention` is removed, and a repository past `size_limit_mb` loses its least recently accessed entries until it fits. Age alone never retires an entry still in use.
+An entry nothing has read or written for `retention` is removed, and a repository past `repo_size_limit` loses its least recently accessed entries until it fits. Age alone never retires an entry still in use.
 
 ```yaml
 cache:
-  retention: 168h        # seven days since last access
-  size_limit_mb: 10240   # 10 GiB per repository
+  retention: 168h         # seven days since last access
+  repo_size_limit: 10GB   # per repository
+  gc_interval: 1h         # how often the sweeps run
 ```
 
-A negative value lifts either limit, and `total_size_limit_mb` caps every repository together, off by default. Whatever these allow, the cache still sheds entries to keep free space above `health_check.min_free_disk_space_mb`, so it can never grow past the point where the runner stops accepting work.
+Sizes accept `10GB`, `512mb`, `1TiB` or a plain byte count, and are binary either way. Leave a setting out for its default or write `0` to turn it off, and `size_limit` caps the whole cache the same way, off by default. Whatever these allow, the cache still sheds entries to keep free space above `health_check.min_free_disk_space_mb`, so it can never grow past the point where the runner stops accepting work.
 
 All of them apply where the cache server runs, so on a shared server they belong in *its* config, not the runners'.
 

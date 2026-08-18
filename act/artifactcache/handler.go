@@ -115,7 +115,7 @@ type Handler struct {
 
 // Options configures a cache server started by StartHandler. The zero value is
 // usable: an empty Dir falls back to $HOME/.cache/actcache, an empty OutboundIP
-// is detected, port 0 picks a free port, and Policy takes its defaults.
+// is detected, port 0 picks a free port, and a zero Policy keeps only the free space floor.
 type Options struct {
 	Dir        string
 	OutboundIP string
@@ -564,8 +564,8 @@ func (h *Handler) commitCache(cache *Cache) error {
 	if err := db.Update(cache.ID, cache); err != nil {
 		return err
 	}
-	// A commit is the only thing that grows the store, so it is the only thing that can push
-	// the volume under the floor. Both are bounded by the entries actually over the limit.
+	// A commit is the only thing that grows the store, so the only thing that can push the
+	// volume under the floor.
 	h.evictRepo(db, cache.Repo)
 	h.evictForFreeSpace(db)
 	return nil
@@ -858,8 +858,6 @@ func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
 const (
 	miB = 1024 * 1024
 
-	defaultRetention  = 7 * 24 * time.Hour
-	defaultSizeLimit  = 10 * 1024 * miB
 	defaultGCInterval = time.Hour
 
 	// inUseGrace spares an entry read or written moments ago, so no sweep cuts off a
@@ -876,21 +874,20 @@ const (
 )
 
 // Policy bounds what the cache server keeps: a retention window counted from last access,
-// and a per-repository size limit that evicts least recently accessed first. A zero field
-// takes the default, except TotalSizeLimit, which is off unless set.
+// and size limits that evict least recently accessed first. A zero limit is no limit.
 type Policy struct {
-	Retention      time.Duration // Retention removes entries nothing has read or written within this window. Negative keeps them regardless of age.
-	SizeLimit      int64         // SizeLimit caps one repository's completed entries in bytes, evicting least recently accessed first. Negative removes the limit.
-	TotalSizeLimit int64         // TotalSizeLimit caps every repository's completed entries together, in bytes. Non-positive removes the limit.
-	GCInterval     time.Duration // GCInterval is the minimum time between two garbage collection runs.
-	MinFreeDisk    int64         // MinFreeDisk is volume headroom the cache will not eat into. Tracks the runner's health-check floor rather than taking a key of its own.
+	Retention     time.Duration // Retention removes entries nothing has read or written within this window. Zero keeps them regardless of age.
+	RepoSizeLimit int64         // RepoSizeLimit caps one repository's completed entries in bytes, evicting least recently accessed first. Zero is no limit.
+	SizeLimit     int64         // SizeLimit caps every repository's completed entries together, in bytes. Zero is no limit.
+	GCInterval    time.Duration // GCInterval is the minimum time between two garbage collection runs.
+	MinFreeDisk   int64         // MinFreeDisk is volume headroom the cache will not eat into. Tracks the runner's health-check floor rather than taking a key of its own.
 }
 
 func (p Policy) withDefaults() Policy {
-	p.Retention = cmp.Or(p.Retention, defaultRetention)
-	p.SizeLimit = cmp.Or(p.SizeLimit, defaultSizeLimit)
+	// Only what an operator cannot sensibly turn off defaults here; config.LoadDefault seeds
+	// the limits, so a written 0 means off.
 	p.MinFreeDisk = cmp.Or(p.MinFreeDisk, defaultMinFreeDisk)
-	if p.GCInterval <= 0 { // no sensible meaning for "never collect"; the policies above are what get disabled
+	if p.GCInterval <= 0 {
 		p.GCInterval = defaultGCInterval
 	}
 	return p
@@ -994,27 +991,27 @@ func (h *Handler) evictSuperseded(db *bolthold.Store) {
 // evictOversized applies the per-repository limit, then the whole-store one. Only completed
 // entries count, since only those carry a size measured at commit rather than claimed.
 func (h *Handler) evictOversized(db *bolthold.Store) {
-	if h.policy.SizeLimit > 0 {
+	if h.policy.RepoSizeLimit > 0 {
 		byRepo := make(map[string][]*Cache)
 		for _, cache := range h.completedByUse(db) {
 			byRepo[cache.Repo] = append(byRepo[cache.Repo], cache)
 		}
 		for repo, caches := range byRepo {
-			h.evictTo(db, caches, h.policy.SizeLimit, "repository "+repo)
+			h.evictTo(db, caches, h.policy.RepoSizeLimit, "repository "+repo)
 		}
 	}
 	// Re-queried because the pass above may have deleted rows the first result still holds.
-	if h.policy.TotalSizeLimit > 0 {
-		h.evictTo(db, h.completedByUse(db), h.policy.TotalSizeLimit, "the cache")
+	if h.policy.SizeLimit > 0 {
+		h.evictTo(db, h.completedByUse(db), h.policy.SizeLimit, "the cache")
 	}
 }
 
 // evictRepo reclaims space when a commit pushes a repo over, rather than at the next sweep.
 func (h *Handler) evictRepo(db *bolthold.Store, repo string) {
-	if h.policy.SizeLimit <= 0 {
+	if h.policy.RepoSizeLimit <= 0 {
 		return
 	}
-	h.evictTo(db, h.cachesByUse(db, bolthold.Where("Repo").Eq(repo).And("Complete").Eq(true).Index("Repo")), h.policy.SizeLimit, "repository "+repo)
+	h.evictTo(db, h.cachesByUse(db, bolthold.Where("Repo").Eq(repo).And("Complete").Eq(true).Index("Repo")), h.policy.RepoSizeLimit, "repository "+repo)
 }
 
 // evictTo deletes until caches fit limit. caches must be ordered by UsedAt ascending.
