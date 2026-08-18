@@ -160,14 +160,14 @@ An edit keeps the comments and the key order of the file. Indentation becomes tw
 
 #### Tool cache
 
-`setup-go`, `setup-node`, `setup-python` and friends install into `RUNNER_TOOL_CACHE`, which is `/opt/hostedtoolcache` inside a job. `runner.tool_cache_mode` decides what backs it:
+Setup actions install tools into `RUNNER_TOOL_CACHE`, which is `/opt/hostedtoolcache` inside a job. `runner.tool_cache_mode` selects what backs it:
 
-| Mode | What a job gets | Trade-off |
+| Mode | Tool cache | Trade-off |
 | --- | --- | --- |
-| `none` (default) | Its own, whatever the job image ships there | A version the image lacks is downloaded again in every job |
-| `shared` | One tool cache every job of the runner reuses | Two jobs writing the same tool version at once corrupt it, so use it only with `runner.capacity: 1` |
+| `none` (default) | Per job, provided by the job image | A version the image lacks is downloaded in every job |
+| `shared` | One volume reused by every job | Two jobs writing the same tool version at once corrupt it, so use it only with `runner.capacity: 1` |
 
-Under `none` the tool cache is only as good as the image, since nothing is mounted over that path. Use an image carrying the tools your workflows ask for, or install them into `/opt/hostedtoolcache/<tool>/<version>/<arch>` with an empty `<arch>.complete` file beside the directory, the layout the actions look for:
+With `none`, tools must come from the job image. Install them into `/opt/hostedtoolcache/<tool>/<version>/<arch>`, with an empty `<arch>.complete` file next to the directory:
 
 ```dockerfile
 RUN mkdir -p /opt/hostedtoolcache/go/1.26.6 && \
@@ -176,9 +176,9 @@ RUN mkdir -p /opt/hostedtoolcache/go/1.26.6 && \
   touch /opt/hostedtoolcache/go/1.26.6/x64.complete
 ```
 
-Pin the minor in a workflow, `go-version: "1.26"`, and the action picks the newest matching version in the cache, so a patch bump in the image keeps hitting it.
+A workflow requesting a minor version, `go-version: "1.26"`, resolves to the newest matching version in the cache, so a patch update in the image still hits it.
 
-`gitea-runner exec` reads no config file and takes `--tool-cache-mode` instead, also defaulting to `none`.
+`gitea-runner exec` reads no config file and takes `--tool-cache-mode` instead, defaulting to `none`.
 
 #### Environment variables
 
