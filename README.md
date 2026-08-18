@@ -180,6 +180,8 @@ RUN GO=$(curl -fsSL 'https://go.dev/dl/?mode=json' | grep -oP '"version": "\Kgo1
 
 A workflow requesting a minor version, `go-version: "1.26"`, resolves to the newest matching version in the cache, so a patch update in the image still hits it.
 
+Of the [runner images](https://gitea.com/gitea/runner-images), only the `-full` flavour ships tools in this layout, and only on amd64, where it carries the same set as GitHub's runners. The default and slim images leave the tool cache empty.
+
 `gitea-runner exec` reads no config file and takes `--tool-cache-mode` instead, defaulting to `none`.
 
 #### Environment variables
