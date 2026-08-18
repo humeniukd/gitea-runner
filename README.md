@@ -158,6 +158,28 @@ An edit keeps the comments and the key order of the file. Indentation becomes tw
 
 `config get`, `set`, `add` and `remove` use `config.yaml` (or `config.yml`) from the working directory, then from the directory of the binary, and print their choice to stderr. `config init` writes `config.yaml` in the working directory, and refuses to overwrite an existing config without `--force`. Pass `-c` for another path.
 
+#### Tool cache
+
+`setup-go`, `setup-node`, `setup-python` and friends install into `RUNNER_TOOL_CACHE`, which is `/opt/hostedtoolcache` inside a job. `runner.tool_cache_mode` decides what backs it:
+
+| Mode | What a job gets | Trade-off |
+| --- | --- | --- |
+| `none` (default) | Its own, whatever the job image ships there | A version the image lacks is downloaded again in every job |
+| `shared` | One tool cache every job of the runner reuses | Two jobs writing the same tool version at once corrupt it, so use it only with `runner.capacity: 1` |
+
+Under `none` the tool cache is only as good as the image, since nothing is mounted over that path. Use an image carrying the tools your workflows ask for, or install them into `/opt/hostedtoolcache/<tool>/<version>/<arch>` with an empty `<arch>.complete` file beside the directory, the layout the actions look for:
+
+```dockerfile
+RUN mkdir -p /opt/hostedtoolcache/go/1.26.6 && \
+  curl -fsSL https://dl.google.com/go/go1.26.6.linux-amd64.tar.gz | tar -xz -C /tmp && \
+  mv /tmp/go /opt/hostedtoolcache/go/1.26.6/x64 && \
+  touch /opt/hostedtoolcache/go/1.26.6/x64.complete
+```
+
+Pin the minor in a workflow, `go-version: "1.26"`, and the action picks the newest matching version in the cache, so a patch bump in the image keeps hitting it.
+
+`gitea-runner exec` reads no config file and takes `--tool-cache-mode` instead, also defaulting to `none`.
+
 #### Environment variables
 
 Earlier releases let a few environment variables (`GITEA_DEBUG`, `GITEA_TRACE`, `GITEA_RUNNER_CAPACITY`, `GITEA_RUNNER_FILE`, `GITEA_RUNNER_ENVIRON`, `GITEA_RUNNER_ENV_FILE`) override parts of the config. They are gone, use the YAML file for all settings. The Docker images still read their own variables, such as `RUNNER_STATE_FILE`, see [scripts/run.sh](scripts/run.sh) and the container documentation below.
