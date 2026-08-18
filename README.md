@@ -170,10 +170,12 @@ Setup actions like `setup-go` install tools into `RUNNER_TOOL_CACHE`, which is `
 With `none`, tools must come from the job image. Install them into `/opt/hostedtoolcache/<tool>/<version>/<arch>`, with an empty `<arch>.complete` file next to the directory:
 
 ```dockerfile
-RUN mkdir -p /opt/hostedtoolcache/go/1.26.6 && \
-  curl -fsSL https://dl.google.com/go/go1.26.6.linux-amd64.tar.gz | tar -xz -C /tmp && \
-  mv /tmp/go /opt/hostedtoolcache/go/1.26.6/x64 && \
-  touch /opt/hostedtoolcache/go/1.26.6/x64.complete
+RUN GO=$(curl -fsSL 'https://go.dev/dl/?mode=json' | grep -oP '"version": "\Kgo1\.26\.[0-9]*' | head -1); \
+  DIR="/opt/hostedtoolcache/go/${GO#go}/x64" && \
+  mkdir -p "$(dirname "$DIR")" && \
+  curl -fsSL "https://dl.google.com/go/${GO}.linux-amd64.tar.gz" | tar -xz -C /tmp && \
+  mv /tmp/go "$DIR" && \
+  touch "${DIR}.complete"
 ```
 
 A workflow requesting a minor version, `go-version: "1.26"`, resolves to the newest matching version in the cache, so a patch update in the image still hits it.
