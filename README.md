@@ -160,7 +160,7 @@ An edit keeps the comments and the key order of the file. Indentation becomes tw
 
 #### Tool cache
 
-Setup actions install tools into `RUNNER_TOOL_CACHE`, which is `/opt/hostedtoolcache` inside a job. `runner.tool_cache_mode` selects what backs it:
+Setup actions like `setup-go` install tools into `RUNNER_TOOL_CACHE`, which is `/opt/hostedtoolcache` inside a job. `runner.tool_cache_mode` selects what backs it:
 
 | Mode | Tool cache | Trade-off |
 | --- | --- | --- |
