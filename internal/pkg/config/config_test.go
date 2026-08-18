@@ -189,7 +189,7 @@ func TestLoadDefault_LoadsCacheEviction(t *testing.T) {
 		cfg, err := LoadDefault(write(t, "cache:\n  repo_size_limit: 0\n"))
 		require.NoError(t, err)
 		assert.Zero(t, cfg.Cache.RepoSizeLimit)
-		assert.Equal(t, DefaultCacheRetention, cfg.Cache.Retention, "an absent key still defaults")
+		assert.Equal(t, DefaultCache().Retention, cfg.Cache.Retention, "an absent key still defaults")
 	})
 
 	t.Run("a bad size names the offending value", func(t *testing.T) {

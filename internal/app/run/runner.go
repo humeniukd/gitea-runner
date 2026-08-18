@@ -728,6 +728,15 @@ func (r *Runner) Declare(ctx context.Context, labels []string) (*connect.Respons
 	}))
 }
 
+// minFreeDisk keeps the cache from growing past the point where the runner stops taking
+// work, but only when health checks are on, since the key is documented as opt-in.
+func minFreeDisk(cfg *config.Config) int64 {
+	if !cfg.HealthCheck.Enabled {
+		return 0
+	}
+	return cfg.HealthCheck.MinFreeDiskSpaceMB * 1024 * 1024
+}
+
 // CachePolicy maps the cache config onto the cache server's own type, in bytes not MiB.
 func CachePolicy(cfg *config.Config) artifactcache.Policy {
 	return artifactcache.Policy{
@@ -735,8 +744,7 @@ func CachePolicy(cfg *config.Config) artifactcache.Policy {
 		RepoSizeLimit: int64(cfg.Cache.RepoSizeLimit),
 		SizeLimit:     int64(cfg.Cache.SizeLimit),
 		GCInterval:    cfg.Cache.GCInterval,
-		// The cache must not grow past the point where the runner stops taking work.
-		MinFreeDisk: cfg.HealthCheck.MinFreeDiskSpaceMB * 1024 * 1024,
+		MinFreeDisk:   minFreeDisk(cfg),
 	}
 }
 

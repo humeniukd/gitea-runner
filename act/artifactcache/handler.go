@@ -113,9 +113,7 @@ type Handler struct {
 	freeDisk func(string) (uint64, error)
 }
 
-// Options configures a cache server started by StartHandler. The zero value is
-// usable: an empty Dir falls back to $HOME/.cache/actcache, an empty OutboundIP
-// is detected, port 0 picks a free port, and a zero Policy keeps only the free space floor.
+// Options configures a cache server started by StartHandler; the zero value is usable.
 type Options struct {
 	Dir        string
 	OutboundIP string
@@ -567,6 +565,7 @@ func (h *Handler) commitCache(cache *Cache) error {
 	// A commit is the only thing that grows the store, so the only thing that can push the
 	// volume under the floor.
 	h.evictRepo(db, cache.Repo)
+	h.evictTotal(db)
 	h.evictForFreeSpace(db)
 	return nil
 }
@@ -860,14 +859,13 @@ const (
 
 	defaultGCInterval = time.Hour
 
-	// inUseGrace spares an entry read or written moments ago, so no sweep cuts off a
-	// download already in progress. It matches artifactURLTTL so an entry outlives every
-	// signed URL still usable for it.
+	// inUseGrace matches artifactURLTTL so an entry outlives every signed URL still usable
+	// for it, and no sweep cuts off a download in progress.
 	inUseGrace = artifactURLTTL
 
-	// uploadStallTimeout is how long a reservation may sit without receiving a chunk
-	// before it is taken for abandoned. Widening it also widens the window in which
-	// findExactCache can hand a stale reservation to a finalize.
+	// uploadStallTimeout is how long a reservation may sit without a chunk before it counts
+	// as abandoned. Widening it also widens the window for findExactCache to hand a finalize
+	// a stale reservation.
 	uploadStallTimeout = 5 * time.Minute
 
 	defaultMinFreeDisk = 1024 * miB
@@ -877,16 +875,17 @@ const (
 // and size limits that evict least recently accessed first. A zero limit is no limit.
 type Policy struct {
 	Retention     time.Duration // Retention removes entries nothing has read or written within this window. Zero keeps them regardless of age.
-	RepoSizeLimit int64         // RepoSizeLimit caps one repository's completed entries in bytes, evicting least recently accessed first. Zero is no limit.
-	SizeLimit     int64         // SizeLimit caps every repository's completed entries together, in bytes. Zero is no limit.
+	RepoSizeLimit int64         // RepoSizeLimit caps one repository's completed entries in bytes, evicting least recently accessed first.
+	SizeLimit     int64         // SizeLimit caps every repository's completed entries together, in bytes.
 	GCInterval    time.Duration // GCInterval is the minimum time between two garbage collection runs.
 	MinFreeDisk   int64         // MinFreeDisk is volume headroom the cache will not eat into. Tracks the runner's health-check floor rather than taking a key of its own.
 }
 
 func (p Policy) withDefaults() Policy {
-	// Only what an operator cannot sensibly turn off defaults here; config.LoadDefault seeds
-	// the limits, so a written 0 means off.
-	p.MinFreeDisk = cmp.Or(p.MinFreeDisk, defaultMinFreeDisk)
+	// The limits default in config.LoadDefault, so a written 0 means off.
+	if p.MinFreeDisk <= 0 {
+		p.MinFreeDisk = defaultMinFreeDisk
+	}
 	if p.GCInterval <= 0 {
 		p.GCInterval = defaultGCInterval
 	}
@@ -922,9 +921,8 @@ func (h *Handler) gcCache() {
 	h.evictForFreeSpace(db)
 }
 
-// evictForFreeSpace is the backstop the size limits cannot be: they bound what the database
-// says the cache holds, where this bounds what the volume actually has left, so it also
-// covers bytes the cache never accounted for.
+// evictForFreeSpace bounds the volume itself, so it also covers bytes the cache never
+// accounted for.
 func (h *Handler) evictForFreeSpace(db *bolthold.Store) {
 	free, err := h.freeDisk(h.dir)
 	if err != nil {
@@ -936,14 +934,12 @@ func (h *Handler) evictForFreeSpace(db *bolthold.Store) {
 	}
 
 	caches := h.completedByUse(db)
-	target := totalSize(caches) - (h.policy.MinFreeDisk - int64(free))
-	if target <= 0 {
-		// Shedding everything still will not clear the floor, so something other than the
-		// cache is filling the volume. Say so, or this reads as the backstop working.
-		h.logger.Warnf("cache volume is %d MiB below the free space floor with only %d MiB of cache on it; something else is filling it",
-			(h.policy.MinFreeDisk-int64(free))/miB, totalSize(caches)/miB)
+	total, shortfall := totalSize(caches), h.policy.MinFreeDisk-int64(free)
+	if total <= shortfall {
+		// Say so, or shedding everything and still being short reads as the backstop working.
+		h.logger.Warnf("cache volume is %d MiB short of the free space floor with only %d MiB of cache on it; something else is filling it", shortfall/miB, total/miB)
 	}
-	h.evictTo(db, caches, target, "the cache volume")
+	h.evictTo(db, caches, total-shortfall, "the cache volume")
 }
 
 // evictIncomplete removes uploads that stopped part way, which are most likely broken.
@@ -958,13 +954,13 @@ func (h *Handler) evictExpired(db *bolthold.Store) {
 	if h.policy.Retention <= 0 {
 		return
 	}
-	h.sweep(db, bolthold.Where("UsedAt").Lt(time.Now().Add(-h.policy.Retention).Unix()).Index("UsedAt"))
+	// Never below inUseGrace, or a short retention would outrun a signed URL already issued.
+	window := max(h.policy.Retention, inUseGrace)
+	h.sweep(db, bolthold.Where("UsedAt").Lt(time.Now().Add(-window).Unix()).Index("UsedAt"))
 }
 
-// evictSuperseded removes entries that a newer one with the same key and version has
-// replaced. Aggregation must include Repo so two repos that happen to share a
-// (key, version) do not evict each other — otherwise per-repo scoping holds for reads but
-// one repo can age another out.
+// evictSuperseded removes entries a newer one with the same key and version replaced. The
+// aggregation includes Repo so two repos sharing a (key, version) do not evict each other.
 func (h *Handler) evictSuperseded(db *bolthold.Store) {
 	results, err := db.FindAggregate(&Cache{}, bolthold.Where("Complete").Eq(true).Index("Complete"), "Repo", "Key", "Version")
 	if err != nil {
@@ -1000,10 +996,16 @@ func (h *Handler) evictOversized(db *bolthold.Store) {
 			h.evictTo(db, caches, h.policy.RepoSizeLimit, "repository "+repo)
 		}
 	}
-	// Re-queried because the pass above may have deleted rows the first result still holds.
-	if h.policy.SizeLimit > 0 {
-		h.evictTo(db, h.completedByUse(db), h.policy.SizeLimit, "the cache")
+	h.evictTotal(db)
+}
+
+// evictTotal caps the store as a whole. It re-queries because the per-repo pass may have
+// deleted rows an earlier result still holds.
+func (h *Handler) evictTotal(db *bolthold.Store) {
+	if h.policy.SizeLimit <= 0 {
+		return
 	}
+	h.evictTo(db, h.completedByUse(db), h.policy.SizeLimit, "the cache")
 }
 
 // evictRepo reclaims space when a commit pushes a repo over, rather than at the next sweep.
@@ -1016,6 +1018,21 @@ func (h *Handler) evictRepo(db *bolthold.Store, repo string) {
 
 // evictTo deletes until caches fit limit. caches must be ordered by UsedAt ascending.
 func (h *Handler) evictTo(db *bolthold.Store, caches []*Cache, limit int64, scope string) {
+	// An entry bigger than the limit never fits, so it goes on its own account instead of
+	// dragging every neighbour out first and then following them next sweep.
+	fits := caches[:0]
+	for _, cache := range caches {
+		if cache.Size <= limit {
+			fits = append(fits, cache)
+			continue
+		}
+		if !inUse(cache) {
+			h.logger.Warnf("cache %q is %d MiB on its own, over the limit for %s; dropping it", cache.Key, cache.Size/miB, scope)
+			h.deleteCache(db, cache)
+		}
+	}
+	caches = fits
+
 	total := totalSize(caches)
 	var freed int64
 	for _, cache := range caches {
@@ -1085,8 +1102,7 @@ func totalSize(caches []*Cache) int64 {
 }
 
 // deleteCache drops an entry and its bytes, reporting whether it went fully. The blob goes
-// first: keeping the row when it survives leaves something for the next sweep to retry,
-// where dropping the row would orphan bytes nothing can find again.
+// first, so a failed unlink leaves the row for the next sweep instead of orphaning bytes.
 func (h *Handler) deleteCache(db *bolthold.Store, cache *Cache) bool {
 	if err := h.storage.Remove(cache.ID); err != nil {
 		h.logger.Warnf("remove cache blob: %v", err)

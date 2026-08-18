@@ -541,7 +541,7 @@ func scalarNode(typ reflect.Type, value string) (*yaml.Node, error) {
 	}
 
 	if typ == sizeType {
-		if _, err := ParseSize(value); err != nil {
+		if _, err := parseSize(value); err != nil {
 			return nil, err
 		}
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}, nil

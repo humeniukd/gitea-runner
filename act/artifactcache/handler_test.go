@@ -855,15 +855,6 @@ func TestHandler_evictPolicy(t *testing.T) {
 			kept: []string{"idle"},
 		},
 		{
-			name:   "a retention shorter than the idle time takes what the default would keep",
-			policy: Policy{Retention: time.Minute},
-			entries: []*Cache{
-				{Key: "idle", UsedAt: stale(time.Hour)},
-				{Key: "just_read", UsedAt: stale(time.Second)},
-			},
-			kept: []string{"just_read"},
-		},
-		{
 			name:   "evicts least recently accessed until the repository fits",
 			policy: Policy{RepoSizeLimit: mib(10)},
 			entries: []*Cache{
@@ -902,6 +893,26 @@ func TestHandler_evictPolicy(t *testing.T) {
 			kept: []string{"b_new"},
 		},
 		{
+			// Retention below inUseGrace would otherwise drop an entry whose signed URL a job
+			// is still holding.
+			name:   "a retention shorter than the grace still spares a just-served entry",
+			policy: Policy{Retention: time.Minute},
+			entries: []*Cache{
+				{Key: "just_served", UsedAt: stale(2 * time.Minute)},
+				{Key: "idle", UsedAt: stale(time.Hour)},
+			},
+			kept: []string{"just_served"},
+		},
+		{
+			name:   "an entry over the limit goes without emptying the repository",
+			policy: Policy{RepoSizeLimit: mib(10)},
+			entries: []*Cache{
+				{Repo: "o/a", Key: "keeps", Size: mib(4), UsedAt: stale(3 * time.Hour)},
+				{Repo: "o/a", Key: "huge", Size: mib(20), UsedAt: stale(2 * time.Hour)},
+			},
+			kept: []string{"keeps"},
+		},
+		{
 			name:   "a zero limit keeps everything",
 			policy: Policy{RepoSizeLimit: 0},
 			entries: []*Cache{
@@ -915,7 +926,10 @@ func TestHandler_evictPolicy(t *testing.T) {
 			for _, e := range tc.entries {
 				e.Complete = true // only completed entries carry a measured size, so only they count
 			}
-			assert.ElementsMatch(t, tc.kept, runGC(t, tc.policy, tc.entries))
+			handler := newTestHandler(t, tc.policy, tc.entries...)
+			handler.gcAt = time.Time{} // ensure gcCache will not skip
+			handler.gcCache()
+			assert.ElementsMatch(t, tc.kept, keptKeys(t, handler, tc.entries))
 		})
 	}
 }
@@ -1015,10 +1029,7 @@ func TestHandler_evictOnCommit(t *testing.T) {
 	// only the commit path can evict.
 	uploadCacheNormally(t, handler.ExternalURL()+apiPath, "new", "v", []byte("some content"))
 
-	db, err := handler.openDB()
-	require.NoError(t, err)
-	defer func() { require.NoError(t, db.Close()) }()
-	assert.ErrorIs(t, db.Get(full.ID, &Cache{}), bolthold.ErrNotFound)
+	assert.Empty(t, keptKeys(t, handler, []*Cache{full}))
 }
 
 func TestHandler_gcCacheInterval(t *testing.T) {
@@ -1026,23 +1037,12 @@ func TestHandler_gcCacheInterval(t *testing.T) {
 	// Half the default, so a sweep 45m ago is still inside the default but past this one.
 	handler := newTestHandler(t, Policy{GCInterval: 30 * time.Minute}, cache)
 
-	handler.gcAt = time.Now().Add(-10 * time.Minute) // inside the configured interval, so the run is skipped
-	handler.gcCache()
-	db, err := handler.openDB()
-	require.NoError(t, err)
-	require.NoError(t, db.Get(cache.ID, &Cache{}))
-	require.NoError(t, db.Close())
-
 	handler.gcAt = time.Now().Add(-45 * time.Minute) // past the configured interval, still inside the default
 	handler.gcCache()
-	db, err = handler.openDB()
-	require.NoError(t, err)
-	defer func() { require.NoError(t, db.Close()) }()
-	assert.ErrorIs(t, db.Get(cache.ID, &Cache{}), bolthold.ErrNotFound)
+	assert.Empty(t, keptKeys(t, handler, []*Cache{cache}))
 }
 
-// newTestHandler starts a handler on a temporary store with testToken registered, seeded
-// with entries.
+// newTestHandler starts a handler with testToken registered, seeded with entries.
 func newTestHandler(t *testing.T, policy Policy, entries ...*Cache) *Handler {
 	t.Helper()
 	handler, err := StartHandler(Options{
@@ -1085,15 +1085,6 @@ func writeBlob(t *testing.T, handler *Handler, id uint64) {
 	require.NoError(t, handler.storage.Write(id, 0, strings.NewReader("a")))
 	_, err := handler.storage.Commit(id, 1)
 	require.NoError(t, err)
-}
-
-// runGC seeds a fresh handler with entries, sweeps once, and reports the keys left.
-func runGC(t *testing.T, policy Policy, entries []*Cache) []string {
-	t.Helper()
-	handler := newTestHandler(t, policy, entries...)
-	handler.gcAt = time.Time{} // ensure gcCache will not skip
-	handler.gcCache()
-	return keptKeys(t, handler, entries)
 }
 
 // TestHandler_RejectsMissingBearer covers the advisory's root cause:

@@ -90,21 +90,13 @@ type Cache struct {
 	GCInterval    time.Duration `yaml:"gc_interval"`     // GCInterval is the minimum time between two garbage collection runs. Default 1h; a cadence has no "off".
 }
 
-const (
-	DefaultCacheRetention     = 7 * 24 * time.Hour
-	DefaultCacheRepoSizeLimit = 10 * 1024 * 1024 * 1024
-	DefaultCacheSizeLimit     = 0 // the free space floor bounds the cache as a whole
-	DefaultCacheGCInterval    = time.Hour
-)
-
 // DefaultCache returns the cache eviction defaults, seeded before the file is read so a
-// written 0 can mean off.
+// written 0 can mean off. SizeLimit stays zero: the free space floor bounds the whole cache.
 func DefaultCache() Cache {
 	return Cache{
-		Retention:     DefaultCacheRetention,
-		RepoSizeLimit: DefaultCacheRepoSizeLimit,
-		SizeLimit:     DefaultCacheSizeLimit,
-		GCInterval:    DefaultCacheGCInterval,
+		Retention:     7 * 24 * time.Hour,
+		RepoSizeLimit: 10 * 1024 * 1024 * 1024,
+		GCInterval:    time.Hour,
 	}
 }
 
@@ -116,7 +108,7 @@ func (s *Size) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind != yaml.ScalarNode {
 		return fmt.Errorf("line %d: size must be a scalar such as 10GB", value.Line)
 	}
-	size, err := ParseSize(value.Value)
+	size, err := parseSize(value.Value)
 	if err != nil {
 		return fmt.Errorf("line %d: %w", value.Line, err)
 	}
@@ -124,8 +116,8 @@ func (s *Size) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// ParseSize reads a Size such as 10GB, 512mb, 1TiB or a plain byte count.
-func ParseSize(value string) (Size, error) {
+// parseSize reads a Size such as 10GB, 512mb, 1TiB or a plain byte count.
+func parseSize(value string) (Size, error) {
 	bytes, err := units.RAMInBytes(strings.TrimSpace(value))
 	if err != nil {
 		return 0, fmt.Errorf("%q is not a size such as 10GB, 512MB or a plain byte count", value)
