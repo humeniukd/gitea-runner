@@ -6,6 +6,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -657,4 +658,13 @@ func TestNewGitCloneExecutorFetchHonoursContext(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("fetch ignored context cancellation")
 	}
+}
+
+func TestStaleRefreshErr(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	require.NoError(t, staleRefreshErr(ctx, errors.New("remote hung up")))
+
+	cancel()
+	require.ErrorIs(t, staleRefreshErr(ctx, errors.New("remote hung up")), context.Canceled)
+	require.NoError(t, staleRefreshErr(ctx, gogit.NoErrAlreadyUpToDate))
 }
