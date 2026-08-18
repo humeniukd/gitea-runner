@@ -743,7 +743,7 @@ func CachePolicy(cfg *config.Config) artifactcache.Policy {
 		Retention:     cfg.Cache.Retention,
 		RepoSizeLimit: int64(cfg.Cache.RepoSizeLimit),
 		SizeLimit:     int64(cfg.Cache.SizeLimit),
-		GCInterval:    cfg.Cache.GCInterval,
+		SweepInterval: cfg.Cache.SweepInterval,
 		MinFreeDisk:   minFreeDisk(cfg),
 	}
 }
@@ -752,7 +752,7 @@ func CachePolicy(cfg *config.Config) artifactcache.Policy {
 func warnIgnoredCachePolicy(cfg *config.Config) {
 	defaults := config.DefaultCache()
 	if cfg.Cache.Retention != defaults.Retention || cfg.Cache.RepoSizeLimit != defaults.RepoSizeLimit ||
-		cfg.Cache.SizeLimit != defaults.SizeLimit || cfg.Cache.GCInterval != defaults.GCInterval {
+		cfg.Cache.SizeLimit != defaults.SizeLimit || cfg.Cache.SweepInterval != defaults.SweepInterval {
 		log.Warn("cache eviction settings are ignored when cache.external_server is set; configure them on that server instead")
 	}
 }

@@ -277,7 +277,7 @@ Each runner starts its own cache server automatically. Cache entries are local t
 
 An entry nothing has read or written for `retention` is removed, and a repository past `repo_size_limit` loses its least recently accessed entries until it fits; `size_limit` caps the whole cache the same way. Age alone never retires an entry still in use, and whatever these allow, the cache keeps free space above `health_check.min_free_disk_space_mb` when health checks are enabled.
 
-These apply where the cache server runs, so on a shared server they belong in *its* config, not the runners'. See `retention`, `repo_size_limit`, `size_limit` and `gc_interval` in [config.example.yaml](internal/pkg/config/config.example.yaml) for units and defaults.
+These apply where the cache server runs, so on a shared server they belong in *its* config, not the runners'. See `retention`, `repo_size_limit`, `size_limit` and `sweep_interval` in [config.example.yaml](internal/pkg/config/config.example.yaml) for units and defaults.
 
 **Cache service v2**
 

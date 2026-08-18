@@ -177,12 +177,12 @@ func TestLoadDefault_LoadsCacheEviction(t *testing.T) {
 	}
 
 	t.Run("sizes accept any spelling of the unit", func(t *testing.T) {
-		cfg, err := LoadDefault(write(t, "cache:\n  retention: 336h\n  repo_size_limit: 50gb\n  size_limit: 1TiB\n  gc_interval: 15m\n"))
+		cfg, err := LoadDefault(write(t, "cache:\n  retention: 336h\n  repo_size_limit: 50gb\n  size_limit: 1TiB\n  sweep_interval: 15m\n"))
 		require.NoError(t, err)
 		assert.Equal(t, 336*time.Hour, cfg.Cache.Retention)
 		assert.Equal(t, Size(50*1024*1024*1024), cfg.Cache.RepoSizeLimit)
 		assert.Equal(t, Size(1024*1024*1024*1024), cfg.Cache.SizeLimit)
-		assert.Equal(t, 15*time.Minute, cfg.Cache.GCInterval)
+		assert.Equal(t, 15*time.Minute, cfg.Cache.SweepInterval)
 	})
 
 	t.Run("zero turns a limit off where an absent key keeps its default", func(t *testing.T) {

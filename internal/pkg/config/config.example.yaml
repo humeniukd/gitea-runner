@@ -171,8 +171,8 @@ cache:
   #repo_size_limit: 10GB
   # Cap the whole cache the same way. Off by default, since the free space floor bounds it.
   #size_limit: 0
-  # Minimum time between two garbage collection runs. This one has no "off".
-  #gc_interval: 1h
+  # Minimum time between two eviction sweeps. This one has no "off".
+  #sweep_interval: 1h
 
 container:
   # Specifies the network to which the container will connect.

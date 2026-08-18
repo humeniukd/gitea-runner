@@ -87,7 +87,7 @@ type Cache struct {
 	Retention     time.Duration `yaml:"retention"`       // Retention removes entries nothing has read or written within this window. Default 168h, 0 keeps them regardless of age.
 	RepoSizeLimit Size          `yaml:"repo_size_limit"` // RepoSizeLimit caps one repository, evicting least recently accessed first. Default 10GB, 0 is no limit.
 	SizeLimit     Size          `yaml:"size_limit"`      // SizeLimit caps the whole cache the same way. No limit by default.
-	GCInterval    time.Duration `yaml:"gc_interval"`     // GCInterval is the minimum time between two garbage collection runs. Default 1h; a cadence has no "off".
+	SweepInterval time.Duration `yaml:"sweep_interval"`  // SweepInterval is the minimum time between two eviction sweeps. Default 1h; a cadence has no "off".
 }
 
 // DefaultCache returns the cache eviction defaults, seeded before the file is read so a
@@ -96,7 +96,7 @@ func DefaultCache() Cache {
 	return Cache{
 		Retention:     7 * 24 * time.Hour,
 		RepoSizeLimit: 10 * 1024 * 1024 * 1024,
-		GCInterval:    time.Hour,
+		SweepInterval: time.Hour,
 	}
 }
 

@@ -857,7 +857,7 @@ func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
 const (
 	miB = 1024 * 1024
 
-	defaultGCInterval = time.Hour
+	defaultSweepInterval = time.Hour
 
 	// inUseGrace matches artifactURLTTL so an entry outlives every signed URL still usable
 	// for it, and no sweep cuts off a download in progress.
@@ -877,7 +877,7 @@ type Policy struct {
 	Retention     time.Duration // Retention removes entries nothing has read or written within this window. Zero keeps them regardless of age.
 	RepoSizeLimit int64         // RepoSizeLimit caps one repository's completed entries in bytes, evicting least recently accessed first.
 	SizeLimit     int64         // SizeLimit caps every repository's completed entries together, in bytes.
-	GCInterval    time.Duration // GCInterval is the minimum time between two garbage collection runs.
+	SweepInterval time.Duration // SweepInterval is the minimum time between two eviction sweeps.
 	MinFreeDisk   int64         // MinFreeDisk is volume headroom the cache will not eat into. Tracks the runner's health-check floor rather than taking a key of its own.
 }
 
@@ -886,8 +886,8 @@ func (p Policy) withDefaults() Policy {
 	if p.MinFreeDisk <= 0 {
 		p.MinFreeDisk = defaultMinFreeDisk
 	}
-	if p.GCInterval <= 0 {
-		p.GCInterval = defaultGCInterval
+	if p.SweepInterval <= 0 {
+		p.SweepInterval = defaultSweepInterval
 	}
 	return p
 }
@@ -901,7 +901,7 @@ func (h *Handler) gcCache() {
 	}
 	defer h.gcing.Store(false)
 
-	if time.Since(h.gcAt) < h.policy.GCInterval {
+	if time.Since(h.gcAt) < h.policy.SweepInterval {
 		h.logger.Debugf("skip gc: %v", h.gcAt.String())
 		return
 	}

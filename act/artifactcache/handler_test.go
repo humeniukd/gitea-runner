@@ -1035,7 +1035,7 @@ func TestHandler_evictOnCommit(t *testing.T) {
 func TestHandler_gcCacheInterval(t *testing.T) {
 	cache := &Cache{Key: "temp", UsedAt: time.Now().Add(-time.Hour).Unix()}
 	// Half the default, so a sweep 45m ago is still inside the default but past this one.
-	handler := newTestHandler(t, Policy{GCInterval: 30 * time.Minute}, cache)
+	handler := newTestHandler(t, Policy{SweepInterval: 30 * time.Minute}, cache)
 
 	handler.gcAt = time.Now().Add(-45 * time.Minute) // past the configured interval, still inside the default
 	handler.gcCache()
