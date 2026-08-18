@@ -83,7 +83,7 @@ type Cache struct {
 	OfflineMode        bool   `yaml:"offline_mode"`         // OfflineMode reuses a cached action without fetching from the remote; a moved tag or branch stays at the cached commit until the cache entry is removed.
 	V2                 *bool  `yaml:"v2"`                   // V2 serves the actions cache service v2 API to jobs, used by actions/cache@v4.2 and later, and edits the action bundles that would otherwise refuse it. Unset means enabled.
 
-	// The four below decide when the cache server discards entries, and are ignored when ExternalServer is set, since that server applies its own.
+	// Eviction settings, ignored when ExternalServer is set since that server applies its own.
 	Retention     time.Duration `yaml:"retention"`       // Retention removes entries nothing has read or written within this window. Default 168h, 0 keeps them regardless of age.
 	RepoSizeLimit Size          `yaml:"repo_size_limit"` // RepoSizeLimit caps one repository, evicting least recently accessed first. Default 10GB, 0 is no limit.
 	SizeLimit     Size          `yaml:"size_limit"`      // SizeLimit caps the whole cache the same way. No limit by default.
