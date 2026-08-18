@@ -359,9 +359,9 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 			return nil, false
 		}
 		// Not a long poll, so a deadline can mean the server assigned a task
-		// this runner never received; Gitea only releases the claim since 1.26.
+		// this runner never received.
 		if errors.Is(err, context.DeadlineExceeded) {
-			log.WithError(err).Errorf("fetching a task timed out after %s, a task assigned in this window may be lost", p.cfg.Runner.FetchTimeout)
+			log.WithError(err).Errorf("fetching a task timed out after %s", p.cfg.Runner.FetchTimeout)
 		} else {
 			log.WithError(err).Error("failed to fetch task")
 		}
