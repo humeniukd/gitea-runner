@@ -10,6 +10,10 @@ changes: the same rows are still uploaded, and Gitea shows what it always did.
 
 ## Configuration
 
+The logs are off by default and `log.job.dir` is the switch: a path turns them on, empty turns
+them off again. There is no separate `enabled` key, and an empty `dir` means no directory and
+no file is ever created.
+
 ```yaml
 log:
   job:
@@ -20,7 +24,7 @@ log:
 
 | key | default | meaning |
 | --- | --- | --- |
-| `log.job.dir` | empty | Where to write the logs. Empty writes nothing, which is the default. |
+| `log.job.dir` | empty (off) | Where to write the logs. Empty writes nothing. |
 | `log.job.retention` | `168h` | Delete a task's directory once it is older than this. Negative keeps every directory forever. |
 | `log.job.max_size` | `0` | Cap for each of the two files, in bytes. `0` is unlimited. |
 

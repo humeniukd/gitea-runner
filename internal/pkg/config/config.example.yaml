@@ -8,13 +8,13 @@ log:
   # logrus severity: trace, debug, info, warn, error, fatal, panic.
   # trace and debug turn on caller/file:line in log lines. Default if omitted: info.
   #level: info
-  # Per-task job logs kept on this host: job.log mirrors what was sent to Gitea,
-  # diag.log adds every entry the reporter saw, including the debug lines
+  # Per-task job logs kept on this host, off unless dir is set: a path turns them on, empty
+  # (the default) turns them off, there is no separate enabled key. job.log mirrors what was
+  # sent to Gitea, diag.log adds every entry the reporter saw, including the debug lines
   # never uploaded. For postmortem on the runner, they do not change what Gitea shows.
-  # dir empty (the default) writes nothing, retention is checked whenever a task opens its
-  # own directory and negative keeps them forever, max_size caps each file in bytes with 0
-  # unlimited. The files hold repository output, so the runner creates them for its own user
-  # only.
+  # retention is checked whenever a task opens its own directory and negative keeps them
+  # forever, max_size caps each file in bytes with 0 unlimited. The files hold repository
+  # output, so the runner creates them for its own user only.
   # Full guide: docs/job-logs.md
   #job:
   #  dir: ""
