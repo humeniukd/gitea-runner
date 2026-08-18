@@ -385,7 +385,7 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 		}
 
 		if !isOfflineMode {
-			err = r.Fetch(&fetchOptions)
+			err = r.FetchContext(ctx, &fetchOptions)
 			if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 				return err
 			}
@@ -454,8 +454,13 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 		switch {
 		case !isOfflineMode && !shallow:
 			// In shallow mode the depth-limited fetch above already advanced the ref.
-			if err = w.Pull(&pullOptions); err != nil && err != git.NoErrAlreadyUpToDate {
+			if err = w.PullContext(ctx, &pullOptions); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 				logger.Debugf("Unable to pull %s: %v", refName, err)
+				// The resolve and checkout below are local and succeed on a
+				// cancelled context, handing back the cached revision as fresh.
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return ctxErr
+				}
 			}
 		case isOfflineMode && reused:
 			reusedMsg = " (reused in offline mode)"

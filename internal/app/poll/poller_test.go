@@ -60,22 +60,26 @@ func TestPoller_WorkerStateCounters(t *testing.T) {
 // TestPoller_FetchErrorIncrementsErrorsOnly verifies that a fetch error
 // increments only the per-worker error counter, not the empty counter.
 func TestPoller_FetchErrorIncrementsErrorsOnly(t *testing.T) {
-	client := mocks.NewClient(t)
-	client.On("FetchTask", mock.Anything, mock.Anything).Return(
-		func(_ context.Context, _ *connect_go.Request[runnerv1.FetchTaskRequest]) (*connect_go.Response[runnerv1.FetchTaskResponse], error) {
-			return nil, errors.New("network unreachable")
-		},
-	)
+	// A deadline is a failed request like any other, not an idle response.
+	for name, fetchErr := range map[string]error{
+		"transport": errors.New("network unreachable"),
+		"deadline":  context.DeadlineExceeded,
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := mocks.NewClient(t)
+			client.On("FetchTask", mock.Anything, mock.Anything).Return(nil, fetchErr)
 
-	cfg, err := config.LoadDefault("")
-	require.NoError(t, err)
-	p := &Poller{client: client, cfg: cfg}
+			cfg, err := config.LoadDefault("")
+			require.NoError(t, err)
+			p := &Poller{client: client, cfg: cfg}
 
-	s := &workerState{}
-	_, ok := p.fetchTask(context.Background(), s)
-	require.False(t, ok)
-	assert.Equal(t, int64(1), s.consecutiveErrors)
-	assert.Equal(t, int64(0), s.consecutiveEmpty)
+			s := &workerState{}
+			_, ok := p.fetchTask(context.Background(), s)
+			require.False(t, ok)
+			assert.Equal(t, int64(1), s.consecutiveErrors)
+			assert.Equal(t, int64(0), s.consecutiveEmpty)
+		})
+	}
 }
 
 // TestPoller_FetchUnauthenticatedStopsPolling verifies that an Unauthenticated

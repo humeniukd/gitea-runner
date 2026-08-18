@@ -346,16 +346,6 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 		TasksVersion: v,
 	}))
 
-	// DeadlineExceeded is the designed idle path for a long-poll: the server
-	// found no work within FetchTimeout. Treat it as an empty response and do
-	// not record the duration — the timeout value would swamp the histogram.
-	if errors.Is(err, context.DeadlineExceeded) {
-		p.markHealthyPoll()
-		s.consecutiveEmpty++
-		s.consecutiveErrors = 0 // timeout is a healthy idle response
-		metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultEmpty).Inc()
-		return nil, false
-	}
 	metrics.PollFetchDuration.Observe(time.Since(start).Seconds())
 
 	if err != nil {
@@ -368,7 +358,13 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 			p.shutdownPolling()
 			return nil, false
 		}
-		log.WithError(err).Error("failed to fetch task")
+		// Not a long poll, so a deadline can mean the server assigned a task
+		// this runner never received; Gitea only releases the claim since 1.26.
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.WithError(err).Errorf("fetching a task timed out after %s, a task assigned in this window may be lost", p.cfg.Runner.FetchTimeout)
+		} else {
+			log.WithError(err).Error("failed to fetch task")
+		}
 		p.lastPollFailed.Store(true)
 		s.consecutiveErrors++
 		metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultError).Inc()
