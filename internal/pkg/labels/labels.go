@@ -64,7 +64,8 @@ func (l Labels) RequireDocker() bool {
 	return false
 }
 
-func (l Labels) PickPlatform(runsOn []string, fallback string) string {
+// PickPlatform returns the platform of the first runs-on entry this runner has a label for, or "".
+func (l Labels) PickPlatform(runsOn []string) string {
 	platforms := make(map[string]string, len(l))
 	for _, label := range l {
 		switch label.Schema {
@@ -83,15 +84,7 @@ func (l Labels) PickPlatform(runsOn []string, fallback string) string {
 			return v
 		}
 	}
-
-	// TODO: support multiple labels
-	// like:
-	//   ["ubuntu-22.04"] => "ubuntu:22.04"
-	//   ["with-gpu"] => "linux:with-gpu"
-	//   ["ubuntu-22.04", "with-gpu"] => "ubuntu:22.04_with-gpu"
-
-	// no match, but the runner still received the task, e.g. labels were edited in the UI after registration
-	return fallback
+	return ""
 }
 
 func (l Labels) Names() []string {

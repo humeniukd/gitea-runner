@@ -118,20 +118,19 @@ func TestPickPlatform(t *testing.T) {
 	)
 
 	tests := []struct {
-		name     string
-		runsOn   []string
-		fallback string
-		want     string
+		name   string
+		runsOn []string
+		want   string
 	}{
-		{"docker strips leading slashes", []string{"ubuntu"}, "mirror.example/ci:noble", "node:18"},
-		{"host maps to self-hosted marker", []string{"self-hosted"}, "mirror.example/ci:noble", SelfHostedPlatform},
-		{"first match wins", []string{"self-hosted", "ubuntu"}, "mirror.example/ci:noble", SelfHostedPlatform},
-		{"unknown falls back", []string{"windows"}, "mirror.example/ci:noble", "mirror.example/ci:noble"},
-		{"no runsOn falls back", nil, SelfHostedPlatform, SelfHostedPlatform},
+		{"docker strips leading slashes", []string{"ubuntu"}, "node:18"},
+		{"host maps to self-hosted marker", []string{"self-hosted"}, SelfHostedPlatform},
+		{"first match wins", []string{"self-hosted", "ubuntu"}, SelfHostedPlatform},
+		{"unknown label picks nothing", []string{"windows"}, ""},
+		{"no runsOn picks nothing", nil, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, ls.PickPlatform(tt.runsOn, tt.fallback))
+			require.Equal(t, tt.want, ls.PickPlatform(tt.runsOn))
 		})
 	}
 }
@@ -168,5 +167,5 @@ func TestOpaqueLabelRoundTrip(t *testing.T) {
 	require.Equal(t, ls, again)
 	require.Equal(t, []string{raw}, again.Names())
 	require.False(t, again.RequireDocker())
-	require.Equal(t, SelfHostedPlatform, again.PickPlatform([]string{raw}, "mirror.example/ci:noble"))
+	require.Equal(t, SelfHostedPlatform, again.PickPlatform([]string{raw}))
 }
