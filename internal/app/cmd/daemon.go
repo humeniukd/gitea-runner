@@ -143,6 +143,10 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 					cfg.Container.DockerHost = "-"
 				}
 			}
+		} else if cfg.Runner.DefaultPlatform != labels.SelfHostedPlatform {
+			// only reached if such a job arrives, so warn instead of demanding a daemon this runner may not have
+			log.Warnf("a job whose runs-on matches none of the labels needs docker for runner.default_platform %q, set it to %q to keep those jobs on the host",
+				cfg.Runner.DefaultPlatform, labels.SelfHostedPlatform)
 		}
 
 		if !slices.Equal(reg.Labels, ls.ToStrings()) {

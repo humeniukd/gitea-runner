@@ -475,6 +475,10 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// Without bind_workdir, the workspace path omits the task id; concurrent host-mode jobs
 	// for the same repository would share this directory and can race with per-job cleanup.
 
+	platformPicker := func(runsOn []string) string {
+		return r.labels.PickPlatform(runsOn, r.cfg.Runner.DefaultPlatform)
+	}
+
 	runnerConfig := &runner.Config{
 		// On Linux, Workdir will be like "/<parent_directory>/<owner>/<repo>"
 		// On Windows, Workdir will be like "\<parent_directory>\<owner>\<repo>"
@@ -517,16 +521,14 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		Privileged:                        r.cfg.Container.Privileged,
 		DefaultActionInstance:             r.getDefaultActionsURL(task),
 		DefaultActionInstanceIsSelfHosted: r.isSelfHostedActionsURL(task),
-		PlatformPicker: func(runsOn []string) string {
-			return r.labels.PickPlatform(runsOn, r.cfg.Runner.DefaultPlatform)
-		},
-		JobStartedHook:   r.cfg.Runner.Hooks.JobStarted,
-		JobCompletedHook: r.cfg.Runner.Hooks.JobCompleted,
-		Vars:             task.Vars,
-		ValidVolumes:     r.cfg.Container.ValidVolumes,
-		SharedToolCache:  r.cfg.Runner.ToolCacheMode == config.ToolCacheModeShared,
-		InsecureSkipTLS:  r.cfg.Runner.Insecure,
-		RunnerName:       r.name,
+		PlatformPicker:                    platformPicker,
+		JobStartedHook:                    r.cfg.Runner.Hooks.JobStarted,
+		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
+		Vars:                              task.Vars,
+		ValidVolumes:                      r.cfg.Container.ValidVolumes,
+		SharedToolCache:                   r.cfg.Runner.ToolCacheMode == config.ToolCacheModeShared,
+		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
+		RunnerName:                        r.name,
 	}
 
 	rr, err := runner.New(runnerConfig)

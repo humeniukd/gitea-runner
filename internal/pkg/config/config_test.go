@@ -45,15 +45,10 @@ cache:
 func TestLoadDefault_DefaultPlatform(t *testing.T) {
 	cfg, err := LoadDefault("")
 	require.NoError(t, err)
-	assert.Empty(t, cfg.Runner.DefaultPlatform)
+	assert.Equal(t, DefaultPlatform, cfg.Runner.DefaultPlatform)
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte(`
-runner:
-  default_platform: mirror.example/ci:noble
-`), 0o600))
-
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("runner:\n  default_platform: mirror.example/ci:noble\n"), 0o600))
 	cfg, err = LoadDefault(path)
 	require.NoError(t, err)
 	assert.Equal(t, "mirror.example/ci:noble", cfg.Runner.DefaultPlatform)

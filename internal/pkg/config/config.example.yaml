@@ -95,8 +95,8 @@ runner:
   # when a TTY is present.
   #allocate_pty: false
   # Image (or "-self-hosted") used when a job's runs-on matches none of this runner's
-  # labels. Empty keeps docker.gitea.com/runner-images:ubuntu-latest. Host-only runners
-  # can set "-self-hosted" so unmatched jobs stay on the host instead of pulling an image.
+  # labels. Host-only runners can set "-self-hosted" so unmatched jobs stay on the host
+  # instead of pulling an image.
   #default_platform: "docker.gitea.com/runner-images:ubuntu-latest"
   # What to mount at RUNNER_TOOL_CACHE (/opt/hostedtoolcache), where setup actions install tools:
   #   none:   nothing. A docker job sees what its image ships there, a host job an empty dir, and

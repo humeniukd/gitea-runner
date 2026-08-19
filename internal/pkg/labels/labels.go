@@ -12,8 +12,8 @@ const (
 	SchemeHost   = "host"
 	SchemeDocker = "docker"
 
-	// DefaultPlatform is used when a job's runs-on matches none of the runner's labels.
-	DefaultPlatform = "docker.gitea.com/runner-images:ubuntu-latest"
+	// SelfHostedPlatform is the platform marker act treats as "run on the host".
+	SelfHostedPlatform = "-self-hosted"
 )
 
 type Label struct {
@@ -72,7 +72,7 @@ func (l Labels) PickPlatform(runsOn []string, defaultPlatform string) string {
 			// "//" will be ignored
 			platforms[label.Name] = strings.TrimPrefix(label.Arg, "//")
 		case SchemeHost:
-			platforms[label.Name] = "-self-hosted"
+			platforms[label.Name] = SelfHostedPlatform
 		default:
 			// unreachable: Parse only produces host or docker schemas
 			continue
@@ -90,14 +90,8 @@ func (l Labels) PickPlatform(runsOn []string, defaultPlatform string) string {
 	//   ["with-gpu"] => "linux:with-gpu"
 	//   ["ubuntu-22.04", "with-gpu"] => "ubuntu:22.04_with-gpu"
 
-	// No runs-on match: the runner still received the task (e.g. labels were
-	// edited in the UI after registration). Use the configured fallback, or the
-	// historical default image. Host-only runners can set default_platform to
-	// "-self-hosted".
-	if defaultPlatform != "" {
-		return defaultPlatform
-	}
-	return DefaultPlatform
+	// no match, but the runner still received the task, e.g. labels were edited in the UI after registration
+	return defaultPlatform
 }
 
 func (l Labels) Names() []string {
