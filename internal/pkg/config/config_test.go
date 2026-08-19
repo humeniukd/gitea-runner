@@ -59,6 +59,23 @@ runner:
 	assert.Equal(t, "mirror.example/ci:noble", cfg.Runner.DefaultPlatform)
 }
 
+func TestLoadDefault_ToolCacheMode(t *testing.T) {
+	cfg, err := LoadDefault("")
+	require.NoError(t, err)
+	assert.Equal(t, ToolCacheModeNone, cfg.Runner.ToolCacheMode)
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("runner:\n  tool_cache_mode: shared\n"), 0o600))
+	cfg, err = LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, ToolCacheModeShared, cfg.Runner.ToolCacheMode)
+
+	require.NoError(t, os.WriteFile(path, []byte("runner:\n  tool_cache_mode: everyone\n"), 0o600))
+	_, err = LoadDefault(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_cache_mode")
+}
+
 func TestLoadDefault_DefaultsWorkdirCleanupAge(t *testing.T) {
 	cfg, err := LoadDefault("")
 	require.NoError(t, err)
@@ -415,4 +432,16 @@ func TestLoadDefault_ShippedConfigsChangeNothing(t *testing.T) {
 		assert.Equal(t, defaults, cfg, name)
 	}
 	assert.Empty(t, hook.AllEntries())
+}
+
+func TestLoadDefault_ClampsFetchTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+runner:
+  fetch_timeout: 120s
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, RequestTimeout, cfg.Runner.FetchTimeout)
 }

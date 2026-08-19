@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +19,9 @@ import (
 	log "github.com/sirupsen/logrus"
 	"go.yaml.in/yaml/v4"
 )
+
+// RequestTimeout bounds every RPC to Gitea, and with it runner.fetch_timeout.
+const RequestTimeout = 60 * time.Second
 
 // DefaultPostTaskScriptTimeout is the fallback cap on how long the post-task
 // script may run when post_task_script is set without an explicit timeout. It is
@@ -61,6 +65,7 @@ type Runner struct {
 	SetActEnv             *bool             `yaml:"set_act_env"`              // SetActEnv controls whether the ACT=true environment variable is injected into jobs. It is a pointer to distinguish between false and not set; if not set, it defaults to true. Set it to false so workflows gated on `if: ${{ !env.ACT }}` behave like on GitHub.
 	AllocatePTY           bool              `yaml:"allocate_pty"`             // AllocatePTY allocates a pseudo-TTY for each step's process. Default is false, matching GitHub's actions/runner. Enable only for jobs that need an interactive terminal; tools like docker build emit redrawing progress frames into the captured log when a TTY is present. Applies to both host and docker backends.
 	DefaultPlatform       string            `yaml:"default_platform"`         // DefaultPlatform is the image (or "-self-hosted") used when a job's runs-on matches none of the runner's labels. Empty keeps docker.gitea.com/runner-images:ubuntu-latest.
+	ToolCacheMode         string            `yaml:"tool_cache_mode"`          // ToolCacheMode is what the runner mounts at RUNNER_TOOL_CACHE on both backends: ToolCacheModeNone or ToolCacheModeShared.
 	PostTaskScript        string            `yaml:"post_task_script"`         // PostTaskScript is the path to an executable script run on the host after each task's cleanup completes. Empty disables the hook. On Windows use .exe/.bat/.cmd; PowerShell (.ps1) is not supported yet as the configured path.
 	PostTaskScriptTimeout time.Duration     `yaml:"post_task_script_timeout"` // PostTaskScriptTimeout caps how long the post-task script may run. Default is 5m when post_task_script is set.
 	Hooks                 RunnerHooks       `yaml:"hooks"`                    // Hooks are scripts run inside the job environment around the job's steps.
@@ -143,6 +148,14 @@ type Container struct {
 	BindWorkdir          bool                          `yaml:"bind_workdir"`           // BindWorkdir binds the workspace to the host filesystem instead of using Docker volumes. Required for DinD when jobs use docker compose with bind mounts.
 	ServiceReadyTimeout  time.Duration                 `yaml:"service_ready_timeout"`  // ServiceReadyTimeout bounds how long a job waits for a service container that declares a healthcheck to report healthy. Negative disables waiting.
 }
+
+// Values of Runner.ToolCacheMode: the runner mounts no tool cache, or one that every job reuses.
+const (
+	ToolCacheModeNone   = "none"
+	ToolCacheModeShared = "shared"
+)
+
+var ToolCacheModes = []string{ToolCacheModeNone, ToolCacheModeShared}
 
 type ContainerNetworkCreateOptions struct {
 	EnableIPv4 *bool `yaml:"enable_ipv4"` // Enable or disable IPv4 for the network (true for docker by default)
@@ -258,6 +271,12 @@ func LoadDefault(file string) (*Config, error) {
 	if cfg.Container.WorkdirParent == "" {
 		cfg.Container.WorkdirParent = "workspace"
 	}
+	if cfg.Runner.ToolCacheMode == "" {
+		cfg.Runner.ToolCacheMode = ToolCacheModeNone
+	}
+	if !slices.Contains(ToolCacheModes, cfg.Runner.ToolCacheMode) {
+		return nil, fmt.Errorf("invalid runner.tool_cache_mode %q: must be one of %q", cfg.Runner.ToolCacheMode, ToolCacheModes)
+	}
 	if cfg.Host.WorkdirParent == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -315,6 +334,14 @@ func LoadDefault(file string) (*Config, error) {
 	}
 
 	// Validate and fix invalid config combinations to prevent confusing behavior.
+	if cfg.Runner.ToolCacheMode == ToolCacheModeShared && cfg.Runner.Capacity > 1 {
+		log.Warnf("runner.tool_cache_mode %q with capacity %d: two jobs writing the same tool version at once corrupt it",
+			ToolCacheModeShared, cfg.Runner.Capacity)
+	}
+	if cfg.Runner.FetchTimeout > RequestTimeout {
+		log.Warnf("fetch_timeout (%v) exceeds the RPC timeout (%v), capping it", cfg.Runner.FetchTimeout, RequestTimeout)
+		cfg.Runner.FetchTimeout = RequestTimeout
+	}
 	if cfg.Runner.FetchIntervalMax < cfg.Runner.FetchInterval {
 		log.Warnf("fetch_interval_max (%v) is less than fetch_interval (%v), setting fetch_interval_max to fetch_interval",
 			cfg.Runner.FetchIntervalMax, cfg.Runner.FetchInterval)

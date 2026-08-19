@@ -34,6 +34,7 @@ runner:
   # Whether skip verifying the TLS certificate of the Gitea instance.
   #insecure: false
   # The timeout for fetching the job from the Gitea instance.
+  # Values above the 60s RPC timeout are capped to it.
   #fetch_timeout: 5s
   # The interval for fetching the job from the Gitea instance.
   #fetch_interval: 2s
@@ -97,6 +98,12 @@ runner:
   # labels. Empty keeps docker.gitea.com/runner-images:ubuntu-latest. Host-only runners
   # can set "-self-hosted" so unmatched jobs stay on the host instead of pulling an image.
   #default_platform: "docker.gitea.com/runner-images:ubuntu-latest"
+  # What to mount at RUNNER_TOOL_CACHE (/opt/hostedtoolcache), where setup actions install tools:
+  #   none:   nothing. A docker job sees what its image ships there, a host job an empty dir, and
+  #           either way what it installs is gone when the job ends.
+  #   shared: one tool cache every job reuses. Two jobs writing the same tool version at once
+  #           corrupt it, so use it only with capacity 1.
+  #tool_cache_mode: none
   # Optional executable on the host, run once after each task's built-in cleanup
   # (post-steps, container teardown, bind-workdir removal). Additive only.
   #
@@ -199,7 +206,7 @@ container:
   #privileged: false
   # Any other options to be used when the container is started, for example:
   #   options: --add-host=my.gitea.url:host-gateway
-  # A volume declared here replaces the one the runner mounts on the same container path, so the
+  # A volume declared here replaces the one the runner would mount on the same container path, so the
   # tool cache can be kept on the host. Its source must also be allowed by valid_volumes below:
   #   options: --volume /host/toolcache:/opt/hostedtoolcache
   #options:
