@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"gitea.com/gitea/runner/internal/pkg/labels"
+
 	"github.com/docker/go-units"
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
@@ -23,8 +25,8 @@ import (
 // RequestTimeout bounds every RPC to Gitea, and with it runner.fetch_timeout.
 const RequestTimeout = 60 * time.Second
 
-// DefaultPlatform is the image a job runs in when its runs-on matches none of the runner's labels.
-const DefaultPlatform = "docker.gitea.com/runner-images:ubuntu-latest"
+// DefaultImage is the image a job runs in when its runs-on matches none of the runner's labels.
+const DefaultImage = "docker.gitea.com/runner-images:ubuntu-latest"
 
 // DefaultPostTaskScriptTimeout is the fallback cap on how long the post-task
 // script may run when post_task_script is set without an explicit timeout. It is
@@ -67,7 +69,7 @@ type Runner struct {
 	ActionShallowClone    *bool             `yaml:"action_shallow_clone"`     // ActionShallowClone fetches only the requested ref of an action repository at depth 1 instead of cloning every branch's full history. It is a pointer to distinguish between false and not set; if not set, it defaults to true.
 	SetActEnv             *bool             `yaml:"set_act_env"`              // SetActEnv controls whether the ACT=true environment variable is injected into jobs. It is a pointer to distinguish between false and not set; if not set, it defaults to true. Set it to false so workflows gated on `if: ${{ !env.ACT }}` behave like on GitHub.
 	AllocatePTY           bool              `yaml:"allocate_pty"`             // AllocatePTY allocates a pseudo-TTY for each step's process. Default is false, matching GitHub's actions/runner. Enable only for jobs that need an interactive terminal; tools like docker build emit redrawing progress frames into the captured log when a TTY is present. Applies to both host and docker backends.
-	DefaultPlatform       string            `yaml:"default_platform"`         // DefaultPlatform is the image (or "-self-hosted") used when a job's runs-on matches none of the runner's labels. Defaults to the DefaultPlatform constant.
+	DefaultPlatform       string            `yaml:"default_platform"`         // DefaultPlatform is where a job runs when its runs-on matches none of the runner's labels: an image, or "host" for the host itself. Defaults to DefaultImage.
 	ToolCacheMode         string            `yaml:"tool_cache_mode"`          // ToolCacheMode is what the runner mounts at RUNNER_TOOL_CACHE on both backends: ToolCacheModeNone or ToolCacheModeShared.
 	PostTaskScript        string            `yaml:"post_task_script"`         // PostTaskScript is the path to an executable script run on the host after each task's cleanup completes. Empty disables the hook. On Windows use .exe/.bat/.cmd; PowerShell (.ps1) is not supported yet as the configured path.
 	PostTaskScriptTimeout time.Duration     `yaml:"post_task_script_timeout"` // PostTaskScriptTimeout caps how long the post-task script may run. Default is 5m when post_task_script is set.
@@ -274,8 +276,13 @@ func LoadDefault(file string) (*Config, error) {
 	if cfg.Container.WorkdirParent == "" {
 		cfg.Container.WorkdirParent = "workspace"
 	}
-	if cfg.Runner.DefaultPlatform == "" {
-		cfg.Runner.DefaultPlatform = DefaultPlatform
+	switch cfg.Runner.DefaultPlatform {
+	case "":
+		cfg.Runner.DefaultPlatform = DefaultImage
+	case labels.SchemeHost:
+		cfg.Runner.DefaultPlatform = labels.SelfHostedPlatform
+	default:
+		cfg.Runner.DefaultPlatform = strings.TrimPrefix(cfg.Runner.DefaultPlatform, "docker://")
 	}
 	if cfg.Runner.ToolCacheMode == "" {
 		cfg.Runner.ToolCacheMode = ToolCacheModeNone

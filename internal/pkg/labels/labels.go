@@ -64,7 +64,7 @@ func (l Labels) RequireDocker() bool {
 	return false
 }
 
-func (l Labels) PickPlatform(runsOn []string, defaultPlatform string) string {
+func (l Labels) PickPlatform(runsOn []string, fallback string) string {
 	platforms := make(map[string]string, len(l))
 	for _, label := range l {
 		switch label.Schema {
@@ -91,7 +91,7 @@ func (l Labels) PickPlatform(runsOn []string, defaultPlatform string) string {
 	//   ["ubuntu-22.04", "with-gpu"] => "ubuntu:22.04_with-gpu"
 
 	// no match, but the runner still received the task, e.g. labels were edited in the UI after registration
-	return defaultPlatform
+	return fallback
 }
 
 func (l Labels) Names() []string {

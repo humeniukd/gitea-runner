@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"gitea.com/gitea/runner/internal/pkg/labels"
+
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,13 +47,18 @@ cache:
 func TestLoadDefault_DefaultPlatform(t *testing.T) {
 	cfg, err := LoadDefault("")
 	require.NoError(t, err)
-	assert.Equal(t, DefaultPlatform, cfg.Runner.DefaultPlatform)
+	assert.Equal(t, DefaultImage, cfg.Runner.DefaultPlatform)
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("runner:\n  default_platform: mirror.example/ci:noble\n"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte("runner:\n  default_platform: docker://mirror.example/ci:noble\n"), 0o600))
 	cfg, err = LoadDefault(path)
 	require.NoError(t, err)
 	assert.Equal(t, "mirror.example/ci:noble", cfg.Runner.DefaultPlatform)
+
+	require.NoError(t, os.WriteFile(path, []byte("runner:\n  default_platform: host\n"), 0o600))
+	cfg, err = LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, labels.SelfHostedPlatform, cfg.Runner.DefaultPlatform)
 }
 
 func TestLoadDefault_ToolCacheMode(t *testing.T) {
