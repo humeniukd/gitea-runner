@@ -388,11 +388,9 @@ See **[docs/job-hooks.md](docs/job-hooks.md)** for the execution order, environm
 
 #### Local job logs (`log.job.dir`)
 
-Job output otherwise lives only in Gitea, so a failure of the upload path takes the evidence with it. Setting `log.job.dir` — empty, and the feature therefore off, by default — keeps a copy of every task's log on the runner: `job.log` mirrors what was sent to Gitea, `diag.log` adds every entry the reporter saw — including the debug output and the failed `UpdateLog` calls that are never part of the job log.
+Set `log.job.dir` to a path and the runner writes a copy of every task's log there as `<start time>-task-<id>.log`: the rows exactly as Gitea received them, with the same secrets masked and the job's result on the last line. Off by default, and what Gitea shows does not change.
 
-Emptying `log.job.dir` again is how the logs are turned off; there is no separate switch. Task directories are pruned by `log.job.retention` (default `168h`) whenever a new task starts, and `log.job.max_size` caps each file. Writing never blocks or fails a job.
-
-See **[docs/job-logs.md](docs/job-logs.md)** for the file layout, masking, and operational notes.
+`log.job.retention` (default `168h`) is how long a log is kept, expired ones being deleted as new tasks start, and `log.job.max_size` (default `1GB`) caps one log. Keep `retention` above `runner.timeout` so a long job cannot outlive its own log, and prefer local disk, the file is written while the job runs. Only the runner's own user can read it.
 
 ### Example Deployments
 

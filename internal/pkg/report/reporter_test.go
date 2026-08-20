@@ -1043,16 +1043,11 @@ func TestReporter_StopHeartbeats(t *testing.T) {
 
 func TestAppendLogRow(t *testing.T) {
 	r := &Reporter{}
-	r.appendLogRow(nil)
-	assert.Empty(t, r.logRows)
-
 	row := &runnerv1.LogRow{Time: timestamppb.Now(), Content: "hello"}
-	r.appendLogRow(row)
-	require.Len(t, r.logRows, 1)
-	assert.Equal(t, row, r.logRows[0])
-
 	r.appendLogRow(nil)
-	require.Len(t, r.logRows, 1)
+	r.appendLogRow(row)
+	r.appendLogRow(nil)
+	assert.Equal(t, []*runnerv1.LogRow{row}, r.logRows)
 }
 
 func TestReporter_Levels(t *testing.T) {

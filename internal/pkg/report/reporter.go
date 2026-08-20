@@ -16,7 +16,6 @@ import (
 	"gitea.com/gitea/runner/act/runner"
 	"gitea.com/gitea/runner/internal/pkg/client"
 	"gitea.com/gitea/runner/internal/pkg/config"
-	"gitea.com/gitea/runner/internal/pkg/joblog"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 
 	"connectrpc.com/connect"
@@ -96,8 +95,7 @@ type Reporter struct {
 	debugOutputEnabled  bool
 	stopCommandEndToken string
 
-	// sink writes this task's logs to the runner's own disk, nil when log.job.dir is unset.
-	sink *joblog.Sink
+	jobLog *jobLog // this task's rows on the runner's own disk, nil when log.job.dir is unset
 }
 
 // extraMasks are values known before the job starts that are not among its secrets, such as
@@ -136,25 +134,13 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 		reportFailing: map[string]bool{},
 		daemon:        make(chan struct{}),
 		heartbeatStop: make(chan struct{}),
+		jobLog:        openJobLog(cfg.Log.Job, task.Id, time.Now()),
 	}
 
 	rv.daemonWait = 6 * rv.effectiveCloseTimeout()
 
 	if task.Secrets["ACTIONS_STEP_DEBUG"] == "true" {
 		rv.debugOutputEnabled = true
-	}
-
-	started := time.Now()
-	rv.sink = joblog.Open(joblog.Options{
-		Dir:       cfg.Log.Job.Dir,
-		Retention: cfg.Log.Job.Retention,
-		MaxSize:   cfg.Log.Job.MaxSize,
-		TaskID:    task.Id,
-		StartedAt: started,
-		Header:    rv.mask(taskHeader(task, started)),
-	})
-	if dir := rv.sink.Dir(); dir != "" {
-		log.Infof("writing the logs of task %d to %s", task.Id, dir)
 	}
 
 	return rv
@@ -181,15 +167,14 @@ func (r *Reporter) Levels() []log.Level {
 	return log.AllLevels
 }
 
-// appendLogRow buffers a row for the uploader and mirrors it into job.log, so the file
-// holds exactly what was handed over, in that order. A nil row is one the command handler
-// dropped, such as ::add-mask::, which must not reach either. Caller holds stateMu.
+// appendLogRow buffers a row for the uploader and mirrors it into job.log. A nil row is one
+// the command handler dropped, such as ::add-mask::. Caller holds stateMu.
 func (r *Reporter) appendLogRow(row *runnerv1.LogRow) {
 	if row == nil {
 		return
 	}
 	r.logRows = append(r.logRows, row)
-	r.sink.Job(row.Time.AsTime(), row.Content)
+	r.jobLog.write(row.Time.AsTime(), row.Content)
 }
 
 // isJobStepEntry is used to not report composite step results incorrectly as step result
@@ -231,10 +216,6 @@ func (r *Reporter) unlockAndNotify(urgentState bool) {
 }
 
 func (r *Reporter) Fire(entry *log.Entry) error {
-	// Deferred, so an ::add-mask:: the entry itself carries is registered before diag.log
-	// writes the entry, and stateMu is free again by then.
-	defer r.diagEntry(entry)
-
 	urgentState := false
 
 	r.stateMu.Lock()
@@ -535,7 +516,8 @@ func (r *Reporter) Close(lastWords string) error {
 	// supported branches, e.g. v1.28+.
 	r.stateMu.Lock()
 	if len(r.logRows) == 0 {
-		r.appendLogRow(&runnerv1.LogRow{
+		// Not appendLogRow: the sentinel is not job output and has no place in job.log.
+		r.logRows = append(r.logRows, &runnerv1.LogRow{
 			Time:    timestamppb.Now(),
 			Content: "",
 		})
@@ -549,21 +531,16 @@ func (r *Reporter) Close(lastWords string) error {
 		r.flushFinal(func() error { return r.ReportState(true) }),
 	)
 
-	// Closed after the final flush, so its failures are in the file too.
-	r.sink.Close(r.mask(r.closeTrailer(err)))
+	// After the flush so a failed handover is in the file too, under stateMu so a late entry cannot race.
+	r.stateMu.Lock()
+	trailer := fmt.Sprintf("task %d finished: %s", r.state.Id, metrics.ResultToStatusLabel(r.state.Result))
+	if err != nil {
+		trailer += fmt.Sprintf(", the final flush to Gitea failed: %v", err)
+	}
+	r.jobLog.close(r.mask(trailer))
+	r.stateMu.Unlock()
 
 	return err
-}
-
-// closeTrailer is the last line of both log files, so a reader knows the file is complete
-// and whether Gitea ever received it.
-func (r *Reporter) closeTrailer(flushErr error) string {
-	trailer := fmt.Sprintf("task %d finished: %s", r.state.Id,
-		strings.ToLower(strings.TrimPrefix(r.Result().String(), "RESULT_")))
-	if flushErr != nil {
-		trailer += fmt.Sprintf(", the final flush to Gitea failed: %v", flushErr)
-	}
-	return trailer
 }
 
 // flushFinal retries fn on a detached, bounded context so a cancelled r.ctx
@@ -621,14 +598,12 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	if err != nil {
 		metrics.ReportLogTotal.WithLabelValues(metrics.LabelResultError).Inc()
 		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodUpdateLog).Inc()
-		r.diagf("UpdateLog(index=%d rows=%d no_more=%t) failed: %v", r.logOffset, len(rows), noMore, err)
 		return err
 	}
 	metrics.ReportLogTotal.WithLabelValues(metrics.LabelResultSuccess).Inc()
 
 	ack := int(resp.Msg.AckIndex)
 	if ack < r.logOffset {
-		r.diagf("UpdateLog acknowledged index %d below the %d already sent: Gitea lost rows", ack, r.logOffset)
 		return errors.New("submitted logs are lost")
 	}
 
@@ -646,7 +621,6 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	}
 
 	if noMore && ack < submitted {
-		r.diagf("the final UpdateLog acknowledged %d of %d rows", ack, submitted)
 		return errors.New("not all logs are submitted")
 	}
 
@@ -703,7 +677,6 @@ func (r *Reporter) ReportState(reportResult bool) error {
 		r.stateMu.Lock()
 		r.stateChanged = true
 		r.stateMu.Unlock()
-		r.diagf("UpdateTask(result=%s outputs=%d) failed: %v", state.Result, len(outputs), err)
 		return err
 	}
 	metrics.ReportStateTotal.WithLabelValues(metrics.LabelResultSuccess).Inc()
@@ -896,8 +869,12 @@ func (r *Reporter) parseLogRow(entry *log.Entry) *runnerv1.LogRow {
 func (r *Reporter) newLogRow(t *timestamppb.Timestamp, content string) *runnerv1.LogRow {
 	return &runnerv1.LogRow{
 		Time:    t,
-		Content: strings.ToValidUTF8(r.logReplacer.Replace(content), "?"),
+		Content: r.mask(content),
 	}
+}
+
+func (r *Reporter) mask(content string) string {
+	return strings.ToValidUTF8(r.logReplacer.Replace(content), "?")
 }
 
 func (r *Reporter) addMask(msg string) {
