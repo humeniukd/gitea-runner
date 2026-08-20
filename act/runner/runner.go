@@ -74,7 +74,7 @@ type Config struct {
 	ContainerNetworkCreateOptions      container.NewDockerNetworkCreateExecutorInput // the default network create options
 	ActionCache                        ActionCache                                   // Use a custom ActionCache Implementation
 	ProxyEnv                           map[string]string                             // the proxy variables the job runs with, also given to service containers and image builds
-	NoToolkitPatch                     bool                                          // leave the @actions toolkit an action bundles exactly as shipped, see toolkit_patch.go
+	NoActionPatch                      bool                                          // leave the @actions toolkit an action bundles exactly as shipped, see patch_actions.go
 
 	PresetGitHubContext   *model.GithubContext // the preset github context, overrides some fields like DefaultBranch, Env, Secrets etc.
 	EventJSON             string               // the content of JSON file to use for event.json in containers, overrides EventPath

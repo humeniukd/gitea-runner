@@ -225,7 +225,7 @@ func TestActionScriptPaths(t *testing.T) {
 
 // The bundle has to be patched whatever state the shared action directory is in, because a
 // concurrent job's prepare checks the action out again and resets it.
-func TestToolkitPatchAtTheContainerCopy(t *testing.T) {
+func TestPatchActionsAtTheContainerCopy(t *testing.T) {
 	copiedBundle := func(t *testing.T, noPatch bool) string {
 		t.Helper()
 
@@ -235,7 +235,7 @@ func TestToolkitPatchAtTheContainerCopy(t *testing.T) {
 			remoteAction: &remoteAction{Org: "owner", Repo: "repo", Path: "sub", Ref: "v1"},
 			action:       &model.Action{Runs: model.ActionRuns{Using: "node20", Main: "index.js"}},
 			RunContext: &RunContext{
-				Config:       &Config{ActionCacheDir: t.TempDir(), NoToolkitPatch: noPatch},
+				Config:       &Config{ActionCacheDir: t.TempDir(), NoActionPatch: noPatch},
 				JobContainer: cm,
 			},
 		}

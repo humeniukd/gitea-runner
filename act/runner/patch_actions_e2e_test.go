@@ -116,7 +116,7 @@ func patchedAction(t *testing.T, repo, ref, entrypoint string) string {
 	require.NoError(t, err)
 	script := filepath.Join(tempDirPath(t), filepath.Base(entrypoint))
 	require.NoError(t, os.WriteFile(script, body, 0o600))
-	patchToolkit(t.Context(), []string{script})
+	patchActions(t.Context(), []string{script})
 	return script
 }
 
@@ -192,7 +192,7 @@ func TestCacheServiceV2EndToEnd(t *testing.T) {
 // anchored on that distance. One entrypoint from each of the families that bundle the cache
 // toolkit, patched but not run, is what keeps a future release from quietly matching only one of
 // the two shapes and leaving every cache on v1.
-func TestToolkitPatchAcrossActions(t *testing.T) {
+func TestPatchedBundleAcrossActions(t *testing.T) {
 	for _, tc := range []struct {
 		repo, ref, path string
 		wantPatched     bool

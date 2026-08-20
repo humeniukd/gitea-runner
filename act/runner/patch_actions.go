@@ -105,9 +105,9 @@ func actionScriptPaths(dir string, action *model.Action) []string {
 	return paths
 }
 
-// patchToolkit edits the toolkit in an action's bundles. The caller holds the action directory's
+// patchActions edits the toolkit in an action's bundles. The caller holds the action directory's
 // clone lock, which is what keeps another job's checkout from resetting them before the copy.
-func patchToolkit(ctx context.Context, scripts []string) {
+func patchActions(ctx context.Context, scripts []string) {
 	for _, script := range scripts {
 		switch patched, err := patchBundle(script); {
 		case err != nil:
