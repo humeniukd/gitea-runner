@@ -518,7 +518,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		AllocatePTY:       r.cfg.Runner.AllocatePTY,
 		ActionOfflineMode: r.cfg.Cache.OfflineMode,
 		ActionCloneDepth:  actionCloneDepth,
-		NoToolkitPatch:    r.cfg.Runner.PatchToolkit != nil && !*r.cfg.Runner.PatchToolkit,
+		NoToolkitPatch:    r.cfg.Runner.PatchActions != nil && !*r.cfg.Runner.PatchActions,
 
 		ReuseContainers:      false,
 		ForcePull:            r.cfg.Container.ForcePull,
