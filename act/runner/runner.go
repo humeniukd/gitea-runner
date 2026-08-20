@@ -74,7 +74,7 @@ type Config struct {
 	ContainerNetworkCreateOptions      container.NewDockerNetworkCreateExecutorInput // the default network create options
 	ActionCache                        ActionCache                                   // Use a custom ActionCache Implementation
 	ProxyEnv                           map[string]string                             // the proxy variables the job runs with, also given to service containers and image builds
-	PatchToolkit                       bool                                          // edit the @actions toolkit bundled into an action so it works against Gitea, see toolkit_patch.go
+	NoActionPatch                      bool                                          // run actions exactly as published, applying no compatibility patches, see patch_actions.go
 
 	PresetGitHubContext   *model.GithubContext // the preset github context, overrides some fields like DefaultBranch, Env, Secrets etc.
 	EventJSON             string               // the content of JSON file to use for event.json in containers, overrides EventPath
@@ -91,6 +91,7 @@ type Config struct {
 	PlatformPicker                    func(labels []string) string // platform picker, it will take precedence over Platforms if isn't nil
 	JobLoggerLevel                    *log.Level                   // the level of job logger
 	ValidVolumes                      []string                     // only volumes (and bind mounts) in this slice can be mounted on the job container or service containers
+	SharedToolCache                   bool                         // one tool cache for all jobs instead of one per job
 	InsecureSkipTLS                   bool                         // whether to skip verifying TLS certificate of the Gitea instance
 	MaxParallel                       int                          // max parallel jobs to run across all workflows (0 = no limit, uses CPU count)
 	AllocatePTY                       bool                         // allocate a pseudo-TTY for each step's process
