@@ -108,17 +108,15 @@ func runActionEntrypoint(t *testing.T, script string, env jobEnv, inputs map[str
 	return string(out)
 }
 
-// patchedAction downloads one entrypoint and patches it exactly as a downloaded action would be,
-// keeping the untouched original in the sidecar beside it.
+// patchedAction downloads one entrypoint and patches it exactly as a downloaded action would be.
 func patchedAction(t *testing.T, repo, ref, entrypoint string) string {
 	t.Helper()
 
 	body, err := os.ReadFile(bundleFromGitHub(t, repo, ref, entrypoint))
 	require.NoError(t, err)
-	dir := tempDirPath(t)
-	script := filepath.Join(dir, filepath.Base(entrypoint))
+	script := filepath.Join(tempDirPath(t), filepath.Base(entrypoint))
 	require.NoError(t, os.WriteFile(script, body, 0o600))
-	patchToolkit(t.Context(), dir, []string{script})
+	patchToolkit(t.Context(), []string{script})
 	return script
 }
 
@@ -184,7 +182,7 @@ func TestCacheServiceV2EndToEnd(t *testing.T) {
 	// cache server on its own address. That is what a runner without a results service of its own
 	// leaves its jobs with, so it has to round trip too.
 	env.workspace = tempDirPath(t)
-	v1 := runActionEntrypoint(t, filepath.Join(sidecarDir(filepath.Dir(restore)), "index.js"), env, inputs)
+	v1 := runActionEntrypoint(t, bundleFromGitHub(t, "actions/cache", actionsCacheRef, "dist/restore/index.js"), env, inputs)
 	require.Contains(t, v1, "Cache service version: v1")
 	require.Contains(t, v1, "Cache restored from key: "+key)
 }

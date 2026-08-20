@@ -307,14 +307,14 @@ These apply where the cache server runs, so on a shared server they belong in *i
 
 **Cache service v2**
 
-`actions/cache@v4.2` and later can use the *cache service v2* API. The runner serves it from the same store as v1, on by default, and it works with `external_server`. Turn it off with:
+Recent `actions/cache` releases can use the *cache service v2* API. The runner serves it from the same store as v1, on by default, and it works with `external_server`. Turn it off with:
 
 ```yaml
 cache:
   v2: false
 ```
 
-Those actions refuse any host they do not take for GitHub. Rather than misreport the server URL, the runner edits that check out of the action's own bundle and keeps the untouched copy beside it; a bundle it does not recognise is left alone and keeps to v1. The same edit lets the stock `actions/upload-artifact` and `actions/download-artifact` work from `v4.4.0` on, without the `gitea-upload-artifact` fork.
+Those actions refuse any host they do not take for GitHub. Rather than misreport the server URL, the runner edits that check out of the action's own bundle on its way into the job, undone whenever the action is downloaded again. A bundle it does not recognise is left alone and keeps to v1. The same edit lets the stock `actions/upload-artifact` and `actions/download-artifact` work from `v4.4.0` on, without the `gitea-upload-artifact` fork, so it is made whatever `v2` says: that setting only governs the API the runner advertises. Set `runner.patch_toolkit: false` to leave every bundle exactly as shipped, an escape hatch for an action the edit breaks. The artifact actions then refuse again and the cache client keeps to v1.
 
 **Shared cache across multiple runners**
 
