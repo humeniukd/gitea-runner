@@ -307,7 +307,7 @@ These apply where the cache server runs, so on a shared server they belong in *i
 
 **Cache service v2**
 
-Recent `actions/cache` releases can use the *cache service v2* API. The runner serves it from the same store as v1, on by default, and it works with `external_server`. Turn it off with:
+`actions/cache@v4.2` and later can use the *cache service v2* API. The runner serves it from the same store as v1, on by default, and it works with `external_server`. Turn it off with:
 
 ```yaml
 cache:
