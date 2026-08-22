@@ -158,6 +158,32 @@ An edit keeps the comments and the key order of the file. Indentation becomes tw
 
 `config get`, `set`, `add` and `remove` use `config.yaml` (or `config.yml`) from the working directory, then from the directory of the binary, and print their choice to stderr. `config init` writes `config.yaml` in the working directory, and refuses to overwrite an existing config without `--force`. Pass `-c` for another path.
 
+#### Tool cache
+
+Setup actions like `setup-go` install tools into `RUNNER_TOOL_CACHE`, which is `/opt/hostedtoolcache` inside a job. `runner.tool_cache_mode` selects what backs it:
+
+| Mode | Tool cache | Trade-off |
+| --- | --- | --- |
+| `none` (default) | Per job, provided by the job image | A version the image lacks is downloaded in every job |
+| `shared` | One volume reused by every job | Two jobs writing the same tool version at once corrupt it, so use it only with `runner.capacity: 1` |
+
+With `none`, tools must come from the job image. Install them into `/opt/hostedtoolcache/<tool>/<version>/<arch>`, with an empty `<arch>.complete` file next to the directory:
+
+```dockerfile
+RUN GO=$(curl -fsSL 'https://go.dev/dl/?mode=json' | grep -oP '"version": "\Kgo1\.26\.[0-9]*' | head -1); \
+  DIR="/opt/hostedtoolcache/go/${GO#go}/x64" && \
+  mkdir -p "$(dirname "$DIR")" && \
+  curl -fsSL "https://dl.google.com/go/${GO}.linux-amd64.tar.gz" | tar -xz -C /tmp && \
+  mv /tmp/go "$DIR" && \
+  touch "${DIR}.complete"
+```
+
+A workflow requesting a minor version, `go-version: "1.26"`, resolves to the newest matching version in the cache, so a patch update in the image still hits it.
+
+Of the [runner images](https://gitea.com/gitea/runner-images), the `-full` flavour is the one that ships tools in this layout.
+
+`gitea-runner exec` reads no config file and takes `--tool-cache-mode` instead, defaulting to `none`.
+
 #### Environment variables
 
 Earlier releases let a few environment variables (`GITEA_DEBUG`, `GITEA_TRACE`, `GITEA_RUNNER_CAPACITY`, `GITEA_RUNNER_FILE`, `GITEA_RUNNER_ENVIRON`, `GITEA_RUNNER_ENV_FILE`) override parts of the config. They are gone, use the YAML file for all settings. The Docker images still read their own variables, such as `RUNNER_STATE_FILE`, see [scripts/run.sh](scripts/run.sh) and the container documentation below.
@@ -202,7 +228,7 @@ a workflow with `runs-on: ubuntu-latest` is executed in the `runner-images:ubunt
 
 Names may themselves contain a colon (for example `pool:e57e18d4-10d4-406f-93bf-60f127221bdd`); only `host` and `docker` are treated as schemas.
 
-If a job's `runs-on` matches none of the runner's labels, the job still runs, in the default `docker.gitea.com/runner-images:ubuntu-latest` image. Images maintained for this purpose are listed at [gitea/runner-images](https://gitea.com/gitea/runner-images).
+If a job's `runs-on` matches none of the runner's labels, or sets no `runs-on` at all, it still runs: in `runner.default_image` where docker is available, on the host where it is not. Images maintained for this purpose are listed at [gitea/runner-images](https://gitea.com/gitea/runner-images).
 
 Labels are chosen at registration time (`--labels`, or the interactive prompt) and can be changed afterwards by editing `runner.labels` in the config file, or in the Gitea UI under the runner's settings.
 
@@ -273,6 +299,12 @@ A password in a proxy URL is hidden in job logs. Any step can still read it, bec
 
 Each runner starts its own cache server automatically. Cache entries are local to that runner — runners do not share a cache by default.
 
+**Eviction**
+
+An entry nothing has read or written for `retention` is removed, and a repository past `repo_size_limit` loses its least recently accessed entries until it fits; `size_limit` caps the whole cache the same way. Age alone never retires an entry still in use, and whatever these allow, the cache keeps free space above `health_check.min_free_disk_space_mb` when health checks are enabled.
+
+These apply where the cache server runs, so on a shared server they belong in *its* config, not the runners'. See `retention`, `repo_size_limit`, `size_limit` and `sweep_interval` in [config.example.yaml](internal/pkg/config/config.example.yaml) for units and defaults.
+
 **Cache service v2**
 
 `actions/cache@v4.2` and later can use the *cache service v2* API. The runner serves it from the same store as v1, on by default, and it works with `external_server`. Turn it off with:
@@ -282,7 +314,7 @@ cache:
   v2: false
 ```
 
-Those actions refuse any host they do not take for GitHub. Rather than misreport the server URL, the runner edits that check out of the action's own bundle and keeps the untouched copy beside it; a bundle it does not recognise is left alone and keeps to v1. The same edit lets the stock `actions/upload-artifact` and `actions/download-artifact` work from `v4.4.0` on, without the `gitea-upload-artifact` fork.
+Those actions refuse any host they do not take for GitHub. Rather than misreport the server URL, the runner edits that check out of the action's own bundle on its way into the job, undone whenever the action is downloaded again. A bundle it does not recognise is left alone and keeps to v1. The same edit lets the stock `actions/upload-artifact` and `actions/download-artifact` work from `v4.4.0` on, without the `gitea-upload-artifact` fork, so it is made whatever `v2` says: that setting only governs the API the runner advertises. Set `runner.patch_actions: false` to leave every bundle exactly as shipped, an escape hatch for an action the edit breaks. The artifact actions then refuse again and the cache client keeps to v1.
 
 **Shared cache across multiple runners**
 
@@ -353,6 +385,12 @@ Because they run where the steps run and see the job's environment, they are the
 Both hooks are synchronous and block the job while they run. Either one exiting non-zero fails the job, and there is no per-hook timeout.
 
 See **[docs/job-hooks.md](docs/job-hooks.md)** for the execution order, environment, and platform notes.
+
+#### Local job logs (`log.job.dir`)
+
+Set `log.job.dir` to a path and the runner writes a copy of every task's log there as `<start time>-task-<id>.log`: the rows exactly as Gitea received them, with the same secrets masked and the job's result on the last line. Off by default, and what Gitea shows does not change.
+
+`log.job.retention` (default `168h`) is how long a log is kept, expired ones being deleted as new tasks start, and `log.job.max_size` (default `1GB`) caps one log. Keep `retention` above `runner.timeout` so a long job cannot outlive its own log, and prefer local disk, the file is written while the job runs. Only the runner's own user can read it.
 
 ### Example Deployments
 

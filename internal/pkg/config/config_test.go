@@ -42,11 +42,29 @@ cache:
 	require.NoError(t, err)
 }
 
+func TestLoadDefault_ToolCacheMode(t *testing.T) {
+	cfg, err := LoadDefault("")
+	require.NoError(t, err)
+	assert.Equal(t, ToolCacheModeNone, cfg.Runner.ToolCacheMode)
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("runner:\n  tool_cache_mode: shared\n"), 0o600))
+	cfg, err = LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, ToolCacheModeShared, cfg.Runner.ToolCacheMode)
+
+	require.NoError(t, os.WriteFile(path, []byte("runner:\n  tool_cache_mode: everyone\n"), 0o600))
+	_, err = LoadDefault(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_cache_mode")
+}
+
 func TestLoadDefault_DefaultsWorkdirCleanupAge(t *testing.T) {
 	cfg, err := LoadDefault("")
 	require.NoError(t, err)
 	assert.Equal(t, 24*time.Hour, cfg.Runner.WorkdirCleanupAge)
 	assert.Equal(t, 10*time.Minute, cfg.Runner.IdleCleanupInterval)
+	assert.Equal(t, DefaultImage, cfg.Runner.DefaultImage)
 }
 
 func TestLoadDefault_HealthChecksAreOptIn(t *testing.T) {
@@ -166,6 +184,45 @@ runner:
 	cfg, err := LoadDefault(path)
 	require.NoError(t, err)
 	assert.Equal(t, 5*time.Minute, cfg.Runner.PostTaskScriptTimeout)
+}
+
+func write(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	return path
+}
+
+func TestLoadDefault_LoadsCacheEviction(t *testing.T) {
+	t.Run("sizes accept any spelling of the unit", func(t *testing.T) {
+		cfg, err := LoadDefault(write(t, "cache:\n  retention: 336h\n  repo_size_limit: 50gb\n  size_limit: 1TiB\n  sweep_interval: 15m\n"))
+		require.NoError(t, err)
+		assert.Equal(t, 336*time.Hour, cfg.Cache.Retention)
+		assert.Equal(t, Size(50*1024*1024*1024), cfg.Cache.RepoSizeLimit)
+		assert.Equal(t, Size(1024*1024*1024*1024), cfg.Cache.SizeLimit)
+		assert.Equal(t, 15*time.Minute, cfg.Cache.SweepInterval)
+	})
+
+	t.Run("zero turns a limit off where an absent key keeps its default", func(t *testing.T) {
+		cfg, err := LoadDefault(write(t, "cache:\n  repo_size_limit: 0\n"))
+		require.NoError(t, err)
+		assert.Zero(t, cfg.Cache.RepoSizeLimit)
+		assert.Equal(t, DefaultCache().Retention, cfg.Cache.Retention, "an absent key still defaults")
+	})
+
+	t.Run("a bad size names the offending value", func(t *testing.T) {
+		_, err := LoadDefault(write(t, "cache:\n  repo_size_limit: banana\n"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "banana")
+	})
+}
+
+func TestLoadDefault_LoadsJobLogs(t *testing.T) {
+	cfg, err := LoadDefault(write(t, "log:\n  job:\n    dir: /var/log/jobs\n    retention: 0s\n    max_size: 100MB\n"))
+	require.NoError(t, err)
+	assert.Equal(t, "/var/log/jobs", cfg.Log.Job.Dir)
+	assert.Zero(t, cfg.Log.Job.Retention, "zero keeps every task directory")
+	assert.Equal(t, Size(100*1024*1024), cfg.Log.Job.MaxSize)
 }
 
 func TestLoadDefault_LoadsJobHooks(t *testing.T) {
@@ -367,4 +424,16 @@ func TestLoadDefault_ShippedConfigsChangeNothing(t *testing.T) {
 		assert.Equal(t, defaults, cfg, name)
 	}
 	assert.Empty(t, hook.AllEntries())
+}
+
+func TestLoadDefault_ClampsFetchTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+runner:
+  fetch_timeout: 120s
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, RequestTimeout, cfg.Runner.FetchTimeout)
 }

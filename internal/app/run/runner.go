@@ -27,6 +27,8 @@ import (
 	"gitea.com/gitea/runner/act/runner"
 	"gitea.com/gitea/runner/internal/pkg/client"
 	"gitea.com/gitea/runner/internal/pkg/config"
+	"gitea.com/gitea/runner/internal/pkg/disk"
+	"gitea.com/gitea/runner/internal/pkg/envcheck"
 	"gitea.com/gitea/runner/internal/pkg/labels"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 	"gitea.com/gitea/runner/internal/pkg/report"
@@ -89,17 +91,18 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	var cacheHandler *artifactcache.Handler
 	if cfg.Cache.Enabled == nil || *cfg.Cache.Enabled {
 		if cfg.Cache.ExternalServer != "" {
+			warnIgnoredCachePolicy(cfg)
 			// The v1 client appends its path to this without a separator, so the slash is required.
 			envs["ACTIONS_CACHE_URL"] = strings.TrimRight(cfg.Cache.ExternalServer, "/") + "/"
 		} else {
 			warnIgnoredCacheSecret(cfg)
-			handler, err := artifactcache.StartHandler(
-				cfg.Cache.Dir,
-				cfg.Cache.Host,
-				cfg.Cache.Port,
-				"",
-				log.StandardLogger().WithField("module", "cache_request"),
-			)
+			handler, err := artifactcache.StartHandler(artifactcache.Options{
+				Dir:        cfg.Cache.Dir,
+				OutboundIP: cfg.Cache.Host,
+				Port:       cfg.Cache.Port,
+				Policy:     CachePolicy(cfg),
+				Logger:     log.StandardLogger().WithField("module", "cache_request"),
+			})
 			if err != nil {
 				log.Errorf("cannot init cache server, it will be disabled: %v", err)
 				// go on
@@ -157,8 +160,8 @@ func (r *Runner) OnIdle(ctx context.Context) {
 	}
 	// Host mode: reclaim per-job scratch dirs left behind when HostEnvironment
 	// cleanup timed out (e.g. a delete stalled by an AV/EDR filter driver). They
-	// sit under the host workdir parent alongside the shared tool_cache, which
-	// the name match leaves untouched. No-op when no host-mode job ever ran.
+	// sit under the host workdir parent next to a shared tool_cache, which the name
+	// match leaves untouched. No-op when no host-mode job ever ran.
 	if hostRoot := filepath.FromSlash(r.cfg.Host.WorkdirParent); hostRoot != "" {
 		r.cleanupStaleDirs(ctx, hostRoot, isHostScratchDir)
 	}
@@ -170,7 +173,7 @@ func (r *Runner) OnIdle(ctx context.Context) {
 // directories above, a task beginning during the pass is safe because the cutoff keeps a
 // network it has created but not yet attached a container to out of scope.
 func (r *Runner) cleanupOrphanNetworks(ctx context.Context) {
-	if r.uuid == "" || !r.labels.RequireDocker() && !r.cfg.Container.RequireDocker {
+	if r.uuid == "" || !r.requiresDocker() {
 		return
 	}
 	cutoff := r.now().Add(-r.cfg.Runner.WorkdirCleanupAge)
@@ -199,13 +202,6 @@ func (r *Runner) shouldRunIdleCleanup() bool {
 	}
 }
 
-// cleanupStaleTaskDirs reclaims stale bind-workdir per-task directories under
-// workdirRoot. Retained as a thin wrapper so existing callers and tests keep a
-// stable entry point.
-func (r *Runner) cleanupStaleTaskDirs(ctx context.Context, workdirRoot string) {
-	r.cleanupStaleDirs(ctx, workdirRoot, isTaskIDDir)
-}
-
 // isTaskIDDir reports whether name is a per-task workspace dir (numeric task
 // ID). Any other directory is skipped to avoid deleting operator-managed data
 // under workdir_root.
@@ -217,7 +213,7 @@ func isTaskIDDir(name string) bool {
 // isHostScratchDir reports whether name is a per-job host-mode scratch dir:
 // hex.EncodeToString of 8 random bytes, i.e. exactly 16 lowercase hex chars
 // (see startHostEnvironment in act/runner/run_context.go). The narrow match
-// leaves the sibling shared "tool_cache" dir and any operator data untouched.
+// leaves a sibling shared "tool_cache" dir and any operator data untouched.
 func isHostScratchDir(name string) bool {
 	if len(name) != 16 {
 		return false
@@ -345,6 +341,27 @@ func (r *Runner) isSelfHostedActionsURL(task *runnerv1.Task) bool {
 	return giteaDefaultActionsURL != "" && giteaDefaultActionsURL != "https://github.com"
 }
 
+// dockerReachable is a variable so tests can substitute one that needs no Docker daemon. It
+// probes the environment act connects through, not container.docker_host, which act ignores.
+var dockerReachable = func(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return envcheck.CheckIfDockerRunning(ctx, "") == nil
+}
+
+func (r *Runner) requiresDocker() bool {
+	return r.labels.RequireDocker() || r.cfg.Container.RequireDocker
+}
+
+// fallbackPlatform is where a job runs whose runs-on matches no label, as any job without a
+// runs-on does, since Gitea sends those to every runner.
+func (r *Runner) fallbackPlatform(ctx context.Context) string {
+	if r.requiresDocker() || dockerReachable(ctx) {
+		return r.cfg.Runner.DefaultImage
+	}
+	return labels.SelfHostedPlatform
+}
+
 func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.Reporter) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -437,10 +454,13 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// is that server's responsibility to authenticate requests.
 	revokeCache, resultsURL := r.registerCacheForTask(giteaRuntimeToken, preset.Repository, reporter)
 	defer revokeCache()
-	// A cache server that agreed to forward the artifact half is the whole results service, so
-	// the job is pointed at it and the v2 variable is finally true.
+	// A cache server that agreed to forward the artifact half is the whole results service, so the
+	// job is pointed at it.
 	if resultsURL != "" {
-		envs["ACTIONS_RESULTS_URL"], envs[runner.CacheServiceV2Env] = resultsURL, "true"
+		envs["ACTIONS_RESULTS_URL"] = resultsURL
+		if r.cacheServiceV2() {
+			envs[runner.CacheServiceV2Env] = "true"
+		}
 	}
 
 	eventJSON, err := json.Marshal(preset.Event)
@@ -473,6 +493,15 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// Without bind_workdir, the workspace path omits the task id; concurrent host-mode jobs
 	// for the same repository would share this directory and can race with per-job cleanup.
 
+	// act asks for the platform once per step, so resolve the fallback at most once per task.
+	fallbackPlatform := sync.OnceValue(func() string { return r.fallbackPlatform(ctx) })
+	platformPicker := func(runsOn []string) string {
+		if platform := r.labels.PickPlatform(runsOn); platform != "" {
+			return platform
+		}
+		return fallbackPlatform()
+	}
+
 	runnerConfig := &runner.Config{
 		// On Linux, Workdir will be like "/<parent_directory>/<owner>/<repo>"
 		// On Windows, Workdir will be like "\<parent_directory>\<owner>\<repo>"
@@ -482,18 +511,15 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		AllocatePTY:       r.cfg.Runner.AllocatePTY,
 		ActionOfflineMode: r.cfg.Cache.OfflineMode,
 		ActionCloneDepth:  actionCloneDepth,
-		PatchToolkit:      r.patchToolkit(),
+		NoActionPatch:     r.cfg.Runner.PatchActions != nil && !*r.cfg.Runner.PatchActions,
 
-		ReuseContainers:      false,
 		ForcePull:            r.cfg.Container.ForcePull,
 		ForceRebuild:         r.cfg.Container.ForceRebuild,
-		LogOutput:            true,
 		JSONLogger:           false,
 		Env:                  envs,
 		ProxyEnv:             proxyEnv,
 		Secrets:              task.Secrets,
 		GitHubInstance:       strings.TrimSuffix(r.client.Address(), "/"),
-		AutoRemove:           true,
 		NoSkipCheckout:       true,
 		DisableActEnv:        r.cfg.Runner.SetActEnv != nil && !*r.cfg.Runner.SetActEnv,
 		PresetGitHubContext:  preset,
@@ -515,11 +541,12 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		Privileged:                        r.cfg.Container.Privileged,
 		DefaultActionInstance:             r.getDefaultActionsURL(task),
 		DefaultActionInstanceIsSelfHosted: r.isSelfHostedActionsURL(task),
-		PlatformPicker:                    r.labels.PickPlatform,
+		PlatformPicker:                    platformPicker,
 		JobStartedHook:                    r.cfg.Runner.Hooks.JobStarted,
 		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
 		Vars:                              task.Vars,
 		ValidVolumes:                      r.cfg.Container.ValidVolumes,
+		SharedToolCache:                   r.cfg.Runner.ToolCacheMode == config.ToolCacheModeShared,
 		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
 		RunnerName:                        r.name,
 	}
@@ -556,10 +583,10 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	return execErr
 }
 
-// patchToolkit reports whether act should edit the toolkit bundled into an action. It follows the
-// cache URL, because that is what the edits point the client at; see act/runner/toolkit_patch.go.
-func (r *Runner) patchToolkit() bool {
-	return r.envs["ACTIONS_CACHE_URL"] != "" && (r.cfg.Cache.V2 == nil || *r.cfg.Cache.V2)
+// cacheServiceV2 reports whether jobs are told the cache service speaks v2. It is all cache.v2
+// turns off: the bundle edit that reaches it is what the artifact actions need too.
+func (r *Runner) cacheServiceV2() bool {
+	return r.cfg.Cache.V2 == nil || *r.cfg.Cache.V2
 }
 
 // registerCacheForTask tells the cache server to accept requests authenticated
@@ -693,7 +720,7 @@ func checkFreeDisk(cfg *config.Config) (bool, string) {
 		root = filepath.FromSlash("/" + strings.TrimLeft(cfg.Container.WorkdirParent, "/"))
 	}
 	root = nearestExistingPath(root)
-	available, err := freeDiskBytes(root)
+	available, err := disk.FreeBytes(root)
 	if err != nil {
 		return false, fmt.Sprintf("cannot determine free disk space for %s: %v", root, err)
 	}
@@ -724,6 +751,35 @@ func (r *Runner) Declare(ctx context.Context, labels []string) (*connect.Respons
 		Labels:       labels,
 		Capabilities: RunnerCapabilities(),
 	}))
+}
+
+// minFreeDisk keeps the cache from growing past the point where the runner stops taking
+// work, but only when health checks are on, since the key is documented as opt-in.
+func minFreeDisk(cfg *config.Config) int64 {
+	if !cfg.HealthCheck.Enabled {
+		return 0
+	}
+	return cfg.HealthCheck.MinFreeDiskSpaceMB * 1024 * 1024
+}
+
+// CachePolicy maps the cache config onto the cache server's own type, in bytes not MiB.
+func CachePolicy(cfg *config.Config) artifactcache.Policy {
+	return artifactcache.Policy{
+		Retention:     cfg.Cache.Retention,
+		RepoSizeLimit: int64(cfg.Cache.RepoSizeLimit),
+		SizeLimit:     int64(cfg.Cache.SizeLimit),
+		SweepInterval: cfg.Cache.SweepInterval,
+		MinFreeDisk:   minFreeDisk(cfg),
+	}
+}
+
+// warnIgnoredCachePolicy flags eviction settings configured on a runner that points at an external cache server.
+func warnIgnoredCachePolicy(cfg *config.Config) {
+	defaults := config.DefaultCache()
+	if cfg.Cache.Retention != defaults.Retention || cfg.Cache.RepoSizeLimit != defaults.RepoSizeLimit ||
+		cfg.Cache.SizeLimit != defaults.SizeLimit || cfg.Cache.SweepInterval != defaults.SweepInterval {
+		log.Warn("cache eviction settings are ignored when cache.external_server is set; configure them on that server instead")
+	}
 }
 
 // warnIgnoredCacheSecret flags an external cache server secret configured on a runner that uses the built-in cache server.

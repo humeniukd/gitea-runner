@@ -13,6 +13,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/runner"
 	"gitea.com/gitea/runner/internal/app/run"
+	"gitea.com/gitea/runner/internal/pkg/config"
 
 	"gitea.dev/actionslib/pkg/model"
 	"github.com/joho/godotenv"
@@ -67,6 +69,15 @@ type executeArgs struct {
 	cacheHandler          *artifactcache.Handler
 	network               string
 	githubInstance        string
+	toolCacheMode         string
+}
+
+// sharedToolCache reports whether mode mounts one tool cache for every job.
+func sharedToolCache(mode string) (bool, error) {
+	if !slices.Contains(config.ToolCacheModes, mode) {
+		return false, fmt.Errorf("invalid --tool-cache-mode %q: must be one of %q", mode, config.ToolCacheModes)
+	}
+	return mode == config.ToolCacheModeShared, nil
 }
 
 // WorkflowsPath returns path to workflow file(s)
@@ -374,7 +385,10 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 		}
 
 		// init a cache server
-		handler, err := artifactcache.StartHandler("", "", 0, "", log.StandardLogger().WithField("module", "cache_request"))
+		handler, err := artifactcache.StartHandler(artifactcache.Options{
+			Policy: run.CachePolicy(&config.Config{Cache: config.DefaultCache()}),
+			Logger: log.StandardLogger().WithField("module", "cache_request"),
+		})
 		if err != nil {
 			return err
 		}
@@ -423,15 +437,17 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 		proxyEnv := run.JobProxyEnv(env, env["ACTIONS_CACHE_URL"], nil)
 		maps.Copy(env, proxyEnv)
 
+		shared, err := sharedToolCache(execArgs.toolCacheMode)
+		if err != nil {
+			return err
+		}
+
 		// run the plan
 		config := &runner.Config{
 			Workdir:               execArgs.Workdir(),
 			BindWorkdir:           false,
-			PatchToolkit:          true, // the cache server started above is what the patch points at
-			ReuseContainers:       false,
 			ForcePull:             execArgs.forcePull,
 			ForceRebuild:          execArgs.forceRebuild,
-			LogOutput:             true,
 			JSONLogger:            execArgs.jsonLogger,
 			Env:                   env,
 			ProxyEnv:              proxyEnv,
@@ -447,7 +463,6 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 			ContainerCapAdd:       execArgs.containerCapAdd,
 			ContainerCapDrop:      execArgs.containerCapDrop,
 			ContainerOptions:      execArgs.containerOptions,
-			AutoRemove:            true,
 			ArtifactServerPath:    execArgs.artifactServerPath,
 			ArtifactServerPort:    execArgs.artifactServerPort,
 			ArtifactServerAddr:    execArgs.artifactServerAddr,
@@ -463,7 +478,8 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 			PlatformPicker: func(_ []string) string {
 				return execArgs.image
 			},
-			ValidVolumes: []string{"**"}, // All volumes are allowed for `exec` command
+			ValidVolumes:    []string{"**"}, // All volumes are allowed for `exec` command
+			SharedToolCache: shared,
 		}
 
 		config.Env["ACT_EXEC"] = "true"
@@ -538,7 +554,8 @@ func loadExecCmd(ctx context.Context) *cobra.Command {
 	execCmd.PersistentFlags().BoolVarP(&execArg.noSkipCheckout, "no-skip-checkout", "", false, "Do not skip actions/checkout")
 	execCmd.PersistentFlags().BoolVarP(&execArg.debug, "debug", "d", false, "enable debug log")
 	execCmd.PersistentFlags().BoolVarP(&execArg.dryrun, "dryrun", "n", false, "dryrun mode")
-	execCmd.PersistentFlags().StringVarP(&execArg.image, "image", "i", "docker.gitea.com/runner-images:ubuntu-latest", "Docker image to use. Use \"-self-hosted\" to run directly on the host.")
+	execCmd.PersistentFlags().StringVarP(&execArg.image, "image", "i", config.DefaultImage, "Docker image to use. Use \"-self-hosted\" to run directly on the host.")
+	execCmd.PersistentFlags().StringVarP(&execArg.toolCacheMode, "tool-cache-mode", "", config.ToolCacheModeNone, "What to mount at RUNNER_TOOL_CACHE: none, or shared to reuse one tool cache across runs")
 	execCmd.PersistentFlags().StringVarP(&execArg.network, "network", "", "", "Specify the network to which the container will connect")
 	execCmd.PersistentFlags().StringVarP(&execArg.githubInstance, "gitea-instance", "", "", "Gitea instance to use.")
 
