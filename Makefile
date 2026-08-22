@@ -18,6 +18,8 @@ DOCKER_TAG ?= nightly
 DOCKER_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)
 DOCKER_ROOTLESS_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)-dind-rootless
 
+include e2e/.env
+
 GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # renovate: datasource=go
 GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.6.0 # renovate: datasource=go
 
@@ -170,6 +172,32 @@ coverage-report: ## turn coverage.txt from `make test` into .tmp/coverage.md
 .PHONY: test-dind
 test-dind: ## run the daemon-facing tests against the built dind image (TARGET=dind|dind-rootless)
 	@./scripts/test-dind.sh $(TARGET)
+
+# The job and service-container images the scenarios run; the Gitea image comes from
+# GITEA_E2E_IMAGE, so the matrix pulls whichever version it is about to test.
+E2E_JOB_IMAGES ?= node:24-bookworm-slim nginx:alpine
+
+.PHONY: e2e-pull
+e2e-pull: ## pre-pull the images the e2e suite needs, retrying transient registry failures
+	@for img in $(E2E_JOB_IMAGES) $(GITEA_E2E_IMAGE); do \
+		pulled=""; \
+		for try in 1 2 3; do \
+			if docker pull "$$img"; then pulled=1; break; fi; \
+			sleep 5; \
+		done; \
+		[ -n "$$pulled" ] || echo "warning: could not pull $$img, falling back to any local copy"; \
+	done
+
+.PHONY: test-e2e
+test-e2e: e2e-pull ## run the Gitea compatibility e2e suite against GITEA_E2E_IMAGE (needs docker)
+	GITEA_E2E_IMAGE=$(GITEA_E2E_IMAGE) $(GO) test -tags e2e -count=1 -timeout 20m -v ./e2e/...
+
+.PHONY: test-e2e-matrix
+test-e2e-matrix: ## run test-e2e once per Gitea version in GITEA_E2E_VERSIONS (from e2e/.env)
+	@for img in $(GITEA_E2E_VERSIONS); do \
+		echo "==> Testing against $$img"; \
+		$(MAKE) test-e2e GITEA_E2E_IMAGE=$$img || exit 1; \
+	done
 
 .PHONY: install
 install: $(GOFILES) ## install the runner binary via `go install`

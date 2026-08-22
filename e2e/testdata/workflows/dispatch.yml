@@ -1,0 +1,13 @@
+name: dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      subject:
+        description: what to greet
+        required: true
+        default: nobody
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "dispatched-for=${{ inputs.subject }}"

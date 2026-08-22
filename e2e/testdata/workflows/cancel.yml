@@ -1,0 +1,13 @@
+name: cancel
+on: push
+jobs:
+  slow:
+    runs-on: ubuntu-latest
+    steps:
+      # Long enough to still be running when the cancel lands, short enough that a version
+      # without the cancel route just runs it to completion quickly.
+      - run: |
+          for i in $(seq 1 15); do
+            echo "tick $i"
+            sleep 1
+          done

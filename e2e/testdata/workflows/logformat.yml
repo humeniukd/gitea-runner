@@ -1,0 +1,20 @@
+name: logformat
+on: push
+jobs:
+  emit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: plain text with characters the command escapes decode
+        run: |
+          echo 'plain-100%-done;-[bracket]'
+          printf 'multiline-first\nmultiline-second\n'
+      - name: workflow commands forwarded from step output
+        run: |
+          echo '::notice::notice-payload-here'
+          echo '::warning::warning-payload-here'
+          echo '::error::error-payload-here'
+          echo '::group::group-payload-here'
+          echo 'inside-the-group'
+          echo '::endgroup::'
+      - name: command carrying an encoded newline
+        run: echo '::notice::encoded-first%0Aencoded-second'
