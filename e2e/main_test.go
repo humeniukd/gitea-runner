@@ -63,6 +63,10 @@ func runSuite(m *testing.M) int {
 	fixture = f
 	defer func() { _ = fixture.Close(context.Background()) }()
 
+	// Straight to stderr, not t.Log, so it shows without -v: it is the only place the run says
+	// which Gitea it actually tested, as opposed to which tag it was asked for.
+	fmt.Fprintf(os.Stderr, "gitea fixture: %s\n", fixture.Describe())
+
 	return m.Run()
 }
 

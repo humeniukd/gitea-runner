@@ -86,6 +86,11 @@ func NewHarness(ctx context.Context, t *testing.T, addr, token string, lbls []st
 	cfg.Runner.FetchInterval = 250 * time.Millisecond
 	cfg.Runner.FetchIntervalMax = 250 * time.Millisecond
 	cfg.Runner.Capacity = 4
+	// In container mode the fixture is only reachable by name on the network we share with it, so
+	// job containers have to join that network too or they cannot resolve ACTIONS_RUNTIME_URL.
+	if fixture != nil && fixture.Network() != "" {
+		cfg.Container.Network = fixture.Network()
+	}
 
 	parsed := make(labels.Labels, 0, len(lbls))
 	for _, l := range lbls {

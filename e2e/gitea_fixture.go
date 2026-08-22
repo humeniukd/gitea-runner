@@ -36,7 +36,10 @@ const (
 type GiteaFixture struct {
 	cli        mobyclient.APIClient
 	id         string
+	image      string
+	version    string
 	baseURL    string
+	network    string // non-empty only in container mode, where jobs must join it too
 	adminToken string
 }
 
@@ -98,6 +101,38 @@ func bridgeGateway(ctx context.Context, cli mobyclient.APIClient) (netip.Addr, b
 	return netip.Addr{}, false
 }
 
+// selfNetwork reports the docker network of the container these tests run in, when they run in
+// one at all. Gitea Actions runs a job inside a container, so the docker daemon is a sibling: no
+// address local to this process means anything to it, and publishing a port on one fails with
+// "cannot assign requested address". scripts/test-dind.sh solves the same problem the same way,
+// by joining the sibling to our own network and addressing it by name.
+func selfNetwork(ctx context.Context, cli mobyclient.APIClient) (string, bool) {
+	if _, err := os.Stat("/.dockerenv"); err != nil {
+		return "", false
+	}
+
+	id, err := os.ReadFile("/proc/sys/kernel/hostname")
+	if err != nil {
+		id, err = os.ReadFile("/etc/hostname")
+	}
+	if err != nil {
+		return "", false
+	}
+
+	inspected, err := cli.ContainerInspect(ctx, strings.TrimSpace(string(id)), mobyclient.ContainerInspectOptions{})
+	if err != nil || inspected.Container.NetworkSettings == nil {
+		return "", false
+	}
+	for name := range inspected.Container.NetworkSettings.Networks {
+		// Only a user-defined network resolves container names; the default bridge has no DNS,
+		// and host/none give the fixture no name to be reached by at all.
+		if name != "host" && name != "none" && name != "bridge" {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 // bindable reports whether this host owns addr, i.e. whether the fixture can publish a port on it.
 func bindable(addr netip.Addr) bool {
 	l, err := net.Listen("tcp", net.JoinHostPort(addr.String(), "0"))
@@ -137,7 +172,9 @@ func pullImage(ctx context.Context, cli mobyclient.APIClient, image string) erro
 		return nil
 	}
 	if _, inspectErr := cli.ImageInspect(ctx, image); inspectErr == nil {
-		fmt.Fprintf(os.Stderr, "pull %s failed (%v), using the local copy\n", image, err)
+		// The local copy of a moving tag may predate the one the registry now serves, so say so:
+		// the fixture's version line is what tells the reader which Gitea actually got tested.
+		fmt.Fprintf(os.Stderr, "pull %s failed (%v), using the local copy, WHICH MAY BE STALE\n", image, err)
 		return nil
 	}
 	return fmt.Errorf("pull %s: %w", image, err)
@@ -160,18 +197,39 @@ func StartGitea(ctx context.Context) (*GiteaFixture, error) {
 		image = "gitea/gitea:main-nightly"
 	}
 
-	host := hostAddress(ctx, cli)
-	port, err := freeHostPort(host.String())
-	if err != nil {
-		return nil, fmt.Errorf("find a free host port: %w", err)
+	name := fmt.Sprintf("gitea-runner-e2e-%d", time.Now().UnixNano())
+	containerPort := network.MustParsePort("3000/tcp")
+
+	// One address has to serve both the test process and the job containers, because the runner
+	// hands its own instance address to jobs as ACTIONS_RUNTIME_URL. Which address that can be
+	// depends on where the tests run, so the two modes differ in nothing else.
+	var (
+		baseURL      string
+		hostConfig   = &apicontainer.HostConfig{}
+		netConfig    *network.NetworkingConfig
+		sharedNet, _ = selfNetwork(ctx, cli)
+	)
+	if sharedNet != "" {
+		baseURL = fmt.Sprintf("http://%s:3000", name) // docker DNS on the network we share
+		netConfig = &network.NetworkingConfig{
+			EndpointsConfig: map[string]*network.EndpointSettings{sharedNet: {}},
+		}
+	} else {
+		host := hostAddress(ctx, cli)
+		port, err := freeHostPort(host.String())
+		if err != nil {
+			return nil, fmt.Errorf("find a free host port: %w", err)
+		}
+		baseURL = fmt.Sprintf("http://%s:%d", host, port)
+		hostConfig.PortBindings = network.PortMap{
+			containerPort: []network.PortBinding{{HostIP: host, HostPort: strconv.Itoa(port)}},
+		}
 	}
-	baseURL := fmt.Sprintf("http://%s:%d", host, port)
 
 	if err := pullImage(ctx, cli, image); err != nil {
 		return nil, err
 	}
 
-	containerPort := network.MustParsePort("3000/tcp")
 	resp, err := cli.ContainerCreate(ctx, mobyclient.ContainerCreateOptions{
 		Config: &apicontainer.Config{
 			Image: image,
@@ -183,19 +241,15 @@ func StartGitea(ctx context.Context) (*GiteaFixture, error) {
 			},
 			ExposedPorts: network.PortSet{containerPort: struct{}{}},
 		},
-		HostConfig: &apicontainer.HostConfig{
-			PortBindings: network.PortMap{
-				containerPort: []network.PortBinding{{HostIP: host, HostPort: strconv.Itoa(port)}},
-			},
-			AutoRemove: false,
-		},
-		Name: fmt.Sprintf("gitea-runner-e2e-%d", time.Now().UnixNano()),
+		HostConfig:       hostConfig,
+		NetworkingConfig: netConfig,
+		Name:             name,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create gitea container: %w", err)
 	}
 
-	f := &GiteaFixture{cli: cli, id: resp.ID, baseURL: baseURL}
+	f := &GiteaFixture{cli: cli, id: resp.ID, image: image, baseURL: baseURL, network: sharedNet}
 
 	if _, err := cli.ContainerStart(ctx, f.id, mobyclient.ContainerStartOptions{}); err != nil {
 		_ = f.Close(ctx)
@@ -212,7 +266,27 @@ func StartGitea(ctx context.Context) (*GiteaFixture, error) {
 		return nil, fmt.Errorf("bootstrap gitea admin: %w", err)
 	}
 
+	// Recorded so the suite can report which Gitea it really tested: a moving tag whose pull
+	// failed silently leaves an older local image behind, and the tag alone would not show it.
+	if err := f.readVersion(ctx); err != nil {
+		_ = f.Close(ctx)
+		return nil, fmt.Errorf("read gitea version: %w", err)
+	}
+
 	return f, nil
+}
+
+// readVersion records the version the running server reports. /api/v1/version is public, but the
+// authenticated client is already to hand.
+func (f *GiteaFixture) readVersion(ctx context.Context) error {
+	var body struct {
+		Version string `json:"version"`
+	}
+	if err := f.doJSON(ctx, http.MethodGet, "/api/v1/version", nil, &body); err != nil {
+		return err
+	}
+	f.version = body.Version
+	return nil
 }
 
 // waitHealthy polls /api/healthz until it returns 200, bounded by ctx.
@@ -340,6 +414,16 @@ func (f *GiteaFixture) doJSON(ctx context.Context, method, path string, reqBody,
 
 // BaseURL is the address the runner registers against.
 func (f *GiteaFixture) BaseURL() string { return f.baseURL }
+
+// Describe names the image and the version the server actually reports, so a stale local image
+// is visible in the suite's output rather than hidden behind a moving tag.
+func (f *GiteaFixture) Describe() string {
+	return fmt.Sprintf("image=%s version=%s", f.image, f.version)
+}
+
+// Network is the docker network job containers must join to reach the fixture, empty when the
+// fixture publishes a port instead (see selfNetwork).
+func (f *GiteaFixture) Network() string { return f.network }
 
 // API returns a client authenticated as the bootstrap admin, for driving repos/workflows/runs.
 func (f *GiteaFixture) API() *GiteaAPI {
