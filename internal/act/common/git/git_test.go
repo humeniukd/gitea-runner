@@ -445,6 +445,40 @@ func TestGitCloneExecutorQuietDemotesCloneLine(t *testing.T) {
 	}
 }
 
+func TestGitCloneExecutorLogsReusedClone(t *testing.T) {
+	remoteDir := t.TempDir()
+	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
+	workDir := t.TempDir()
+	require.NoError(t, gitCmd("clone", remoteDir, workDir))
+	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "main"))
+	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "initial"))
+	require.NoError(t, gitCmd("-C", workDir, "push", "-u", "origin", "main"))
+
+	cacheDir := t.TempDir()
+	input := NewGitCloneExecutorInput{URL: remoteDir, Ref: "main", Dir: cacheDir}
+	logger, hook := logrustest.NewNullLogger()
+	logger.SetLevel(log.DebugLevel)
+	ctx := common.WithLogger(context.Background(), logger.WithField("job", "j1"))
+
+	require.NoError(t, NewGitCloneExecutor(input)(ctx))
+	assert.True(t, hasLogMessage(hook.AllEntries(), "Cloned "+remoteDir+" to "+cacheDir))
+
+	hook.Reset()
+	require.NoError(t, NewGitCloneExecutor(input)(ctx))
+	entries := hook.AllEntries()
+	assert.True(t, hasLogMessage(entries, "Reused "+remoteDir+" at "+cacheDir))
+	assert.False(t, hasLogMessage(entries, "Cloned "+remoteDir+" to "+cacheDir))
+}
+
+func hasLogMessage(entries []*log.Entry, want string) bool {
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Message, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestGitCloneExecutorShallow(t *testing.T) {
 	// Build a local "remote" with several commits on main plus a tag, so a full clone would pull noticeably more history than a shallow one.
 	remoteDir := t.TempDir()

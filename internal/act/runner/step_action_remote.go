@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"gitea.com/gitea/runner/internal/act/common"
 	"gitea.com/gitea/runner/internal/act/common/git"
@@ -41,6 +42,32 @@ var stepActionRemoteNewCloneExecutor = git.NewGitCloneExecutor
 
 // selfRepoPrefix introduces a self-repository reference: the action lives in the repo holding the file that wrote the `uses:`.
 const selfRepoPrefix = "$/"
+
+type preparedAction struct {
+	resolvedSha string
+	action      *model.Action
+	cacheDir    string
+}
+
+type preparedActionCache struct {
+	mu      sync.Mutex
+	entries map[string]*preparedAction
+}
+
+func (c *preparedActionCache) get(key string) *preparedAction {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.entries[key]
+}
+
+func (c *preparedActionCache) set(key string, action *preparedAction) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[key] = action
+}
 
 func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 	return func(ctx context.Context) error {
@@ -76,6 +103,16 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 				github.Token = sar.RunContext.Config.ReplaceGheActionTokenWithGithubCom
 			}
 		}
+
+		prepared := sar.RunContext.preparedActionCache()
+		cacheKey := sar.actionDir()
+		if cached := prepared.get(cacheKey); cached != nil {
+			sar.resolvedSha = cached.resolvedSha
+			sar.action = cached.action
+			sar.cacheDir = cached.cacheDir
+			return nil
+		}
+
 		// Actions served from the action cache are read out of a git object store rather than a
 		// directory, so they never reach the bundle patch below and keep to the v1 cache API.
 		if sar.RunContext.Config.ActionCache != nil {
@@ -117,8 +154,12 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			}
 
 			actionModel, err := sar.readAction(ctx, sar.Step, sar.resolvedSha, sar.remoteAction.Path, remoteReader(ctx), os.WriteFile)
+			if err != nil {
+				return err
+			}
 			sar.action = actionModel
-			return err
+			prepared.set(cacheKey, &preparedAction{resolvedSha: sar.resolvedSha, action: sar.action, cacheDir: sar.cacheDir})
+			return nil
 		}
 
 		actionDir := sar.actionDir()
@@ -172,7 +213,7 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			}
 		}
 
-		return common.NewPipelineExecutor(
+		err := common.NewPipelineExecutor(
 			ntErr,
 			func(ctx context.Context) error {
 				defer git.AcquireCloneLock(actionDir)()
@@ -184,6 +225,11 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			// runAction copies the action into the job container.
 			sar.patchActionToolkit,
 		)(ctx)
+		if err != nil {
+			return err
+		}
+		prepared.set(cacheKey, &preparedAction{resolvedSha: sar.resolvedSha, action: sar.action, cacheDir: sar.cacheDir})
+		return nil
 	}
 }
 

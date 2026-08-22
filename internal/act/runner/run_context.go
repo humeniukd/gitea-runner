@@ -66,6 +66,7 @@ type RunContext struct {
 	Masks               []string
 	cleanUpJobContainer common.Executor
 	caller              *caller // job calling this RunContext (reusable workflows)
+	actionPreparations  *preparedActionCache
 	// summaryFileInitialized tracks which per-step summary files (workflow/step-summary-N.md)
 	// have already been created on the JobContainer. The runner sets up file-command files
 	// via JobContainer.Copy at the start of every phase, which truncates them — fine for
@@ -1008,6 +1009,20 @@ func (rc *RunContext) topLevelRunContext() *RunContext {
 		top = top.Parent
 	}
 	return top
+}
+
+// preparedActionCache returns the cache shared by every step of this job. Composite actions
+// reach the same top-level cache through their Parent chain, so a repeated action is only
+// downloaded once per job.
+func (rc *RunContext) preparedActionCache() *preparedActionCache {
+	if rc == nil {
+		return nil
+	}
+	top := rc.topLevelRunContext()
+	if top.actionPreparations == nil {
+		top.actionPreparations = &preparedActionCache{entries: make(map[string]*preparedAction)}
+	}
+	return top.actionPreparations
 }
 
 // Executor returns a pipeline executor for all the steps in the job

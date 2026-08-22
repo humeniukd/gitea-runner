@@ -284,6 +284,58 @@ func TestStepActionRemotePre(t *testing.T) {
 	}
 }
 
+func TestStepActionRemotePrepareReusesCachedAction(t *testing.T) {
+	ctx := context.Background()
+	sarm := &stepActionRemoteMocks{}
+	cloned := 0
+
+	origStepAtionRemoteNewCloneExecutor := stepActionRemoteNewCloneExecutor
+	stepActionRemoteNewCloneExecutor = func(input git.NewGitCloneExecutorInput) common.Executor {
+		return func(context.Context) error {
+			cloned++
+			return nil
+		}
+	}
+	defer func() {
+		stepActionRemoteNewCloneExecutor = origStepAtionRemoteNewCloneExecutor
+	}()
+
+	rc := &RunContext{
+		Config: &Config{
+			GitHubInstance: "github.com",
+			ActionCacheDir: t.TempDir(),
+		},
+		Run: &model.Run{
+			JobID: "1",
+			Workflow: &model.Workflow{
+				Jobs: map[string]*model.Job{"1": {}},
+			},
+		},
+	}
+	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
+
+	actionModel := &model.Action{Name: "shared"}
+	sarm.On("readAction", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(actionModel, nil).Once()
+
+	newStep := func() *stepActionRemote {
+		return &stepActionRemote{
+			Step:       &model.Step{Uses: "org/repo@v1"},
+			RunContext: rc,
+			readAction: sarm.readAction,
+		}
+	}
+	first := newStep()
+	second := newStep()
+
+	require.NoError(t, first.prepareActionExecutor()(ctx))
+	require.NoError(t, second.prepareActionExecutor()(ctx))
+
+	assert.Equal(t, 1, cloned)
+	assert.Same(t, actionModel, first.action)
+	assert.Same(t, actionModel, second.action)
+	sarm.AssertExpectations(t)
+}
+
 func TestStepActionRemotePreThroughAction(t *testing.T) {
 	table := []struct {
 		name      string
