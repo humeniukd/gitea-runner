@@ -50,7 +50,7 @@ import (
 // cancellation (waitForCommand) nor a normal container exit (wait) truncates
 // the tail of the log. It is a safety bound: in the common case the stream
 // reaches EOF and the goroutine returns well before this elapses.
-const drainGracePeriod = 2 * time.Second
+var drainGracePeriod = 2 * time.Second
 
 // NewContainer creates a reference to a container
 func NewContainer(input *NewContainerInput) ExecutionsEnvironment {
