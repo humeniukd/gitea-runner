@@ -12,12 +12,9 @@ import (
 	"time"
 )
 
-// TestWorkflowDispatch triggers a run through the dispatch API rather than a push, and checks the
-// supplied input reached the job. Dispatch requires the workflow to already exist on the branch
-// being dispatched, so the file is pushed first and the resulting push run ignored.
 func TestWorkflowDispatch(t *testing.T) {
 	requireFixture(t)
-	t.Parallel() // own repo and runner, so it shares nothing with the other scenarios
+	t.Parallel()
 	ctx := context.Background()
 
 	api, repo, _ := startScenario(t, "dispatch.yml")
@@ -37,8 +34,7 @@ func TestWorkflowDispatch(t *testing.T) {
 	}
 }
 
-// waitForDispatch retries the dispatch call until Gitea has indexed the freshly pushed workflow,
-// which it does asynchronously after the Contents API commit.
+// Gitea indexes workflows asynchronously after the Contents API commit.
 func waitForDispatch(ctx context.Context, api *GiteaAPI, repo, branch string, inputs map[string]string) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
@@ -57,8 +53,6 @@ func waitForDispatch(ctx context.Context, api *GiteaAPI, repo, branch string, in
 	}
 }
 
-// waitForDispatchedRun returns the run created by the workflow_dispatch event, ignoring the push
-// run the same file produced when it was committed.
 func waitForDispatchedRun(t *testing.T, api *GiteaAPI, repo string) *ActionRun {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
@@ -83,7 +77,6 @@ func waitForDispatchedRun(t *testing.T, api *GiteaAPI, repo string) *ActionRun {
 	}
 }
 
-// defaultBranch reports the repository's default branch, which dispatch needs as its ref.
 func defaultBranch(t *testing.T, api *GiteaAPI, repo string) string {
 	t.Helper()
 

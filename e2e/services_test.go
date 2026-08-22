@@ -10,13 +10,9 @@ import (
 	"testing"
 )
 
-// TestServiceContainer runs a job with a service container and reaches it by its alias over the
-// job network. It covers the service lifecycle the runner drives itself (creating the network,
-// starting the service, waiting on its readiness per container.service_ready_timeout) against a
-// task definition the server produced.
 func TestServiceContainer(t *testing.T) {
 	requireFixture(t)
-	t.Parallel() // own repo and runner, so it shares nothing with the other scenarios
+	t.Parallel()
 
 	api, repo, _ := startScenario(t, "services.yml")
 

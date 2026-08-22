@@ -13,12 +13,9 @@ import (
 	"time"
 )
 
-// TestSecretsMasking confirms a repository secret interpolated into a step's log is masked
-// with the runner's literal "***" marker (act/runner/logger.go's AppendSecretMasker), not
-// leaked in plaintext.
 func TestSecretsMasking(t *testing.T) {
 	requireFixture(t)
-	t.Parallel() // own repo and runner, so it shares nothing with the other scenarios
+	t.Parallel()
 	ctx := context.Background()
 
 	const secretValue = "s3cr3t-value-xyz"

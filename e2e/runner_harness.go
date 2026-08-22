@@ -24,9 +24,7 @@ import (
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 )
 
-// Harness is one in-process runner, registered and polling against a fixture Gitea. It
-// reimplements the register+daemon call sequence from internal/app/cmd directly, skipping the
-// disk/file-lock concerns that only matter for the CLI.
+// Harness is an in-process runner registered against the fixture (register+poll without CLI disk lock).
 type Harness struct {
 	runner *run.Runner
 	poller *poll.Poller
@@ -36,29 +34,21 @@ type Harness struct {
 	ephemeralGranted bool
 }
 
-// harnessOptions collects the settings NewHarness applies before registering.
 type harnessOptions struct {
 	ephemeral bool
 	cacheV2   *bool
 }
 
-// HarnessOption customises a Harness, so scenarios can vary registration and config without
-// every existing call site having to pass defaults.
 type HarnessOption func(*harnessOptions)
 
-// WithEphemeral registers the runner as ephemeral. Servers too old to support it silently
-// downgrade, which Harness.EphemeralGranted reports.
 func WithEphemeral() HarnessOption {
 	return func(o *harnessOptions) { o.ephemeral = true }
 }
 
-// WithCacheV2 forces the cache service version advertised to jobs (config cache.v2).
 func WithCacheV2(enabled bool) HarnessOption {
 	return func(o *harnessOptions) { o.cacheV2 = &enabled }
 }
 
-// NewHarness registers a runner named t.Name() against addr using token, then starts polling
-// for tasks in the background.
 func NewHarness(ctx context.Context, t *testing.T, addr, token string, lbls []string, opts ...HarnessOption) *Harness {
 	t.Helper()
 
@@ -78,16 +68,11 @@ func NewHarness(ctx context.Context, t *testing.T, addr, token string, lbls []st
 	if cfg.Container.DockerHost == "" {
 		cfg.Container.DockerHost = "unix:///var/run/docker.sock"
 	}
-	cfg.Runner.File = t.TempDir() + "/.runner" // never written to; only config.LoadDefault's file-based defaults apply
+	cfg.Runner.File = t.TempDir() + "/.runner"
 	cfg.Runner.Insecure = true
-	// Test-only tuning: every scenario registers a fresh runner and then waits for it to pick the
-	// task up, so the 2s/5s production poll defaults are mostly idle sleep here. Capacity lets the
-	// multi-job scenarios (matrix, artifacts, cache, outputs) run their jobs concurrently.
-	cfg.Runner.FetchInterval = 250 * time.Millisecond
+	cfg.Runner.FetchInterval = 250 * time.Millisecond // faster than prod defaults for local fixture
 	cfg.Runner.FetchIntervalMax = 250 * time.Millisecond
 	cfg.Runner.Capacity = 4
-	// In container mode the fixture is only reachable by name on the network we share with it, so
-	// job containers have to join that network too or they cannot resolve ACTIONS_RUNTIME_URL.
 	if fixture != nil && fixture.Network() != "" {
 		cfg.Container.Network = fixture.Network()
 	}
@@ -142,9 +127,8 @@ func NewHarness(ctx context.Context, t *testing.T, addr, token string, lbls []st
 	go poller.Poll()
 
 	h := &Harness{
-		runner: runner,
-		poller: poller,
-		// Negotiated via response header rather than the proto, see run.Runner.SetCapabilitiesFromDeclare.
+		runner:           runner,
+		poller:           poller,
 		capabilities:     strings.TrimSpace(declResp.Header().Get("X-Gitea-Actions-Capabilities")),
 		ephemeralWanted:  options.ephemeral,
 		ephemeralGranted: regResp.Msg.Runner.Ephemeral,
@@ -159,18 +143,12 @@ func NewHarness(ctx context.Context, t *testing.T, addr, token string, lbls []st
 	return h
 }
 
-// Capabilities is the capability set the server negotiated back on Declare. It legitimately
-// differs by Gitea version, which is why scenarios record it rather than assert one value.
 func (h *Harness) Capabilities() string { return h.capabilities }
 
-// EphemeralGranted reports whether the server honoured an ephemeral registration. Older servers
-// accept the request but downgrade it, see internal/app/cmd/register.go.
 func (h *Harness) EphemeralGranted() bool { return h.ephemeralGranted }
 
-// EphemeralDowngraded reports an ephemeral registration the server silently refused.
 func (h *Harness) EphemeralDowngraded() bool { return h.ephemeralWanted && !h.ephemeralGranted }
 
-// Close stops polling and releases runner resources.
 func (h *Harness) Close(ctx context.Context) error {
 	if err := h.poller.Shutdown(ctx); err != nil {
 		return fmt.Errorf("poller shutdown: %w", err)

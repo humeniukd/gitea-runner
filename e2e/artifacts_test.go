@@ -12,11 +12,9 @@ import (
 	"time"
 )
 
-// TestArtifactUploadDownload exercises upload-artifact in one job and download-artifact in a
-// dependent job, verifying the artifact also shows up via the artifacts API.
 func TestArtifactUploadDownload(t *testing.T) {
 	requireFixture(t)
-	t.Parallel() // own repo and runner, so it shares nothing with the other scenarios
+	t.Parallel()
 	ctx := context.Background()
 
 	repo := repoName(t)

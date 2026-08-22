@@ -15,37 +15,24 @@ import (
 	"time"
 )
 
-// runnerLabel is the label every scenario registers with: an image already present on most
-// dev/CI hosts (docs/scripts/test.yml pre-pulls it too), so job containers don't need a fresh
-// pull on top of the Gitea image pull the fixture already does.
-const runnerLabel = "ubuntu-latest:docker://node:24-bookworm-slim"
+const runnerLabel = "ubuntu-latest:docker://node:24-bookworm-slim" // pre-pulled in CI/docs scripts
 
-// runTimeout bounds how long a scenario waits for its workflow run to conclude.
 const runTimeout = 3 * time.Minute
 
 var nonRepoChars = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
-// repoName derives a Gitea-safe repository name from the test name, so each scenario gets its
-// own repo inside the shared fixture instance.
 func repoName(t *testing.T) string {
 	return strings.ToLower(nonRepoChars.ReplaceAllString(t.Name(), "-"))
 }
 
-// fixture is shared across every scenario in this binary run: starting one Gitea container
-// (image pull + admin bootstrap) is expensive, and each scenario uses its own repo/runner
-// name (see t.Name() usage in Harness/tests) so sharing costs no isolation between them.
 var fixture *GiteaFixture
 
-// skipReason, when non-empty, means no docker daemon was reachable at startup; every test
-// checks it and calls t.Skip, so `go test -v` shows each test as SKIP rather than the binary
-// exiting silently.
-var skipReason string
+var skipReason string // set when docker is unavailable; tests call t.Skip
 
 func TestMain(m *testing.M) {
-	os.Exit(runSuite(m)) // the only Exit, so every defer in runSuite still runs
+	os.Exit(runSuite(m))
 }
 
-// runSuite owns the shared fixture's lifetime and returns the exit code for TestMain.
 func runSuite(m *testing.M) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -63,15 +50,11 @@ func runSuite(m *testing.M) int {
 	fixture = f
 	defer func() { _ = fixture.Close(context.Background()) }()
 
-	// Straight to stderr, not t.Log, so it shows without -v: it is the only place the run says
-	// which Gitea it actually tested, as opposed to which tag it was asked for.
 	fmt.Fprintf(os.Stderr, "gitea fixture: %s\n", fixture.Describe())
 
 	return m.Run()
 }
 
-// startScenario creates this test's repository, pushes the named workflow fixture into it, and
-// starts a runner registered against the shared fixture.
 func startScenario(t *testing.T, workflow string, opts ...HarnessOption) (*GiteaAPI, string, *Harness) {
 	t.Helper()
 	ctx := context.Background()
@@ -90,7 +73,6 @@ func startScenario(t *testing.T, workflow string, opts ...HarnessOption) (*Gitea
 	return api, repo, NewHarness(ctx, t, fixture.BaseURL(), token, []string{runnerLabel}, opts...)
 }
 
-// pushWorkflow publishes a testdata workflow into repo's .gitea/workflows directory.
 func pushWorkflow(t *testing.T, api *GiteaAPI, repo, workflow string) {
 	t.Helper()
 
@@ -103,7 +85,6 @@ func pushWorkflow(t *testing.T, api *GiteaAPI, repo, workflow string) {
 	}
 }
 
-// requireSuccess waits for run to finish and fails with its logs unless it succeeded.
 func requireSuccess(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 	t.Helper()
 
@@ -118,8 +99,6 @@ func requireSuccess(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 	}
 }
 
-// runLogs concatenates every job log of a run, for assertions that do not care which job emitted
-// a line.
 func runLogs(t *testing.T, api *GiteaAPI, repo string, runID int64) string {
 	t.Helper()
 	ctx := context.Background()
@@ -139,8 +118,6 @@ func runLogs(t *testing.T, api *GiteaAPI, repo string, runID int64) string {
 	return all.String()
 }
 
-// dumpRuns reports every run in repo, so a scenario waiting for a run that never appears says
-// what did appear instead of only that it timed out.
 func dumpRuns(t *testing.T, api *GiteaAPI, repo string) {
 	t.Helper()
 
@@ -158,8 +135,6 @@ func dumpRuns(t *testing.T, api *GiteaAPI, repo string) {
 	}
 }
 
-// dumpRunLogs reports every job's outcome and log for run, so a scenario that fails on the
-// server side says why instead of only reporting the conclusion.
 func dumpRunLogs(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 	t.Helper()
 	ctx := context.Background()
@@ -179,7 +154,6 @@ func dumpRunLogs(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 	}
 }
 
-// requireFixture skips t if TestMain could not start the shared fixture.
 func requireFixture(t *testing.T) {
 	t.Helper()
 	if skipReason != "" {

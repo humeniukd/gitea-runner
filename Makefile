@@ -173,12 +173,10 @@ coverage-report: ## turn coverage.txt from `make test` into .tmp/coverage.md
 test-dind: ## run the daemon-facing tests against the built dind image (TARGET=dind|dind-rootless)
 	@./scripts/test-dind.sh $(TARGET)
 
-# The job and service-container images the scenarios run; the Gitea image comes from
-# GITEA_E2E_IMAGE, so the matrix pulls whichever version it is about to test.
 E2E_JOB_IMAGES ?= node:24-bookworm-slim nginx:alpine
 
 .PHONY: e2e-pull
-e2e-pull: ## pre-pull the images the e2e suite needs, retrying transient registry failures
+e2e-pull: ## pre-pull e2e images (with retries)
 	@for img in $(E2E_JOB_IMAGES) $(GITEA_E2E_IMAGE); do \
 		pulled=""; \
 		for try in 1 2 3; do \
@@ -189,11 +187,11 @@ e2e-pull: ## pre-pull the images the e2e suite needs, retrying transient registr
 	done
 
 .PHONY: test-e2e
-test-e2e: e2e-pull ## run the Gitea compatibility e2e suite against GITEA_E2E_IMAGE (needs docker)
+test-e2e: e2e-pull ## Gitea compatibility e2e against GITEA_E2E_IMAGE (needs docker)
 	GITEA_E2E_IMAGE=$(GITEA_E2E_IMAGE) $(GO) test -tags e2e -count=1 -timeout 20m -v ./e2e/...
 
 .PHONY: test-e2e-matrix
-test-e2e-matrix: ## run test-e2e once per Gitea version in GITEA_E2E_VERSIONS (from e2e/.env)
+test-e2e-matrix: ## test-e2e for each GITEA_E2E_VERSIONS entry (e2e/.env)
 	@for img in $(GITEA_E2E_VERSIONS); do \
 		echo "==> Testing against $$img"; \
 		$(MAKE) test-e2e GITEA_E2E_IMAGE=$$img || exit 1; \

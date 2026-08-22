@@ -13,15 +13,9 @@ import (
 	"gitea.com/gitea/runner/internal/app/run"
 )
 
-// TestCapabilityNegotiation records what the server negotiates back on Declare. The runner
-// advertises its capabilities in the request and reads the server's answer from the
-// X-Gitea-Actions-Capabilities response header (run.Runner.SetCapabilitiesFromDeclare), a
-// side channel that exists precisely because the answer varies by Gitea version. The value
-// here is reporting that per-version truth in the matrix output, so the assertion only covers
-// what must hold everywhere: Declare succeeds and the runner keeps working.
 func TestCapabilityNegotiation(t *testing.T) {
 	requireFixture(t)
-	t.Parallel() // own repo and runner, so it shares nothing with the other scenarios
+	t.Parallel()
 	ctx := context.Background()
 
 	repo := repoName(t)
@@ -44,8 +38,6 @@ func TestCapabilityNegotiation(t *testing.T) {
 		t.Logf("capability %q honoured by this gitea: %t", c, strings.Contains(negotiated, c))
 	}
 
-	// A server that negotiates nothing must still run jobs, so the declare path is proven end
-	// to end rather than only by the header being readable.
 	wfRun := waitForRun(t, api, repo)
 	requireSuccess(t, api, repo, wfRun.ID)
 }

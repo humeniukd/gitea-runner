@@ -13,8 +13,6 @@ import (
 	"time"
 )
 
-// TestLogStreaming confirms a job's log is readable while it is still running, not only once
-// it has completed, by sampling logs during the run and checking they grow.
 func TestLogStreaming(t *testing.T) {
 	requireFixture(t)
 	ctx := context.Background()
@@ -85,7 +83,6 @@ pollLoop:
 	}
 }
 
-// waitForJob returns the id of the run's (single) job once it exists.
 func waitForJob(t *testing.T, api *GiteaAPI, repo string, runID int64) int64 {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -13,10 +13,7 @@ import (
 	"time"
 )
 
-// TestRunCancellation covers REST run cancellation, which only nightly exposes: 1.26 and 1.27
-// register no CancelWorkflowRun route. Rather than skip the older versions outright, it asserts
-// they degrade gracefully — the unsupported call must not disturb the in-flight job or the
-// runner, which keeps picking up work afterwards.
+// Cancel exists only on nightly; older versions must leave the job and runner alone.
 func TestRunCancellation(t *testing.T) {
 	requireFixture(t)
 	ctx := context.Background()
@@ -24,12 +21,12 @@ func TestRunCancellation(t *testing.T) {
 	api, repo, _ := startScenario(t, "cancel.yml")
 
 	wfRun := waitForRun(t, api, repo)
-	waitForJob(t, api, repo, wfRun.ID) // cancel only means something once the job is picked up
+	waitForJob(t, api, repo, wfRun.ID)
 
 	err := api.CancelRun(ctx, giteaAdminUser, repo, wfRun.ID)
 	switch {
 	case errors.Is(err, ErrCancelUnsupported):
-		t.Log("REST run cancellation is unavailable on this gitea version; asserting it degrades gracefully")
+		t.Log("REST run cancellation unavailable; asserting graceful degrade")
 		assertRunnerStillHealthy(t, api, repo, wfRun.ID)
 	case err != nil:
 		dumpRunLogs(t, api, repo, wfRun.ID)
@@ -39,8 +36,6 @@ func TestRunCancellation(t *testing.T) {
 	}
 }
 
-// assertRunCancelled expects the cancelled run to finish promptly, well inside the workflow's
-// own runtime, so a run that merely ran to completion cannot pass.
 func assertRunCancelled(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 	t.Helper()
 
@@ -58,8 +53,6 @@ func assertRunCancelled(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 	assertPicksUpNewWork(t, api, repo)
 }
 
-// assertRunnerStillHealthy checks that a rejected cancel left the original job alone and the
-// runner able to take more work.
 func assertRunnerStillHealthy(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 	t.Helper()
 
@@ -76,8 +69,6 @@ func assertRunnerStillHealthy(t *testing.T, api *GiteaAPI, repo string, runID in
 	assertPicksUpNewWork(t, api, repo)
 }
 
-// assertPicksUpNewWork pushes a second workflow and requires the same runner to run it, proving
-// the runner survived whatever happened to the first run.
 func assertPicksUpNewWork(t *testing.T, api *GiteaAPI, repo string) {
 	t.Helper()
 

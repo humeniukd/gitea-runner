@@ -13,11 +13,9 @@ import (
 	"time"
 )
 
-// TestJobMatrix confirms a 2x2 strategy.matrix expands to four jobs, each with its matrix
-// values injected correctly.
 func TestJobMatrix(t *testing.T) {
 	requireFixture(t)
-	t.Parallel() // own repo and runner, so it shares nothing with the other scenarios
+	t.Parallel()
 	ctx := context.Background()
 
 	repo := repoName(t)

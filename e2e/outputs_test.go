@@ -10,12 +10,9 @@ import (
 	"testing"
 )
 
-// TestJobOutputs confirms a value written to GITHUB_OUTPUT in one job reaches a dependent job
-// through needs.<job>.outputs, which crosses the runner/server boundary: the producing job
-// reports its outputs to Gitea, and Gitea feeds them into the consuming job's task.
 func TestJobOutputs(t *testing.T) {
 	requireFixture(t)
-	t.Parallel() // own repo and runner, so it shares nothing with the other scenarios
+	t.Parallel()
 
 	api, repo, _ := startScenario(t, "outputs.yml")
 

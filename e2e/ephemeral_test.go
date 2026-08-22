@@ -10,10 +10,7 @@ import (
 	"testing"
 )
 
-// TestEphemeralRunner registers a one-shot runner and runs a job on it. Whether the server
-// honours the request is version-dependent: older Gitea accepts the registration but silently
-// clears the flag (internal/app/cmd/register.go warns about exactly this), so the downgrade is
-// reported rather than failed, and the job must run either way.
+// Older Gitea accepts ephemeral registration but silently clears the flag.
 func TestEphemeralRunner(t *testing.T) {
 	requireFixture(t)
 

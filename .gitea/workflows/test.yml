@@ -62,6 +62,5 @@ jobs:
           check-latest: true
       - name: prepare anonymous docker config
         run: mkdir -p "$DOCKER_CONFIG" && echo '{}' > "$DOCKER_CONFIG/config.json"
-      # make test-e2e depends on e2e-pull, so the images are fetched (with retries) per version.
       - name: e2e compatibility matrix
         run: make test-e2e-matrix

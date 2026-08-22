@@ -14,11 +14,9 @@ import (
 	"time"
 )
 
-// TestRegisterAndRunWorkflow is the baseline scenario: register a runner, push a one-step
-// workflow, and confirm it runs to completion with the expected output.
 func TestRegisterAndRunWorkflow(t *testing.T) {
 	requireFixture(t)
-	t.Parallel() // own repo and runner, so it shares nothing with the other scenarios
+	t.Parallel()
 	ctx := context.Background()
 
 	repo := repoName(t)
@@ -66,8 +64,6 @@ func TestRegisterAndRunWorkflow(t *testing.T) {
 	}
 }
 
-// waitForRun polls for the run triggered by the most recent push, since the Contents API
-// commit that pushes a workflow file races the runner's own poll interval.
 func waitForRun(t *testing.T, api *GiteaAPI, repo string) *ActionRun {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

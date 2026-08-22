@@ -11,12 +11,9 @@ import (
 	"testing"
 )
 
-// TestRepoVariables confirms a repository Actions variable reaches the job through vars.*. It is
-// the counterpart to TestSecretsMasking: a variable is not sensitive, so it must appear in the
-// log verbatim rather than masked.
 func TestRepoVariables(t *testing.T) {
 	requireFixture(t)
-	t.Parallel() // own repo and runner, so it shares nothing with the other scenarios
+	t.Parallel()
 	ctx := context.Background()
 
 	const variableValue = "hello-from-a-variable"
