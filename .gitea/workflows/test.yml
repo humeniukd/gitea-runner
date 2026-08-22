@@ -5,17 +5,18 @@ on:
       - main
   pull_request:
 
+env:
+  # The runner image ships a stale docker.io login; point docker at an empty config so
+  # image pulls go straight to anonymous instead of attempting (and failing) that auth
+  # first. The path must be a literal: the `runner` context is unavailable in workflow-level
+  # env, so `${{ runner.temp }}` would resolve to empty and config.Dir() would fall back
+  # to ~/.docker with the stale credentials.
+  DOCKER_CONFIG: /tmp/docker-noauth
+
 jobs:
   lint:
     name: check and test
     runs-on: ubuntu-latest
-    env:
-      # The runner image ships a stale docker.io login; point docker at an empty config so
-      # image pulls go straight to anonymous instead of attempting (and failing) that auth
-      # first. The path must be a literal: the `runner` context is unavailable in job-level
-      # env, so `${{ runner.temp }}` would resolve to empty and config.Dir() would fall back
-      # to ~/.docker with the stale credentials.
-      DOCKER_CONFIG: /tmp/docker-noauth
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -49,3 +50,18 @@ jobs:
         run: |
           make coverage-report
           cat .tmp/coverage.md >> "$GITHUB_STEP_SUMMARY"
+
+  e2e:
+    name: gitea compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+      - name: prepare anonymous docker config
+        run: mkdir -p "$DOCKER_CONFIG" && echo '{}' > "$DOCKER_CONFIG/config.json"
+      # make test-e2e depends on e2e-pull, so the images are fetched (with retries) per version.
+      - name: e2e compatibility matrix
+        run: make test-e2e-matrix
