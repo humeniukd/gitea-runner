@@ -85,6 +85,11 @@ pollLoop:
 
 func waitForJob(t *testing.T, api *GiteaAPI, repo string, runID int64) int64 {
 	t.Helper()
+	return waitForJobStatus(t, api, repo, runID, "")
+}
+
+func waitForJobStatus(t *testing.T, api *GiteaAPI, repo string, runID int64, status string) int64 {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -93,13 +98,34 @@ func waitForJob(t *testing.T, api *GiteaAPI, repo string, runID int64) int64 {
 		if err != nil {
 			t.Fatalf("list jobs: %v", err)
 		}
-		if len(jobs) > 0 {
+		if len(jobs) > 0 && (status == "" || jobs[0].Status == status) {
 			return jobs[0].ID
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("no job appeared for run %d within timeout", runID)
-		case <-time.After(500 * time.Millisecond):
+			if status == "" {
+				t.Fatalf("no job appeared for run %d within timeout", runID)
+			}
+			t.Fatalf("job for run %d never reached %q within timeout", runID, status)
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+func waitForJobLogContains(t *testing.T, api *GiteaAPI, repo string, jobID int64, substr string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	for {
+		logs, err := api.JobLogs(ctx, giteaAdminUser, repo, jobID)
+		if err == nil && strings.Contains(logs, substr) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("job %d logs never contained %q", jobID, substr)
+		case <-time.After(pollInterval):
 		}
 	}
 }

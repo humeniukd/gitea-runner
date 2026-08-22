@@ -72,6 +72,8 @@ func NewHarness(ctx context.Context, t *testing.T, addr, token string, lbls []st
 	cfg.Runner.Insecure = true
 	cfg.Runner.FetchInterval = 250 * time.Millisecond // faster than prod defaults for local fixture
 	cfg.Runner.FetchIntervalMax = 250 * time.Millisecond
+	cfg.Runner.StateReportInterval = 500 * time.Millisecond // so cancel reaches the job quickly
+	cfg.Runner.LogReportInterval = 500 * time.Millisecond
 	cfg.Runner.Capacity = 4
 	if fixture != nil && fixture.Network() != "" {
 		cfg.Container.Network = fixture.Network()

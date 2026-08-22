@@ -21,7 +21,8 @@ func TestRunCancellation(t *testing.T) {
 	api, repo, _ := startScenario(t, "cancel.yml")
 
 	wfRun := waitForRun(t, api, repo)
-	waitForJob(t, api, repo, wfRun.ID)
+	jobID := waitForJobStatus(t, api, repo, wfRun.ID, "in_progress")
+	waitForJobLogContains(t, api, repo, jobID, "tick ") // mid-step so UpdateTask can surface cancel
 
 	err := api.CancelRun(ctx, giteaAdminUser, repo, wfRun.ID)
 	switch {
