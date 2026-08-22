@@ -458,7 +458,7 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 				logger.Debugf("Unable to pull %s: %v", refName, err)
 			}
 		case isOfflineMode && reused:
-			reusedMsg = " (reused in offline mode)"
+			reusedMsg = " (offline mode)"
 		}
 
 		if reused {

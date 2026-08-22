@@ -91,7 +91,6 @@ func printPrepareActions(rc *RunContext, preparers []actionPreparer) common.Exec
 		rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
 		rawLogger.Infof("Prepare all required actions")
 
-		seen := make(map[string]struct{}, len(preparers))
 		for _, preparer := range preparers {
 			if err := preparer.prepareActionExecutor()(ctx); err != nil {
 				// No step has run yet, so the failure belongs to the job.
@@ -102,11 +101,6 @@ func printPrepareActions(rc *RunContext, preparers []actionPreparer) common.Exec
 			if !ok {
 				continue
 			}
-			key := reference + "\x00" + sha
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
 			if sha == "" {
 				rawLogger.Infof("Download action repository '%s'", reference)
 			} else {

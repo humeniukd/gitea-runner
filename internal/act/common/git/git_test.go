@@ -373,22 +373,28 @@ func TestGitCloneExecutorOfflineMode(t *testing.T) {
 
 	// Prime the cache with an online clone of main.
 	cacheDir := t.TempDir()
+	logger, hook := logrustest.NewNullLogger()
+	logger.SetLevel(log.DebugLevel)
+	ctx := common.WithLogger(context.Background(), logger.WithField("job", "j1"))
 	require.NoError(t, NewGitCloneExecutor(NewGitCloneExecutorInput{
 		URL: remoteDir,
 		Ref: "main",
 		Dir: cacheDir,
-	})(context.Background()))
+	})(ctx))
+	assert.Contains(t, logMessages(hook), "Cloned "+remoteDir+" to "+cacheDir)
 
 	t.Run("cached branch resolves without fetching", func(t *testing.T) {
 		// Offline reuse of a cached branch must succeed even though ResolveRevision(input.Ref)
 		// finds no local refs/heads/<ref>.
+		hook.Reset()
 		err := NewGitCloneExecutor(NewGitCloneExecutorInput{
 			URL:         remoteDir,
 			Ref:         "main",
 			Dir:         cacheDir,
 			OfflineMode: true,
-		})(context.Background())
+		})(ctx)
 		require.NoError(t, err)
+		assert.Contains(t, logMessages(hook), "Reused "+remoteDir+" at "+cacheDir+" (offline mode)")
 
 		out, err := exec.Command("git", "-C", cacheDir, "log", "--oneline", "-1", "--format=%s").Output()
 		require.NoError(t, err)
@@ -445,38 +451,12 @@ func TestGitCloneExecutorQuietDemotesCloneLine(t *testing.T) {
 	}
 }
 
-func TestGitCloneExecutorLogsReusedClone(t *testing.T) {
-	remoteDir := t.TempDir()
-	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
-	workDir := t.TempDir()
-	require.NoError(t, gitCmd("clone", remoteDir, workDir))
-	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "main"))
-	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "initial"))
-	require.NoError(t, gitCmd("-C", workDir, "push", "-u", "origin", "main"))
-
-	cacheDir := t.TempDir()
-	input := NewGitCloneExecutorInput{URL: remoteDir, Ref: "main", Dir: cacheDir}
-	logger, hook := logrustest.NewNullLogger()
-	logger.SetLevel(log.DebugLevel)
-	ctx := common.WithLogger(context.Background(), logger.WithField("job", "j1"))
-
-	require.NoError(t, NewGitCloneExecutor(input)(ctx))
-	assert.True(t, hasLogMessage(hook.AllEntries(), "Cloned "+remoteDir+" to "+cacheDir))
-
-	hook.Reset()
-	require.NoError(t, NewGitCloneExecutor(input)(ctx))
-	entries := hook.AllEntries()
-	assert.True(t, hasLogMessage(entries, "Reused "+remoteDir+" at "+cacheDir))
-	assert.False(t, hasLogMessage(entries, "Cloned "+remoteDir+" to "+cacheDir))
-}
-
-func hasLogMessage(entries []*log.Entry, want string) bool {
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Message, want) {
-			return true
-		}
+func logMessages(hook *logrustest.Hook) []string {
+	messages := []string{}
+	for _, entry := range hook.AllEntries() {
+		messages = append(messages, entry.Message)
 	}
-	return false
+	return messages
 }
 
 func TestGitCloneExecutorShallow(t *testing.T) {

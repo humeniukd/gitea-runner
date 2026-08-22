@@ -146,7 +146,8 @@ func TestPrintPrepareActionsGolden(t *testing.T) {
 		&actionPreparerMock{reference: "actions/checkout@v7", sha: "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0", ok: true},
 		// A resolved commit is best effort; the ref alone is reported when it is unknown.
 		&actionPreparerMock{reference: "actions/setup-go@v6", ok: true},
-		// A step that downloads nothing, such as the checkout of the workflow's own repository.
+		// A step that downloads nothing, such as the checkout of the workflow's own repository or a
+		// second step on an action the job already downloaded.
 		&actionPreparerMock{ok: false},
 	}
 	require.NoError(t, printPrepareActions(&RunContext{}, preparers)(ctx))
@@ -155,29 +156,6 @@ func TestPrintPrepareActionsGolden(t *testing.T) {
 		"[j1]   | Prepare all required actions",
 		"[j1]   | Download action repository 'actions/checkout@v7' (SHA:9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0)",
 		"[j1]   | Download action repository 'actions/setup-go@v6'",
-		"",
-	}, "\n")
-	assert.Equal(t, want, buf.String())
-}
-
-func TestPrintPrepareActionsDeduplicatesDownloads(t *testing.T) {
-	buf := &bytes.Buffer{}
-	logger := log.New()
-	logger.SetOutput(buf)
-	logger.SetLevel(log.InfoLevel)
-	logger.SetFormatter(&jobLogFormatter{color: cyan})
-	ctx := common.WithLogger(context.Background(), logger.WithFields(log.Fields{"job": "j1"}))
-
-	preparers := []actionPreparer{
-		&actionPreparerMock{reference: "appleboy/ssh-action@v1", sha: "0ff4204d59e8e51228ff73bce53f80d53301dee2", ok: true},
-		&actionPreparerMock{reference: "appleboy/ssh-action@v1", sha: "0ff4204d59e8e51228ff73bce53f80d53301dee2", ok: true},
-		&actionPreparerMock{reference: "appleboy/ssh-action@v1", sha: "0ff4204d59e8e51228ff73bce53f80d53301dee2", ok: true},
-	}
-	require.NoError(t, printPrepareActions(&RunContext{}, preparers)(ctx))
-
-	want := strings.Join([]string{
-		"[j1]   | Prepare all required actions",
-		"[j1]   | Download action repository 'appleboy/ssh-action@v1' (SHA:0ff4204d59e8e51228ff73bce53f80d53301dee2)",
 		"",
 	}, "\n")
 	assert.Equal(t, want, buf.String())
