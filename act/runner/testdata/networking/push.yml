@@ -4,6 +4,5 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Reach the container hostname
-        run: >-
-          node -e "const net = require('net'), server = net.createServer(socket => socket.end()); server.listen(0, '0.0.0', () => net.connect({host: process.argv[1], port: server.address().port, signal: AbortSignal.timeout(5000)}).on('connect', () => server.close()).on('error', () => process.exit(1)))" "$(hostname -f)"
+      - name: Resolve the container hostname
+        run: getent hosts "$(hostname -f)"

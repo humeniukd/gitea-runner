@@ -259,20 +259,6 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 	fmt.Println("::endgroup::") //nolint:forbidigo // pre-existing issue from nektos/act
 }
 
-func isolatedTestWorkdir(t *testing.T, source string) string {
-	t.Helper()
-
-	source, err := filepath.Abs(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	destination := filepath.Join(t.TempDir(), "testdata")
-	if err := os.CopyFS(destination, os.DirFS(source)); err != nil {
-		t.Fatal(err)
-	}
-	return destination
-}
-
 func TestRunEvent(t *testing.T) {
 	requireDocker(t)
 	t.Parallel()
@@ -383,7 +369,6 @@ func TestRunEventHostEnvironment(t *testing.T) {
 	// as TestRunEvent). Only the broadly-used interpreters are required up front; the pwsh- and
 	// nix-specific cases gate on their own tool below so a missing pwsh/nix skips just those.
 	requireHostTools(t, "bash", "node")
-	t.Parallel()
 
 	ctx := context.Background()
 
@@ -471,7 +456,6 @@ func TestRunEventHostEnvironment(t *testing.T) {
 			t.Parallel()
 			hostPlanSlots <- struct{}{}
 			defer func() { <-hostPlanSlots }()
-			table.workdir = isolatedTestWorkdir(t, table.workdir)
 			table.runTest(ctx, t, &Config{})
 		})
 	}

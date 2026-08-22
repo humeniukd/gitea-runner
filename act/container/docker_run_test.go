@@ -176,13 +176,12 @@ func (m *mockConn) Close() (err error) {
 
 func TestDockerExecAbort(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	originalDrainGracePeriod := drainGracePeriod
-	drainGracePeriod = 0
-	t.Cleanup(func() { drainGracePeriod = originalDrainGracePeriod })
 
 	reader := &interruptReader{started: make(chan struct{}), interrupted: make(chan struct{}), stopped: make(chan struct{})}
 	conn := &mockConn{}
-	conn.On("Write", []byte{3}).Return(1, nil)
+	conn.On("Write", []byte{3}).
+		Run(func(mock.Arguments) { close(reader.interrupted) }).
+		Return(1, nil)
 
 	client := &mockDockerClient{}
 	client.On("ExecCreate", ctx, "123", mock.AnythingOfType("client.ExecCreateOptions")).Return(mobyclient.ExecCreateResult{ID: "id"}, nil)
@@ -211,7 +210,6 @@ func TestDockerExecAbort(t *testing.T) {
 	cancel()
 
 	err := <-channel
-	close(reader.interrupted)
 	<-reader.stopped
 	assert.ErrorIs(t, err, context.Canceled) //nolint:testifylint // pre-existing issue from nektos/act
 
