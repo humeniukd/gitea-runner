@@ -35,8 +35,6 @@ func (sf *stepFactoryImpl) newStep(stepModel *model.Step, rc *RunContext) (step,
 			runAction:  runActionImpl,
 		}, nil
 	case model.StepTypeUsesActionRemote:
-		// actionslib classifies built-ins as remote actions, so recognize the
-		// explicit `builtin:` namespace here. See docs/builtin-actions.md.
 		if name, isBuiltin := builtin.ParseUses(stepModel.Uses); isBuiltin {
 			if !builtin.ValidName(name) {
 				return nil, fmt.Errorf("invalid built-in action name %q for job:%s step:%+v",

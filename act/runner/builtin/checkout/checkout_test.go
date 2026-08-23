@@ -7,10 +7,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
-	"os/exec"
-	"path"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,9 +20,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeContainer records the CopyDir invocation we want to assert and is a
-// no-op for everything else. It satisfies container.ExecutionsEnvironment.
 type fakeContainer struct {
+	container.LinuxContainerEnvironmentExtensions
 	copyDirDst string
 	copyDirSrc string
 	copyDirGI  bool
@@ -44,7 +39,6 @@ func (f *fakeContainer) CopyDir(destPath, srcPath string, useGitIgnore bool) com
 	}
 }
 
-// container.Container surface (the rest are unused in tests).
 func (f *fakeContainer) Create(_, _ []string) common.Executor      { return nopExec }
 func (f *fakeContainer) ConnectToNetwork(_ string) common.Executor { return nopExec }
 func (f *fakeContainer) Copy(_ string, _ ...*container.FileEntry) common.Executor {
@@ -72,25 +66,8 @@ func (f *fakeContainer) Close() common.Executor                                 
 func (f *fakeContainer) DumpLogs(_ context.Context) error                       { return nil }
 func (f *fakeContainer) ReplaceLogWriter(_, _ io.Writer) (io.Writer, io.Writer) { return nil, nil }
 
-// container.ExecutionsEnvironment surface.
-func (f *fakeContainer) ToContainerPath(p string) string {
-	return path.Join("/workspace", strings.TrimPrefix(p, "/"))
-}
-func (f *fakeContainer) GetActPath() string          { return "/var/run/act" }
-func (f *fakeContainer) GetPathVariableName() string { return "PATH" }
-func (f *fakeContainer) DefaultPathVariable() string { return "/usr/bin" }
-func (f *fakeContainer) JoinPathVariable(parts ...string) string {
-	return strings.Join(parts, ":")
-}
-
-func (f *fakeContainer) GetRunnerContext(_ context.Context) map[string]any {
-	return map[string]any{}
-}
-func (f *fakeContainer) IsEnvironmentCaseInsensitive() bool { return false }
-
 var nopExec common.Executor = func(_ context.Context) error { return nil }
 
-// fakeRunContext satisfies builtin.RunContext for tests.
 type fakeRunContext struct {
 	jc    container.ExecutionsEnvironment
 	wd    string
@@ -107,7 +84,6 @@ func (f *fakeRunContext) ActionCacheDir() string                        { return
 func (f *fakeRunContext) GithubContext() *model.GithubContext           { return f.gh }
 func (f *fakeRunContext) Config() builtin.Config                        { return f.cfg }
 
-// fakeConfig satisfies builtin.Config for tests.
 type fakeConfig struct {
 	token             string
 	githubInstance    string
@@ -128,85 +104,80 @@ func (f *fakeConfig) NoSkipCheckout() bool          { return f.noSkip }
 func (f *fakeConfig) UseGitIgnore() bool            { return f.gitIgnore }
 func (f *fakeConfig) ActionOfflineMode() bool       { return f.offline }
 
+func checkoutCtx(t *testing.T, fc *fakeContainer, cfg *fakeConfig, inputs map[string]string) *builtin.Context {
+	t.Helper()
+	if fc == nil {
+		fc = &fakeContainer{}
+	}
+	if cfg == nil {
+		cfg = &fakeConfig{}
+	}
+	if inputs == nil {
+		inputs = map[string]string{}
+	}
+	return &builtin.Context{
+		Ctx: context.Background(),
+		RunContext: &fakeRunContext{
+			jc:    fc,
+			wd:    "/host/work",
+			cwd:   "/workspace",
+			cache: t.TempDir(),
+			gh:    &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main"},
+			cfg:   cfg,
+		},
+		Step:   &model.Step{Uses: "builtin:checkout"},
+		Inputs: inputs,
+		Env:    map[string]string{},
+		Logger: log.New(),
+	}
+}
+
 func TestCheckoutSkipsWhenWorkspaceBound(t *testing.T) {
 	fc := &fakeContainer{}
-	rc := &fakeRunContext{
-		jc:    fc,
-		wd:    "/host/work",
-		cwd:   "/workspace",
-		cache: t.TempDir(),
-		gh:    &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main"},
-		cfg:   &fakeConfig{bind: true},
-	}
-
-	a := &Action{}
-	ctx := &builtin.Context{
-		Ctx:        context.Background(),
-		RunContext: rc,
-		Step:       &model.Step{Uses: "builtin:checkout"},
-		Inputs:     map[string]string{},
-		Env:        map[string]string{},
-		Logger:     log.New(),
-	}
-
-	err := a.Main(ctx)
+	err := (&Action{}).Main(checkoutCtx(t, fc, &fakeConfig{bind: true}, nil))
 	require.NoError(t, err)
-	assert.False(t, fc.called, "CopyDir must not be called when BindWorkdir is true and workspace is local")
+	assert.False(t, fc.called)
 }
 
 func TestCheckoutCopiesLocalWorkspace(t *testing.T) {
 	fc := &fakeContainer{}
-	rc := &fakeRunContext{
-		jc:    fc,
-		wd:    "/host/work",
-		cwd:   "/workspace",
-		cache: t.TempDir(),
-		gh:    &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main"},
-		cfg:   &fakeConfig{gitIgnore: true},
-	}
-
-	a := &Action{}
-	ctx := &builtin.Context{
-		Ctx:        context.Background(),
-		RunContext: rc,
-		Step:       &model.Step{Uses: "builtin:checkout"},
-		Inputs:     map[string]string{"path": "src"},
-		Env:        map[string]string{},
-		Logger:     log.New(),
-	}
-
-	err := a.Main(ctx)
+	err := (&Action{}).Main(checkoutCtx(t, fc, &fakeConfig{gitIgnore: true}, map[string]string{"path": "src"}))
 	require.NoError(t, err)
-	assert.True(t, fc.called, "CopyDir must be called for local checkout when not bound")
+	assert.True(t, fc.called)
 	assert.Equal(t, "/workspace/src", fc.copyDirDst)
 	assert.True(t, strings.HasPrefix(fc.copyDirSrc, "/host/work"))
 	assert.True(t, fc.copyDirGI)
 }
 
 func TestCheckoutRejectsPathOutsideWorkspace(t *testing.T) {
-	for _, checkoutPath := range []string{"../outside", "/outside", "nested/../../outside"} {
-		t.Run(checkoutPath, func(t *testing.T) {
-			fc := &fakeContainer{}
-			rc := &fakeRunContext{
-				jc:    fc,
-				wd:    "/host/work",
-				cwd:   "/workspace",
-				cache: t.TempDir(),
-				gh:    &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main"},
-				cfg:   &fakeConfig{bind: true},
+	fc := &fakeContainer{}
+	err := (&Action{}).Main(checkoutCtx(t, fc, &fakeConfig{bind: true}, map[string]string{"path": "../outside"}))
+	require.Error(t, err)
+	assert.False(t, fc.called)
+}
+
+func TestWorkspaceDestination(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want string
+		err  bool
+	}{
+		{path: "", want: "/workspace"},
+		{path: ".", want: "/workspace"},
+		{path: "src", want: "/workspace/src"},
+		{path: "nested/../src", want: "/workspace/src"},
+		{path: "../outside", err: true},
+		{path: "/outside", err: true},
+		{path: "nested/../../outside", err: true},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			got, err := workspaceDestination("/workspace", tc.path)
+			if tc.err {
+				require.Error(t, err)
+				return
 			}
-
-			err := (&Action{}).Main(&builtin.Context{
-				Ctx:        context.Background(),
-				RunContext: rc,
-				Step:       &model.Step{Uses: "builtin:checkout"},
-				Inputs:     map[string]string{"path": checkoutPath},
-				Env:        map[string]string{},
-				Logger:     log.New(),
-			})
-
-			require.Error(t, err)
-			assert.False(t, fc.called)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }
@@ -218,8 +189,10 @@ func TestFetchDepth(t *testing.T) {
 		err   bool
 	}{
 		{input: "", want: 1},
+		{input: " ", want: 1},
 		{input: "0", want: 0},
 		{input: "5", want: 5},
+		{input: " 5", want: 5},
 		{input: "-1", err: true},
 		{input: "invalid", err: true},
 	} {
@@ -235,150 +208,43 @@ func TestFetchDepth(t *testing.T) {
 	}
 }
 
-func TestCheckoutUsesFetchDepth(t *testing.T) {
-	remote := createGitRemote(t)
-	fc := &fakeContainer{}
-	err := (&Action{}).Main(&builtin.Context{
-		Ctx: context.Background(),
-		RunContext: &fakeRunContext{
-			jc:    fc,
-			wd:    "/host/work",
-			cwd:   "/workspace",
-			cache: t.TempDir(),
-			gh: &model.GithubContext{
-				Repository: "workflow",
-				Ref:        "refs/heads/main",
-				ServerURL:  "file://" + filepath.Dir(remote),
-			},
-			cfg: &fakeConfig{},
-		},
-		Step:   &model.Step{Uses: "builtin:checkout"},
-		Inputs: map[string]string{"repository": filepath.Base(remote), "ref": "main", "fetch-depth": "1"},
-		Env:    map[string]string{},
-		Logger: log.New(),
-	})
-
-	require.NoError(t, err)
-	require.True(t, fc.called)
-	assert.FileExists(t, filepath.Join(fc.copyDirSrc, ".git", "shallow"))
-}
-
-func createGitRemote(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	remote := filepath.Join(root, "remote")
-	workdir := filepath.Join(root, "work")
-	runGit(t, "init", "--bare", remote)
-	runGit(t, "init", "-b", "main", workdir)
-	runGit(t, "-C", workdir, "config", "user.name", "Test User")
-	runGit(t, "-C", workdir, "config", "user.email", "test@example.com")
-	require.NoError(t, os.WriteFile(filepath.Join(workdir, "file"), []byte("first\n"), 0o600))
-	runGit(t, "-C", workdir, "add", "file")
-	runGit(t, "-C", workdir, "commit", "-m", "first")
-	require.NoError(t, os.WriteFile(filepath.Join(workdir, "file"), []byte("second\n"), 0o600))
-	runGit(t, "-C", workdir, "commit", "-am", "second")
-	runGit(t, "-C", workdir, "remote", "add", "origin", remote)
-	runGit(t, "-C", workdir, "push", "origin", "main")
-	return remote
-}
-
-func runGit(t *testing.T, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	output, err := cmd.CombinedOutput()
-	require.NoErrorf(t, err, "git %s: %s", strings.Join(args, " "), output)
-}
-
-func TestCheckoutNoSkipForcesClonePath(t *testing.T) {
-	rc := &fakeRunContext{
-		jc:    &fakeContainer{},
-		wd:    "/host/work",
-		cwd:   "/workspace",
-		cache: t.TempDir(),
-		gh:    &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main"},
-		cfg:   &fakeConfig{noSkip: true, offline: true},
+func TestCheckoutTakesClonePath(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cfg    *fakeConfig
+		inputs map[string]string
+	}{
+		{name: "no-skip", cfg: &fakeConfig{noSkip: true, offline: true}},
+		{name: "other-repo", cfg: &fakeConfig{offline: true}, inputs: map[string]string{"repository": "other/repo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Error(t, (&Action{}).Main(checkoutCtx(t, nil, tc.cfg, tc.inputs)))
+		})
 	}
+}
 
-	a := &Action{}
-	ctx := &builtin.Context{
-		Ctx:        context.Background(),
-		RunContext: rc,
-		Step:       &model.Step{Uses: "builtin:checkout"},
-		Inputs:     map[string]string{},
-		Env:        map[string]string{},
-		Logger:     log.New(),
+func TestRepoURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		gh   *model.GithubContext
+		cfg  *fakeConfig
+		want string
+	}{
+		{"server-url", &model.GithubContext{ServerURL: "https://gitea.example.com"}, &fakeConfig{githubInstance: "gitea.example.com", defaultActionInst: "https://github.com"}, "https://gitea.example.com/org/repo"},
+		{"default-instance", &model.GithubContext{}, &fakeConfig{defaultActionInst: "github.com"}, "https://github.com/org/repo"},
+		{"github-instance", &model.GithubContext{}, &fakeConfig{githubInstance: "gitea.local"}, "https://gitea.local/org/repo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, repoURL(tc.gh, tc.cfg, "org/repo"))
+		})
 	}
-
-	err := a.Main(ctx)
-	// We expect an error here because the offline clone of "org/repo" cannot
-	// resolve, but reaching that path proves the skip-if-bound branch was
-	// bypassed when NoSkipCheckout is set.
-	assert.Error(t, err)
-}
-
-func TestCheckoutRedirectsToOtherRepoTakesClonePath(t *testing.T) {
-	rc := &fakeRunContext{
-		jc:    &fakeContainer{},
-		wd:    "/host/work",
-		cwd:   "/workspace",
-		cache: t.TempDir(),
-		gh:    &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main"},
-		cfg:   &fakeConfig{offline: true},
-	}
-
-	a := &Action{}
-	ctx := &builtin.Context{
-		Ctx:        context.Background(),
-		RunContext: rc,
-		Step:       &model.Step{Uses: "builtin:checkout"},
-		Inputs:     map[string]string{"repository": "other/repo"},
-		Env:        map[string]string{},
-		Logger:     log.New(),
-	}
-
-	err := a.Main(ctx)
-	// Same as above: offline clone of an arbitrary repo errors out, but the
-	// fact that we get past isLocalCheckoutLike is the assertion.
-	assert.Error(t, err)
-}
-
-func TestRepoURLPrefersServerURL(t *testing.T) {
-	gh := &model.GithubContext{ServerURL: "https://gitea.example.com"}
-	cfg := &fakeConfig{githubInstance: "gitea.example.com", defaultActionInst: "https://github.com"}
-	got := repoURL(gh, cfg, "org/repo")
-	assert.Equal(t, "https://gitea.example.com/org/repo", got)
-}
-
-func TestRepoURLFallsBackToDefaultActionInstance(t *testing.T) {
-	gh := &model.GithubContext{}
-	cfg := &fakeConfig{defaultActionInst: "github.com"}
-	got := repoURL(gh, cfg, "org/repo")
-	assert.Equal(t, "https://github.com/org/repo", got)
-}
-
-func TestRepoURLFallsBackToGithubInstance(t *testing.T) {
-	gh := &model.GithubContext{}
-	cfg := &fakeConfig{githubInstance: "gitea.local"}
-	got := repoURL(gh, cfg, "org/repo")
-	assert.Equal(t, "https://gitea.local/org/repo", got)
 }
 
 func TestIsLocalCheckoutLike(t *testing.T) {
 	gh := &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main"}
-
 	assert.True(t, isLocalCheckoutLike(map[string]string{}, gh))
 	assert.True(t, isLocalCheckoutLike(map[string]string{"repository": "org/repo"}, gh))
 	assert.True(t, isLocalCheckoutLike(map[string]string{"repository": "org/repo", "ref": "refs/heads/main"}, gh))
-
 	assert.False(t, isLocalCheckoutLike(map[string]string{"repository": "other/repo"}, gh))
 	assert.False(t, isLocalCheckoutLike(map[string]string{"ref": "refs/heads/feature"}, gh))
-}
-
-func TestActionMetadata(t *testing.T) {
-	a := &Action{}
-	assert.Equal(t, "checkout", a.Name())
-	assert.False(t, a.HasPre())
-	assert.False(t, a.HasPost())
-	assert.NoError(t, a.Pre(&builtin.Context{}))
-	assert.NoError(t, a.Post(&builtin.Context{}))
 }

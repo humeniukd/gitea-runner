@@ -1,12 +1,6 @@
 // Copyright 2026 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-// Package checkout implements the `checkout` built-in action: a strict
-// subset of `actions/checkout` v4 that runs natively in the runner
-// process and copies the working tree into the job container instead of
-// cloning the action and shelling into Node.
-//
-// See docs/builtin-actions.md.
 package checkout
 
 import (
@@ -26,7 +20,6 @@ import (
 	"gitea.dev/actionslib/pkg/model"
 )
 
-// Action is the `checkout` built-in.
 type Action struct{}
 
 func init() {
@@ -66,11 +59,6 @@ func (a *Action) Main(c *builtin.Context) error {
 
 	c.Logger.Infof("checkout: repository=%s ref=%s path=%s", repository, ref, subPath)
 
-	// Skip-if-bound parity: when the workflow's `with:` does not redirect
-	// to a different repo or ref, the runner already has the workspace on
-	// the host (the same code path that `step_action_remote.go` takes for
-	// `actions/checkout`). For `Config.BindWorkdir == true` the workspace
-	// is already mounted into the container; otherwise copy it in.
 	if isLocalCheckoutLike(c.Inputs, ghc) && !cfg.NoSkipCheckout() {
 		if cfg.BindWorkdir() {
 			c.Logger.Debugf("checkout: workspace already bind-mounted, skipping")
@@ -85,8 +73,6 @@ func (a *Action) Main(c *builtin.Context) error {
 		return jobContainer.CopyDir(dst, src, cfg.UseGitIgnore())(c.Ctx)
 	}
 
-	// Otherwise clone on the runner host into ActionCacheDir/<step-hash>,
-	// then copy the working tree into the container workspace at `path`.
 	if repository == "" {
 		return errors.New("checkout: empty `repository` and no github.repository in context")
 	}
@@ -133,7 +119,8 @@ func workspaceDestination(workspace, checkoutPath string) (string, error) {
 }
 
 func fetchDepth(input string) (int, error) {
-	if strings.TrimSpace(input) == "" {
+	input = strings.TrimSpace(input)
+	if input == "" {
 		return 1, nil
 	}
 	depth, err := strconv.Atoi(input)
@@ -143,10 +130,6 @@ func fetchDepth(input string) (int, error) {
 	return depth, nil
 }
 
-// isLocalCheckoutLike mirrors the precondition used by
-// `runner.isLocalCheckout` for `actions/checkout`: the step refers to the
-// same repository / ref as the job's github context (or omits them
-// entirely), so the working tree the runner already has on disk is fine.
 func isLocalCheckoutLike(inputs map[string]string, ghc *model.GithubContext) bool {
 	if repo, ok := inputs["repository"]; ok && repo != "" && repo != ghc.Repository {
 		return false
@@ -157,9 +140,6 @@ func isLocalCheckoutLike(inputs map[string]string, ghc *model.GithubContext) boo
 	return true
 }
 
-// repoURL builds the clone URL. Mirrors what the existing remote-action
-// path does: prefer the github context's ServerURL; fall back to the
-// configured DefaultActionInstance, then GitHubInstance.
 func repoURL(ghc *model.GithubContext, cfg builtin.Config, repository string) string {
 	base := strings.TrimRight(ghc.ServerURL, "/")
 	if base == "" {
@@ -178,17 +158,12 @@ func repoURL(ghc *model.GithubContext, cfg builtin.Config, repository string) st
 	return base + "/" + repository
 }
 
-// stageDir returns a host-side directory unique to (step, repository) where
-// the clone is staged before being copied into the container.
 func stageDir(actionCacheDir, usesHash, repository string) string {
 	suffix := sha256.Sum256([]byte(repository))
 	return filepath.Join(actionCacheDir, "builtin-checkout", usesHash, hex.EncodeToString(suffix[:8]))
 }
 
-// shortRef strips a fully-qualified ref (as found in `github.ref`, e.g.
-// "refs/heads/main") down to the short name that git.NewGitCloneExecutor
-// expects, since it unconditionally re-qualifies its Ref input as
-// "refs/heads/<ref>".
+// NewGitCloneExecutor re-prefixes the ref as refs/heads/<ref>.
 func shortRef(ref string) string {
 	for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
 		if s, ok := strings.CutPrefix(ref, prefix); ok {

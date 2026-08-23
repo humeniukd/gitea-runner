@@ -96,13 +96,8 @@ func TestStepFactoryInvalidStep(t *testing.T) {
 }
 
 func TestStepFactoryUnknownBuiltin(t *testing.T) {
-	m := &model.Step{
-		Uses: "builtin:this-name-is-not-registered",
-	}
-
 	sf := &stepFactoryImpl{}
-	s, err := sf.newStep(m, &RunContext{})
-
+	s, err := sf.newStep(&model.Step{Uses: "builtin:this-name-is-not-registered"}, &RunContext{})
 	assert.Nil(t, s)
 	assert.Error(t, err)
 }
@@ -110,7 +105,6 @@ func TestStepFactoryUnknownBuiltin(t *testing.T) {
 func TestStepFactoryBareNameIsRemoteAction(t *testing.T) {
 	sf := &stepFactoryImpl{}
 	s, err := sf.newStep(&model.Step{Uses: "checkout"}, &RunContext{})
-
 	require.NoError(t, err)
 	assert.IsType(t, &stepActionRemote{}, s)
 }
@@ -118,7 +112,6 @@ func TestStepFactoryBareNameIsRemoteAction(t *testing.T) {
 func TestStepFactoryInvalidBuiltinName(t *testing.T) {
 	sf := &stepFactoryImpl{}
 	s, err := sf.newStep(&model.Step{Uses: "builtin:has/slash"}, &RunContext{})
-
 	assert.Nil(t, s)
 	assert.Error(t, err)
 }
