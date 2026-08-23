@@ -29,9 +29,16 @@ jobs:
       # the rest (alpine/ubuntu) pull on demand, absorbed by the make-test -timeout. The host
       # daemon retains them between runs, so this is usually a fast manifest re-check.
       - name: pre-pull test images
+        env:
+          TEST_JOB_IMAGE: node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 # renovate: datasource=docker
+          TEST_SERVICE_IMAGE: nginx:alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913 # renovate: datasource=docker
         run: |
-          for img in node:24-bookworm-slim nginx:alpine; do
-            for try in 1 2 3; do docker pull "$img" && break || sleep 5; done
+          for image in "$TEST_JOB_IMAGE" "$TEST_SERVICE_IMAGE"; do
+            for attempt in 1 2 3; do
+              docker pull "$image" && break
+              [ "$attempt" = 3 ] || sleep 5
+            done
+            docker tag "$image" "${image%@*}"
           done
       - name: lint
         run: make lint
@@ -52,8 +59,13 @@ jobs:
           cat .tmp/coverage.md >> "$GITHUB_STEP_SUMMARY"
 
   e2e:
-    name: gitea compatibility
+    name: gitea compatibility (${{ matrix.gitea_image }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        gitea_image:
+          - gitea/gitea:latest
+          - gitea/gitea:main-nightly
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -62,5 +74,5 @@ jobs:
           check-latest: true
       - name: prepare anonymous docker config
         run: mkdir -p "$DOCKER_CONFIG" && echo '{}' > "$DOCKER_CONFIG/config.json"
-      - name: e2e compatibility matrix
-        run: make test-e2e-matrix
+      - name: e2e compatibility
+        run: make test-e2e E2E_GITEA_IMAGE=${{ matrix.gitea_image }}

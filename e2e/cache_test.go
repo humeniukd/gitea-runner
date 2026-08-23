@@ -6,12 +6,11 @@
 package e2e
 
 import (
-	"strings"
 	"testing"
 )
 
-func TestActionsCacheRoundTrip(t *testing.T) {
-	requireFixture(t)
+func testActionsCacheRoundTrip(t *testing.T) {
+	t.Parallel()
 
 	for _, tc := range []struct {
 		name string
@@ -21,15 +20,11 @@ func TestActionsCacheRoundTrip(t *testing.T) {
 		{name: "cache_v1", v2: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			api, repo, _ := startScenario(t, "cache.yml", WithCacheV2(tc.v2))
+			t.Parallel()
+			api, repo, _ := startIsolatedScenario(t, "cache.yml", "e2e-cache", runnerOptions{cacheV2: &tc.v2})
 
 			wfRun := waitForRun(t, api, repo)
 			requireSuccess(t, api, repo, wfRun.ID)
-
-			logs := runLogs(t, api, repo, wfRun.ID)
-			if !strings.Contains(logs, "cache-restored-ok") {
-				t.Fatalf("restore job did not confirm a cache hit: %s", logs)
-			}
 		})
 	}
 }

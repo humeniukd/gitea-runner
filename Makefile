@@ -18,8 +18,6 @@ DOCKER_TAG ?= nightly
 DOCKER_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)
 DOCKER_ROOTLESS_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)-dind-rootless
 
-include e2e/.env
-
 GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # renovate: datasource=go
 GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.6.0 # renovate: datasource=go
 
@@ -173,29 +171,14 @@ coverage-report: ## turn coverage.txt from `make test` into .tmp/coverage.md
 test-dind: ## run the daemon-facing tests against the built dind image (TARGET=dind|dind-rootless)
 	@./scripts/test-dind.sh $(TARGET)
 
-E2E_JOB_IMAGES ?= node:24-bookworm-slim nginx:alpine
-
-.PHONY: e2e-pull
-e2e-pull: ## pre-pull e2e images (with retries)
-	@for img in $(E2E_JOB_IMAGES) $(GITEA_E2E_IMAGE); do \
-		pulled=""; \
-		for try in 1 2 3; do \
-			if docker pull "$$img"; then pulled=1; break; fi; \
-			sleep 5; \
-		done; \
-		[ -n "$$pulled" ] || echo "warning: could not pull $$img, falling back to any local copy"; \
-	done
+E2E_JOB_IMAGE ?= node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584 # renovate: datasource=docker
+SERVICE_IMAGE ?= nginx:1.31.4-alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913 # renovate: datasource=docker
+E2E_GITEA_IMAGE ?= gitea/gitea:main-nightly
+E2E_CONCURRENCY ?= 8
 
 .PHONY: test-e2e
-test-e2e: e2e-pull ## Gitea compatibility e2e against GITEA_E2E_IMAGE (needs docker)
-	GITEA_E2E_IMAGE=$(GITEA_E2E_IMAGE) $(GO) test -tags e2e -count=1 -timeout 20m -v ./e2e/...
-
-.PHONY: test-e2e-matrix
-test-e2e-matrix: ## test-e2e for each GITEA_E2E_VERSIONS entry (e2e/.env)
-	@for img in $(GITEA_E2E_VERSIONS); do \
-		echo "==> Testing against $$img"; \
-		$(MAKE) test-e2e GITEA_E2E_IMAGE=$$img || exit 1; \
-	done
+test-e2e: ## run Gitea compatibility tests against E2E_GITEA_IMAGE
+	@E2E_CONCURRENCY=$(E2E_CONCURRENCY) E2E_GITEA_IMAGE=$(E2E_GITEA_IMAGE) E2E_JOB_IMAGE=$(E2E_JOB_IMAGE) GO=$(GO) SERVICE_IMAGE=$(SERVICE_IMAGE) ./tools/test-e2e.sh
 
 .PHONY: install
 install: $(GOFILES) ## install the runner binary via `go install`

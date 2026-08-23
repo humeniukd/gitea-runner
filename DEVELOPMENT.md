@@ -33,15 +33,9 @@ depending on the prefix:
 
 ## End-to-end compatibility tests
 
-`e2e/` (build tag `e2e`) runs the runner against a real `gitea/gitea` container. Skipped without
-Docker; invisible to `make test` / `go test ./...`. CI runs `make test-e2e-matrix`.
+`make test-e2e` runs the runner against `E2E_GITEA_IMAGE`. It defaults to the nightly image.
+It requires Docker and is excluded from `make test`. CI runs stable and nightly variants in
+parallel.
 
-- `make test-e2e` — one image (`GITEA_E2E_IMAGE`, default `gitea/gitea:main-nightly`)
-- `make test-e2e-matrix` — versions in `e2e/.env` (`GITEA_E2E_VERSIONS`; newest stable + nightly)
-
-`TestMain` starts one shared Gitea; each scenario uses its own repo and in-process runner
-(`Harness`). Add a scenario with `testdata/workflows/*.yml` plus a `*_test.go`.
-
-Cancellation, capability negotiation, and ephemeral registration differ by server version and
-report rather than hard-fail on older releases. A run's `path` is `<workflow>@<ref>`; log rows
-are `<timestamp>Z <payload>`.
+The suite shares one Gitea and regular runner. Cache and ephemeral scenarios use isolated
+repository runners. A run path is `<workflow>@<ref>` and a log row is `<timestamp>Z <payload>`.

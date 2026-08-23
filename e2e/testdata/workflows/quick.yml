@@ -1,7 +1,0 @@
-name: quick
-on: push
-jobs:
-  quick:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo still-alive

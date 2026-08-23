@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -32,7 +33,6 @@ const (
 	giteaAdminMail = "e2e-admin@example.com"
 )
 
-// GiteaFixture is one gitea/gitea container shared for a test binary run.
 type GiteaFixture struct {
 	cli        mobyclient.APIClient
 	id         string
@@ -137,32 +137,17 @@ func freeHostPort(host string) (int, error) {
 	return addr.Port, nil
 }
 
-// Pull tolerates registry failure when a local image exists (same idea as force_pull).
-func pullImage(ctx context.Context, cli mobyclient.APIClient, image string) error {
-	pull, err := cli.ImagePull(ctx, image, mobyclient.ImagePullOptions{})
-	if err == nil {
-		err = pull.Wait(ctx)
-	}
-	if err == nil {
-		return nil
-	}
-	if _, inspectErr := cli.ImageInspect(ctx, image); inspectErr == nil {
-		fmt.Fprintf(os.Stderr, "pull %s failed (%v), using the local copy, WHICH MAY BE STALE\n", image, err)
-		return nil
-	}
-	return fmt.Errorf("pull %s: %w", image, err)
-}
+func StartGitea(ctx context.Context, cli mobyclient.APIClient) (*GiteaFixture, error) {
+	closeClient := true
+	defer func() {
+		if closeClient {
+			_ = cli.Close()
+		}
+	}()
 
-// StartGitea boots GITEA_E2E_IMAGE (default main-nightly), waits for healthy, bootstraps admin+token.
-func StartGitea(ctx context.Context) (*GiteaFixture, error) {
-	cli, err := dockerClient(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("docker unavailable: %w", err)
-	}
-
-	image := os.Getenv("GITEA_E2E_IMAGE")
+	image := os.Getenv("E2E_GITEA_IMAGE")
 	if image == "" {
-		image = "gitea/gitea:main-nightly"
+		return nil, errors.New("E2E_GITEA_IMAGE is not set")
 	}
 
 	name := fmt.Sprintf("gitea-runner-e2e-%d", time.Now().UnixNano())
@@ -191,8 +176,8 @@ func StartGitea(ctx context.Context) (*GiteaFixture, error) {
 		}
 	}
 
-	if err := pullImage(ctx, cli, image); err != nil {
-		return nil, err
+	if _, err := cli.ImageInspect(ctx, image); err != nil {
+		return nil, fmt.Errorf("inspect gitea image %s: %w", image, err)
 	}
 
 	resp, err := cli.ContainerCreate(ctx, mobyclient.ContainerCreateOptions{
@@ -215,6 +200,7 @@ func StartGitea(ctx context.Context) (*GiteaFixture, error) {
 	}
 
 	f := &GiteaFixture{cli: cli, id: resp.ID, image: image, baseURL: baseURL, network: sharedNet}
+	closeClient = false
 
 	if _, err := cli.ContainerStart(ctx, f.id, mobyclient.ContainerStartOptions{}); err != nil {
 		_ = f.Close(ctx)
@@ -351,11 +337,15 @@ func (f *GiteaFixture) exec(ctx context.Context, cmd []string) (string, error) {
 	return out.String(), nil
 }
 
-func (f *GiteaFixture) RegistrationToken(ctx context.Context) (string, error) {
+func (f *GiteaFixture) RegistrationToken(ctx context.Context, repo string) (string, error) {
 	var body struct {
 		Token string `json:"token"`
 	}
-	if err := f.doJSON(ctx, http.MethodPost, "/api/v1/admin/actions/runners/registration-token", nil, &body); err != nil {
+	path := "/api/v1/admin/actions/runners/registration-token"
+	if repo != "" {
+		path = fmt.Sprintf("/api/v1/repos/%s/%s/actions/runners/registration-token", giteaAdminUser, repo)
+	}
+	if err := f.doJSON(ctx, http.MethodPost, path, nil, &body); err != nil {
 		return "", err
 	}
 	return body.Token, nil
@@ -366,22 +356,10 @@ func (f *GiteaFixture) doJSON(ctx context.Context, method, path string, reqBody,
 	return api.doJSON(ctx, method, path, reqBody, respBody)
 }
 
-func (f *GiteaFixture) BaseURL() string { return f.baseURL }
-
-func (f *GiteaFixture) Describe() string {
-	return fmt.Sprintf("image=%s version=%s", f.image, f.version)
-}
-
-func (f *GiteaFixture) Network() string { return f.network }
-
-func (f *GiteaFixture) API() *GiteaAPI {
-	return &GiteaAPI{baseURL: f.baseURL, token: f.adminToken}
-}
-
 func (f *GiteaFixture) Close(ctx context.Context) error {
 	if f.id == "" {
-		return nil
+		return f.cli.Close()
 	}
-	_, err := f.cli.ContainerRemove(ctx, f.id, mobyclient.ContainerRemoveOptions{Force: true})
-	return err
+	_, removeErr := f.cli.ContainerRemove(ctx, f.id, mobyclient.ContainerRemoveOptions{Force: true})
+	return errors.Join(removeErr, f.cli.Close())
 }

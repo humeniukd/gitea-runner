@@ -3,6 +3,15 @@
   "extends": [
     "local>gitea/renovate-config"
   ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)\\.(gitea|github)/workflows/.+\\.ya?ml$/"],
+      "matchStrings": [
+        "[A-Z_]+_IMAGE[ \\t]*:[ \\t]*(?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]+)[ \\t]*# renovate: datasource=(?<datasource>\\S+)"
+      ]
+    }
+  ],
   "packageRules": [
     {
       "matchPackageNames": ["go.yaml.in/yaml/v4"],

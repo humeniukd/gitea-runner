@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 	"time"
-)
 
-const runnerLabel = "ubuntu-latest:docker://node:24-bookworm-slim" // pre-pulled in CI/docs scripts
+	"gitea.com/gitea/runner/internal/app/poll"
+)
 
 const runTimeout = 3 * time.Minute
 
@@ -27,7 +27,7 @@ func repoName(t *testing.T) string {
 
 var fixture *GiteaFixture
 
-var skipReason string // set when docker is unavailable; tests call t.Skip
+var skipReason string
 
 func TestMain(m *testing.M) {
 	os.Exit(runSuite(m))
@@ -37,12 +37,13 @@ func runSuite(m *testing.M) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	if _, err := dockerClient(ctx); err != nil {
+	cli, err := dockerClient(ctx)
+	if err != nil {
 		skipReason = fmt.Sprintf("docker unavailable: %v", err)
 		return m.Run()
 	}
 
-	f, err := StartGitea(ctx)
+	f, err := StartGitea(ctx, cli)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "start gitea fixture: %v\n", err)
 		return 1
@@ -50,27 +51,29 @@ func runSuite(m *testing.M) int {
 	fixture = f
 	defer func() { _ = fixture.Close(context.Background()) }()
 
-	fmt.Fprintf(os.Stderr, "gitea fixture: %s\n", fixture.Describe())
+	fmt.Fprintf(os.Stderr, "gitea fixture: image=%s version=%s\n", fixture.image, fixture.version)
 
 	return m.Run()
 }
 
-func startScenario(t *testing.T, workflow string, opts ...HarnessOption) (*GiteaAPI, string, *Harness) {
+func newScenario(t *testing.T) (*GiteaAPI, string) {
 	t.Helper()
-	ctx := context.Background()
 
 	repo := repoName(t)
-	api := fixture.API()
-	if err := api.CreateRepo(ctx, repo, true); err != nil {
+	api := &GiteaAPI{baseURL: fixture.baseURL, token: fixture.adminToken}
+	if err := api.CreateRepo(t.Context(), repo); err != nil {
 		t.Fatalf("create repo: %v", err)
 	}
-	pushWorkflow(t, api, repo, workflow)
+	return api, repo
+}
 
-	token, err := fixture.RegistrationToken(ctx)
-	if err != nil {
-		t.Fatalf("get registration token: %v", err)
-	}
-	return api, repo, NewHarness(ctx, t, fixture.BaseURL(), token, []string{runnerLabel}, opts...)
+func startIsolatedScenario(t *testing.T, workflow, label string, options runnerOptions) (*GiteaAPI, string, *poll.Poller) {
+	t.Helper()
+
+	api, repo := newScenario(t)
+	poller := startRunner(t, repo, label, options)
+	pushWorkflow(t, api, repo, workflow)
+	return api, repo, poller
 }
 
 func pushWorkflow(t *testing.T, api *GiteaAPI, repo, workflow string) {
@@ -80,7 +83,7 @@ func pushWorkflow(t *testing.T, api *GiteaAPI, repo, workflow string) {
 	if err != nil {
 		t.Fatalf("read workflow fixture %s: %v", workflow, err)
 	}
-	if err := api.CreateFile(context.Background(), giteaAdminUser, repo, ".gitea/workflows/"+workflow, string(content), "add "+workflow); err != nil {
+	if err := api.CreateFile(t.Context(), repo, ".gitea/workflows/"+workflow, string(content), "add "+workflow); err != nil {
 		t.Fatalf("push workflow %s: %v", workflow, err)
 	}
 }
@@ -88,7 +91,7 @@ func pushWorkflow(t *testing.T, api *GiteaAPI, repo, workflow string) {
 func requireSuccess(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 	t.Helper()
 
-	completed, err := api.WaitForRunConclusion(context.Background(), giteaAdminUser, repo, runID, runTimeout)
+	completed, err := api.WaitForRunConclusion(t.Context(), repo, runID, runTimeout)
 	if err != nil {
 		dumpRunLogs(t, api, repo, runID)
 		t.Fatalf("wait for run: %v", err)
@@ -101,15 +104,15 @@ func requireSuccess(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 
 func runLogs(t *testing.T, api *GiteaAPI, repo string, runID int64) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 
-	jobs, err := api.Jobs(ctx, giteaAdminUser, repo, runID)
+	jobs, err := api.Jobs(ctx, repo, runID)
 	if err != nil {
 		t.Fatalf("list jobs: %v", err)
 	}
 	var all strings.Builder
 	for _, job := range jobs {
-		logs, err := api.JobLogs(ctx, giteaAdminUser, repo, job.ID)
+		logs, err := api.JobLogs(ctx, repo, job.ID)
 		if err != nil {
 			t.Fatalf("job logs for %s: %v", job.Name, err)
 		}
@@ -118,34 +121,17 @@ func runLogs(t *testing.T, api *GiteaAPI, repo string, runID int64) string {
 	return all.String()
 }
 
-func dumpRuns(t *testing.T, api *GiteaAPI, repo string) {
-	t.Helper()
-
-	runs, err := api.Runs(context.Background(), giteaAdminUser, repo)
-	if err != nil {
-		t.Logf("dump runs: %v", err)
-		return
-	}
-	if len(runs) == 0 {
-		t.Log("the repository has no runs at all")
-		return
-	}
-	for _, run := range runs {
-		t.Logf("run %d: path=%q event=%q status=%q conclusion=%q", run.ID, run.Path, run.Event, run.Status, run.Conclusion)
-	}
-}
-
 func dumpRunLogs(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 
-	jobs, err := api.Jobs(ctx, giteaAdminUser, repo, runID)
+	jobs, err := api.Jobs(ctx, repo, runID)
 	if err != nil {
 		t.Logf("dump run %d: list jobs: %v", runID, err)
 		return
 	}
 	for _, job := range jobs {
-		logs, err := api.JobLogs(ctx, giteaAdminUser, repo, job.ID)
+		logs, err := api.JobLogs(ctx, repo, job.ID)
 		if err != nil {
 			t.Logf("job %q (%s): logs unavailable: %v", job.Name, job.Conclusion, err)
 			continue
@@ -154,9 +140,23 @@ func dumpRunLogs(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 	}
 }
 
-func requireFixture(t *testing.T) {
+func waitForRun(t *testing.T, api *GiteaAPI, repo string) *ActionRun {
 	t.Helper()
-	if skipReason != "" {
-		t.Skip(skipReason)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+
+	for {
+		runs, err := api.Runs(ctx, repo)
+		if err != nil {
+			t.Fatalf("get latest run: %v", err)
+		}
+		if len(runs) > 0 {
+			return &runs[0]
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("no run appeared for %s within timeout", repo)
+		case <-time.After(pollInterval):
+		}
 	}
 }

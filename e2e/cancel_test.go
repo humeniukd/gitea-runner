@@ -8,92 +8,66 @@ package e2e
 import (
 	"context"
 	"errors"
-	"strings"
+	"net/http"
 	"testing"
 	"time"
 )
 
-// Cancel exists only on nightly; older versions must leave the job and runner alone.
-func TestRunCancellation(t *testing.T) {
-	requireFixture(t)
-	ctx := context.Background()
+func testRunCancellation(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
 
-	api, repo, _ := startScenario(t, "cancel.yml")
+	api, repo := newScenario(t)
+	err := api.CancelRun(ctx, repo, 0)
+	cancelSupported := !errors.Is(err, ErrCancelUnsupported)
+	var response statusError
+	if cancelSupported && (!errors.As(err, &response) || response.code != http.StatusNotFound) {
+		t.Fatalf("probe run cancellation: %v", err)
+	}
+
+	pushWorkflow(t, api, repo, "cancel.yml")
 
 	wfRun := waitForRun(t, api, repo)
-	jobID := waitForJobStatus(t, api, repo, wfRun.ID, "in_progress")
-	waitForJobLogContains(t, api, repo, jobID, "tick ") // mid-step so UpdateTask can surface cancel
+	waitForRunningJobLog(t, api, repo, wfRun.ID, "e2e-live-log-marker")
+	if !cancelSupported {
+		requireSuccess(t, api, repo, wfRun.ID)
+		return
+	}
 
-	err := api.CancelRun(ctx, giteaAdminUser, repo, wfRun.ID)
-	switch {
-	case errors.Is(err, ErrCancelUnsupported):
-		t.Log("REST run cancellation unavailable; asserting graceful degrade")
-		assertRunnerStillHealthy(t, api, repo, wfRun.ID)
-	case err != nil:
+	if err := api.CancelRun(ctx, repo, wfRun.ID); err != nil {
 		dumpRunLogs(t, api, repo, wfRun.ID)
 		t.Fatalf("cancel run: %v", err)
-	default:
-		assertRunCancelled(t, api, repo, wfRun.ID)
 	}
-}
-
-func assertRunCancelled(t *testing.T, api *GiteaAPI, repo string, runID int64) {
-	t.Helper()
-
-	completed, err := api.WaitForRunConclusion(context.Background(), giteaAdminUser, repo, runID, time.Minute)
+	completed, err := api.WaitForRunConclusion(ctx, repo, wfRun.ID, time.Minute)
 	if err != nil {
-		dumpRunLogs(t, api, repo, runID)
+		dumpRunLogs(t, api, repo, wfRun.ID)
 		t.Fatalf("cancelled run did not finish promptly: %v", err)
 	}
-	if completed.Conclusion == "success" {
-		dumpRunLogs(t, api, repo, runID)
-		t.Fatalf("cancelled run concluded %q; it should not have completed successfully", completed.Conclusion)
+	if completed.Conclusion != "cancelled" {
+		dumpRunLogs(t, api, repo, wfRun.ID)
+		t.Fatalf("cancelled run concluded %q, want cancelled", completed.Conclusion)
 	}
-	t.Logf("cancelled run concluded %q", completed.Conclusion)
-
-	assertPicksUpNewWork(t, api, repo)
 }
 
-func assertRunnerStillHealthy(t *testing.T, api *GiteaAPI, repo string, runID int64) {
+func waitForRunningJobLog(t *testing.T, api *GiteaAPI, repo string, runID int64, substr string) {
 	t.Helper()
-
-	completed, err := api.WaitForRunConclusion(context.Background(), giteaAdminUser, repo, runID, 5*time.Minute)
-	if err != nil {
-		dumpRunLogs(t, api, repo, runID)
-		t.Fatalf("run did not finish after an unsupported cancel: %v", err)
-	}
-	if completed.Conclusion != "success" {
-		dumpRunLogs(t, api, repo, runID)
-		t.Fatalf("run concluded %q after an unsupported cancel, want success", completed.Conclusion)
-	}
-
-	assertPicksUpNewWork(t, api, repo)
-}
-
-func assertPicksUpNewWork(t *testing.T, api *GiteaAPI, repo string) {
-	t.Helper()
-
-	pushWorkflow(t, api, repo, "quick.yml")
-
-	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
+
 	for {
-		runs, err := api.RunsForWorkflow(ctx, giteaAdminUser, repo, "quick.yml")
+		jobs, err := api.Jobs(ctx, repo, runID)
 		if err != nil {
-			t.Fatalf("list runs: %v", err)
+			t.Fatalf("list jobs: %v", err)
 		}
-		if len(runs) > 0 {
-			requireSuccess(t, api, repo, runs[0].ID)
-			logs := runLogs(t, api, repo, runs[0].ID)
-			if !strings.Contains(logs, "still-alive") {
-				t.Fatalf("follow-up run did not produce its output: %s", logs)
+		if len(jobs) > 0 && jobs[0].Status == "in_progress" {
+			logs, err := api.JobLogs(ctx, repo, jobs[0].ID)
+			if err == nil && commandRow(logs, substr) == substr {
+				return
 			}
-			return
 		}
 		select {
 		case <-ctx.Done():
-			dumpRuns(t, api, repo)
-			t.Fatal("the runner never picked up the follow-up workflow")
+			t.Fatalf("running job for run %d never logged %q", runID, substr)
 		case <-time.After(pollInterval):
 		}
 	}

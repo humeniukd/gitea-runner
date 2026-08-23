@@ -7,9 +7,8 @@ package e2e
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -24,37 +23,18 @@ import (
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 )
 
-// Harness is an in-process runner registered against the fixture (register+poll without CLI disk lock).
-type Harness struct {
-	runner *run.Runner
-	poller *poll.Poller
-
-	capabilities     string
-	ephemeralWanted  bool
-	ephemeralGranted bool
-}
-
-type harnessOptions struct {
+type runnerOptions struct {
+	capacity  int
 	ephemeral bool
 	cacheV2   *bool
 }
 
-type HarnessOption func(*harnessOptions)
-
-func WithEphemeral() HarnessOption {
-	return func(o *harnessOptions) { o.ephemeral = true }
-}
-
-func WithCacheV2(enabled bool) HarnessOption {
-	return func(o *harnessOptions) { o.cacheV2 = &enabled }
-}
-
-func NewHarness(ctx context.Context, t *testing.T, addr, token string, lbls []string, opts ...HarnessOption) *Harness {
+func startRunner(t *testing.T, repo, labelName string, options runnerOptions) *poll.Poller {
 	t.Helper()
-
-	var options harnessOptions
-	for _, opt := range opts {
-		opt(&options)
+	ctx := t.Context()
+	token, err := fixture.RegistrationToken(ctx, repo)
+	if err != nil {
+		t.Fatalf("get registration token: %v", err)
 	}
 
 	cfg, err := config.LoadDefault("")
@@ -68,41 +48,42 @@ func NewHarness(ctx context.Context, t *testing.T, addr, token string, lbls []st
 	if cfg.Container.DockerHost == "" {
 		cfg.Container.DockerHost = "unix:///var/run/docker.sock"
 	}
-	cfg.Runner.File = t.TempDir() + "/.runner"
+	cfg.Cache.Dir = t.TempDir() + "/cache"
 	cfg.Runner.Insecure = true
 	cfg.Runner.FetchInterval = 250 * time.Millisecond // faster than prod defaults for local fixture
 	cfg.Runner.FetchIntervalMax = 250 * time.Millisecond
 	cfg.Runner.StateReportInterval = 500 * time.Millisecond // so cancel reaches the job quickly
 	cfg.Runner.LogReportInterval = 500 * time.Millisecond
-	cfg.Runner.Capacity = 4
-	if fixture != nil && fixture.Network() != "" {
-		cfg.Container.Network = fixture.Network()
+	cfg.Runner.Capacity = max(options.capacity, 1)
+	if fixture.network != "" {
+		cfg.Container.Network = fixture.network
 	}
 
-	parsed := make(labels.Labels, 0, len(lbls))
-	for _, l := range lbls {
-		label, err := labels.Parse(l)
-		if err != nil {
-			t.Fatalf("parse label %q: %v", l, err)
-		}
-		parsed = append(parsed, label)
+	rawLabel := labelName + ":docker://" + os.Getenv("E2E_JOB_IMAGE")
+	label, err := labels.Parse(rawLabel)
+	if err != nil {
+		t.Fatalf("parse label %q: %v", rawLabel, err)
 	}
+	labelNames := []string{label.Name}
 
-	pingCli := client.New(addr, cfg.Runner.Insecure, "", "", config.RequestTimeout)
+	pingCli := client.New(fixture.baseURL, cfg.Runner.Insecure, "", "", config.RequestTimeout)
 	if _, err := pingCli.Ping(ctx, connect.NewRequest(&pingv1.PingRequest{Data: t.Name()})); err != nil {
-		t.Fatalf("ping %s: %v", addr, err)
+		t.Fatalf("ping %s: %v", fixture.baseURL, err)
 	}
 
 	regResp, err := pingCli.Register(ctx, connect.NewRequest(&runnerv1.RegisterRequest{
 		Name:         t.Name(),
 		Token:        token,
 		Version:      "e2e",
-		Labels:       parsed.Names(),
+		Labels:       labelNames,
 		Ephemeral:    options.ephemeral,
 		Capabilities: run.RunnerCapabilities(),
 	}))
 	if err != nil {
 		t.Fatalf("register runner: %v", err)
+	}
+	if options.ephemeral && !regResp.Msg.Runner.Ephemeral {
+		t.Fatal("gitea did not grant ephemeral registration")
 	}
 
 	reg := &config.Registration{
@@ -110,15 +91,15 @@ func NewHarness(ctx context.Context, t *testing.T, addr, token string, lbls []st
 		UUID:      regResp.Msg.Runner.Uuid,
 		Name:      regResp.Msg.Runner.Name,
 		Token:     regResp.Msg.Runner.Token,
-		Address:   addr,
-		Labels:    lbls,
+		Address:   fixture.baseURL,
+		Labels:    []string{rawLabel},
 		Ephemeral: regResp.Msg.Runner.Ephemeral,
 	}
 
-	cli := client.New(addr, cfg.Runner.Insecure, reg.UUID, reg.Token, config.RequestTimeout)
+	cli := client.New(fixture.baseURL, cfg.Runner.Insecure, reg.UUID, reg.Token, config.RequestTimeout)
 
 	runner := run.NewRunner(cfg, reg, cli)
-	declResp, err := runner.Declare(ctx, parsed.Names())
+	declResp, err := runner.Declare(ctx, labelNames)
 	if err != nil {
 		_ = runner.Close()
 		t.Fatalf("declare runner: %v", err)
@@ -128,32 +109,12 @@ func NewHarness(ctx context.Context, t *testing.T, addr, token string, lbls []st
 	poller := poll.New(cfg, cli, runner)
 	go poller.Poll()
 
-	h := &Harness{
-		runner:           runner,
-		poller:           poller,
-		capabilities:     strings.TrimSpace(declResp.Header().Get("X-Gitea-Actions-Capabilities")),
-		ephemeralWanted:  options.ephemeral,
-		ephemeralGranted: regResp.Msg.Runner.Ephemeral,
-	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := h.Close(ctx); err != nil {
-			t.Logf("harness shutdown: %v", err)
+		if err := errors.Join(poller.Shutdown(ctx), runner.Close()); err != nil {
+			t.Logf("runner shutdown: %v", err)
 		}
 	})
-	return h
-}
-
-func (h *Harness) Capabilities() string { return h.capabilities }
-
-func (h *Harness) EphemeralGranted() bool { return h.ephemeralGranted }
-
-func (h *Harness) EphemeralDowngraded() bool { return h.ephemeralWanted && !h.ephemeralGranted }
-
-func (h *Harness) Close(ctx context.Context) error {
-	if err := h.poller.Shutdown(ctx); err != nil {
-		return fmt.Errorf("poller shutdown: %w", err)
-	}
-	return h.runner.Close()
+	return poller
 }
