@@ -12,9 +12,9 @@ Visit [here](https://dl.gitea.com/gitea-runner/) and download the right version 
 
 ## Releases
 
-`make changelog` generates `CHANGELOG.md` from the repository history. To publish a release, run `make patch`, `make minor`, or `make major` from a clean local `main` that matches `origin/main`. Each target generates the new changelog section, creates and pushes the release commit and tag, then creates the Gitea release.
+`make changelog` generates `CHANGELOG.md` from the repository history. Review and edit the generated changelog, then run `make patch`, `make minor`, or `make major` from local `main` matching `origin/main`. Each target uses `CHANGELOG.md` for the Gitea release, creates and pushes the release commit and tag, then creates the release.
 
-Install the pinned Node.js development dependencies with `pnpm install --frozen-lockfile` before generating or publishing a release. Set `GITEA_URL=https://gitea.com` and a Gitea API token in `GITEA_TOKEN` before publishing.
+Set `GITEA_URL=https://gitea.com` and a Gitea API token in `GITEA_TOKEN` before publishing.
 
 ### Build from source
 
