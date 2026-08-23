@@ -10,6 +10,12 @@ Docker Engine Community version is required for docker mode. To install Docker C
 
 Visit [here](https://dl.gitea.com/gitea-runner/) and download the right version for your platform.
 
+## Releases
+
+`make changelog` generates `CHANGELOG.md` from the repository history. To publish a release, run `make patch`, `make minor`, or `make major` from a clean local `main` that matches `origin/main`. Each target generates the new changelog section, creates and pushes the release commit and tag, then creates the Gitea release.
+
+Install the pinned Node.js development dependencies with `pnpm install --frozen-lockfile` before generating or publishing a release. Set `GITEA_URL=https://gitea.com` and a Gitea API token in `GITEA_TOKEN` before publishing.
+
 ### Build from source
 
 ```bash

@@ -3,6 +3,9 @@ EXECUTABLE := gitea-runner
 DIST_DIRS := $(DIST)/binaries $(DIST)/release
 GO ?= go
 SHASUM ?= shasum -a 256
+PNPM ?= pnpm
+CHANGELOG ?= $(PNPM) exec conventional-changelog
+VERSIONS ?= $(PNPM) exec versions
 HAS_GO = $(shell hash $(GO) > /dev/null 2>&1 && echo "GO" || echo "NOGO" )
 XGO_PACKAGE ?= src.techknowlogick.com/xgo@v1.9.0 # renovate: datasource=go
 XGO_VERSION := go-1.26.x
@@ -156,6 +159,32 @@ tidy-check: tidy
 		printf "%s" "$${diff}"; \
 		exit 1; \
 	fi
+
+.PHONY: changelog
+changelog: ## generate CHANGELOG.md from all releases
+	$(CHANGELOG) --config changelog.config.mjs --release-count 0
+
+node_modules: pnpm-lock.yaml
+	$(PNPM) install --frozen-lockfile
+
+.PHONY: publish-check
+publish-check:
+	@test "$$(git branch --show-current)" = main || { echo "Releases must be created from main"; exit 1; }
+	@git diff --quiet && git diff --cached --quiet && test -z "$$(git ls-files --others --exclude-standard)" || { echo "Releases require a clean worktree"; exit 1; }
+	@git diff --quiet HEAD origin/main || { echo "main must match origin/main before releasing"; exit 1; }
+
+.PHONY: release-changelog
+release-changelog:
+	$(CHANGELOG) --config changelog.config.mjs
+
+.PHONY: patch minor major
+patch: publish-check node_modules ## create, tag, and publish a patch release
+minor: publish-check node_modules ## create, tag, and publish a minor release
+major: publish-check node_modules ## create, tag, and publish a major release
+patch minor major:
+	$(VERSIONS) --gitless -p $@ package.json
+	$(MAKE) release-changelog
+	$(VERSIONS) -R -p -a $@
 
 .PHONY: test
 test: ## test everything (integration tests self-skip without docker/network)

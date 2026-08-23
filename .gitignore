@@ -5,6 +5,7 @@
 .runner.lock
 coverage.txt
 .tmp/
+node_modules/
 /config.yaml
 
 # Jetbrains
