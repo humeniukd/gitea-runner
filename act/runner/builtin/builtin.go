@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 // Package builtin hosts the runner's built-in actions and the small
-// registry that maps reserved no-slash `uses:` names to native Go
+// registry that maps `builtin:`-prefixed `uses:` names to native Go
 // implementations.
 //
 // See docs/builtin-actions.md for the design overview.
@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"gitea.com/gitea/runner/act/container"
@@ -20,6 +21,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const usesPrefix = "builtin:"
+
 // Action is implemented by every built-in. It deliberately does not depend on
 // the `act/runner` package so the registry can live below it without an
 // import cycle.
@@ -27,7 +30,7 @@ import (
 // Implementations should be cheap to construct (typically one zero-value
 // struct per process) and should be safe for concurrent use across jobs.
 type Action interface {
-	// Name is the reserved no-slash token a workflow uses in `uses:`.
+	// Name is the action name following the `builtin:` prefix in `uses:`.
 	// Must match `^[a-z0-9][a-z0-9-]*$`.
 	Name() string
 
@@ -179,10 +182,9 @@ func Names() []string {
 	return out
 }
 
-// ValidName reports whether s matches the built-in name pattern
-// (`^[a-z0-9][a-z0-9-]*$`), mirroring the regex used by
-// `model.(*Step).Type()` to recognize a built-in. Kept in code (not
-// regexp) to avoid a one-shot compile per registration.
+// ValidName reports whether s matches the built-in action name pattern
+// (`^[a-z0-9][a-z0-9-]*$`). Kept in code (not regexp) to avoid a one-shot
+// compile per registration.
 func ValidName(s string) bool {
 	if s == "" {
 		return false
@@ -200,6 +202,17 @@ func ValidName(s string) bool {
 		}
 	}
 	return true
+}
+
+// ParseUses returns the action name after the `builtin:` prefix in a `uses:`
+// value. Built-ins are explicit so ordinary action references cannot be
+// mistaken for native runner functionality.
+func ParseUses(uses string) (string, bool) {
+	name, ok := strings.CutPrefix(uses, usesPrefix)
+	if !ok {
+		return "", false
+	}
+	return name, true
 }
 
 // resetForTest empties the registry. It is exported via builtin_test.go's

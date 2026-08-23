@@ -93,6 +93,26 @@ func TestRegisterValidNames(t *testing.T) {
 	}
 }
 
+func TestParseUses(t *testing.T) {
+	for _, tc := range []struct {
+		uses string
+		name string
+		ok   bool
+	}{
+		{uses: "builtin:checkout", name: "checkout", ok: true},
+		{uses: "checkout"},
+		{uses: "builtin:", ok: true},
+		{uses: "builtin:has/slash", name: "has/slash", ok: true},
+		{uses: "builtin:Has-Upper", name: "Has-Upper", ok: true},
+	} {
+		t.Run(tc.uses, func(t *testing.T) {
+			name, ok := ParseUses(tc.uses)
+			assert.Equal(t, tc.name, name)
+			assert.Equal(t, tc.ok, ok)
+		})
+	}
+}
+
 func TestRegisterNilPanics(t *testing.T) {
 	defer resetForTest()
 	resetForTest()

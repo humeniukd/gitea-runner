@@ -35,16 +35,17 @@ func (sf *stepFactoryImpl) newStep(stepModel *model.Step, rc *RunContext) (step,
 			runAction:  runActionImpl,
 		}, nil
 	case model.StepTypeUsesActionRemote:
-		// For Gitea: reserved no-slash names dispatch to a built-in registered
-		// in the act/runner/builtin tree. See docs/builtin-actions.md.
-		// Classification used to be model.StepTypeUsesActionBuiltin in act/model;
-		// that package now lives in actionslib without the builtin type, so we
-		// detect the same pattern here.
-		if builtin.ValidName(stepModel.Uses) {
-			a, ok := builtin.Lookup(stepModel.Uses)
+		// actionslib classifies built-ins as remote actions, so recognize the
+		// explicit `builtin:` namespace here. See docs/builtin-actions.md.
+		if name, isBuiltin := builtin.ParseUses(stepModel.Uses); isBuiltin {
+			if !builtin.ValidName(name) {
+				return nil, fmt.Errorf("invalid built-in action name %q for job:%s step:%+v",
+					name, rc.Run, stepModel)
+			}
+			a, ok := builtin.Lookup(name)
 			if !ok {
 				return nil, fmt.Errorf("unknown built-in action %q (known: %v) for job:%s step:%+v",
-					stepModel.Uses, builtin.Names(), rc.Run, stepModel)
+					name, builtin.Names(), rc.Run, stepModel)
 			}
 			return &stepActionBuiltin{
 				Step:       stepModel,

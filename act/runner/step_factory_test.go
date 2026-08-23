@@ -9,6 +9,7 @@ import (
 
 	"gitea.dev/actionslib/pkg/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStepFactoryNewStep(t *testing.T) {
@@ -60,7 +61,7 @@ func TestStepFactoryNewStep(t *testing.T) {
 		{
 			name: "StepBuiltinAction",
 			model: &model.Step{
-				Uses: "checkout",
+				Uses: "builtin:checkout",
 			},
 			check: func(s step) bool {
 				_, ok := s.(*stepActionBuiltin)
@@ -96,11 +97,27 @@ func TestStepFactoryInvalidStep(t *testing.T) {
 
 func TestStepFactoryUnknownBuiltin(t *testing.T) {
 	m := &model.Step{
-		Uses: "this-name-is-not-registered",
+		Uses: "builtin:this-name-is-not-registered",
 	}
 
 	sf := &stepFactoryImpl{}
 	s, err := sf.newStep(m, &RunContext{})
+
+	assert.Nil(t, s)
+	assert.Error(t, err)
+}
+
+func TestStepFactoryBareNameIsRemoteAction(t *testing.T) {
+	sf := &stepFactoryImpl{}
+	s, err := sf.newStep(&model.Step{Uses: "checkout"}, &RunContext{})
+
+	require.NoError(t, err)
+	assert.IsType(t, &stepActionRemote{}, s)
+}
+
+func TestStepFactoryInvalidBuiltinName(t *testing.T) {
+	sf := &stepFactoryImpl{}
+	s, err := sf.newStep(&model.Step{Uses: "builtin:has/slash"}, &RunContext{})
 
 	assert.Nil(t, s)
 	assert.Error(t, err)

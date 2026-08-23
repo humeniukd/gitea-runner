@@ -1,6 +1,6 @@
 # Built-in actions
 
-> Status: design + initial scaffold (`checkout` only).
+> Status: design + initial scaffold (`builtin:checkout` only).
 > Audience: contributors to `act_runner`, and operators who want to understand
 > what runs natively versus what is fetched and executed inside the job
 > container.
@@ -41,8 +41,8 @@ A built-in action is:
   interface.
 - Registered into a process-wide registry at `init()` time (via a blank
   import in [`act/runner/builtins_register.go`](../act/runner/builtins_register.go)).
-- Reached from a workflow with a reserved no-slash name in `uses:`, for
-  example `uses: checkout`.
+- Reached from a workflow with a `builtin:`-prefixed name in `uses:`, for
+  example `uses: builtin:checkout`.
 - Executed in the runner process. It may drive the job container through
   the existing [`container.ExecutionsEnvironment`](../act/container/executions_environment.go)
   interface (`Exec`, `CopyDir`, `CopyTarStream`, `Copy`, `GetContainerArchive`).
@@ -61,7 +61,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: checkout            # built-in, no @ref, no /, no ./
+      - uses: builtin:checkout    # built-in, no @ref, no /, no ./
         with:
           fetch-depth: 0
       - run: ls -la
@@ -75,14 +75,14 @@ Resolution rules:
 3. `uses:` containing `.github/workflows/...@...` ->
    `StepTypeReusableWorkflowRemote` (unchanged).
 4. `uses:` starting with `./` -> `StepTypeUsesActionLocal` (unchanged).
-5. `uses:` matching `^[a-z0-9][a-z0-9-]*$` (no `/`, no `@`, no `./`) ->
-   `StepTypeUsesActionBuiltin` (new).
+5. `uses:` matching `^builtin:[a-z0-9][a-z0-9-]*$` -> the runner's built-in
+   action dispatcher.
 6. Anything else -> `StepTypeUsesActionRemote` (unchanged).
 
 A `uses:` of `actions/checkout@v4` therefore keeps clone-and-run-Node
 behavior. There is no implicit shadowing of `actions/*` in this iteration.
 
-If the no-slash name is not registered, step construction fails with a
+If the `builtin:` action name is not registered, step construction fails with a
 clear message listing the known built-ins, mirroring how `StepTypeInvalid`
 is reported today.
 
@@ -90,8 +90,8 @@ is reported today.
 
 ```mermaid
 flowchart TD
-  yml[".yml: uses: checkout"] --> typing["model.(*Step).Type()"]
-  typing --> builtinT["StepTypeUsesActionBuiltin"]
+  yml[".yml: uses: builtin:checkout"] --> typing["model.(*Step).Type()"]
+  typing --> builtinT["StepTypeUsesActionRemote"]
   builtinT --> factory["step_factory.newStep"]
   factory --> sab["stepActionBuiltin"]
   sab --> reg["builtin.Lookup(name)"]
@@ -162,7 +162,7 @@ duplicate registration treated as a programmer error (panic at init).
 
 ## First built-in: `checkout`
 
-`uses: checkout` is intentionally a strict subset of `actions/checkout` v4.
+`uses: builtin:checkout` is intentionally a strict subset of `actions/checkout` v4.
 Inputs honored in this iteration:
 
 | Input          | Default                             | Notes                              |
@@ -199,8 +199,8 @@ Behavior:
 - The token for cloning is the same token already supplied to the runner
   (`Config.Token`, threaded through the github context). It is not
   exposed to the job container by the built-in.
-- Reserved no-slash names are evaluated *only* if the workflow author
-  wrote one - there is no automatic redirection from `actions/checkout`,
+- Built-ins are evaluated *only* if the workflow author uses the explicit
+  `builtin:` prefix - there is no automatic redirection from `actions/checkout`,
   so existing workflows are untouched.
 
 ## Adding a new built-in
@@ -229,6 +229,6 @@ Behavior:
 
 | Name       | Status      | Replaces                                |
 | ---------- | ----------- | --------------------------------------- |
-| `checkout` | implemented | `actions/checkout`                      |
+| `builtin:checkout` | implemented | `actions/checkout`              |
 
 Future entries will be added here as they land.

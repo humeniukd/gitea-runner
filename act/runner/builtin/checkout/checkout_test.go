@@ -140,7 +140,7 @@ func TestCheckoutSkipsWhenWorkspaceBound(t *testing.T) {
 	ctx := &builtin.Context{
 		Ctx:        context.Background(),
 		RunContext: rc,
-		Step:       &model.Step{Uses: "checkout"},
+		Step:       &model.Step{Uses: "builtin:checkout"},
 		Inputs:     map[string]string{},
 		Env:        map[string]string{},
 		Logger:     log.New(),
@@ -166,7 +166,7 @@ func TestCheckoutCopiesLocalWorkspace(t *testing.T) {
 	ctx := &builtin.Context{
 		Ctx:        context.Background(),
 		RunContext: rc,
-		Step:       &model.Step{Uses: "checkout"},
+		Step:       &model.Step{Uses: "builtin:checkout"},
 		Inputs:     map[string]string{"path": "src"},
 		Env:        map[string]string{},
 		Logger:     log.New(),
@@ -194,7 +194,7 @@ func TestCheckoutNoSkipForcesClonePath(t *testing.T) {
 	ctx := &builtin.Context{
 		Ctx:        context.Background(),
 		RunContext: rc,
-		Step:       &model.Step{Uses: "checkout"},
+		Step:       &model.Step{Uses: "builtin:checkout"},
 		Inputs:     map[string]string{},
 		Env:        map[string]string{},
 		Logger:     log.New(),
@@ -221,7 +221,7 @@ func TestCheckoutRedirectsToOtherRepoTakesClonePath(t *testing.T) {
 	ctx := &builtin.Context{
 		Ctx:        context.Background(),
 		RunContext: rc,
-		Step:       &model.Step{Uses: "checkout"},
+		Step:       &model.Step{Uses: "builtin:checkout"},
 		Inputs:     map[string]string{"repository": "other/repo"},
 		Env:        map[string]string{},
 		Logger:     log.New(),
