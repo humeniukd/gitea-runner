@@ -170,8 +170,8 @@ Inputs honored in this iteration:
 | `repository`   | `${{ github.repository }}`          | full `org/repo`                    |
 | `ref`          | `${{ github.ref }}`                 | branch / tag / SHA                 |
 | `token`        | `${{ github.token }}`               | used for HTTP basic auth on clone  |
-| `path`         | `` (workspace root)                 | relative to `GITHUB_WORKSPACE`     |
-| `fetch-depth`  | `1`                                 | passthrough hint, currently best-effort |
+| `path`         | `` (workspace root)                 | must remain within `GITHUB_WORKSPACE` |
+| `fetch-depth`  | `1`                                 | `0` fetches complete history       |
 | `clean`        | `true`                              | reserved, currently no-op          |
 | `submodules`   | `false`                             | reserved, currently no-op          |
 

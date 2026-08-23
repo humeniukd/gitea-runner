@@ -17,6 +17,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"gitea.com/gitea/runner/act/common/git"
@@ -54,6 +55,14 @@ func (a *Action) Main(c *builtin.Context) error {
 	ref := shortRef(firstNonEmpty(c.Inputs["ref"], ghc.Ref))
 	token := firstNonEmpty(c.Inputs["token"], ghc.Token, cfg.Token())
 	subPath := strings.TrimSpace(c.Inputs["path"])
+	dst, err := workspaceDestination(c.RunContext.ContainerWorkdir(), subPath)
+	if err != nil {
+		return err
+	}
+	depth, err := fetchDepth(c.Inputs["fetch-depth"])
+	if err != nil {
+		return err
+	}
 
 	c.Logger.Infof("checkout: repository=%s ref=%s path=%s", repository, ref, subPath)
 
@@ -71,7 +80,6 @@ func (a *Action) Main(c *builtin.Context) error {
 		if jobContainer == nil {
 			return errors.New("checkout: no job container available")
 		}
-		dst := path.Join(c.RunContext.ContainerWorkdir(), subPath)
 		src := c.RunContext.Workdir() + string(filepath.Separator) + "."
 		c.Logger.Debugf("checkout: copying workspace %s -> %s", src, dst)
 		return jobContainer.CopyDir(dst, src, cfg.UseGitIgnore())(c.Ctx)
@@ -99,6 +107,7 @@ func (a *Action) Main(c *builtin.Context) error {
 		Ref:             ref,
 		Dir:             cloneDir,
 		Token:           token,
+		Depth:           depth,
 		OfflineMode:     cfg.ActionOfflineMode(),
 		InsecureSkipTLS: cfg.InsecureSkipTLS(),
 	})
@@ -110,10 +119,28 @@ func (a *Action) Main(c *builtin.Context) error {
 	if jobContainer == nil {
 		return errors.New("checkout: no job container available")
 	}
-	dst := path.Join(c.RunContext.ContainerWorkdir(), subPath)
 	src := cloneDir + string(filepath.Separator) + "."
 	c.Logger.Debugf("checkout: copying clone %s -> %s", src, dst)
 	return jobContainer.CopyDir(dst, src, cfg.UseGitIgnore())(c.Ctx)
+}
+
+func workspaceDestination(workspace, checkoutPath string) (string, error) {
+	cleanPath := path.Clean(checkoutPath)
+	if path.IsAbs(cleanPath) || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") {
+		return "", fmt.Errorf("checkout: path %q must be relative to the workspace", checkoutPath)
+	}
+	return path.Join(workspace, cleanPath), nil
+}
+
+func fetchDepth(input string) (int, error) {
+	if strings.TrimSpace(input) == "" {
+		return 1, nil
+	}
+	depth, err := strconv.Atoi(input)
+	if err != nil || depth < 0 {
+		return 0, fmt.Errorf("checkout: fetch-depth %q must be a non-negative integer", input)
+	}
+	return depth, nil
 }
 
 // isLocalCheckoutLike mirrors the precondition used by

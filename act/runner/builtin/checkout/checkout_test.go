@@ -7,7 +7,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -178,6 +181,112 @@ func TestCheckoutCopiesLocalWorkspace(t *testing.T) {
 	assert.Equal(t, "/workspace/src", fc.copyDirDst)
 	assert.True(t, strings.HasPrefix(fc.copyDirSrc, "/host/work"))
 	assert.True(t, fc.copyDirGI)
+}
+
+func TestCheckoutRejectsPathOutsideWorkspace(t *testing.T) {
+	for _, checkoutPath := range []string{"../outside", "/outside", "nested/../../outside"} {
+		t.Run(checkoutPath, func(t *testing.T) {
+			fc := &fakeContainer{}
+			rc := &fakeRunContext{
+				jc:    fc,
+				wd:    "/host/work",
+				cwd:   "/workspace",
+				cache: t.TempDir(),
+				gh:    &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main"},
+				cfg:   &fakeConfig{bind: true},
+			}
+
+			err := (&Action{}).Main(&builtin.Context{
+				Ctx:        context.Background(),
+				RunContext: rc,
+				Step:       &model.Step{Uses: "builtin:checkout"},
+				Inputs:     map[string]string{"path": checkoutPath},
+				Env:        map[string]string{},
+				Logger:     log.New(),
+			})
+
+			require.Error(t, err)
+			assert.False(t, fc.called)
+		})
+	}
+}
+
+func TestFetchDepth(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  int
+		err   bool
+	}{
+		{input: "", want: 1},
+		{input: "0", want: 0},
+		{input: "5", want: 5},
+		{input: "-1", err: true},
+		{input: "invalid", err: true},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			got, err := fetchDepth(tc.input)
+			if tc.err {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestCheckoutUsesFetchDepth(t *testing.T) {
+	remote := createGitRemote(t)
+	fc := &fakeContainer{}
+	err := (&Action{}).Main(&builtin.Context{
+		Ctx: context.Background(),
+		RunContext: &fakeRunContext{
+			jc:    fc,
+			wd:    "/host/work",
+			cwd:   "/workspace",
+			cache: t.TempDir(),
+			gh: &model.GithubContext{
+				Repository: "workflow",
+				Ref:        "refs/heads/main",
+				ServerURL:  "file://" + filepath.Dir(remote),
+			},
+			cfg: &fakeConfig{},
+		},
+		Step:   &model.Step{Uses: "builtin:checkout"},
+		Inputs: map[string]string{"repository": filepath.Base(remote), "ref": "main", "fetch-depth": "1"},
+		Env:    map[string]string{},
+		Logger: log.New(),
+	})
+
+	require.NoError(t, err)
+	require.True(t, fc.called)
+	assert.FileExists(t, filepath.Join(fc.copyDirSrc, ".git", "shallow"))
+}
+
+func createGitRemote(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote")
+	workdir := filepath.Join(root, "work")
+	runGit(t, "init", "--bare", remote)
+	runGit(t, "init", "-b", "main", workdir)
+	runGit(t, "-C", workdir, "config", "user.name", "Test User")
+	runGit(t, "-C", workdir, "config", "user.email", "test@example.com")
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "file"), []byte("first\n"), 0o600))
+	runGit(t, "-C", workdir, "add", "file")
+	runGit(t, "-C", workdir, "commit", "-m", "first")
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "file"), []byte("second\n"), 0o600))
+	runGit(t, "-C", workdir, "commit", "-am", "second")
+	runGit(t, "-C", workdir, "remote", "add", "origin", remote)
+	runGit(t, "-C", workdir, "push", "origin", "main")
+	return remote
+}
+
+func runGit(t *testing.T, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	output, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "git %s: %s", strings.Join(args, " "), output)
 }
 
 func TestCheckoutNoSkipForcesClonePath(t *testing.T) {
