@@ -1,10 +1,7 @@
 DIST := dist
 EXECUTABLE := gitea-runner
 DIST_DIRS := $(DIST)/binaries $(DIST)/release
-GO ?= go
-SHASUM ?= shasum -a 256
-PNPM ?= pnpm
-HAS_GO = $(shell hash $(GO) > /dev/null 2>&1 && echo "GO" || echo "NOGO" )
+HAS_GO = $(shell hash go > /dev/null 2>&1 && echo "GO" || echo "NOGO" )
 XGO_PACKAGE ?= src.techknowlogick.com/xgo@v1.9.0 # renovate: datasource=go
 XGO_VERSION := go-1.26.x
 GXZ_PACKAGE ?= github.com/ulikunitz/xz/cmd/gxz@v0.5.16 # renovate: datasource=go
@@ -31,11 +28,11 @@ ifneq ($(STATIC),)
 endif
 
 ifeq ($(HAS_GO), GO)
-	GOPATH ?= $(shell $(GO) env GOPATH)
+	GOPATH ?= $(shell go env GOPATH)
 	export PATH := $(GOPATH)/bin:$(PATH)
 
 	CGO_EXTRA_CFLAGS := -DSQLITE_MAX_VARIABLE_NUMBER=32766
-	CGO_CFLAGS ?= $(shell $(GO) env CGO_CFLAGS) $(CGO_EXTRA_CFLAGS)
+	CGO_CFLAGS ?= $(shell go env CGO_CFLAGS) $(CGO_EXTRA_CFLAGS)
 endif
 
 ifeq ($(OS), Windows_NT)
@@ -84,13 +81,13 @@ help: Makefile ## print Makefile help information.
 
 .PHONY: fmt
 fmt: ## format the Go code
-	$(GO) run $(GOLANGCI_LINT_PACKAGE) fmt
+	go run $(GOLANGCI_LINT_PACKAGE) fmt
 
 .PHONY: go-check
 go-check:
 	$(eval MIN_GO_VERSION_STR := $(shell grep -Eo '^go\s+[0-9]+\.[0-9]+' go.mod | cut -d' ' -f2))
 	$(eval MIN_GO_VERSION := $(shell printf "%03d%03d" $(shell echo '$(MIN_GO_VERSION_STR)' | tr '.' ' ')))
-	$(eval GO_VERSION := $(shell printf "%03d%03d" $(shell $(GO) version | grep -Eo '[0-9]+\.[0-9]+' | tr '.' ' ');))
+	$(eval GO_VERSION := $(shell printf "%03d%03d" $(shell go version | grep -Eo '[0-9]+\.[0-9]+' | tr '.' ' ');))
 	@if [ "$(GO_VERSION)" -lt "$(MIN_GO_VERSION)" ]; then \
 		echo "Gitea Runner requires Go $(MIN_GO_VERSION_STR) or greater to build. You can get it at https://go.dev/dl/"; \
 		exit 1; \
@@ -107,10 +104,10 @@ fmt-check: fmt
 
 .PHONY: deps-tools
 deps-tools: ## install tool dependencies
-	$(GO) install $(GOLANGCI_LINT_PACKAGE) & \
-	$(GO) install $(GXZ_PACKAGE) & \
-	$(GO) install $(XGO_PACKAGE) & \
-	$(GO) install $(GOVULNCHECK_PACKAGE) & \
+	go install $(GOLANGCI_LINT_PACKAGE) & \
+	go install $(GXZ_PACKAGE) & \
+	go install $(XGO_PACKAGE) & \
+	go install $(GOVULNCHECK_PACKAGE) & \
 	wait
 
 .PHONY: checks
@@ -121,16 +118,16 @@ lint: lint-go lint-go-windows ## lint everything
 
 .PHONY: lint-go
 lint-go: ## lint go files
-	$(GO) run $(GOLANGCI_LINT_PACKAGE) run
+	go run $(GOLANGCI_LINT_PACKAGE) run
 
 .PHONY: lint-go-windows
 lint-go-windows: ## lint Windows go files
-	$(GO) install $(GOLANGCI_LINT_PACKAGE)
+	go install $(GOLANGCI_LINT_PACKAGE)
 	$(GO_ENV_WINDOWS) golangci-lint run
 
 .PHONY: lint-go-fix
 lint-go-fix: ## lint go files and fix issues
-	$(GO) run $(GOLANGCI_LINT_PACKAGE) run --fix
+	go run $(GOLANGCI_LINT_PACKAGE) run --fix
 
 .PHONY: lint-pr-title
 lint-pr-title: ## lint PR title against Conventional Commits (set PR_TITLE=...)
@@ -138,15 +135,15 @@ lint-pr-title: ## lint PR title against Conventional Commits (set PR_TITLE=...)
 
 .PHONY: security-check
 security-check:
-	GOEXPERIMENT= $(GO) run $(GOVULNCHECK_PACKAGE) -show color ./... || true
+	GOEXPERIMENT= go run $(GOVULNCHECK_PACKAGE) -show color ./... || true
 
 .PHONY: tidy
 tidy: ## run go mod tidy
 	$(eval GO_TOOLCHAIN := $(shell grep -Eo '^toolchain\s+go[0-9.]+' go.mod | cut -d' ' -f2))
-	$(GO) mod tidy
+	go mod tidy
 	@# workaround https://github.com/golang/go/issues/75331: restore toolchain if tidy dropped it
 	@if [ -n "$(GO_TOOLCHAIN)" ] && ! grep -qE '^toolchain\s' go.mod; then \
-		$(GO) mod edit -toolchain=$(GO_TOOLCHAIN); \
+		go mod edit -toolchain=$(GO_TOOLCHAIN); \
 	fi
 
 .PHONY: tidy-check
@@ -160,10 +157,10 @@ tidy-check: tidy
 
 .PHONY: changelog
 changelog: node_modules ## generate CHANGELOG.md from all releases
-	$(PNPM) exec conventional-changelog --config changelog.config.ts --release-count 0
+	pnpm exec conventional-changelog --config changelog.config.ts --release-count 0
 
 node_modules: pnpm-lock.yaml
-	$(PNPM) install --frozen-lockfile
+	pnpm install --frozen-lockfile
 	@touch node_modules
 
 .PHONY: publish-check
@@ -174,14 +171,17 @@ publish-check:
 
 .PHONY: patch minor major
 patch: publish-check node_modules ## create, tag, and publish a patch release
+	pnpm exec versions -R -p -a patch
+
 minor: publish-check node_modules ## create, tag, and publish a minor release
+	pnpm exec versions -R -p -a minor
+
 major: publish-check node_modules ## create, tag, and publish a major release
-patch minor major:
-	$(PNPM) exec versions -R -p -a $@
+	pnpm exec versions -R -p -a major
 
 .PHONY: test
 test: ## test everything (integration tests self-skip without docker/network)
-	@$(GO) test $(GOTEST_FLAGS) -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
+	@go test $(GOTEST_FLAGS) -cover -coverprofile coverage.txt ./... && echo "\n==>\033[32m Ok\033[m\n" || exit 1
 
 .PHONY: coverage-report
 coverage-report: ## turn coverage.txt from `make test` into .tmp/coverage.md
@@ -200,21 +200,21 @@ E2E_CONCURRENCY ?= 8
 
 .PHONY: test-e2e
 test-e2e: ## run Gitea compatibility tests against E2E_GITEA_IMAGE
-	@E2E_CONCURRENCY=$(E2E_CONCURRENCY) E2E_GITEA_IMAGE=$(E2E_GITEA_IMAGE) E2E_JOB_IMAGE=$(E2E_JOB_IMAGE) GO=$(GO) SERVICE_IMAGE=$(SERVICE_IMAGE) ./tools/test-e2e.sh
+	@E2E_CONCURRENCY=$(E2E_CONCURRENCY) E2E_GITEA_IMAGE=$(E2E_GITEA_IMAGE) E2E_JOB_IMAGE=$(E2E_JOB_IMAGE) SERVICE_IMAGE=$(SERVICE_IMAGE) ./tools/test-e2e.sh
 
 .PHONY: install
 install: $(GOFILES) ## install the runner binary via `go install`
-	$(GO) install -v -tags '$(TAGS)' -ldflags '-s -w $(EXTLDFLAGS) $(LDFLAGS)'
+	go install -v -tags '$(TAGS)' -ldflags '-s -w $(EXTLDFLAGS) $(LDFLAGS)'
 
 .PHONY: build
 build: go-check $(EXECUTABLE) ## build the runner binary
 
 $(EXECUTABLE): $(GOFILES)
-	$(GO) build -v -tags '$(TAGS)' -ldflags '-s -w $(EXTLDFLAGS) $(LDFLAGS)' -o $@
+	go build -v -tags '$(TAGS)' -ldflags '-s -w $(EXTLDFLAGS) $(LDFLAGS)' -o $@
 
 .PHONY: deps-backend
 deps-backend: ## install backend dependencies
-	$(GO) mod download
+	go mod download
 
 .PHONY: release
 release: release-windows release-linux release-darwin release-copy release-compress release-check ## build release artifacts
@@ -224,21 +224,21 @@ $(DIST_DIRS):
 
 .PHONY: release-windows
 release-windows: | $(DIST_DIRS)
-	CGO_CFLAGS="$(CGO_CFLAGS)" $(GO) run $(XGO_PACKAGE) -go $(XGO_VERSION) -buildmode exe -dest $(DIST)/binaries -tags 'netgo osusergo $(TAGS)' -ldflags '-s -w -linkmode external -extldflags "-static" $(LDFLAGS)' -targets '$(WINDOWS_ARCHS)' -out $(EXECUTABLE)-$(VERSION) .
+	CGO_CFLAGS="$(CGO_CFLAGS)" go run $(XGO_PACKAGE) -go $(XGO_VERSION) -buildmode exe -dest $(DIST)/binaries -tags 'netgo osusergo $(TAGS)' -ldflags '-s -w -linkmode external -extldflags "-static" $(LDFLAGS)' -targets '$(WINDOWS_ARCHS)' -out $(EXECUTABLE)-$(VERSION) .
 ifeq ($(CI),true)
 	cp -r /build/* $(DIST)/binaries/
 endif
 
 .PHONY: release-linux
 release-linux: | $(DIST_DIRS)
-	CGO_CFLAGS="$(CGO_CFLAGS)" $(GO) run $(XGO_PACKAGE) -go $(XGO_VERSION) -dest $(DIST)/binaries -tags 'netgo osusergo $(TAGS)' -ldflags '-s -w -linkmode external -extldflags "-static" $(LDFLAGS)' -targets '$(LINUX_ARCHS)' -out $(EXECUTABLE)-$(VERSION) .
+	CGO_CFLAGS="$(CGO_CFLAGS)" go run $(XGO_PACKAGE) -go $(XGO_VERSION) -dest $(DIST)/binaries -tags 'netgo osusergo $(TAGS)' -ldflags '-s -w -linkmode external -extldflags "-static" $(LDFLAGS)' -targets '$(LINUX_ARCHS)' -out $(EXECUTABLE)-$(VERSION) .
 ifeq ($(CI),true)
 	cp -r /build/* $(DIST)/binaries/
 endif
 
 .PHONY: release-darwin
 release-darwin: | $(DIST_DIRS)
-	CGO_CFLAGS="$(CGO_CFLAGS)" $(GO) run $(XGO_PACKAGE) -go $(XGO_VERSION) -dest $(DIST)/binaries -tags 'netgo osusergo $(TAGS)' -ldflags '-s -w $(LDFLAGS)' -targets '$(DARWIN_ARCHS)' -out $(EXECUTABLE)-$(VERSION) .
+	CGO_CFLAGS="$(CGO_CFLAGS)" go run $(XGO_PACKAGE) -go $(XGO_VERSION) -dest $(DIST)/binaries -tags 'netgo osusergo $(TAGS)' -ldflags '-s -w $(LDFLAGS)' -targets '$(DARWIN_ARCHS)' -out $(EXECUTABLE)-$(VERSION) .
 ifeq ($(CI),true)
 	cp -r /build/* $(DIST)/binaries/
 endif
@@ -249,11 +249,11 @@ release-copy: | $(DIST_DIRS)
 
 .PHONY: release-check
 release-check: | $(DIST_DIRS)
-	cd $(DIST)/release/; for file in `find . -type f -name "*"`; do echo "checksumming $${file}" && $(SHASUM) `echo $${file} | sed 's/^..//'` > $${file}.sha256; done;
+	cd $(DIST)/release/; for file in `find . -type f -name "*"`; do echo "checksumming $${file}" && shasum -a 256 `echo $${file} | sed 's/^..//'` > $${file}.sha256; done;
 
 .PHONY: release-compress
 release-compress: | $(DIST_DIRS)
-	cd $(DIST)/release/; for file in `find . -type f -name "*"`; do echo "compressing $${file}" && $(GO) run $(GXZ_PACKAGE) -k -9 $${file}; done;
+	cd $(DIST)/release/; for file in `find . -type f -name "*"`; do echo "compressing $${file}" && go run $(GXZ_PACKAGE) -k -9 $${file}; done;
 
 .PHONY: docker
 docker: ## build the docker image
@@ -264,7 +264,7 @@ docker: ## build the docker image
 
 .PHONY: clean
 clean: ## delete binary and coverage files
-	$(GO) clean -x -i ./...
+	go clean -x -i ./...
 	rm -rf coverage.txt .tmp $(EXECUTABLE) $(DIST)
 
 .PHONY: version
