@@ -1296,3 +1296,52 @@ func TestReporter_NoteReport(t *testing.T) {
 	require.Len(t, hook.AllEntries(), 2)
 	assert.Contains(t, hook.LastEntry().Message, "reconnected")
 }
+
+// A job's final error can carry a secret, e.g. one interpolated into a failing
+// expression, so Close must mask it like every other row.
+func TestReporter_CloseMasksLastWords(t *testing.T) {
+	const secret = "supersecret"
+	var mu sync.Mutex
+	var rows []*runnerv1.LogRow
+
+	client := mocks.NewClient(t)
+	client.On("UpdateLog", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
+			mu.Lock()
+			rows = append(rows, req.Msg.Rows...)
+			mu.Unlock()
+			return connect_go.NewResponse(&runnerv1.UpdateLogResponse{
+				AckIndex: req.Msg.Index + int64(len(req.Msg.Rows)),
+			}), nil
+		},
+	)
+	client.On("UpdateTask", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ *connect_go.Request[runnerv1.UpdateTaskRequest]) (*connect_go.Response[runnerv1.UpdateTaskResponse], error) {
+			return connect_go.NewResponse(&runnerv1.UpdateTaskResponse{}), nil
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+	cfg, _ := config.LoadDefault("")
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{
+		Context: taskCtx,
+		Secrets: map[string]string{"TOKEN": secret},
+	}, cfg)
+	reporter.ResetSteps(1)
+	close(reporter.daemon)
+
+	require.NoError(t, reporter.Close("could not get job matrix: "+secret))
+
+	mu.Lock()
+	defer mu.Unlock()
+	contents := make([]string, 0, len(rows))
+	for _, row := range rows {
+		contents = append(contents, row.Content)
+	}
+	joined := strings.Join(contents, "\n")
+	assert.Contains(t, joined, "***")
+	assert.NotContains(t, joined, secret)
+}

@@ -485,16 +485,10 @@ func (r *Reporter) Close(lastWords string) error {
 			}
 		}
 		r.state.Result = result
-		r.appendLogRow(&runnerv1.LogRow{
-			Time:    timestamppb.Now(),
-			Content: lastWords,
-		})
+		r.appendLogRow(r.newLogRow(timestamppb.Now(), lastWords))
 		r.state.StoppedAt = timestamppb.Now()
 	} else if lastWords != "" {
-		r.appendLogRow(&runnerv1.LogRow{
-			Time:    timestamppb.Now(),
-			Content: lastWords,
-		})
+		r.appendLogRow(r.newLogRow(timestamppb.Now(), lastWords))
 	}
 	r.stateMu.Unlock()
 
