@@ -392,9 +392,7 @@ Set `log.job.dir` to a path and the runner writes a copy of every task's log the
 
 #### Secret masking
 
-The job's secrets and every `::add-mask::` value are masked out of the job log, the local copy above, the job summary, and the container and network names the runner creates. A job output whose value carries one is skipped with a warning rather than sent masked, as GitHub does, so a downstream `needs.<job>.outputs.<name>` reading it is empty.
-
-`ACTIONS_STEP_DEBUG` and `ACTIONS_RUNNER_DEBUG` arrive as secrets but are never masked, matching GitHub, since hiding `true` would blank it out of unrelated log lines and outputs.
+A job's secrets and its `::add-mask::` values are hidden from what the runner writes and uploads: the job log, the local copy above, job summaries, and the names of the containers it creates. A job output carrying one is skipped with a warning rather than sent masked, as GitHub does, so a downstream `needs.<job>.outputs.<name>` reading it is empty.
 
 `log.job.retention` (default `168h`) is how long a log is kept, expired ones being deleted as new tasks start, and `log.job.max_size` (default `1GB`) caps one log. Keep `retention` above `runner.timeout` so a long job cannot outlive its own log, and prefer local disk, the file is written while the job runs. Only the runner's own user can read it.
 

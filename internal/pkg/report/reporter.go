@@ -95,8 +95,7 @@ type Reporter struct {
 	debugOutputEnabled  bool
 	stopCommandEndToken string
 
-	globalMaskID uint64  // this task's entry in the process-wide masker
-	jobLog       *jobLog // this task's rows on the runner's own disk, nil when log.job.dir is unset
+	jobLog *jobLog // this task's rows on the runner's own disk, nil when log.job.dir is unset
 }
 
 // extraMasks are values known before the job starts that are not among its secrets, such as
@@ -141,7 +140,7 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 
 	rv.daemonWait = 6 * rv.effectiveCloseTimeout()
 
-	rv.globalMaskID = registerGlobalMasks(oldnew)
+	registerGlobalMasks(rv)
 
 	if task.Secrets["ACTIONS_STEP_DEBUG"] == "true" {
 		rv.debugOutputEnabled = true
@@ -171,9 +170,8 @@ func (r *Reporter) Levels() []log.Level {
 	return log.AllLevels
 }
 
-// appendLogRow buffers a row for the uploader and mirrors it into job.log. A nil row is one
-// the command handler dropped, such as ::add-mask::. Masks here, the one point feeding both
-// sinks, so no row reaches either unmasked whatever built it. Caller holds stateMu.
+// appendLogRow masks a row before buffering it for Gitea and the local job.log, the one point
+// feeding both. A nil row is one the command handler dropped. Caller holds stateMu.
 func (r *Reporter) appendLogRow(row *runnerv1.LogRow) {
 	if row == nil {
 		return
@@ -476,7 +474,7 @@ func (r *Reporter) SetOutputs(outputs map[string]string) {
 }
 
 func (r *Reporter) Close(lastWords string) error {
-	defer deregisterGlobalMasks(r.globalMaskID) // deferred so a panic below cannot strand this task's masks
+	defer deregisterGlobalMasks(r) // deferred so a panic below cannot strand this task's masks
 	r.stateMu.Lock()
 	r.closed = true
 	if r.state.Result == runnerv1.Result_RESULT_UNSPECIFIED {

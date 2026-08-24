@@ -14,28 +14,24 @@ import (
 )
 
 // A job's plan runs before its job logger exists and logs through the process-wide one, which
-// several tasks share, so that one holds the union of every live task's secrets.
+// several tasks share, so that one holds the union of every live task's starting secrets.
 var (
 	globalMu       sync.Mutex
-	globalMasks    = map[uint64][]string{}
-	globalMaskSeq  uint64
-	globalReplacer atomic.Pointer[strings.Replacer] // nil while no task is live
+	globalMasks    = map[*Reporter][]string{}
+	globalReplacer atomic.Pointer[strings.Replacer] // nil while nothing is registered
 )
 
-func registerGlobalMasks(oldnew []string) uint64 {
+func registerGlobalMasks(r *Reporter) {
 	globalMu.Lock()
 	defer globalMu.Unlock()
-	globalMaskSeq++
-	globalMasks[globalMaskSeq] = oldnew
+	globalMasks[r] = r.oldnew
 	rebuildGlobalReplacer()
-
-	return globalMaskSeq
 }
 
-func deregisterGlobalMasks(id uint64) {
+func deregisterGlobalMasks(r *Reporter) {
 	globalMu.Lock()
 	defer globalMu.Unlock()
-	delete(globalMasks, id)
+	delete(globalMasks, r)
 	rebuildGlobalReplacer()
 }
 
@@ -51,7 +47,7 @@ func rebuildGlobalReplacer() { // caller holds globalMu
 	globalReplacer.Store(runner.NewSecretReplacer(oldnew))
 }
 
-// MaskingFormatter wraps f so no live task's secret reaches the process-wide log, fields included.
+// MaskingFormatter wraps f so a registered value cannot reach the process-wide log, fields included.
 func MaskingFormatter(f log.Formatter) log.Formatter {
 	return &maskingFormatter{inner: f}
 }
@@ -64,7 +60,7 @@ func (m *maskingFormatter) Format(entry *log.Entry) ([]byte, error) {
 		return nil, err
 	}
 	replacer := globalReplacer.Load()
-	if replacer == nil { // no task is live, so this costs what it did before the wrapper
+	if replacer == nil { // nothing to hide, so an idle daemon pays no copy
 		return line, nil
 	}
 	return []byte(replacer.Replace(string(line))), nil

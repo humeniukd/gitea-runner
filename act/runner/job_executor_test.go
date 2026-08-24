@@ -1127,7 +1127,6 @@ func TestTryUploadJobSummaryMasksSecrets(t *testing.T) {
 
 	tryUploadJobSummary(context.Background(), rc)
 
-	// Gitea renders this on the run page, so it gets everything the job log masks
 	assert.Equal(t, "deployed true with *** and *** via ***", got)
 	cm.AssertExpectations(t)
 }

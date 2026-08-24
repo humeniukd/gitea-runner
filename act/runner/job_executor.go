@@ -487,7 +487,7 @@ func tryUploadJobSummary(ctx context.Context, rc *RunContext) {
 		if !ok || len(body) == 0 {
 			continue
 		}
-		// Gitea renders this on the run page, so it needs the masking the job log gets.
+		// Gitea renders summaries on the run page, so mask before the upload.
 		uploadJobSummary(ctx, client, base+strconv.Itoa(i)+"/summary", runtimeToken, []byte(rc.maskSecrets(string(body))))
 	}
 }

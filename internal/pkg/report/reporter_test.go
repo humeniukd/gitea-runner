@@ -1044,7 +1044,6 @@ func TestAppendLogRow(t *testing.T) {
 	r := &Reporter{logReplacer: strings.NewReplacer("supersecret", "***")}
 	r.appendLogRow(nil)
 	r.appendLogRow(&runnerv1.LogRow{Time: timestamppb.Now(), Content: "hello supersecret"})
-	r.appendLogRow(nil)
 	require.Len(t, r.logRows, 1)
 	assert.Equal(t, "hello ***", r.logRows[0].Content)
 
@@ -1106,20 +1105,17 @@ func TestReporter_SetOutputs(t *testing.T) {
 	assert.Len(t, got.value, maxOutputValueLen)
 }
 
-// Gitea delivers ACTIONS_STEP_DEBUG as a secret, but masking "true" would blank it out of every
-// log line and drop any job output saying it. GitHub whitelists the same two keys.
+// Gitea delivers ACTIONS_STEP_DEBUG as a secret, so masking "true" would drop any job output
+// saying it. GitHub skips the same two keys.
 func TestReporter_DebugSettingsAreNotMasked(t *testing.T) {
 	taskCtx, err := structpb.NewStruct(map[string]any{})
 	require.NoError(t, err)
-	cfg, _ := config.LoadDefault("")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	reporter := NewReporter(ctx, cancel, mocks.NewClient(t), &runnerv1.Task{
+	reporter := NewReporter(context.Background(), nil, nil, &runnerv1.Task{
 		Context: taskCtx,
 		Secrets: map[string]string{"ACTIONS_STEP_DEBUG": "true", "ACTIONS_RUNNER_DEBUG": "true", "TOKEN": "s3cr3t"},
-	}, cfg)
-	defer deregisterGlobalMasks(reporter.globalMaskID)
+	}, &config.Config{})
+	defer deregisterGlobalMasks(reporter)
 
 	assert.True(t, reporter.debugOutputEnabled)
 	assert.Equal(t, "debug is true", reporter.mask("debug is true"))

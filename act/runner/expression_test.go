@@ -359,17 +359,11 @@ on:
 
 func TestJobNameMasksSecrets(t *testing.T) {
 	workflow, err := model.ReadWorkflow(strings.NewReader(`
-name: wf
-on: push
 jobs:
   a:
     name: deploy ${{ secrets.A }}
-    runs-on: ubuntu-latest
-    steps: []
   b:
     name: deploy ${{ secrets.B }}
-    runs-on: ubuntu-latest
-    steps: []
 `))
 	require.NoError(t, err)
 

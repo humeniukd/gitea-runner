@@ -121,7 +121,7 @@ func WithJobLogger(ctx context.Context, jobID, jobName string, config *Config, m
 
 	logger.SetFormatter(&maskedFormatter{
 		Formatter: logger.Formatter,
-		masker:    valueMasker(config.InsecureSecrets, config.Secrets),
+		masker:    valueMasker(config.InsecureSecrets, config.maskers()),
 	})
 	rtn := logger.WithFields(logrus.Fields{
 		"job":    jobName,
@@ -237,14 +237,11 @@ func jsonStringEscapeNoHTML(v string) string {
 	return encoded[1 : len(encoded)-1]
 }
 
-// debugSettings arrive as secrets but are settings, not values to hide. Masking "true" would
-// gut every log line and drop job outputs that say it, so GitHub skips these two as well.
-var debugSettings = []string{"ACTIONS_STEP_DEBUG", "ACTIONS_RUNNER_DEBUG"}
-
-// AppendSecretMaskers masks every secret whose value is worth hiding.
+// AppendSecretMaskers skips the debug settings, as GitHub does: they arrive as secrets, but
+// masking "true" would corrupt unrelated log lines and drop job outputs that say it.
 func AppendSecretMaskers(oldnew []string, secrets map[string]string) []string {
 	for k, v := range secrets {
-		if !slices.Contains(debugSettings, k) {
+		if k != "ACTIONS_STEP_DEBUG" && k != "ACTIONS_RUNNER_DEBUG" {
 			oldnew = AppendSecretMasker(oldnew, v)
 		}
 	}
@@ -286,8 +283,8 @@ func AppendSecretMasker(oldnew []string, v string) []string {
 
 // valueMasker applies secrets and ::add-mask:: patterns to every log entry, including
 // raw_output (command/stream) lines; there is no bypass by field.
-func valueMasker(insecureSecrets bool, secrets map[string]string) entryProcessor {
-	oldnew := slices.Clip(AppendSecretMaskers(nil, secrets))
+func valueMasker(insecureSecrets bool, oldnew []string) entryProcessor {
+	oldnew = slices.Clip(oldnew)
 	defReplacer := NewSecretReplacer(oldnew)
 
 	// A ::add-mask:: only ever appends to the job's mask slice, so the replacer built for
@@ -435,11 +432,20 @@ func checkIfTerminal(w io.Writer) bool {
 // such as a container name or a job summary. Masks added at runtime count, so a summary written
 // after ::add-mask:: is covered too.
 func (rc *RunContext) maskSecrets(value string) string {
-	oldnew := AppendSecretMaskers(nil, rc.Config.Secrets)
-	for _, mask := range slices.Concat(rc.Config.ExtraMasks, rc.Masks) {
+	oldnew := rc.Config.maskers()
+	for _, mask := range rc.Masks {
 		oldnew = AppendSecretMasker(oldnew, mask)
 	}
 	return NewSecretReplacer(oldnew).Replace(value)
+}
+
+// maskers is every value this job's configuration says to hide, whatever the sink.
+func (c *Config) maskers() []string {
+	oldnew := AppendSecretMaskers(nil, c.Secrets)
+	for _, mask := range c.ExtraMasks {
+		oldnew = AppendSecretMasker(oldnew, mask)
+	}
+	return oldnew
 }
 
 // NewSecretReplacer masks the longest secret first. Replacer matches in argument order, so a

@@ -18,13 +18,14 @@ func TestGlobalMasks(t *testing.T) {
 		require.NoError(t, err)
 		return string(line)
 	}
-	register := func(oldnew ...string) uint64 {
-		id := registerGlobalMasks(oldnew)
-		t.Cleanup(func() { deregisterGlobalMasks(id) })
-		return id
+	register := func(oldnew ...string) *Reporter {
+		r := &Reporter{oldnew: oldnew}
+		registerGlobalMasks(r)
+		t.Cleanup(func() { deregisterGlobalMasks(r) })
+		return r
 	}
 
-	assert.Contains(t, format("build s3cr3t"), "s3cr3t") // nothing registered yet
+	assert.Contains(t, format("build s3cr3t"), "s3cr3t")
 
 	first := register("s3cr3t", "***")
 	second := register("other", "***", "otherlonger", "***")
@@ -36,15 +37,15 @@ func TestGlobalMasks(t *testing.T) {
 
 	deregisterGlobalMasks(first)
 	line = format("build s3cr3t and other")
-	assert.Contains(t, line, "s3cr3t")   // that task ended
-	assert.NotContains(t, line, "other") // the one still running keeps its own
+	assert.Contains(t, line, "s3cr3t")
+	assert.NotContains(t, line, "other") // the task still running keeps its own
 
 	deregisterGlobalMasks(second)
-	assert.Nil(t, globalReplacer.Load()) // no task live, so the process log pays nothing
+	assert.Nil(t, globalReplacer.Load())
 
 	// A workflow could otherwise mask "error" here and rewrite every other task's log.
-	r := &Reporter{globalMaskID: register("s3cr3t", "***"), oldnew: []string{"s3cr3t", "***"}}
-	r.addMask("runtime-secret")
+	third := register("s3cr3t", "***")
+	third.addMask("runtime-secret")
 	assert.Contains(t, format("saw runtime-secret"), "runtime-secret")
-	assert.NotContains(t, r.mask("saw runtime-secret"), "runtime-secret") // the job's own log still masks it
+	assert.NotContains(t, third.mask("saw runtime-secret"), "runtime-secret")
 }

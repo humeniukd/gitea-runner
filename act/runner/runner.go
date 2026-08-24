@@ -36,7 +36,7 @@ type Config struct {
 	JSONLogger                    bool                                          // use json or text logger
 	Env                           map[string]string                             // env for containers
 	Secrets                       map[string]string                             // list of secrets
-	ExtraMasks                    []string                                      // values to hide that are not secrets, such as the proxy password
+	ExtraMasks                    []string                                      // values to hide that are not in Secrets, such as the proxy password
 	Vars                          map[string]string                             // list of vars
 	Token                         string                                        // GitHub token
 	InsecureSecrets               bool                                          // switch hiding output when printing to terminal
