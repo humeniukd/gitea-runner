@@ -373,7 +373,7 @@ func (r *Reporter) runDaemonLoop() {
 	for {
 		select {
 		case <-logTicker.C:
-			r.noteReport(metrics.LabelMethodUpdateLog, r.ReportLog(false))
+			r.reportLogWithState()
 			r.stopLatencyTimer(&maxLatencyActive, maxLatencyTimer)
 
 		case <-stateTicker.C:
@@ -385,7 +385,7 @@ func (r *Reporter) runDaemonLoop() {
 			r.stateMu.RUnlock()
 
 			if n >= r.logBatchSize {
-				r.noteReport(metrics.LabelMethodUpdateLog, r.ReportLog(false))
+				r.reportLogWithState()
 				r.stopLatencyTimer(&maxLatencyActive, maxLatencyTimer)
 			} else if !maxLatencyActive && n > 0 {
 				maxLatencyTimer.Reset(r.logReportMaxLatency)
@@ -400,7 +400,7 @@ func (r *Reporter) runDaemonLoop() {
 
 		case <-maxLatencyTimer.C:
 			maxLatencyActive = false
-			r.noteReport(metrics.LabelMethodUpdateLog, r.ReportLog(false))
+			r.reportLogWithState()
 
 		case <-r.ctx.Done():
 			// Stop heartbeating on cancel so Gitea sees the runner as offline
@@ -421,6 +421,25 @@ func (r *Reporter) runDaemonLoop() {
 			return
 		}
 	}
+}
+
+// reportLogWithState flushes the log and, when the server took rows, the state that
+// describes them. Gitea slices one log stream into steps by the LogIndex/LogLength the
+// state carries, so rows acked before the matching state belong to no step and render
+// under "Complete job"; a runner that stops reporting in that window leaves them there.
+func (r *Reporter) reportLogWithState() {
+	before := r.acked()
+	r.noteReport(metrics.LabelMethodUpdateLog, r.ReportLog(false))
+	if r.acked() != before {
+		r.noteReport(metrics.LabelMethodUpdateTask, r.ReportState(false))
+	}
+}
+
+// acked is the number of log rows the server has taken, i.e. r.logOffset.
+func (r *Reporter) acked() int {
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	return r.logOffset
 }
 
 func (r *Reporter) Logf(format string, a ...any) {

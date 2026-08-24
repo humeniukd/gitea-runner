@@ -1296,3 +1296,117 @@ func TestReporter_NoteReport(t *testing.T) {
 	require.Len(t, hook.AllEntries(), 2)
 	assert.Contains(t, hook.LastEntry().Message, "reconnected")
 }
+
+// giteaLogModel mirrors how Gitea stores a task log: UpdateLog appends rows to one
+// stream, and UpdateTask overwrites the per-step ranges the web UI slices that stream
+// by. Rows past the last step's range are rendered under the "Complete job"
+// pseudo-step (modules/actions/task_state.go, FullSteps).
+type giteaLogModel struct {
+	mu           sync.Mutex
+	rows         int64
+	stepLogIndex map[int64]int64
+	stepLogLen   map[int64]int64
+}
+
+func newGiteaLogModel() *giteaLogModel {
+	return &giteaLogModel{stepLogIndex: map[int64]int64{}, stepLogLen: map[int64]int64{}}
+}
+
+func (m *giteaLogModel) appendRows(n int) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rows += int64(n)
+	return m.rows
+}
+
+func (m *giteaLogModel) acceptedRows() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rows
+}
+
+func (m *giteaLogModel) applyState(state *runnerv1.TaskState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range state.GetSteps() {
+		m.stepLogIndex[s.Id] = s.LogIndex
+		m.stepLogLen[s.Id] = s.LogLength
+	}
+}
+
+// unclaimedRows is what the web UI attributes to "Complete job" instead of to the step
+// that produced it.
+func (m *giteaLogModel) unclaimedRows() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	claimed := int64(0)
+	for _, l := range m.stepLogLen {
+		claimed += l
+	}
+	return m.rows - claimed
+}
+
+// TestReporter_StepRangeCoversAckedRows reproduces
+// https://gitea.com/gitea/runner/issues/1184: the daemon's log-flush path uploads rows
+// without the step ranges that describe them, so every row the server accepts between
+// two state reports belongs to no step. A runner that stops reporting in that window
+// leaves them under "Complete job" for good.
+func TestReporter_StepRangeCoversAckedRows(t *testing.T) {
+	server := newGiteaLogModel()
+
+	client := mocks.NewClient(t)
+	client.On("UpdateLog", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
+			return connect_go.NewResponse(&runnerv1.UpdateLogResponse{
+				AckIndex: server.appendRows(len(req.Msg.Rows)),
+			}), nil
+		},
+	)
+	client.On("UpdateTask", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req *connect_go.Request[runnerv1.UpdateTaskRequest]) (*connect_go.Response[runnerv1.UpdateTaskResponse], error) {
+			server.applyState(req.Msg.State)
+			return connect_go.NewResponse(&runnerv1.UpdateTaskResponse{}), nil
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+
+	// Only the batch threshold may flush: the tickers are the periodic repair this test
+	// must not depend on, and Close() is the one after the damage is done.
+	cfg, _ := config.LoadDefault("")
+	cfg.Runner.LogReportInterval = time.Hour
+	cfg.Runner.LogReportMaxLatency = time.Hour
+	cfg.Runner.StateReportInterval = time.Hour
+	cfg.Runner.LogReportBatchSize = 5
+
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx}, cfg)
+	reporter.ResetSteps(1)
+	reporter.RunDaemon()
+	defer func() {
+		_ = reporter.Close("")
+	}()
+
+	stepData := log.Fields{"stage": "Main", "stepNumber": 0, "raw_output": true}
+
+	// The step's first row is a transition, so it flushes state as well as logs.
+	require.NoError(t, reporter.Fire(&log.Entry{Message: "step starting", Data: stepData}))
+	require.Eventually(t, func() bool {
+		return server.acceptedRows() == 1 && server.unclaimedRows() == 0
+	}, time.Second, 10*time.Millisecond, "the step transition should have flushed both log and state")
+
+	// Mid-step output, flushed by the batch threshold alone.
+	for i := range cfg.Runner.LogReportBatchSize {
+		require.NoError(t, reporter.Fire(&log.Entry{
+			Message: fmt.Sprintf("step output %d", i),
+			Data:    stepData,
+		}))
+	}
+
+	assert.Eventually(t, func() bool {
+		return server.acceptedRows() == 1+int64(cfg.Runner.LogReportBatchSize) && server.unclaimedRows() == 0
+	}, time.Second, 10*time.Millisecond,
+		"every log row the server accepted must be covered by a reported step range")
+}
