@@ -173,6 +173,7 @@ func (r *Reporter) appendLogRow(row *runnerv1.LogRow) {
 	if row == nil {
 		return
 	}
+	row.Content = r.mask(row.Content) // here rather than in a constructor a caller can skip
 	r.logRows = append(r.logRows, row)
 	r.jobLog.write(row.Time.AsTime(), row.Content)
 }
@@ -485,10 +486,16 @@ func (r *Reporter) Close(lastWords string) error {
 			}
 		}
 		r.state.Result = result
-		r.appendLogRow(r.newLogRow(timestamppb.Now(), lastWords))
+		r.appendLogRow(&runnerv1.LogRow{
+			Time:    timestamppb.Now(),
+			Content: lastWords,
+		})
 		r.state.StoppedAt = timestamppb.Now()
 	} else if lastWords != "" {
-		r.appendLogRow(r.newLogRow(timestamppb.Now(), lastWords))
+		r.appendLogRow(&runnerv1.LogRow{
+			Time:    timestamppb.Now(),
+			Content: lastWords,
+		})
 	}
 	r.stateMu.Unlock()
 
@@ -859,11 +866,10 @@ func (r *Reporter) parseLogRow(entry *log.Entry) *runnerv1.LogRow {
 	return r.newLogRow(timestamppb.New(entry.Time), content)
 }
 
-// newLogRow applies the masking and validation every row must carry, whatever built it.
 func (r *Reporter) newLogRow(t *timestamppb.Timestamp, content string) *runnerv1.LogRow {
 	return &runnerv1.LogRow{
 		Time:    t,
-		Content: r.mask(content),
+		Content: content,
 	}
 }
 

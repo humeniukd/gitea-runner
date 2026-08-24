@@ -209,6 +209,7 @@ func TestReporter_parseLogRow(t *testing.T) {
 				got := "<nil>"
 
 				if rv != nil {
+					r.appendLogRow(rv)
 					got = rv.Content
 				}
 
@@ -227,6 +228,7 @@ func TestReporter_parseLogRowAddMask(t *testing.T) {
 		assert.Nil(t, r.parseLogRow(&log.Entry{Message: line}), line)
 
 		row := r.parseLogRow(&log.Entry{Message: "using supersecret now"})
+		r.appendLogRow(row)
 		assert.Equal(t, "using *** now", row.Content, line)
 	}
 }
@@ -1042,7 +1044,7 @@ func TestReporter_StopHeartbeats(t *testing.T) {
 }
 
 func TestAppendLogRow(t *testing.T) {
-	r := &Reporter{}
+	r := &Reporter{logReplacer: strings.NewReplacer()}
 	row := &runnerv1.LogRow{Time: timestamppb.Now(), Content: "hello"}
 	r.appendLogRow(nil)
 	r.appendLogRow(row)
@@ -1162,6 +1164,7 @@ func TestReporter_masksEncodedSecrets(t *testing.T) {
 	} {
 		row := r.parseLogRow(&log.Entry{Message: line})
 		require.NotNil(t, row)
+		r.appendLogRow(row)
 		assert.Contains(t, row.Content, "***")
 		assert.NotContains(t, row.Content, secret)
 		assert.NotContains(t, row.Content, base64.StdEncoding.EncodeToString([]byte(secret)))
