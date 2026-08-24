@@ -1298,18 +1298,12 @@ func TestReporter_NoteReport(t *testing.T) {
 }
 
 // giteaLogModel mirrors how Gitea stores a task log: UpdateLog appends rows to one
-// stream, and UpdateTask overwrites the per-step ranges the web UI slices that stream
-// by. Rows past the last step's range are rendered under the "Complete job"
-// pseudo-step (modules/actions/task_state.go, FullSteps).
+// stream, and UpdateTask overwrites the per-step ranges the web UI slices that stream by
+// (modules/actions/task_state.go, FullSteps).
 type giteaLogModel struct {
-	mu           sync.Mutex
-	rows         int64
-	stepLogIndex map[int64]int64
-	stepLogLen   map[int64]int64
-}
-
-func newGiteaLogModel() *giteaLogModel {
-	return &giteaLogModel{stepLogIndex: map[int64]int64{}, stepLogLen: map[int64]int64{}}
+	mu      sync.Mutex
+	rows    int64
+	claimed int64
 }
 
 func (m *giteaLogModel) appendRows(n int) int64 {
@@ -1319,40 +1313,25 @@ func (m *giteaLogModel) appendRows(n int) int64 {
 	return m.rows
 }
 
-func (m *giteaLogModel) acceptedRows() int64 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.rows
-}
-
 func (m *giteaLogModel) applyState(state *runnerv1.TaskState) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range state.GetSteps() {
-		m.stepLogIndex[s.Id] = s.LogIndex
-		m.stepLogLen[s.Id] = s.LogLength
+		m.claimed = max(m.claimed, s.LogIndex+s.LogLength)
 	}
 }
 
-// unclaimedRows is what the web UI attributes to "Complete job" instead of to the step
-// that produced it.
-func (m *giteaLogModel) unclaimedRows() int64 {
+// snapshot returns the accepted rows and how far the reported step ranges reach into
+// them. The remainder is what the web UI renders under "Complete job".
+func (m *giteaLogModel) snapshot() (rows, claimed int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	claimed := int64(0)
-	for _, l := range m.stepLogLen {
-		claimed += l
-	}
-	return m.rows - claimed
+	return m.rows, m.claimed
 }
 
-// TestReporter_StepRangeCoversAckedRows reproduces
-// https://gitea.com/gitea/runner/issues/1184: the daemon's log-flush path uploads rows
-// without the step ranges that describe them, so every row the server accepts between
-// two state reports belongs to no step. A runner that stops reporting in that window
-// leaves them under "Complete job" for good.
+// Regression test for https://gitea.com/gitea/runner/issues/1184.
 func TestReporter_StepRangeCoversAckedRows(t *testing.T) {
-	server := newGiteaLogModel()
+	server := &giteaLogModel{}
 
 	client := mocks.NewClient(t)
 	client.On("UpdateLog", mock.Anything, mock.Anything).Return(
@@ -1394,10 +1373,10 @@ func TestReporter_StepRangeCoversAckedRows(t *testing.T) {
 	// The step's first row is a transition, so it flushes state as well as logs.
 	require.NoError(t, reporter.Fire(&log.Entry{Message: "step starting", Data: stepData}))
 	require.Eventually(t, func() bool {
-		return server.acceptedRows() == 1 && server.unclaimedRows() == 0
+		rows, claimed := server.snapshot()
+		return rows == 1 && claimed == rows
 	}, time.Second, 10*time.Millisecond, "the step transition should have flushed both log and state")
 
-	// Mid-step output, flushed by the batch threshold alone.
 	for i := range cfg.Runner.LogReportBatchSize {
 		require.NoError(t, reporter.Fire(&log.Entry{
 			Message: fmt.Sprintf("step output %d", i),
@@ -1406,7 +1385,34 @@ func TestReporter_StepRangeCoversAckedRows(t *testing.T) {
 	}
 
 	assert.Eventually(t, func() bool {
-		return server.acceptedRows() == 1+int64(cfg.Runner.LogReportBatchSize) && server.unclaimedRows() == 0
+		rows, claimed := server.snapshot()
+		return rows == 1+int64(cfg.Runner.LogReportBatchSize) && claimed == rows
 	}, time.Second, 10*time.Millisecond,
 		"every log row the server accepted must be covered by a reported step range")
+}
+
+// A flush the server took no rows for describes nothing new, so it must not spend an
+// UpdateTask. UpdateTask is never registered on the client, so calling it fails the test.
+func TestReporter_FlushWithoutAckedRowsSkipsState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+
+	client := mocks.NewClient(t)
+	client.On("UpdateLog", mock.Anything, mock.Anything).Once().Return(
+		func(_ context.Context, _ *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
+			return connect_go.NewResponse(&runnerv1.UpdateLogResponse{AckIndex: 0}), nil
+		},
+	)
+
+	cfg, _ := config.LoadDefault("")
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx}, cfg)
+
+	// An idle job: no rows, so not even an UpdateLog.
+	reporter.reportLogWithState()
+
+	// A row the server declines to take: an UpdateLog, but still no step range to report.
+	reporter.Logf("row")
+	reporter.reportLogWithState()
 }

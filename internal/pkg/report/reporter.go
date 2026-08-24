@@ -423,23 +423,15 @@ func (r *Reporter) runDaemonLoop() {
 	}
 }
 
-// reportLogWithState flushes the log and, when the server took rows, the state that
-// describes them. Gitea slices one log stream into steps by the LogIndex/LogLength the
-// state carries, so rows acked before the matching state belong to no step and render
-// under "Complete job"; a runner that stops reporting in that window leaves them there.
+// Gitea slices the single log stream into steps by the LogIndex/LogLength the state
+// carries, so rows acked without a state report behind them stay unattributed, and stay
+// that way for good if the runner never reports again.
 func (r *Reporter) reportLogWithState() {
-	before := r.acked()
-	r.noteReport(metrics.LabelMethodUpdateLog, r.ReportLog(false))
-	if r.acked() != before {
+	took, err := r.reportLog(false)
+	r.noteReport(metrics.LabelMethodUpdateLog, err)
+	if took {
 		r.noteReport(metrics.LabelMethodUpdateTask, r.ReportState(false))
 	}
-}
-
-// acked is the number of log rows the server has taken, i.e. r.logOffset.
-func (r *Reporter) acked() int {
-	r.stateMu.RLock()
-	defer r.stateMu.RUnlock()
-	return r.logOffset
 }
 
 func (r *Reporter) Logf(format string, a ...any) {
@@ -592,6 +584,12 @@ func (r *Reporter) rpcCtx() (context.Context, context.CancelFunc) {
 }
 
 func (r *Reporter) ReportLog(noMore bool) error {
+	_, err := r.reportLog(noMore)
+	return err
+}
+
+// reportLog also reports whether the server took rows it had not taken before.
+func (r *Reporter) reportLog(noMore bool) (bool, error) {
 	r.clientM.Lock()
 	defer r.clientM.Unlock()
 
@@ -600,7 +598,7 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	r.stateMu.RUnlock()
 
 	if !noMore && len(rows) == 0 {
-		return nil
+		return false, nil
 	}
 
 	rpcCtx, rpcCancel := r.rpcCtx()
@@ -617,19 +615,20 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	if err != nil {
 		metrics.ReportLogTotal.WithLabelValues(metrics.LabelResultError).Inc()
 		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodUpdateLog).Inc()
-		return err
+		return false, err
 	}
 	metrics.ReportLogTotal.WithLabelValues(metrics.LabelResultSuccess).Inc()
 
 	ack := int(resp.Msg.AckIndex)
 	if ack < r.logOffset {
-		return errors.New("submitted logs are lost")
+		return false, errors.New("submitted logs are lost")
 	}
 
 	r.stateMu.Lock()
 	submitted := r.logOffset + len(rows)
 	// A server can ack beyond what it was sent; clamp to stay within the buffer.
 	ack = min(ack, submitted)
+	took := ack > r.logOffset
 	r.logRows = r.logRows[ack-r.logOffset:]
 	r.logOffset = ack
 	remaining := len(r.logRows)
@@ -640,10 +639,10 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	}
 
 	if noMore && ack < submitted {
-		return errors.New("not all logs are submitted")
+		return took, errors.New("not all logs are submitted")
 	}
 
-	return nil
+	return took, nil
 }
 
 // ReportState only reports the job result if reportResult is true
