@@ -538,6 +538,11 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 		return config, hostConfig, nil
 	}
 
+	// For Gitea, checked here because the parse below is what would read those files
+	if err := rejectHostReadingOptions(cr.input.WorkflowOptions); err != nil {
+		return nil, nil, err
+	}
+
 	// parse configuration from CLI container.options
 	flags, copts, cf, err := parseContainerOptions(options)
 	if err != nil {
@@ -579,9 +584,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 		return nil, nil, fmt.Errorf("cannot process container options: '%s': '%w'", options, err)
 	}
 
-	// For Gitea
-	// A workflow must not reach past the container the administrator granted it, and
-	// forcing --privileged off is not enough on its own.
+	// For Gitea, forcing --privileged off is not enough, other options reach the host too
 	if !hostConfig.Privileged {
 		trusted, err := parseOptionsHostConfig(cr.input.RunnerOptions)
 		if err != nil {
@@ -613,7 +616,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 	if cf.name != "" {
 		logger.Warn("--name in the options will be ignored.")
 	}
-	// the runner's own network mode was added above, so only the flags show what was given
+	// the runner's own network mode was put into copts above, so ask the flags instead
 	if flags.Changed("network") || flags.Changed("net") {
 		logger.Warn("--network and --net in the options will be ignored.")
 	}
@@ -1120,9 +1123,9 @@ func (cr *containerReference) wait() common.Executor {
 }
 
 // For Gitea
-// sanitizeOptionsHostConfig resets the fields a workflow could escape the container with to
-// trusted, the HostConfig the runner's own options parse to. Only call it with privileged
-// mode off, since enabling it opts into host access already.
+// sanitizeOptionsHostConfig takes back everything a workflow could escape the container with,
+// setting each field to trusted, which is what the runner's own options parse to on their own.
+// Only for unprivileged mode, since privileged mode grants host access anyway.
 func sanitizeOptionsHostConfig(logger logrus.FieldLogger, hostConfig, trusted *container.HostConfig) {
 	resetOption(logger, "--pid", &hostConfig.PidMode, trusted.PidMode)
 	resetOption(logger, "--ipc", &hostConfig.IpcMode, trusted.IpcMode)
@@ -1139,10 +1142,25 @@ func sanitizeOptionsHostConfig(logger logrus.FieldLogger, hostConfig, trusted *c
 	resetOption(logger, "--cgroup-parent", &hostConfig.CgroupParent, trusted.CgroupParent)
 	resetOption(logger, "--sysctl", &hostConfig.Sysctls, trusted.Sysctls)
 	resetOption(logger, "--isolation", &hostConfig.Isolation, trusted.Isolation) // windows: process isolation drops the hyper-v boundary
+	resetOption(logger, "--volume-driver", &hostConfig.VolumeDriver, trusted.VolumeDriver)
+	// systempaths=unconfined lands in these two rather than in SecurityOpt
+	resetOption(logger, "--security-opt", &hostConfig.MaskedPaths, trusted.MaskedPaths)
+	resetOption(logger, "--security-opt", &hostConfig.ReadonlyPaths, trusted.ReadonlyPaths)
+
+	// a driver mounts what it likes, e.g. local with device= binds any host path, which
+	// valid_volumes never gets to see
+	hostConfig.Mounts = slices.DeleteFunc(hostConfig.Mounts, func(mt mount.Mount) bool {
+		if mt.VolumeOptions == nil || mt.VolumeOptions.DriverConfig == nil ||
+			slices.ContainsFunc(trusted.Mounts, func(t mount.Mount) bool { return reflect.DeepEqual(t, mt) }) {
+			return false
+		}
+		logger.Warnf("volume driver of %q in the workflow is not allowed when privileged mode is disabled and will be ignored", mt.Source)
+		return true
+	})
 }
 
-// resetOption puts a field back to what the runner's own options give it, which only the
-// workflow's options can have changed.
+// resetOption puts a field back to the runner's own value. It compares the values rather than
+// the flags, so a field that more than one option feeds cannot slip through.
 func resetOption[T any](logger logrus.FieldLogger, option string, field *T, trusted T) {
 	if reflect.DeepEqual(*field, trusted) {
 		return
@@ -1151,20 +1169,17 @@ func resetOption[T any](logger logrus.FieldLogger, option string, field *T, trus
 	*field = trusted
 }
 
-// parseOptionsHostConfig parses an options string on its own, to know which part of a
-// HostConfig parsed from several of them that one is responsible for. An empty string goes
-// through the parse too, since only that yields empty values comparable with a real parse's.
+// parseOptionsHostConfig parses one options string on its own, to see what it alone asks for.
+// Even "" goes through the parser, or its empty slices and maps would differ from a real parse.
 func parseOptionsHostConfig(options string) (*container.HostConfig, error) {
 	flags, copts, _, err := parseContainerOptions(options)
 	if err != nil {
 		return nil, err
 	}
-
 	containerConfig, err := parse(flags, copts, runtime.GOOS)
 	if err != nil {
 		return nil, fmt.Errorf("cannot process container options: '%s': '%w'", options, err)
 	}
-
 	return containerConfig.HostConfig, nil
 }
 

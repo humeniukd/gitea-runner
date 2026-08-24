@@ -583,10 +583,58 @@ func TestCheckVolumes(t *testing.T) {
 	}
 }
 
+// A volume driver decides for itself what it mounts, e.g. the local driver with device= binds
+// any host path, which valid_volumes never gets to see.
+func TestMergeContainerConfigsDropsVolumeDriversFromWorkflows(t *testing.T) {
+	const escape = "--mount type=volume,src=job-escape,dst=/host,volume-driver=local,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/"
+
+	hostConfig, _ := mergeOptions(t, "", escape+" --mount type=volume,src=job-plain,dst=/cache", false)
+	require.Len(t, hostConfig.Mounts, 1)
+	assert.Equal(t, "job-plain", hostConfig.Mounts[0].Source)
+
+	// the same mount from the runner's own options is the administrator's to make
+	hostConfig, _ = mergeOptions(t, escape, "", false)
+	require.Len(t, hostConfig.Mounts, 1)
+	assert.Equal(t, "job-escape", hostConfig.Mounts[0].Source)
+}
+
+// Both of these are read here, on the runner, so a workflow could read the runner's files
+// and environment with them.
+func TestMergeContainerConfigsKeepsTheRunnersFilesAndEnvToItself(t *testing.T) {
+	hostFile := filepath.Join(t.TempDir(), "host.env")
+	require.NoError(t, os.WriteFile(hostFile, []byte("STOLEN=from-the-host\n"), 0o600))
+	t.Setenv("RUNNER_SECRET", "s3cr3t")
+
+	for _, option := range []string{"--env-file " + hostFile, "--label-file " + hostFile} {
+		logger, _ := test.NewNullLogger()
+		cr := &containerReference{input: &NewContainerInput{NetworkMode: "bridge", WorkflowOptions: option}}
+
+		_, _, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{})
+		require.ErrorContains(t, err, "not allowed in a workflow")
+
+		// the runner reading its own files is what those options are for
+		cr = &containerReference{input: &NewContainerInput{NetworkMode: "bridge", RunnerOptions: option}}
+		_, _, err = cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{})
+		require.NoError(t, err)
+	}
+
+	// a bare name is no longer resolved from the runner's environment, for either source
+	logger, _ := test.NewNullLogger()
+	cr := &containerReference{input: &NewContainerInput{
+		NetworkMode:     "bridge",
+		RunnerOptions:   "--env RUNNER_SECRET",
+		WorkflowOptions: "--env RUNNER_SECRET --env GIVEN=value",
+	}}
+
+	config, _, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"RUNNER_SECRET", "RUNNER_SECRET", "GIVEN=value"}, config.Env)
+}
+
 func TestSanitizeOptionsHostConfig(t *testing.T) {
 	logger, _ := test.NewNullLogger()
 
-	// every field the sanitizer knows, so that a new one added without a reset shows up here
+	// every field the sanitizer resets, so a reset dropped in a refactor fails here
 	hostConfig := &container.HostConfig{
 		PidMode:           "host",
 		IpcMode:           "host",
@@ -598,6 +646,9 @@ func TestSanitizeOptionsHostConfig(t *testing.T) {
 		VolumesFrom:       []string{"other"},
 		Runtime:           "runc",
 		Isolation:         "process",
+		VolumeDriver:      "rogue",
+		MaskedPaths:       []string{},
+		ReadonlyPaths:     []string{},
 		CgroupParent:      "/custom",
 		Devices:           []container.DeviceMapping{{PathOnHost: "/dev/sda", PathInContainer: "/dev/sda", CgroupPermissions: "rwm"}},
 		DeviceCgroupRules: []string{"a *:* rwm"},
@@ -610,8 +661,7 @@ func TestSanitizeOptionsHostConfig(t *testing.T) {
 	assert.Equal(t, &container.HostConfig{}, hostConfig)
 }
 
-// mergeOptions merges both option sources into an otherwise bare container, returning the
-// HostConfig and the log the merge wrote.
+// mergeOptions merges both option sources into a bare container, returning the result and its log.
 func mergeOptions(t *testing.T, runnerOptions, workflowOptions string, privileged bool) (*container.HostConfig, *test.Hook) {
 	t.Helper()
 	logger, hook := test.NewNullLogger()
@@ -632,60 +682,34 @@ func mergeOptions(t *testing.T, runnerOptions, workflowOptions string, privilege
 }
 
 func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.T) {
-	// OS-independent options only: --device parsing requires a linux/windows
-	// server OS, which is not guaranteed for the test host.
+	// OS-independent options only, --device and --gpus need a linux/windows server OS
 	const dangerousOptions = "--pid=host --ipc=host --uts=host --cgroupns=host " +
 		"--userns=host --cap-add=ALL --security-opt seccomp=unconfined " +
 		"--security-opt apparmor=unconfined --volumes-from other --isolation process " +
 		"--runtime runc --cgroup-parent /custom --sysctl net.ipv4.ip_forward=1"
 
-	t.Run("unprivileged strips host-escape options", func(t *testing.T) {
-		hostConfig, _ := mergeOptions(t, "", dangerousOptions, false)
+	// whatever the workflow adds, an unprivileged container comes out exactly as the runner's
+	// own options alone describe it, field for field
+	for _, runnerOptions := range []string{"--shm-size 1g", dangerousOptions, "--cap-add SYS_ADMIN --security-opt seccomp=unconfined"} {
+		runnerOnly, _ := mergeOptions(t, runnerOptions, "", false)
+		withWorkflow, _ := mergeOptions(t, runnerOptions, dangerousOptions, false)
 
-		assert.False(t, hostConfig.Privileged)
-		assert.Empty(t, string(hostConfig.PidMode))
-		assert.Empty(t, string(hostConfig.IpcMode))
-		assert.Empty(t, string(hostConfig.UTSMode))
-		assert.Empty(t, string(hostConfig.CgroupnsMode))
-		// UsernsMode must keep the runner-controlled value, not the one from options.
-		assert.Equal(t, "private", string(hostConfig.UsernsMode))
-		assert.Empty(t, hostConfig.CapAdd)
-		assert.Empty(t, hostConfig.SecurityOpt)
-		assert.Empty(t, hostConfig.VolumesFrom)
-		assert.Empty(t, hostConfig.Runtime)
-		assert.Empty(t, string(hostConfig.Isolation))
-		assert.Empty(t, hostConfig.CgroupParent)
-		assert.Empty(t, hostConfig.Sysctls)
-	})
+		assert.Equal(t, runnerOnly, withWorkflow, "runner options: %q", runnerOptions)
+	}
 
-	// https://gitea.com/gitea/runner/issues/1142: the options the runner is configured
-	// with are the administrator's own, only the workflow's are untrusted.
-	t.Run("unprivileged keeps the runner's own options", func(t *testing.T) {
-		hostConfig, _ := mergeOptions(t, "--security-opt seccomp=unconfined --cap-add SYS_ADMIN --sysctl net.ipv4.ip_forward=1", dangerousOptions, false)
+	// the same options from the runner reach the daemon, even --userns, which no workflow may set
+	kept, _ := mergeOptions(t, dangerousOptions, "", false)
+	assert.Equal(t, "host", string(kept.PidMode))
+	assert.Equal(t, []string{"ALL"}, kept.CapAdd)
+	assert.Equal(t, "runc", kept.Runtime)
+	assert.Equal(t, "host", string(kept.UsernsMode))
+	assert.False(t, kept.Privileged)
 
-		assert.Equal(t, []string{"seccomp=unconfined"}, hostConfig.SecurityOpt)
-		assert.Equal(t, []string{"SYS_ADMIN"}, hostConfig.CapAdd)
-		assert.Equal(t, map[string]string{"net.ipv4.ip_forward": "1"}, hostConfig.Sysctls)
-		assert.Empty(t, string(hostConfig.PidMode))
-		assert.Equal(t, "private", string(hostConfig.UsernsMode))
-		assert.Empty(t, hostConfig.Runtime)
-	})
-
-	t.Run("unprivileged without workflow options keeps them all", func(t *testing.T) {
-		hostConfig, _ := mergeOptions(t, dangerousOptions, "", false)
-
-		assert.Equal(t, "host", string(hostConfig.PidMode))
-		assert.Equal(t, []string{"ALL"}, hostConfig.CapAdd)
-		assert.Equal(t, "runc", hostConfig.Runtime)
-	})
-
-	t.Run("privileged preserves options", func(t *testing.T) {
-		hostConfig, _ := mergeOptions(t, "", dangerousOptions, true)
-
-		assert.Equal(t, "host", string(hostConfig.PidMode))
-		assert.Equal(t, []string{"ALL"}, hostConfig.CapAdd)
-		assert.Equal(t, []string{"seccomp=unconfined", "apparmor=unconfined"}, hostConfig.SecurityOpt)
-	})
+	// privileged is the administrator opting in, so the workflow's options are honored
+	privileged, _ := mergeOptions(t, "", dangerousOptions, true)
+	assert.Equal(t, "host", string(privileged.PidMode))
+	assert.Equal(t, []string{"ALL"}, privileged.CapAdd)
+	assert.Equal(t, []string{"seccomp=unconfined", "apparmor=unconfined"}, privileged.SecurityOpt)
 }
 
 func TestCheckVolumesRejectsEscapingHostPaths(t *testing.T) {

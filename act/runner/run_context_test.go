@@ -267,7 +267,7 @@ func startJobContainerInputs(t *testing.T, workflowYAML string, cfg *Config) []*
 	}
 	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
 
-	// the inputs are built before the first call the missing daemon fails
+	// the inputs are built before the missing daemon fails the first call
 	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
 	require.Error(t, rc.startJobContainer()(t.Context()))
 
@@ -311,8 +311,8 @@ jobs:
 	require.Equal(t, [2]string{"", ""}, credentials["redis:latest"])
 }
 
-// https://gitea.com/gitea/runner/issues/1142: only the workflow's options may be stripped,
-// so the two sources have to reach the container apart.
+// Only the workflow's options may be stripped later, so the two sources have to reach the
+// container apart from each other.
 func TestStartJobContainerKeepsRunnerOptionsApartFromWorkflowOptions(t *testing.T) {
 	inputs := startJobContainerInputs(t, `
 name: test
