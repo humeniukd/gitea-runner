@@ -6,7 +6,7 @@ package run
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
@@ -28,6 +28,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/client"
 	"gitea.com/gitea/runner/internal/pkg/config"
 	"gitea.com/gitea/runner/internal/pkg/disk"
+	"gitea.com/gitea/runner/internal/pkg/envcheck"
 	"gitea.com/gitea/runner/internal/pkg/labels"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 	"gitea.com/gitea/runner/internal/pkg/report"
@@ -172,7 +173,7 @@ func (r *Runner) OnIdle(ctx context.Context) {
 // directories above, a task beginning during the pass is safe because the cutoff keeps a
 // network it has created but not yet attached a container to out of scope.
 func (r *Runner) cleanupOrphanNetworks(ctx context.Context) {
-	if r.uuid == "" || !r.labels.RequireDocker() && !r.cfg.Container.RequireDocker {
+	if r.uuid == "" || !r.requiresDocker() {
 		return
 	}
 	cutoff := r.now().Add(-r.cfg.Runner.WorkdirCleanupAge)
@@ -199,13 +200,6 @@ func (r *Runner) shouldRunIdleCleanup() bool {
 			return true
 		}
 	}
-}
-
-// cleanupStaleTaskDirs reclaims stale bind-workdir per-task directories under
-// workdirRoot. Retained as a thin wrapper so existing callers and tests keep a
-// stable entry point.
-func (r *Runner) cleanupStaleTaskDirs(ctx context.Context, workdirRoot string) {
-	r.cleanupStaleDirs(ctx, workdirRoot, isTaskIDDir)
 }
 
 // isTaskIDDir reports whether name is a per-task workspace dir (numeric task
@@ -347,6 +341,27 @@ func (r *Runner) isSelfHostedActionsURL(task *runnerv1.Task) bool {
 	return giteaDefaultActionsURL != "" && giteaDefaultActionsURL != "https://github.com"
 }
 
+// dockerReachable is a variable so tests can substitute one that needs no Docker daemon. It
+// probes the environment act connects through, not container.docker_host, which act ignores.
+var dockerReachable = func(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return envcheck.CheckIfDockerRunning(ctx, "") == nil
+}
+
+func (r *Runner) requiresDocker() bool {
+	return r.labels.RequireDocker() || r.cfg.Container.RequireDocker
+}
+
+// fallbackPlatform is where a job runs whose runs-on matches no label, as any job without a
+// runs-on does, since Gitea sends those to every runner.
+func (r *Runner) fallbackPlatform(ctx context.Context) string {
+	if r.requiresDocker() || dockerReachable(ctx) {
+		return r.cfg.Runner.DefaultImage
+	}
+	return labels.SelfHostedPlatform
+}
+
 func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.Reporter) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -439,10 +454,13 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// is that server's responsibility to authenticate requests.
 	revokeCache, resultsURL := r.registerCacheForTask(giteaRuntimeToken, preset.Repository, reporter)
 	defer revokeCache()
-	// A cache server that agreed to forward the artifact half is the whole results service, so
-	// the job is pointed at it and the v2 variable is finally true.
+	// A cache server that agreed to forward the artifact half is the whole results service, so the
+	// job is pointed at it.
 	if resultsURL != "" {
-		envs["ACTIONS_RESULTS_URL"], envs[runner.CacheServiceV2Env] = resultsURL, "true"
+		envs["ACTIONS_RESULTS_URL"] = resultsURL
+		if r.cacheServiceV2() {
+			envs[runner.CacheServiceV2Env] = "true"
+		}
 	}
 
 	eventJSON, err := json.Marshal(preset.Event)
@@ -475,6 +493,15 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// Without bind_workdir, the workspace path omits the task id; concurrent host-mode jobs
 	// for the same repository would share this directory and can race with per-job cleanup.
 
+	// act asks for the platform once per step, so resolve the fallback at most once per task.
+	fallbackPlatform := sync.OnceValue(func() string { return r.fallbackPlatform(ctx) })
+	platformPicker := func(runsOn []string) string {
+		if platform := r.labels.PickPlatform(runsOn); platform != "" {
+			return platform
+		}
+		return fallbackPlatform()
+	}
+
 	runnerConfig := &runner.Config{
 		// On Linux, Workdir will be like "/<parent_directory>/<owner>/<repo>"
 		// On Windows, Workdir will be like "\<parent_directory>\<owner>\<repo>"
@@ -484,18 +511,15 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		AllocatePTY:       r.cfg.Runner.AllocatePTY,
 		ActionOfflineMode: r.cfg.Cache.OfflineMode,
 		ActionCloneDepth:  actionCloneDepth,
-		PatchToolkit:      r.patchToolkit(),
+		NoActionPatch:     r.cfg.Runner.PatchActions != nil && !*r.cfg.Runner.PatchActions,
 
-		ReuseContainers:      false,
 		ForcePull:            r.cfg.Container.ForcePull,
 		ForceRebuild:         r.cfg.Container.ForceRebuild,
-		LogOutput:            true,
 		JSONLogger:           false,
 		Env:                  envs,
 		ProxyEnv:             proxyEnv,
 		Secrets:              task.Secrets,
 		GitHubInstance:       strings.TrimSuffix(r.client.Address(), "/"),
-		AutoRemove:           true,
 		NoSkipCheckout:       true,
 		DisableActEnv:        r.cfg.Runner.SetActEnv != nil && !*r.cfg.Runner.SetActEnv,
 		PresetGitHubContext:  preset,
@@ -517,7 +541,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		Privileged:                        r.cfg.Container.Privileged,
 		DefaultActionInstance:             r.getDefaultActionsURL(task),
 		DefaultActionInstanceIsSelfHosted: r.isSelfHostedActionsURL(task),
-		PlatformPicker:                    r.labels.PickPlatform,
+		PlatformPicker:                    platformPicker,
 		JobStartedHook:                    r.cfg.Runner.Hooks.JobStarted,
 		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
 		Vars:                              task.Vars,
@@ -559,10 +583,10 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	return execErr
 }
 
-// patchToolkit reports whether act should edit the toolkit bundled into an action. It follows the
-// cache URL, because that is what the edits point the client at; see act/runner/toolkit_patch.go.
-func (r *Runner) patchToolkit() bool {
-	return r.envs["ACTIONS_CACHE_URL"] != "" && (r.cfg.Cache.V2 == nil || *r.cfg.Cache.V2)
+// cacheServiceV2 reports whether jobs are told the cache service speaks v2. It is all cache.v2
+// turns off: the bundle edit that reaches it is what the artifact actions need too.
+func (r *Runner) cacheServiceV2() bool {
+	return r.cfg.Cache.V2 == nil || *r.cfg.Cache.V2
 }
 
 // registerCacheForTask tells the cache server to accept requests authenticated
@@ -652,7 +676,7 @@ func postInternalCache(url, secret string, body map[string]any) (map[string]any,
 	}
 	answer := map[string]any{}
 	// A server too old to answer with a body is not an error, it simply tells us nothing.
-	_ = json.NewDecoder(resp.Body).Decode(&answer)
+	_ = json.UnmarshalRead(resp.Body, &answer)
 	return answer, nil
 }
 

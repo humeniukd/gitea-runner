@@ -214,11 +214,14 @@ type fakeContainer struct {
 	container.ExecutionsEnvironment
 }
 
-func (fakeContainer) Pull(bool) common.Executor  { return func(context.Context) error { return nil } }
+func (fakeContainer) Pull(bool) common.Executor { return func(context.Context) error { return nil } }
+
 func (fakeContainer) Start(bool) common.Executor { return func(context.Context) error { return nil } }
-func (fakeContainer) Remove() common.Executor    { return func(context.Context) error { return nil } }
-func (fakeContainer) Close() common.Executor     { return func(context.Context) error { return nil } }
-func (fakeContainer) GetActPath() string         { return "/var/run/act" }
+
+func (fakeContainer) Remove() common.Executor { return func(context.Context) error { return nil } }
+
+func (fakeContainer) Close() common.Executor { return func(context.Context) error { return nil } }
+func (fakeContainer) GetActPath() string     { return "/var/run/act" }
 func (fakeContainer) Create([]string, []string) common.Executor {
 	return func(context.Context) error { return nil }
 }
@@ -249,10 +252,7 @@ func startJobContainerInputs(t *testing.T, workflowYAML string, cfg *Config) []*
 	t.Cleanup(func() { newContainer = origNewContainer })
 
 	cfg.Workdir = "/tmp"
-	// no daemon: an explicit network mode creates no network, and
-	// reusing containers short-circuits the volume cleanup executors
-	cfg.ContainerNetworkMode = "host"
-	cfg.ReuseContainers = true
+	cfg.ContainerNetworkMode = "host" // an explicit network mode creates no network
 	cfg.Env = map[string]string{}
 	cfg.Secrets = map[string]string{}
 
@@ -267,7 +267,9 @@ func startJobContainerInputs(t *testing.T, workflowYAML string, cfg *Config) []*
 	}
 	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
 
-	require.NoError(t, rc.startJobContainer()(t.Context()))
+	// the inputs are built before the first call the missing daemon fails
+	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
+	require.Error(t, rc.startJobContainer()(t.Context()))
 
 	return inputs
 }
@@ -671,13 +673,12 @@ func TestGetGitHubContext(t *testing.T) {
 				Name: "GitHubContextTest",
 			},
 		},
-		Name:           "GitHubContextTest",
-		CurrentStep:    "step",
-		Matrix:         map[string]any{},
-		Env:            map[string]string{},
-		ExtraPath:      []string{},
-		StepResults:    map[string]*model.StepResult{},
-		OutputMappings: map[MappableOutput]MappableOutput{},
+		Name:        "GitHubContextTest",
+		CurrentStep: "step",
+		Matrix:      map[string]any{},
+		Env:         map[string]string{},
+		ExtraPath:   []string{},
+		StepResults: map[string]*model.StepResult{},
 	}
 	rc.Run.JobID = "job1"
 
@@ -754,13 +755,8 @@ func TestGetGithubContextRef(t *testing.T) {
 
 func createIfTestRunContext(jobs map[string]*model.Job) *RunContext {
 	rc := &RunContext{
-		Config: &Config{
-			Workdir: ".",
-			Platforms: map[string]string{
-				"ubuntu-latest": "ubuntu-latest",
-			},
-		},
-		Env: map[string]string{},
+		Config: &Config{Workdir: ".", PlatformPicker: func([]string) string { return "ubuntu-latest" }},
+		Env:    map[string]string{},
 		Run: &model.Run{
 			JobID: "job1",
 			Workflow: &model.Workflow{
@@ -1313,15 +1309,13 @@ func TestRunContextImageOS(t *testing.T) {
 
 	t.Run("prefers the release in the resolved image tag", func(t *testing.T) {
 		rc := createRunsOnRunContext(t, "ubuntu-latest")
-		rc.Config.Platforms = map[string]string{
-			"ubuntu-latest": "docker.gitea.com/runner-images:ubuntu-24.04",
-		}
+		rc.Config.PlatformPicker = func([]string) string { return "docker.gitea.com/runner-images:ubuntu-24.04" }
 		assert.Equal(t, "ubuntu24", rc.imageOS(ctx))
 	})
 
 	t.Run("falls back to the runs-on label", func(t *testing.T) {
 		rc := createRunsOnRunContext(t, "ubuntu-22.04")
-		rc.Config.Platforms = map[string]string{"ubuntu-22.04": "some-image"}
+		rc.Config.PlatformPicker = func([]string) string { return "some-image" }
 		assert.Equal(t, "ubuntu22", rc.imageOS(ctx))
 	})
 

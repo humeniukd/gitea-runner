@@ -36,7 +36,6 @@ var (
 	cloneLocks lock.Keyed[string] // key: clone target directory
 
 	ErrShortRef = errors.New("short SHA references are not supported")
-	ErrNoRepo   = errors.New("unable to find git repo")
 )
 
 // AcquireCloneLock returns an unlock function after locking the per-directory mutex for dir.
@@ -187,19 +186,16 @@ func FindGitRef(ctx context.Context, file string) (string, error) {
 }
 
 // FindGithubRepo get the repo
-func FindGithubRepo(ctx context.Context, file, githubInstance, remoteName string) (string, error) {
+func FindGithubRepo(ctx context.Context, file, githubInstance string) (string, error) {
 	goGitMu.Lock()
 	defer goGitMu.Unlock()
-	if remoteName == "" {
-		remoteName = "origin"
-	}
 
-	url, err := findGitRemoteURL(ctx, file, remoteName)
+	url, err := findGitRemoteURL(ctx, file, "origin")
 	if err != nil {
 		return "", err
 	}
-	_, slug, err := findGitSlug(url, githubInstance)
-	return slug, err
+	_, slug := findGitSlug(url, githubInstance)
+	return slug, nil
 }
 
 func findGitRemoteURL(_ context.Context, file, remoteName string) (string, error) {
@@ -226,25 +222,25 @@ func findGitRemoteURL(_ context.Context, file, remoteName string) (string, error
 	return remote.Config().URLs[0], nil
 }
 
-func findGitSlug(url, githubInstance string) (string, string, error) { //nolint:unparam // pre-existing issue from nektos/act
+func findGitSlug(url, githubInstance string) (string, string) {
 	if matches := codeCommitHTTPRegex.FindStringSubmatch(url); matches != nil {
-		return "CodeCommit", matches[2], nil
+		return "CodeCommit", matches[2]
 	} else if matches := codeCommitSSHRegex.FindStringSubmatch(url); matches != nil {
-		return "CodeCommit", matches[2], nil
+		return "CodeCommit", matches[2]
 	} else if matches := githubHTTPRegex.FindStringSubmatch(url); matches != nil {
-		return "GitHub", fmt.Sprintf("%s/%s", matches[1], matches[2]), nil
+		return "GitHub", fmt.Sprintf("%s/%s", matches[1], matches[2])
 	} else if matches := githubSSHRegex.FindStringSubmatch(url); matches != nil {
-		return "GitHub", fmt.Sprintf("%s/%s", matches[1], matches[2]), nil
+		return "GitHub", fmt.Sprintf("%s/%s", matches[1], matches[2])
 	} else if githubInstance != "github.com" {
 		gheHTTPRegex := regexp.MustCompile(fmt.Sprintf(`^https?://%s/(.+)/(.+?)(?:.git)?$`, githubInstance))
 		gheSSHRegex := regexp.MustCompile(githubInstance + "[:/](.+)/(.+?)(?:.git)?$")
 		if matches := gheHTTPRegex.FindStringSubmatch(url); matches != nil {
-			return "GitHubEnterprise", fmt.Sprintf("%s/%s", matches[1], matches[2]), nil
+			return "GitHubEnterprise", fmt.Sprintf("%s/%s", matches[1], matches[2])
 		} else if matches := gheSSHRegex.FindStringSubmatch(url); matches != nil {
-			return "GitHubEnterprise", fmt.Sprintf("%s/%s", matches[1], matches[2]), nil
+			return "GitHubEnterprise", fmt.Sprintf("%s/%s", matches[1], matches[2])
 		}
 	}
-	return "", url, nil
+	return "", url
 }
 
 // NewGitCloneExecutorInput the input for the NewGitCloneExecutor
@@ -278,11 +274,12 @@ func CloneIfRequired(ctx context.Context, refName plumbing.ReferenceName, input 
 			return r, true, nil
 		}
 
-		if err != nil {
+		switch {
+		case err != nil:
 			logger.Debugf("Removing cached clone at %s because origin cannot be read: %v", input.Dir, err)
-		} else if len(remote.Config().URLs) == 0 {
+		case len(remote.Config().URLs) == 0:
 			logger.Debugf("Removing cached clone at %s because origin has no URL", input.Dir)
-		} else {
+		default:
 			logger.Debugf("Removing cached clone at %s because origin URL changed from %s to %s", input.Dir, remote.Config().URLs[0], input.URL)
 		}
 		if err := os.RemoveAll(input.Dir); err != nil {
@@ -345,6 +342,16 @@ func gitOptions(token string) (fetchOptions git.FetchOptions, pullOptions git.Pu
 	return fetchOptions, pullOptions
 }
 
+// staleRefreshErr reports why a failed refresh must abort: the resolve and
+// checkout that follow are local and succeed on a cancelled context, which
+// would hand back the cached revision as if it were fresh.
+func staleRefreshErr(ctx context.Context, err error) error {
+	if err == nil || errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return nil
+	}
+	return ctx.Err()
+}
+
 // NewGitCloneExecutor creates an executor to clone git repos
 func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 	return func(ctx context.Context) error {
@@ -385,7 +392,7 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 		}
 
 		if !isOfflineMode {
-			err = r.Fetch(&fetchOptions)
+			err = r.FetchContext(ctx, &fetchOptions)
 			if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 				return err
 			}
@@ -454,8 +461,11 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 		switch {
 		case !isOfflineMode && !shallow:
 			// In shallow mode the depth-limited fetch above already advanced the ref.
-			if err = w.Pull(&pullOptions); err != nil && err != git.NoErrAlreadyUpToDate {
+			if err = w.PullContext(ctx, &pullOptions); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 				logger.Debugf("Unable to pull %s: %v", refName, err)
+			}
+			if err := staleRefreshErr(ctx, err); err != nil {
+				return err
 			}
 		case isOfflineMode && reused:
 			reusedMsg = " (reused in offline mode)"

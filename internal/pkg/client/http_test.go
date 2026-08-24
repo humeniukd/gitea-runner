@@ -8,16 +8,19 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	pingv1 "gitea.dev/actionslib/ping/v1"
+	"gitea.dev/actionslib/pkg/protocol"
 	"github.com/stretchr/testify/require"
 )
 
 func TestGetHTTPClientUsesProxyFromEnvironment(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://proxy.example.com:8080")
 
-	client := getHTTPClient("http://gitea.example.com", false)
+	client := getHTTPClient("http://gitea.example.com", false, time.Minute)
+	require.Equal(t, time.Minute, client.Timeout)
 	transport, ok := client.Transport.(*http.Transport)
 	require.True(t, ok)
 
@@ -32,7 +35,7 @@ func TestGetHTTPClientUsesProxyFromEnvironment(t *testing.T) {
 
 func TestGetHTTPClientInsecureTLS(t *testing.T) {
 	// insecure only takes effect for https endpoints
-	httpsInsecure := getHTTPClient("https://gitea.example.com", true)
+	httpsInsecure := getHTTPClient("https://gitea.example.com", true, time.Minute)
 	transport, ok := httpsInsecure.Transport.(*http.Transport)
 	require.True(t, ok)
 	require.NotNil(t, transport.TLSClientConfig)
@@ -47,7 +50,7 @@ func TestGetHTTPClientInsecureTLS(t *testing.T) {
 		{"http insecure ignored", "http://gitea.example.com", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := getHTTPClient(tc.endpoint, tc.insecure)
+			c := getHTTPClient(tc.endpoint, tc.insecure, time.Minute)
 			tr, ok := c.Transport.(*http.Transport)
 			require.True(t, ok)
 			require.Nil(t, tr.TLSClientConfig)
@@ -66,17 +69,16 @@ func TestNewSetsBaseURLAndHeaders(t *testing.T) {
 	defer server.Close()
 
 	// trailing slash must be trimmed before "/api/actions" is appended
-	c := New(server.URL+"/", false, "the-uuid", "the-token")
+	c := New(server.URL+"/", false, "the-uuid", "the-token", time.Minute)
 	// Address returns the endpoint as supplied (untrimmed)
 	require.Equal(t, server.URL+"/", c.Address())
-	require.False(t, c.Insecure())
 
 	// the call is expected to fail (server returns 500), we only assert what was sent
 	_, _ = c.Ping(t.Context(), connect.NewRequest(&pingv1.PingRequest{Data: "hi"}))
 
 	require.True(t, strings.HasPrefix(gotPath, "/api/actions/"), "unexpected path %q", gotPath)
-	require.Equal(t, "the-uuid", gotHeaders.Get(UUIDHeader))
-	require.Equal(t, "the-token", gotHeaders.Get(TokenHeader))
+	require.Equal(t, "the-uuid", gotHeaders.Get(protocol.UUIDHeader))
+	require.Equal(t, "the-token", gotHeaders.Get(protocol.TokenHeader))
 }
 
 func TestNewOmitsEmptyHeaders(t *testing.T) {
@@ -87,9 +89,9 @@ func TestNewOmitsEmptyHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := New(server.URL, false, "", "")
+	c := New(server.URL, false, "", "", time.Minute)
 	_, _ = c.Ping(t.Context(), connect.NewRequest(&pingv1.PingRequest{Data: "hi"}))
 
-	require.Empty(t, gotHeaders.Get(UUIDHeader))
-	require.Empty(t, gotHeaders.Get(TokenHeader))
+	require.Empty(t, gotHeaders.Get(protocol.UUIDHeader))
+	require.Empty(t, gotHeaders.Get(protocol.TokenHeader))
 }

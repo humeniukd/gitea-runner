@@ -66,37 +66,14 @@ func NewContainer(input *NewContainerInput) ExecutionsEnvironment {
 	return cr
 }
 
-func (cr *containerReference) ConnectToNetwork(name string) common.Executor {
-	return common.
-		NewDebugExecutor("docker network connect %s %s", name, cr.input.Name).
-		Then(
-			common.NewPipelineExecutor(
-				cr.connect(),
-				cr.connectToNetwork(name, cr.input.NetworkAliases),
-			).IfNot(common.Dryrun),
-		)
-}
-
-func (cr *containerReference) connectToNetwork(name string, aliases []string) common.Executor {
-	return func(ctx context.Context) error {
-		_, err := cr.cli.NetworkConnect(ctx, name, client.NetworkConnectOptions{
-			Container: cr.input.Name,
-			EndpointConfig: &network.EndpointSettings{
-				Aliases: aliases,
-			},
-		})
-		return err
-	}
-}
-
-// supportsContainerImagePlatform returns true if the underlying Docker server
-// API version is 1.41 and beyond
-func supportsContainerImagePlatform(ctx context.Context, cli client.APIClient) bool {
+// supportsContainerImagePlatform reports whether the Docker server API version
+// is 1.41 and beyond
+func supportsContainerImagePlatform(ctx context.Context, cli client.APIClient) (bool, error) {
 	ver, err := cli.ServerVersion(ctx, client.ServerVersionOptions{})
 	if err != nil {
-		common.Logger(ctx).Panicf("Failed to get Docker API Version: %s", err)
+		return false, fmt.Errorf("get docker API version: %w", err)
 	}
-	return versions.GreaterThanOrEqualTo(ver.APIVersion, "1.41")
+	return versions.GreaterThanOrEqualTo(ver.APIVersion, "1.41"), nil
 }
 
 func (cr *containerReference) Create(capAdd, capDrop []string) common.Executor {
@@ -568,14 +545,14 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 	}
 
 	if err := cf.validate(); err != nil {
-		return nil, nil, fmt.Errorf("Cannot process container options: '%s': '%w'", options, err)
+		return nil, nil, fmt.Errorf("cannot process container options: '%s': '%w'", options, err)
 	}
 
 	// FIXME: If everything is fine after gitea/act v0.260.0, remove the following comment.
 	// In the old fork version, the code is
 	// if len(copts.netMode.Value()) == 0 {
 	// 	if err = copts.netMode.Set("host"); err != nil {
-	// 		return nil, nil, fmt.Errorf("Cannot parse networkmode=host. This is an internal error and should not happen: '%w'", err)
+	// 		return nil, nil, fmt.Errorf("cannot parse networkmode=host. This is an internal error and should not happen: '%w'", err)
 	// 	}
 	// }
 	// And it has been commented with:
@@ -587,7 +564,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 
 	if len(copts.netMode.Value()) == 0 {
 		if err = copts.netMode.Set(cr.input.NetworkMode); err != nil {
-			return nil, nil, fmt.Errorf("Cannot parse networkmode=%s. This is an internal error and should not happen: '%w'", cr.input.NetworkMode, err)
+			return nil, nil, fmt.Errorf("cannot parse networkmode=%s. This is an internal error and should not happen: '%w'", cr.input.NetworkMode, err)
 		}
 	}
 
@@ -599,7 +576,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 
 	containerConfig, err := parse(flags, copts, runtime.GOOS)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Cannot process container options: '%s': '%w'", options, err)
+		return nil, nil, fmt.Errorf("cannot process container options: '%s': '%w'", options, err)
 	}
 
 	// For Gitea
@@ -617,7 +594,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 
 	err = mergo.Merge(config, containerConfig.Config, mergo.WithOverride, mergo.WithAppendSlice)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Cannot merge container.Config options: '%s': '%w'", options, err)
+		return nil, nil, fmt.Errorf("cannot merge container.Config options: '%s': '%w'", options, err)
 	}
 	logger.Debugf("Merged container.Config ==> %+v", config)
 
@@ -629,7 +606,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 	networkMode := hostConfig.NetworkMode
 	err = mergo.Merge(hostConfig, containerConfig.HostConfig, mergo.WithOverride)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Cannot merge container.HostConfig options: '%s': '%w'", options, err)
+		return nil, nil, fmt.Errorf("cannot merge container.HostConfig options: '%s': '%w'", options, err)
 	}
 	hostConfig.Binds = binds
 	hostConfig.Mounts = mounts
@@ -690,10 +667,16 @@ func (cr *containerReference) create(capAdd, capDrop []string) common.Executor {
 		}
 
 		var platSpecs *specs.Platform
-		if cr.input.Platform != "" && supportsContainerImagePlatform(ctx, cr.cli) {
-			platSpecs, err = parsePlatform(cr.input.Platform)
+		if cr.input.Platform != "" {
+			// Dropping the platform silently would build for the host arch.
+			supported, err := supportsContainerImagePlatform(ctx, cr.cli)
 			if err != nil {
 				return err
+			}
+			if supported {
+				if platSpecs, err = parsePlatform(cr.input.Platform); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -946,42 +929,6 @@ func (cr *containerReference) waitForCommand(ctx context.Context, resp client.Hi
 	}
 }
 
-func (cr *containerReference) CopyTarStream(ctx context.Context, destPath string, tarStream io.Reader) error {
-	if cr.id == "" {
-		return cr.missingContainerError("copy to %s", destPath)
-	}
-	// Mkdir, with a path relative to the DestinationPath ("/") below. Docker 29.5+
-	// rejects absolute tar entry names with "path escapes from parent".
-	buf := &bytes.Buffer{}
-	tw := tar.NewWriter(buf)
-	_ = tw.WriteHeader(&tar.Header{
-		Name:     strings.TrimPrefix(destPath, "/"),
-		Mode:     0o777,
-		Typeflag: tar.TypeDir,
-	})
-	tw.Close()
-	_, err := cr.cli.CopyToContainer(ctx, cr.id, client.CopyToContainerOptions{
-		DestinationPath: "/",
-		Content:         buf,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to mkdir to copy content to container: %w", err)
-	}
-	// Copy Content
-	_, err = cr.cli.CopyToContainer(ctx, cr.id, client.CopyToContainerOptions{
-		DestinationPath: destPath,
-		Content:         tarStream,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to copy content to container: %w", err)
-	}
-	// If this fails, then folders have wrong permissions on non root container
-	if cr.UID != 0 || cr.GID != 0 {
-		_ = cr.Exec([]string{"chown", "-R", fmt.Sprintf("%d:%d", cr.UID, cr.GID), destPath}, nil, "0", "")(ctx)
-	}
-	return nil
-}
-
 func (cr *containerReference) copyDir(dstPath, srcPath string, useGitIgnore bool) common.Executor {
 	return func(ctx context.Context) error {
 		if cr.id == "" {
@@ -1023,7 +970,6 @@ func (cr *containerReference) copyDir(dstPath, srcPath string, useGitIgnore bool
 		}
 
 		fc := &filecollector.FileCollector{
-			Fs:        &filecollector.DefaultFs{},
 			Ignorer:   ignorer,
 			SrcPath:   srcPath,
 			SrcPrefix: srcPrefix,
@@ -1215,7 +1161,7 @@ func parseOptionsHostConfig(options string) (*container.HostConfig, error) {
 
 	containerConfig, err := parse(flags, copts, runtime.GOOS)
 	if err != nil {
-		return nil, fmt.Errorf("Cannot process container options: '%s': '%w'", options, err)
+		return nil, fmt.Errorf("cannot process container options: '%s': '%w'", options, err)
 	}
 
 	return containerConfig.HostConfig, nil

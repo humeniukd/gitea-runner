@@ -20,6 +20,12 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
+// RequestTimeout bounds every RPC to Gitea, and with it runner.fetch_timeout.
+const RequestTimeout = 60 * time.Second
+
+// DefaultImage is the image jobs run in unless a label or runner.default_image names another.
+const DefaultImage = "docker.gitea.com/runner-images:ubuntu-latest"
+
 // DefaultPostTaskScriptTimeout is the fallback cap on how long the post-task
 // script may run when post_task_script is set without an explicit timeout. It is
 // applied both at config load (for a configured script) and at the point of use
@@ -32,9 +38,17 @@ const Minimal = `# Minimal config file. Every option it does not set keeps its d
 # "gitea-runner config generate" prints all options, "config set <key> <value>" sets one here.
 `
 
-// Log represents the configuration for logging.
+// Log represents the runner process's own logging, plus the copy of each task's log it keeps.
 type Log struct {
 	Level string `yaml:"level"` // Level indicates the logging level.
+	Job   LogJob `yaml:"job"`   // Job configures the copy of each task's log kept on the runner host.
+}
+
+// LogJob represents the configuration for the copy of each task's log kept on the runner host.
+type LogJob struct {
+	Dir       string        `yaml:"dir"`       // Dir is the directory the runner writes each task's log to. Empty, the default, writes none.
+	Retention time.Duration `yaml:"retention"` // Retention deletes a task's log directory once it is older than this. Default 168h, 0s keeps them regardless of age.
+	MaxSize   Size          `yaml:"max_size"`  // MaxSize caps one task's log file. Default 1GB, 0 is no limit.
 }
 
 // Runner represents the configuration for the runner.
@@ -60,7 +74,9 @@ type Runner struct {
 	GithubMirror          string            `yaml:"github_mirror"`            // GithubMirror defines what mirrors should be used when using github
 	ActionShallowClone    *bool             `yaml:"action_shallow_clone"`     // ActionShallowClone fetches only the requested ref of an action repository at depth 1 instead of cloning every branch's full history. It is a pointer to distinguish between false and not set; if not set, it defaults to true.
 	SetActEnv             *bool             `yaml:"set_act_env"`              // SetActEnv controls whether the ACT=true environment variable is injected into jobs. It is a pointer to distinguish between false and not set; if not set, it defaults to true. Set it to false so workflows gated on `if: ${{ !env.ACT }}` behave like on GitHub.
+	PatchActions          *bool             `yaml:"patch_actions"`            // PatchActions applies compatibility patches to the actions a job runs, so actions written for GitHub work against Gitea, see act/runner/patch_actions.go. It is a pointer to distinguish between false and not set; if not set, it defaults to true. Set it to false to run every action exactly as published, at the price of the artifact actions refusing.
 	AllocatePTY           bool              `yaml:"allocate_pty"`             // AllocatePTY allocates a pseudo-TTY for each step's process. Default is false, matching GitHub's actions/runner. Enable only for jobs that need an interactive terminal; tools like docker build emit redrawing progress frames into the captured log when a TTY is present. Applies to both host and docker backends.
+	DefaultImage          string            `yaml:"default_image"`            // DefaultImage is the image a job runs in when its runs-on matches none of the runner's labels. A runner without docker runs such a job on the host instead.
 	ToolCacheMode         string            `yaml:"tool_cache_mode"`          // ToolCacheMode is what the runner mounts at RUNNER_TOOL_CACHE on both backends: ToolCacheModeNone or ToolCacheModeShared.
 	PostTaskScript        string            `yaml:"post_task_script"`         // PostTaskScript is the path to an executable script run on the host after each task's cleanup completes. Empty disables the hook. On Windows use .exe/.bat/.cmd; PowerShell (.ps1) is not supported yet as the configured path.
 	PostTaskScriptTimeout time.Duration     `yaml:"post_task_script_timeout"` // PostTaskScriptTimeout caps how long the post-task script may run. Default is 5m when post_task_script is set.
@@ -83,7 +99,7 @@ type Cache struct {
 	ExternalSecret     string `yaml:"external_secret"`      // ExternalSecret is a shared secret between this runner and an external gitea-runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Required whenever ExternalServer is set; ExternalSecretFile is the alternative way to provide it.
 	ExternalSecretFile string `yaml:"external_secret_file"` // ExternalSecretFile is the path to a file holding the ExternalSecret value, so the secret can be mounted instead of stored in the config file. LoadDefault reads it into ExternalSecret; setting both is an error.
 	OfflineMode        bool   `yaml:"offline_mode"`         // OfflineMode reuses a cached action without fetching from the remote; a moved tag or branch stays at the cached commit until the cache entry is removed.
-	V2                 *bool  `yaml:"v2"`                   // V2 serves the actions cache service v2 API to jobs, used by actions/cache@v4.2 and later, and edits the action bundles that would otherwise refuse it. Unset means enabled.
+	V2                 *bool  `yaml:"v2"`                   // V2 advertises the actions cache service v2 API to jobs. The bundle edit that reaches it is made either way, the artifact actions need it too. Unset means enabled.
 
 	// Eviction settings, ignored when ExternalServer is set since that server applies its own.
 	Retention     time.Duration `yaml:"retention"`       // Retention removes entries nothing has read or written within this window. Default 168h, 0 keeps them regardless of age.
@@ -194,7 +210,8 @@ type Config struct {
 // LoadDefault returns the default configuration.
 // If file is not empty, it will be used to load the configuration.
 func LoadDefault(file string) (*Config, error) {
-	cfg := &Config{Cache: DefaultCache()}
+	// Seeded before the file is read, so a written 0 can mean off.
+	cfg := &Config{Cache: DefaultCache(), Log: Log{Job: LogJob{Retention: 7 * 24 * time.Hour, MaxSize: 1024 * 1024 * 1024}}}
 	definedRunnerKeys := map[string]bool{}
 	if file != "" {
 		content, err := os.ReadFile(file)
@@ -267,6 +284,9 @@ func LoadDefault(file string) (*Config, error) {
 	if cfg.Container.WorkdirParent == "" {
 		cfg.Container.WorkdirParent = "workspace"
 	}
+	if cfg.Runner.DefaultImage == "" {
+		cfg.Runner.DefaultImage = DefaultImage
+	}
 	if cfg.Runner.ToolCacheMode == "" {
 		cfg.Runner.ToolCacheMode = ToolCacheModeNone
 	}
@@ -333,6 +353,10 @@ func LoadDefault(file string) (*Config, error) {
 	if cfg.Runner.ToolCacheMode == ToolCacheModeShared && cfg.Runner.Capacity > 1 {
 		log.Warnf("runner.tool_cache_mode %q with capacity %d: two jobs writing the same tool version at once corrupt it",
 			ToolCacheModeShared, cfg.Runner.Capacity)
+	}
+	if cfg.Runner.FetchTimeout > RequestTimeout {
+		log.Warnf("fetch_timeout (%v) exceeds the RPC timeout (%v), capping it", cfg.Runner.FetchTimeout, RequestTimeout)
+		cfg.Runner.FetchTimeout = RequestTimeout
 	}
 	if cfg.Runner.FetchIntervalMax < cfg.Runner.FetchInterval {
 		log.Warnf("fetch_interval_max (%v) is less than fetch_interval (%v), setting fetch_interval_max to fetch_interval",

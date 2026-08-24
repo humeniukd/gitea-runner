@@ -303,19 +303,20 @@ func runExecList(planner model.WorkflowPlanner, execArgs *executeArgs) error {
 	}
 
 	var err error
-	if execArgs.job != "" {
+	switch {
+	case execArgs.job != "":
 		log.Infof("Preparing plan with a job: %s", execArgs.job)
 		filterPlan, err = planner.PlanJob(execArgs.job)
 		if err != nil {
 			return err
 		}
-	} else if filterEventName != "" {
+	case filterEventName != "":
 		log.Infof("Preparing plan for a event: %s", filterEventName)
 		filterPlan, err = planner.PlanEvent(filterEventName)
 		if err != nil {
 			return err
 		}
-	} else {
+	default:
 		log.Infof("Preparing plan with all jobs")
 		filterPlan, err = planner.PlanAll()
 		if err != nil {
@@ -348,18 +349,19 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 		// collect all events from loaded workflows
 		events := planner.GetEvents()
 
-		if len(execArgs.event) > 0 {
+		switch {
+		case len(execArgs.event) > 0:
 			log.Infof("Using chosed event for filtering: %s", execArgs.event)
 			eventName = execArgs.event
-		} else if len(events) == 1 && len(events[0]) > 0 {
+		case len(events) == 1 && len(events[0]) > 0:
 			log.Infof("Using the only detected workflow event: %s", events[0])
 			eventName = events[0]
-		} else if execArgs.autodetectEvent && len(events) > 0 && len(events[0]) > 0 {
+		case execArgs.autodetectEvent && len(events) > 0 && len(events[0]) > 0:
 			// set default event type to first event from many available
 			// this way user dont have to specify the event.
 			log.Infof("Using first detected workflow event: %s", events[0])
 			eventName = events[0]
-		} else {
+		default:
 			log.Infof("Using default workflow event: push")
 			eventName = "push"
 		}
@@ -446,11 +448,8 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 		config := &runner.Config{
 			Workdir:               execArgs.Workdir(),
 			BindWorkdir:           false,
-			PatchToolkit:          true, // the cache server started above is what the patch points at
-			ReuseContainers:       false,
 			ForcePull:             execArgs.forcePull,
 			ForceRebuild:          execArgs.forceRebuild,
-			LogOutput:             true,
 			JSONLogger:            execArgs.jsonLogger,
 			Env:                   env,
 			ProxyEnv:              proxyEnv,
@@ -466,7 +465,6 @@ func runExec(ctx context.Context, execArgs *executeArgs) func(cmd *cobra.Command
 			ContainerCapAdd:       execArgs.containerCapAdd,
 			ContainerCapDrop:      execArgs.containerCapDrop,
 			ContainerOptions:      execArgs.containerOptions,
-			AutoRemove:            true,
 			ArtifactServerPath:    execArgs.artifactServerPath,
 			ArtifactServerPort:    execArgs.artifactServerPort,
 			ArtifactServerAddr:    execArgs.artifactServerAddr,
@@ -558,7 +556,7 @@ func loadExecCmd(ctx context.Context) *cobra.Command {
 	execCmd.PersistentFlags().BoolVarP(&execArg.noSkipCheckout, "no-skip-checkout", "", false, "Do not skip actions/checkout")
 	execCmd.PersistentFlags().BoolVarP(&execArg.debug, "debug", "d", false, "enable debug log")
 	execCmd.PersistentFlags().BoolVarP(&execArg.dryrun, "dryrun", "n", false, "dryrun mode")
-	execCmd.PersistentFlags().StringVarP(&execArg.image, "image", "i", "docker.gitea.com/runner-images:ubuntu-latest", "Docker image to use. Use \"-self-hosted\" to run directly on the host.")
+	execCmd.PersistentFlags().StringVarP(&execArg.image, "image", "i", config.DefaultImage, "Docker image to use. Use \"-self-hosted\" to run directly on the host.")
 	execCmd.PersistentFlags().StringVarP(&execArg.toolCacheMode, "tool-cache-mode", "", config.ToolCacheModeNone, "What to mount at RUNNER_TOOL_CACHE: none, or shared to reuse one tool cache across runs")
 	execCmd.PersistentFlags().StringVarP(&execArg.network, "network", "", "", "Specify the network to which the container will connect")
 	execCmd.PersistentFlags().StringVarP(&execArg.githubInstance, "gitea-instance", "", "", "Gitea instance to use.")
