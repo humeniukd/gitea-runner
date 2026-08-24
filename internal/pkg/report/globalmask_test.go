@@ -13,20 +13,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMaskingFormatter(t *testing.T) {
+func TestGlobalMasks(t *testing.T) {
 	formatter := MaskingFormatter(&log.TextFormatter{DisableTimestamp: true})
 	format := func() string {
 		line, err := formatter.Format(log.WithField("job", "build s3cr3t and other"))
 		require.NoError(t, err)
 		return string(line)
 	}
+	register := func(oldnew ...string) uint64 {
+		id := registerGlobalMasks(oldnew)
+		t.Cleanup(func() { deregisterGlobalMasks(id) })
+		return id
+	}
 
 	assert.Contains(t, format(), "s3cr3t") // nothing registered yet
 
-	first := registerGlobalMasks([]string{"s3cr3t", "***"})
-	t.Cleanup(func() { deregisterGlobalMasks(first) })
-	second := registerGlobalMasks([]string{"other", "***"})
-	t.Cleanup(func() { deregisterGlobalMasks(second) })
+	first := register("s3cr3t", "***")
+	register("other", "***")
 
 	line := format()
 	assert.NotContains(t, line, "s3cr3t") // masked though it rode a field, not the message
@@ -35,25 +38,14 @@ func TestMaskingFormatter(t *testing.T) {
 	deregisterGlobalMasks(first)
 	line = format()
 	assert.Contains(t, line, "s3cr3t")   // that task ended
-	assert.NotContains(t, line, "other") // the task still running keeps its own
-}
+	assert.NotContains(t, line, "other") // the one still running keeps its own
 
-func TestAddMaskReachesGlobalMasker(t *testing.T) {
-	r := &Reporter{globalMaskID: registerGlobalMasks(nil)}
-	t.Cleanup(func() { deregisterGlobalMasks(r.globalMaskID) })
+	register("otherlonger", "***")
+	assert.Equal(t, "***", maskGlobal("otherlonger")) // not "***longer", whichever registered first
 
+	r := &Reporter{globalMaskID: register()}
 	r.AddMask("runtime-secret")
-
 	assert.NotContains(t, maskGlobal("saw runtime-secret"), "runtime-secret")
-}
-
-func TestGlobalMasksDoNotTruncateEachOther(t *testing.T) {
-	short := registerGlobalMasks([]string{"abc", "***"})
-	t.Cleanup(func() { deregisterGlobalMasks(short) })
-	long := registerGlobalMasks([]string{"abcdef", "***"})
-	t.Cleanup(func() { deregisterGlobalMasks(long) })
-
-	assert.Equal(t, "***", maskGlobal("abcdef")) // not "***def", whichever task registered first
 }
 
 func TestSetOutputsSkipsSecrets(t *testing.T) {
