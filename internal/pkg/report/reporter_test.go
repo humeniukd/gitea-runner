@@ -209,8 +209,7 @@ func TestReporter_parseLogRow(t *testing.T) {
 				got := "<nil>"
 
 				if rv != nil {
-					r.appendLogRow(rv)
-					got = rv.Content
+					got = r.mask(rv.Content)
 				}
 
 				assert.Equal(t, tt.want[idx], got)
@@ -227,9 +226,7 @@ func TestReporter_parseLogRowAddMask(t *testing.T) {
 
 		assert.Nil(t, r.parseLogRow(&log.Entry{Message: line}), line)
 
-		row := r.parseLogRow(&log.Entry{Message: "using supersecret now"})
-		r.appendLogRow(row)
-		assert.Equal(t, "using *** now", row.Content, line)
+		assert.Equal(t, "using *** now", r.mask("using supersecret now"), line)
 	}
 }
 
@@ -1044,12 +1041,12 @@ func TestReporter_StopHeartbeats(t *testing.T) {
 }
 
 func TestAppendLogRow(t *testing.T) {
-	r := &Reporter{logReplacer: strings.NewReplacer()}
-	row := &runnerv1.LogRow{Time: timestamppb.Now(), Content: "hello"}
+	r := &Reporter{logReplacer: strings.NewReplacer("supersecret", "***")}
 	r.appendLogRow(nil)
-	r.appendLogRow(row)
+	r.appendLogRow(&runnerv1.LogRow{Time: timestamppb.Now(), Content: "hello supersecret"})
 	r.appendLogRow(nil)
-	assert.Equal(t, []*runnerv1.LogRow{row}, r.logRows)
+	require.Len(t, r.logRows, 1)
+	assert.Equal(t, "hello ***", r.logRows[0].Content)
 }
 
 func TestReporter_Levels(t *testing.T) {
@@ -1162,12 +1159,10 @@ func TestReporter_masksEncodedSecrets(t *testing.T) {
 		"basic " + base64.StdEncoding.EncodeToString([]byte(secret)),
 		"https://example.com/?token=" + url.QueryEscape(secret),
 	} {
-		row := r.parseLogRow(&log.Entry{Message: line})
-		require.NotNil(t, row)
-		r.appendLogRow(row)
-		assert.Contains(t, row.Content, "***")
-		assert.NotContains(t, row.Content, secret)
-		assert.NotContains(t, row.Content, base64.StdEncoding.EncodeToString([]byte(secret)))
+		masked := r.mask(line)
+		assert.Contains(t, masked, "***")
+		assert.NotContains(t, masked, secret)
+		assert.NotContains(t, masked, base64.StdEncoding.EncodeToString([]byte(secret)))
 	}
 }
 
@@ -1304,15 +1299,12 @@ func TestReporter_NoteReport(t *testing.T) {
 // expression, so Close must mask it like every other row.
 func TestReporter_CloseMasksLastWords(t *testing.T) {
 	const secret = "supersecret"
-	var mu sync.Mutex
 	var rows []*runnerv1.LogRow
 
 	client := mocks.NewClient(t)
 	client.On("UpdateLog", mock.Anything, mock.Anything).Return(
 		func(_ context.Context, req *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
-			mu.Lock()
 			rows = append(rows, req.Msg.Rows...)
-			mu.Unlock()
 			return connect_go.NewResponse(&runnerv1.UpdateLogResponse{
 				AckIndex: req.Msg.Index + int64(len(req.Msg.Rows)),
 			}), nil
@@ -1333,18 +1325,10 @@ func TestReporter_CloseMasksLastWords(t *testing.T) {
 		Context: taskCtx,
 		Secrets: map[string]string{"TOKEN": secret},
 	}, cfg)
-	reporter.ResetSteps(1)
 	close(reporter.daemon)
 
 	require.NoError(t, reporter.Close("could not get job matrix: "+secret))
 
-	mu.Lock()
-	defer mu.Unlock()
-	contents := make([]string, 0, len(rows))
-	for _, row := range rows {
-		contents = append(contents, row.Content)
-	}
-	joined := strings.Join(contents, "\n")
-	assert.Contains(t, joined, "***")
-	assert.NotContains(t, joined, secret)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "could not get job matrix: ***", rows[0].Content)
 }

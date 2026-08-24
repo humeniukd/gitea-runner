@@ -168,12 +168,13 @@ func (r *Reporter) Levels() []log.Level {
 }
 
 // appendLogRow buffers a row for the uploader and mirrors it into job.log. A nil row is one
-// the command handler dropped, such as ::add-mask::. Caller holds stateMu.
+// the command handler dropped, such as ::add-mask::. Masks here, the one point feeding both
+// sinks, so no row reaches either unmasked whatever built it. Caller holds stateMu.
 func (r *Reporter) appendLogRow(row *runnerv1.LogRow) {
 	if row == nil {
 		return
 	}
-	row.Content = r.mask(row.Content) // here rather than in a constructor a caller can skip
+	row.Content = r.mask(row.Content)
 	r.logRows = append(r.logRows, row)
 	r.jobLog.write(row.Time.AsTime(), row.Content)
 }
@@ -435,7 +436,7 @@ func (r *Reporter) logf(format string, a ...any) {
 	if !r.duringSteps() {
 		// Masked like any other row: these bypass parseLogRow, but a caller can still
 		// interpolate a secret, such as a configured URL carrying credentials.
-		r.appendLogRow(r.newLogRow(timestamppb.Now(), fmt.Sprintf(format, a...)))
+		r.appendLogRow(&runnerv1.LogRow{Time: timestamppb.Now(), Content: fmt.Sprintf(format, a...)})
 	}
 }
 
@@ -863,14 +864,7 @@ func (r *Reporter) parseLogRow(entry *log.Entry) *runnerv1.LogRow {
 		}
 	}
 
-	return r.newLogRow(timestamppb.New(entry.Time), content)
-}
-
-func (r *Reporter) newLogRow(t *timestamppb.Timestamp, content string) *runnerv1.LogRow {
-	return &runnerv1.LogRow{
-		Time:    t,
-		Content: content,
-	}
+	return &runnerv1.LogRow{Time: timestamppb.New(entry.Time), Content: content}
 }
 
 func (r *Reporter) mask(content string) string {
