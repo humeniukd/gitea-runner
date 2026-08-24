@@ -12,7 +12,7 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/act/runner/builtin"
+	"gitea.com/gitea/runner/internal/pkg/action"
 
 	"gitea.dev/actionslib/pkg/model"
 	log "github.com/sirupsen/logrus"
@@ -74,7 +74,7 @@ type fakeRunContext struct {
 	cwd   string
 	cache string
 	gh    *model.GithubContext
-	cfg   builtin.Config
+	cfg   action.Config
 }
 
 func (f *fakeRunContext) JobContainer() container.ExecutionsEnvironment { return f.jc }
@@ -82,7 +82,7 @@ func (f *fakeRunContext) Workdir() string                               { return
 func (f *fakeRunContext) ContainerWorkdir() string                      { return f.cwd }
 func (f *fakeRunContext) ActionCacheDir() string                        { return f.cache }
 func (f *fakeRunContext) GithubContext() *model.GithubContext           { return f.gh }
-func (f *fakeRunContext) Config() builtin.Config                        { return f.cfg }
+func (f *fakeRunContext) Config() action.Config                         { return f.cfg }
 
 type fakeConfig struct {
 	token             string
@@ -104,7 +104,7 @@ func (f *fakeConfig) NoSkipCheckout() bool          { return f.noSkip }
 func (f *fakeConfig) UseGitIgnore() bool            { return f.gitIgnore }
 func (f *fakeConfig) ActionOfflineMode() bool       { return f.offline }
 
-func checkoutCtx(t *testing.T, fc *fakeContainer, cfg *fakeConfig, inputs map[string]string) *builtin.Context {
+func checkoutCtx(t *testing.T, fc *fakeContainer, cfg *fakeConfig, inputs map[string]string) *action.Context {
 	t.Helper()
 	if fc == nil {
 		fc = &fakeContainer{}
@@ -115,7 +115,7 @@ func checkoutCtx(t *testing.T, fc *fakeContainer, cfg *fakeConfig, inputs map[st
 	if inputs == nil {
 		inputs = map[string]string{}
 	}
-	return &builtin.Context{
+	return &action.Context{
 		Ctx: context.Background(),
 		RunContext: &fakeRunContext{
 			jc:    fc,

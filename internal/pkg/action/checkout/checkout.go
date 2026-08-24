@@ -15,7 +15,7 @@ import (
 	"strings"
 
 	"gitea.com/gitea/runner/act/common/git"
-	"gitea.com/gitea/runner/act/runner/builtin"
+	"gitea.com/gitea/runner/internal/pkg/action"
 
 	"gitea.dev/actionslib/pkg/model"
 )
@@ -23,17 +23,17 @@ import (
 type Action struct{}
 
 func init() {
-	builtin.Register(&Action{})
+	action.Register(&Action{})
 }
 
 func (*Action) Name() string  { return "checkout" }
 func (*Action) HasPre() bool  { return false }
 func (*Action) HasPost() bool { return false }
 
-func (*Action) Pre(_ *builtin.Context) error  { return nil }
-func (*Action) Post(_ *builtin.Context) error { return nil }
+func (*Action) Pre(_ *action.Context) error  { return nil }
+func (*Action) Post(_ *action.Context) error { return nil }
 
-func (a *Action) Main(c *builtin.Context) error {
+func (a *Action) Main(c *action.Context) error {
 	if c == nil || c.RunContext == nil {
 		return errors.New("checkout: nil context")
 	}
@@ -140,7 +140,7 @@ func isLocalCheckoutLike(inputs map[string]string, ghc *model.GithubContext) boo
 	return true
 }
 
-func repoURL(ghc *model.GithubContext, cfg builtin.Config, repository string) string {
+func repoURL(ghc *model.GithubContext, cfg action.Config, repository string) string {
 	base := strings.TrimRight(ghc.ServerURL, "/")
 	if base == "" {
 		base = strings.TrimRight(cfg.DefaultActionInstance(), "/")

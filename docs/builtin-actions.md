@@ -30,5 +30,5 @@ and copies the tree into the container.
 
 ## Adding one
 
-1. Implement `builtin.Action` under `act/runner/builtin/<name>` and `Register` from `init()`.
+1. Implement `action.Action` under `internal/pkg/action/<name>` and `Register` from `init()`.
 2. Blank-import the package from `act/runner/builtins_register.go`.

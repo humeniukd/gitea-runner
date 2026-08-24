@@ -1,8 +1,8 @@
 // Copyright 2026 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-// Package builtin is the registry for `uses: builtin:<name>` actions.
-package builtin
+// Package action is the registry for `uses: builtin:<name>` actions.
+package action
 
 import (
 	"context"

@@ -10,7 +10,7 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/act/runner/builtin"
+	"gitea.com/gitea/runner/internal/pkg/action"
 
 	"gitea.dev/actionslib/pkg/model"
 )
@@ -18,7 +18,7 @@ import (
 type stepActionBuiltin struct {
 	Step       *model.Step
 	RunContext *RunContext
-	action     builtin.Action
+	action     action.Action
 	env        map[string]string
 }
 
@@ -53,7 +53,7 @@ func (sab *stepActionBuiltin) post() common.Executor {
 	}
 }
 
-func (sab *stepActionBuiltin) run(fn func(*builtin.Context) error) common.Executor {
+func (sab *stepActionBuiltin) run(fn func(*action.Context) error) common.Executor {
 	return func(ctx context.Context) error {
 		rc := sab.RunContext
 		printRunActionHeader(ctx, sab.Step, sab.env, rc)
@@ -62,7 +62,7 @@ func (sab *stepActionBuiltin) run(fn func(*builtin.Context) error) common.Execut
 
 		inputs := sab.evaluatedInputs(ctx)
 		populateEnvsFromBuiltinInputs(sab.env, inputs)
-		return fn(&builtin.Context{
+		return fn(&action.Context{
 			Ctx:        ctx,
 			RunContext: &builtinRunContextAdapter{ctx: ctx, rc: rc},
 			Step:       sab.Step,
@@ -137,7 +137,7 @@ func (a *builtinRunContextAdapter) GithubContext() *model.GithubContext {
 	return a.rc.getGithubContext(a.ctx)
 }
 
-func (a *builtinRunContextAdapter) Config() builtin.Config {
+func (a *builtinRunContextAdapter) Config() action.Config {
 	return &builtinConfigAdapter{cfg: a.rc.Config}
 }
 

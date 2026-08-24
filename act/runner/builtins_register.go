@@ -4,5 +4,5 @@
 package runner
 
 import (
-	_ "gitea.com/gitea/runner/act/runner/builtin/checkout" // registers builtin:checkout
+	_ "gitea.com/gitea/runner/internal/pkg/action/checkout" // registers builtin:checkout
 )
