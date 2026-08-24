@@ -32,16 +32,6 @@ func registerGlobalMasks(oldnew []string) uint64 {
 	return globalMaskSeq
 }
 
-func updateGlobalMasks(id uint64, oldnew []string) { // an unregistered id, such as zero, is a no-op
-	globalMu.Lock()
-	defer globalMu.Unlock()
-	if _, ok := globalMasks[id]; !ok {
-		return
-	}
-	globalMasks[id] = oldnew
-	rebuildGlobalReplacer()
-}
-
 func deregisterGlobalMasks(id uint64) {
 	globalMu.Lock()
 	defer globalMu.Unlock()

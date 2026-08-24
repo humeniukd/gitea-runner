@@ -237,6 +237,20 @@ func jsonStringEscapeNoHTML(v string) string {
 	return encoded[1 : len(encoded)-1]
 }
 
+// debugSettings arrive as secrets but are settings, not values to hide. Masking "true" would
+// gut every log line and drop job outputs that say it, so GitHub skips these two as well.
+var debugSettings = []string{"ACTIONS_STEP_DEBUG", "ACTIONS_RUNNER_DEBUG"}
+
+// AppendSecretMaskers masks every secret whose value is worth hiding.
+func AppendSecretMaskers(oldnew []string, secrets map[string]string) []string {
+	for k, v := range secrets {
+		if !slices.Contains(debugSettings, k) {
+			oldnew = AppendSecretMasker(oldnew, v)
+		}
+	}
+	return oldnew
+}
+
 func AppendSecretMasker(oldnew []string, v string) []string {
 	ret := oldnew
 
@@ -273,11 +287,7 @@ func AppendSecretMasker(oldnew []string, v string) []string {
 // valueMasker applies secrets and ::add-mask:: patterns to every log entry, including
 // raw_output (command/stream) lines; there is no bypass by field.
 func valueMasker(insecureSecrets bool, secrets map[string]string) entryProcessor {
-	var oldnew []string
-	for _, v := range secrets {
-		oldnew = AppendSecretMasker(oldnew, v)
-	}
-	oldnew = slices.Clip(oldnew)
+	oldnew := slices.Clip(AppendSecretMaskers(nil, secrets))
 	defReplacer := NewSecretReplacer(oldnew)
 
 	// A ::add-mask:: only ever appends to the job's mask slice, so the replacer built for
@@ -425,11 +435,8 @@ func checkIfTerminal(w io.Writer) bool {
 // such as a container name or a job summary. Masks added at runtime count, so a summary written
 // after ::add-mask:: is covered too.
 func (rc *RunContext) maskSecrets(value string) string {
-	var oldnew []string
-	for _, secret := range rc.Config.Secrets {
-		oldnew = AppendSecretMasker(oldnew, secret)
-	}
-	for _, mask := range rc.Masks {
+	oldnew := AppendSecretMaskers(nil, rc.Config.Secrets)
+	for _, mask := range slices.Concat(rc.Config.ExtraMasks, rc.Masks) {
 		oldnew = AppendSecretMasker(oldnew, mask)
 	}
 	return NewSecretReplacer(oldnew).Replace(value)

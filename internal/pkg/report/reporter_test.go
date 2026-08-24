@@ -1047,6 +1047,11 @@ func TestAppendLogRow(t *testing.T) {
 	r.appendLogRow(nil)
 	require.Len(t, r.logRows, 1)
 	assert.Equal(t, "hello ***", r.logRows[0].Content)
+
+	// repairing the invalid byte spells out the secret, so the repair has to come first
+	r = &Reporter{logReplacer: strings.NewReplacer("a?b", "***")}
+	r.appendLogRow(&runnerv1.LogRow{Time: timestamppb.Now(), Content: "a\xffb"})
+	assert.Equal(t, "***", r.logRows[0].Content)
 }
 
 func TestReporter_Levels(t *testing.T) {
@@ -1087,12 +1092,41 @@ func TestReporter_SetOutputs(t *testing.T) {
 	_, ok = r.outputs["leaky"]
 	assert.False(t, ok)
 
+	// invalid UTF-8 is not a secret, so the value is kept as it is rather than dropped
+	r.SetOutputs(map[string]string{"binary": "caf\xff"})
+	got, ok = r.outputs["binary"]
+	require.True(t, ok)
+	assert.Equal(t, "caf\xff", got.value)
+
 	// a value at exactly the limit is still stored
 	maxValue := strings.Repeat("v", maxOutputValueLen)
 	r.SetOutputs(map[string]string{"atlimit": maxValue})
 	got, ok = r.outputs["atlimit"]
 	require.True(t, ok)
 	assert.Len(t, got.value, maxOutputValueLen)
+}
+
+// Gitea delivers ACTIONS_STEP_DEBUG as a secret, but masking "true" would blank it out of every
+// log line and drop any job output saying it. GitHub whitelists the same two keys.
+func TestReporter_DebugSettingsAreNotMasked(t *testing.T) {
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+	cfg, _ := config.LoadDefault("")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reporter := NewReporter(ctx, cancel, mocks.NewClient(t), &runnerv1.Task{
+		Context: taskCtx,
+		Secrets: map[string]string{"ACTIONS_STEP_DEBUG": "true", "ACTIONS_RUNNER_DEBUG": "true", "TOKEN": "s3cr3t"},
+	}, cfg)
+	defer deregisterGlobalMasks(reporter.globalMaskID)
+
+	assert.True(t, reporter.debugOutputEnabled)
+	assert.Equal(t, "debug is true", reporter.mask("debug is true"))
+	assert.Equal(t, "***", reporter.mask("s3cr3t"))
+
+	reporter.SetOutputs(map[string]string{"changed": "true"})
+	assert.Equal(t, "true", reporter.outputs["changed"].value) // needs.<job>.outputs.changed == 'true' still works
 }
 
 // An output the server acknowledged is not reported again.
@@ -1323,7 +1357,8 @@ func TestReporter_CloseMasksLastWords(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	taskCtx, err := structpb.NewStruct(map[string]any{})
+	const idToken = "id-token-request-secret"
+	taskCtx, err := structpb.NewStruct(map[string]any{"actions_id_token_request_token": idToken})
 	require.NoError(t, err)
 	cfg, _ := config.LoadDefault("")
 	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{
@@ -1332,8 +1367,8 @@ func TestReporter_CloseMasksLastWords(t *testing.T) {
 	}, cfg)
 	close(reporter.daemon)
 
-	require.NoError(t, reporter.Close("could not get job matrix: "+secret))
+	require.NoError(t, reporter.Close("could not get job matrix: "+secret+" "+idToken))
 
 	require.Len(t, rows, 1)
-	assert.Equal(t, "could not get job matrix: ***", rows[0].Content)
+	assert.Equal(t, "could not get job matrix: *** ***", rows[0].Content)
 }
