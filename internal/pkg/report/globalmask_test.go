@@ -13,28 +13,43 @@ import (
 
 func TestMaskingFormatter(t *testing.T) {
 	formatter := MaskingFormatter(&log.TextFormatter{DisableTimestamp: true})
-	entry := func() *log.Entry {
-		return log.WithField("job", "build s3cr3t").WithField("msg", "x")
+	format := func() string {
+		line, err := formatter.Format(log.WithField("job", "build s3cr3t and other"))
+		require.NoError(t, err)
+		return string(line)
 	}
 
-	line, err := formatter.Format(entry())
-	require.NoError(t, err)
-	assert.Contains(t, string(line), "s3cr3t") // nothing registered yet
+	assert.Contains(t, format(), "s3cr3t") // nothing registered yet
 
-	first := &Reporter{}
-	stopFirst := registerGlobalMasks(first, []string{"s3cr3t", "***"})
-	second := &Reporter{}
-	stopSecond := registerGlobalMasks(second, []string{"other", "***"})
+	first := registerGlobalMasks([]string{"s3cr3t", "***"})
+	t.Cleanup(func() { deregisterGlobalMasks(first) })
+	second := registerGlobalMasks([]string{"other", "***"})
+	t.Cleanup(func() { deregisterGlobalMasks(second) })
 
-	line, err = formatter.Format(entry())
-	require.NoError(t, err)
-	assert.NotContains(t, string(line), "s3cr3t") // masked even though it is a field, not the message
+	line := format()
+	assert.NotContains(t, line, "s3cr3t") // masked though it rode a field, not the message
+	assert.NotContains(t, line, "other")
 
-	stopFirst()
-	line, err = formatter.Format(entry())
-	require.NoError(t, err)
-	assert.Contains(t, string(line), "s3cr3t") // that task is gone, the other task's masks remain
+	deregisterGlobalMasks(first)
+	line = format()
+	assert.Contains(t, line, "s3cr3t")   // that task ended
+	assert.NotContains(t, line, "other") // the task still running keeps its own
+}
 
-	stopSecond()
-	require.Empty(t, globalMasks)
+func TestAddMaskReachesGlobalMasker(t *testing.T) {
+	r := &Reporter{globalMaskID: registerGlobalMasks(nil)}
+	t.Cleanup(func() { deregisterGlobalMasks(r.globalMaskID) })
+
+	r.addMask("runtime-secret")
+
+	assert.NotContains(t, maskGlobal("saw runtime-secret"), "runtime-secret")
+}
+
+func TestGlobalMasksDoNotTruncateEachOther(t *testing.T) {
+	short := registerGlobalMasks([]string{"abc", "***"})
+	t.Cleanup(func() { deregisterGlobalMasks(short) })
+	long := registerGlobalMasks([]string{"abcdef", "***"})
+	t.Cleanup(func() { deregisterGlobalMasks(long) })
+
+	assert.Equal(t, "***", maskGlobal("abcdef")) // not "***def", whichever task registered first
 }
