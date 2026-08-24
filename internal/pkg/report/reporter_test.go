@@ -1059,7 +1059,7 @@ func TestReporter_Result(t *testing.T) {
 }
 
 func TestReporter_SetOutputs(t *testing.T) {
-	r := &Reporter{state: &runnerv1.TaskState{}, logReplacer: strings.NewReplacer()}
+	r := &Reporter{state: &runnerv1.TaskState{}, logReplacer: strings.NewReplacer("s3cr3t", "***")}
 
 	r.SetOutputs(map[string]string{"foo": "bar"})
 	got, ok := r.outputs["foo"]
@@ -1080,6 +1080,11 @@ func TestReporter_SetOutputs(t *testing.T) {
 	longValue := strings.Repeat("v", maxOutputValueLen+1)
 	r.SetOutputs(map[string]string{"big": longValue})
 	_, ok = r.outputs["big"]
+	assert.False(t, ok)
+
+	// a value carrying a secret is skipped, as GitHub does, rather than sent masked
+	r.SetOutputs(map[string]string{"leaky": "has s3cr3t in it"})
+	_, ok = r.outputs["leaky"]
 	assert.False(t, ok)
 
 	// a value at exactly the limit is still stored

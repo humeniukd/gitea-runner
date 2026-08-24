@@ -278,7 +278,7 @@ func valueMasker(insecureSecrets bool, secrets map[string]string) entryProcessor
 		oldnew = AppendSecretMasker(oldnew, v)
 	}
 	oldnew = slices.Clip(oldnew)
-	defReplacer := strings.NewReplacer(oldnew...)
+	defReplacer := NewSecretReplacer(oldnew)
 
 	// A ::add-mask:: only ever appends to the job's mask slice, so the replacer built for
 	// it stays valid until the slice grows. Cache it, keyed by the slice itself and its
@@ -314,7 +314,7 @@ func valueMasker(insecureSecrets bool, secrets map[string]string) entryProcessor
 				pairs = AppendSecretMasker(pairs, v)
 			}
 			masked = len(*masks)
-			replacer = strings.NewReplacer(pairs...)
+			replacer = NewSecretReplacer(pairs)
 		}
 		cmasker := replacer
 		mu.Unlock()
@@ -422,11 +422,31 @@ func checkIfTerminal(w io.Writer) bool {
 }
 
 // maskSecrets hides this job's secrets in a value that reaches somewhere the log maskers cannot,
-// such as a container name or a network alias.
+// such as a container name or a job summary. Masks added at runtime count, so a summary written
+// after ::add-mask:: is covered too.
 func (rc *RunContext) maskSecrets(value string) string {
 	var oldnew []string
 	for _, secret := range rc.Config.Secrets {
 		oldnew = AppendSecretMasker(oldnew, secret)
 	}
-	return strings.NewReplacer(oldnew...).Replace(value)
+	for _, mask := range rc.Masks {
+		oldnew = AppendSecretMasker(oldnew, mask)
+	}
+	return NewSecretReplacer(oldnew).Replace(value)
+}
+
+// NewSecretReplacer masks the longest secret first. Replacer matches in argument order, so a
+// secret that prefixes another would otherwise mask only that prefix and print the rest.
+func NewSecretReplacer(oldnew []string) *strings.Replacer {
+	pairs := make([][2]string, 0, len(oldnew)/2)
+	for i := 0; i+1 < len(oldnew); i += 2 {
+		pairs = append(pairs, [2]string{oldnew[i], oldnew[i+1]})
+	}
+	slices.SortFunc(pairs, func(a, b [2]string) int { return len(b[0]) - len(a[0]) })
+
+	sorted := make([]string, 0, len(pairs)*2)
+	for _, pair := range pairs {
+		sorted = append(sorted, pair[0], pair[1])
+	}
+	return strings.NewReplacer(sorted...)
 }

@@ -4,11 +4,11 @@
 package report
 
 import (
-	"bytes"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"gitea.com/gitea/runner/act/runner"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -50,37 +50,15 @@ func deregisterGlobalMasks(id uint64) {
 }
 
 func rebuildGlobalReplacer() { // caller holds globalMu
-	total := 0
+	var oldnew []string
 	for _, masks := range globalMasks {
-		total += len(masks) / 2
+		oldnew = append(oldnew, masks...)
 	}
-	if total == 0 {
+	if len(oldnew) == 0 {
 		globalReplacer.Store(nil)
 		return
 	}
-
-	pairs := make([][2]string, 0, total)
-	for _, masks := range globalMasks {
-		for i := 0; i+1 < len(masks); i += 2 {
-			pairs = append(pairs, [2]string{masks[i], masks[i+1]})
-		}
-	}
-	// Replacer matches in argument order, so a secret prefixing another's would mask only that.
-	slices.SortFunc(pairs, func(a, b [2]string) int { return len(b[0]) - len(a[0]) })
-
-	oldnew := make([]string, 0, len(pairs)*2)
-	for _, pair := range pairs {
-		oldnew = append(oldnew, pair[0], pair[1])
-	}
-	globalReplacer.Store(strings.NewReplacer(oldnew...))
-}
-
-func maskGlobal(content string) string {
-	replacer := globalReplacer.Load()
-	if replacer == nil {
-		return content
-	}
-	return replacer.Replace(content)
+	globalReplacer.Store(runner.NewSecretReplacer(oldnew))
 }
 
 // MaskingFormatter wraps f so no live task's secret reaches the process-wide log, fields included.
@@ -96,14 +74,8 @@ func (m *maskingFormatter) Format(entry *log.Entry) ([]byte, error) {
 		return nil, err
 	}
 	replacer := globalReplacer.Load()
-	if replacer == nil {
+	if replacer == nil { // no task is live, so this costs what it did before the wrapper
 		return line, nil
 	}
-
-	var masked bytes.Buffer // streams, rather than a []byte to string and back round trip
-	masked.Grow(len(line))
-	if _, err := replacer.WriteString(&masked, string(line)); err != nil {
-		return nil, err
-	}
-	return masked.Bytes(), nil
+	return []byte(replacer.Replace(string(line))), nil
 }

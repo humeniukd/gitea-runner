@@ -430,7 +430,6 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		envs["ACTIONS_ID_TOKEN_REQUEST_URL"] = actionsIDTokenRequestURL
 		envs["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = taskContext["actions_id_token_request_token"].GetStringValue()
 		task.Secrets["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = envs["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
-		reporter.AddMask(envs["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
 	}
 
 	giteaRuntimeToken := taskContext["gitea_runtime_token"].GetStringValue()
@@ -444,7 +443,6 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// any reader of the log impersonate this job against the cache.
 	if giteaRuntimeToken != "" {
 		task.Secrets["ACTIONS_RUNTIME_TOKEN"] = giteaRuntimeToken
-		reporter.AddMask(giteaRuntimeToken)
 	}
 
 	// Register this job's runtime token with the local cache server so that
