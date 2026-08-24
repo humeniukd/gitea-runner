@@ -95,7 +95,8 @@ type Reporter struct {
 	debugOutputEnabled  bool
 	stopCommandEndToken string
 
-	jobLog *jobLog // this task's rows on the runner's own disk, nil when log.job.dir is unset
+	stopGlobalMasks func()  // drops this task's secrets from the process-wide logger
+	jobLog          *jobLog // this task's rows on the runner's own disk, nil when log.job.dir is unset
 }
 
 // extraMasks are values known before the job starts that are not among its secrets, such as
@@ -138,6 +139,8 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 	}
 
 	rv.daemonWait = 6 * rv.effectiveCloseTimeout()
+
+	rv.stopGlobalMasks = registerGlobalMasks(rv, oldnew)
 
 	if task.Secrets["ACTIONS_STEP_DEBUG"] == "true" {
 		rv.debugOutputEnabled = true
@@ -541,6 +544,10 @@ func (r *Reporter) Close(lastWords string) error {
 	}
 	r.jobLog.close(r.mask(trailer))
 	r.stateMu.Unlock()
+
+	if r.stopGlobalMasks != nil { // a Reporter built outside NewReporter, as tests do
+		r.stopGlobalMasks()
+	}
 
 	return err
 }
