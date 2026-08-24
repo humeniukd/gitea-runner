@@ -250,6 +250,8 @@ jobs:
     services:
       redis:
         image: redis:latest
+        volumes:
+          - data:/data
       db:
         image: postgres:latest
         credentials:
@@ -272,6 +274,7 @@ jobs:
 		Config: &Config{
 			Workdir:              "/tmp",
 			ContainerNetworkMode: "host",
+			ValidVolumes:         []string{"data", "/var/run/docker.sock"},
 			Env:                  map[string]string{},
 			Secrets:              map[string]string{},
 		},
@@ -286,16 +289,25 @@ jobs:
 	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
 	require.Error(t, rc.startJobContainer()(t.Context()))
 
-	credentials := map[string][2]string{}
+	inputsByImage := map[string]*container.NewContainerInput{}
 	for _, in := range inputs {
-		credentials[in.Image] = [2]string{in.Username, in.Password}
+		inputsByImage[in.Image] = in
 	}
+	require.Contains(t, inputsByImage, "registry.example/private:latest")
+	require.Contains(t, inputsByImage, "postgres:latest")
+	require.Contains(t, inputsByImage, "redis:latest")
 
 	// the job container keeps its own credentials, whichever services exist
-	require.Equal(t, [2]string{"job-user", "job-password"}, credentials["registry.example/private:latest"])
+	require.Equal(t, "job-user", inputsByImage["registry.example/private:latest"].Username)
+	require.Equal(t, "job-password", inputsByImage["registry.example/private:latest"].Password)
 	// each service keeps its own, and a service without credentials gets none
-	require.Equal(t, [2]string{"db-user", "db-password"}, credentials["postgres:latest"])
-	require.Equal(t, [2]string{"", ""}, credentials["redis:latest"])
+	require.Equal(t, "db-user", inputsByImage["postgres:latest"].Username)
+	require.Equal(t, "db-password", inputsByImage["postgres:latest"].Password)
+	require.Empty(t, inputsByImage["redis:latest"].Username)
+	require.Empty(t, inputsByImage["redis:latest"].Password)
+	require.Equal(t, []string{"data", "/var/run/docker.sock"}, inputsByImage["redis:latest"].ValidVolumes)
+	require.Equal(t, map[string]string{"data": "/data"}, inputsByImage["redis:latest"].Mounts)
+	require.Empty(t, inputsByImage["redis:latest"].Binds)
 }
 
 // A service container reaches the internet the same way the job does, so it inherits the
@@ -508,7 +520,7 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 				rc.Run.Workflow.Jobs = map[string]*model.Job{"job1": job}
 
 				jobBinds, jobMounts := rc.GetBindsAndMounts()
-				svcBinds, svcMounts := rc.GetServiceBindsAndMounts(testcase.volumes)
+				svcBinds, svcMounts, _ := splitVolumes(testcase.volumes)
 				// job and service containers classify volumes alike, only their own mounts differ
 				for _, got := range []struct {
 					binds  []string

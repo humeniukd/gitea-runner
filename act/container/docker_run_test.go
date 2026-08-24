@@ -545,13 +545,14 @@ func TestCheckVolumes(t *testing.T) {
 			desc:         "no volumes can be matched",
 			validVolumes: []string{},
 			binds: []string{
+				"/anonymous",
 				"shared_volume:/shared_volume",
 				"/home/test/data:/test_data",
 				"/etc/conf.d/base.json:/config/base.json",
 				"sql_data:/sql_data",
 				"/secrets/keys:/keys",
 			},
-			expectedBinds: []string{},
+			expectedBinds: []string{"/anonymous"},
 		},
 		{
 			desc: "only allowed volumes can be matched",
@@ -576,7 +577,7 @@ func TestCheckVolumes(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			logger, _ := test.NewNullLogger()
+			logger, hook := test.NewNullLogger()
 			ctx := common.WithLogger(context.Background(), logger)
 			cr := &containerReference{
 				input: &NewContainerInput{
@@ -585,6 +586,7 @@ func TestCheckVolumes(t *testing.T) {
 			}
 			_, hostConf := cr.sanitizeConfig(ctx, &container.Config{}, &container.HostConfig{Binds: tc.binds})
 			assert.Equal(t, tc.expectedBinds, hostConf.Binds)
+			assert.Len(t, hook.AllEntries(), len(tc.binds)-len(tc.expectedBinds))
 		})
 	}
 }

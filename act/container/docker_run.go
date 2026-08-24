@@ -1187,42 +1187,35 @@ func sanitizeOptionsHostConfig(logger logrus.FieldLogger, hostConfig *container.
 func (cr *containerReference) sanitizeConfig(ctx context.Context, config *container.Config, hostConfig *container.HostConfig) (*container.Config, *container.HostConfig) {
 	logger := common.Logger(ctx)
 
-	if len(cr.input.ValidVolumes) > 0 {
-		matcher := newValidVolumeMatcher(ctx, cr.input.ValidVolumes)
-		// sanitize binds
-		sanitizedBinds := make([]string, 0, len(hostConfig.Binds))
-		for _, bind := range hostConfig.Binds {
-			parsed, err := loader.ParseVolume(bind)
-			if err != nil {
-				logger.Warnf("parse volume [%s] error: %v", bind, err)
-				continue
-			}
-			if parsed.Source == "" {
-				// anonymous volume
-				sanitizedBinds = append(sanitizedBinds, bind)
-				continue
-			}
-			if matcher.isValid(parsed.Source, mount.Type(parsed.Type)) {
-				sanitizedBinds = append(sanitizedBinds, bind)
-			} else {
-				logger.Warnf("[%s] is not a valid volume, will be ignored", parsed.Source)
-			}
+	matcher := newValidVolumeMatcher(ctx, cr.input.ValidVolumes)
+	sanitizedBinds := make([]string, 0, len(hostConfig.Binds))
+	for _, bind := range hostConfig.Binds {
+		parsed, err := loader.ParseVolume(bind)
+		if err != nil {
+			logger.Warnf("parse volume [%s] error: %v", bind, err)
+			continue
 		}
-		hostConfig.Binds = sanitizedBinds
-		// sanitize mounts
-		sanitizedMounts := make([]mount.Mount, 0, len(hostConfig.Mounts))
-		for _, mt := range hostConfig.Mounts {
-			if matcher.isValid(mt.Source, mt.Type) {
-				sanitizedMounts = append(sanitizedMounts, mt)
-			} else {
-				logger.Warnf("[%s] is not a valid volume, will be ignored", mt.Source)
-			}
+		if parsed.Source == "" {
+			// anonymous volume
+			sanitizedBinds = append(sanitizedBinds, bind)
+			continue
 		}
-		hostConfig.Mounts = sanitizedMounts
-	} else {
-		hostConfig.Binds = []string{}
-		hostConfig.Mounts = []mount.Mount{}
+		if matcher.isValid(parsed.Source, mount.Type(parsed.Type)) {
+			sanitizedBinds = append(sanitizedBinds, bind)
+		} else {
+			logger.Warnf("[%s] is not a valid volume, will be ignored", parsed.Source)
+		}
 	}
+	hostConfig.Binds = sanitizedBinds
+	sanitizedMounts := make([]mount.Mount, 0, len(hostConfig.Mounts))
+	for _, mt := range hostConfig.Mounts {
+		if matcher.isValid(mt.Source, mt.Type) {
+			sanitizedMounts = append(sanitizedMounts, mt)
+		} else {
+			logger.Warnf("[%s] is not a valid volume, will be ignored", mt.Source)
+		}
+	}
+	hostConfig.Mounts = sanitizedMounts
 
 	return config, hostConfig
 }
