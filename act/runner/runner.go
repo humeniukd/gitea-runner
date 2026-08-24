@@ -324,7 +324,7 @@ func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, mat
 		caller:      runner.caller,
 	}
 	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
-	rc.Name = rc.ExprEval.Interpolate(ctx, run.String())
+	rc.Name = rc.maskSecrets(rc.ExprEval.Interpolate(ctx, run.String()))
 	// Snapshot the job's pristine output expressions now, before any matrix combo runs and
 	// rewrites the shared Job.Outputs (see interpolateOutputs).
 	if job := run.Job(); job != nil {

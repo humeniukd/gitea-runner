@@ -420,3 +420,13 @@ func checkIfTerminal(w io.Writer) bool {
 		return false
 	}
 }
+
+// maskSecrets hides this job's secrets in a value that reaches somewhere the log maskers cannot,
+// such as a container name or a network alias.
+func (rc *RunContext) maskSecrets(value string) string {
+	var oldnew []string
+	for _, secret := range rc.Config.Secrets {
+		oldnew = AppendSecretMasker(oldnew, secret)
+	}
+	return strings.NewReplacer(oldnew...).Replace(value)
+}

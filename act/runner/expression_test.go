@@ -356,3 +356,22 @@ on:
 		}
 	}
 }
+
+func TestJobNameMasksSecrets(t *testing.T) {
+	workflow, err := model.ReadWorkflow(strings.NewReader(`
+name: wf
+on: push
+jobs:
+  job:
+    name: build ${{ secrets.FOO }}
+    runs-on: ubuntu-latest
+    steps: []
+`))
+	require.NoError(t, err)
+
+	runner := &runnerImpl{config: &Config{Secrets: map[string]string{"FOO": "s3cr3t"}}}
+	rc := runner.newRunContext(t.Context(), &model.Run{JobID: "job", Workflow: workflow}, nil)
+
+	assert.NotContains(t, rc.Name, "s3cr3t") // it reaches the container name, which no log masker covers
+	assert.NotContains(t, rc.jobContainerName(), "s3cr3t")
+}

@@ -99,6 +99,14 @@ type Reporter struct {
 	jobLog       *jobLog // this task's rows on the runner's own disk, nil when log.job.dir is unset
 }
 
+// AddMask hides value in everything this task reports from here on, for a secret the runner
+// only learns after the reporter was built.
+func (r *Reporter) AddMask(value string) {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	r.addMask(value)
+}
+
 // extraMasks are values known before the job starts that are not among its secrets, such as
 // the password in the runner's proxy URL.
 func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.Client, task *runnerv1.Task, cfg *config.Config, extraMasks ...string) *Reporter {
@@ -461,6 +469,11 @@ func (r *Reporter) SetOutputs(outputs map[string]string) {
 		if l := len(v); l > maxOutputValueLen {
 			log.Warnf("ignore output %q because the value is too long: %d > %d", k, l, maxOutputValueLen)
 			r.logf("ignore output %q because the value is too long: %d > %d", k, l, maxOutputValueLen)
+			continue
+		}
+		if r.mask(v) != v { // GitHub skips an output that may carry a secret rather than masking it
+			log.Warnf("ignore output %q because it may contain a secret", k)
+			r.logf("ignore output %q because it may contain a secret", k)
 			continue
 		}
 		if _, ok := r.outputs[k]; !ok {

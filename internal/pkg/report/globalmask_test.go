@@ -4,8 +4,10 @@
 package report
 
 import (
+	"strings"
 	"testing"
 
+	runnerv1 "gitea.dev/actionslib/runner/v1"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,7 +42,7 @@ func TestAddMaskReachesGlobalMasker(t *testing.T) {
 	r := &Reporter{globalMaskID: registerGlobalMasks(nil)}
 	t.Cleanup(func() { deregisterGlobalMasks(r.globalMaskID) })
 
-	r.addMask("runtime-secret")
+	r.AddMask("runtime-secret")
 
 	assert.NotContains(t, maskGlobal("saw runtime-secret"), "runtime-secret")
 }
@@ -52,4 +54,13 @@ func TestGlobalMasksDoNotTruncateEachOther(t *testing.T) {
 	t.Cleanup(func() { deregisterGlobalMasks(long) })
 
 	assert.Equal(t, "***", maskGlobal("abcdef")) // not "***def", whichever task registered first
+}
+
+func TestSetOutputsSkipsSecrets(t *testing.T) {
+	r := &Reporter{logReplacer: strings.NewReplacer("s3cr3t", "***"), state: &runnerv1.TaskState{}}
+
+	r.SetOutputs(map[string]string{"safe": "value", "leaky": "has s3cr3t in it"})
+
+	assert.Contains(t, r.outputs, "safe")
+	assert.NotContains(t, r.outputs, "leaky") // GitHub skips it rather than sending a masked value
 }
