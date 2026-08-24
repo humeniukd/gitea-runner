@@ -207,7 +207,7 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 
 				matrixes, err := job.GetMatrixes()
 				if err != nil {
-					log.Errorf("Error while get job's matrix: %v", err)
+					return fmt.Errorf("could not get job matrix: %w", err)
 				}
 				log.Debugf("Job Matrices: %v", matrixes)
 
@@ -306,7 +306,7 @@ func handleFailure(plan *model.Plan) common.Executor {
 		for _, stage := range plan.Stages {
 			for _, run := range stage.Runs {
 				if run.Job().Result == "failure" && !run.Job().ContinueOnError {
-					return fmt.Errorf("Job '%s' failed", run.String())
+					return fmt.Errorf("job '%s' failed", run.String())
 				}
 			}
 		}
