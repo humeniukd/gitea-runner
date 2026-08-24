@@ -1138,6 +1138,7 @@ func sanitizeOptionsHostConfig(logger logrus.FieldLogger, hostConfig, trusted *c
 	resetOption(logger, "--runtime", &hostConfig.Runtime, trusted.Runtime)
 	resetOption(logger, "--cgroup-parent", &hostConfig.CgroupParent, trusted.CgroupParent)
 	resetOption(logger, "--sysctl", &hostConfig.Sysctls, trusted.Sysctls)
+	resetOption(logger, "--isolation", &hostConfig.Isolation, trusted.Isolation) // windows: process isolation drops the hyper-v boundary
 }
 
 // resetOption puts a field back to what the runner's own options give it, which only the

@@ -586,40 +586,28 @@ func TestCheckVolumes(t *testing.T) {
 func TestSanitizeOptionsHostConfig(t *testing.T) {
 	logger, _ := test.NewNullLogger()
 
-	dangerous := func() *container.HostConfig {
-		return &container.HostConfig{
-			PidMode:           "host",
-			IpcMode:           "host",
-			UTSMode:           "host",
-			CgroupnsMode:      "host",
-			UsernsMode:        "host",
-			CapAdd:            []string{"ALL"},
-			SecurityOpt:       []string{"seccomp=unconfined", "apparmor=unconfined"},
-			VolumesFrom:       []string{"other"},
-			Runtime:           "runc",
-			CgroupParent:      "/custom",
-			Devices:           []container.DeviceMapping{{PathOnHost: "/dev/sda", PathInContainer: "/dev/sda", CgroupPermissions: "rwm"}},
-			DeviceCgroupRules: []string{"a *:* rwm"},
-			Sysctls:           map[string]string{"net.ipv4.ip_forward": "1"},
-		}
+	// every field the sanitizer knows, so that a new one added without a reset shows up here
+	hostConfig := &container.HostConfig{
+		PidMode:           "host",
+		IpcMode:           "host",
+		UTSMode:           "host",
+		CgroupnsMode:      "host",
+		UsernsMode:        "host",
+		CapAdd:            []string{"ALL"},
+		SecurityOpt:       []string{"seccomp=unconfined", "apparmor=unconfined"},
+		VolumesFrom:       []string{"other"},
+		Runtime:           "runc",
+		Isolation:         "process",
+		CgroupParent:      "/custom",
+		Devices:           []container.DeviceMapping{{PathOnHost: "/dev/sda", PathInContainer: "/dev/sda", CgroupPermissions: "rwm"}},
+		DeviceCgroupRules: []string{"a *:* rwm"},
+		DeviceRequests:    []container.DeviceRequest{{Count: -1, Capabilities: [][]string{{"gpu"}}}},
+		Sysctls:           map[string]string{"net.ipv4.ip_forward": "1"},
 	}
 
-	hostConfig := dangerous()
 	sanitizeOptionsHostConfig(logger, hostConfig, &container.HostConfig{})
 
-	assert.Empty(t, string(hostConfig.PidMode))
-	assert.Empty(t, string(hostConfig.IpcMode))
-	assert.Empty(t, string(hostConfig.UTSMode))
-	assert.Empty(t, string(hostConfig.CgroupnsMode))
-	assert.Empty(t, string(hostConfig.UsernsMode))
-	assert.Empty(t, hostConfig.CapAdd)
-	assert.Empty(t, hostConfig.SecurityOpt)
-	assert.Empty(t, hostConfig.Devices)
-	assert.Empty(t, hostConfig.DeviceCgroupRules)
-	assert.Empty(t, hostConfig.VolumesFrom)
-	assert.Empty(t, hostConfig.Runtime)
-	assert.Empty(t, hostConfig.CgroupParent)
-	assert.Empty(t, hostConfig.Sysctls)
+	assert.Equal(t, &container.HostConfig{}, hostConfig)
 }
 
 // mergeOptions merges both option sources into an otherwise bare container, returning the
@@ -648,7 +636,7 @@ func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.
 	// server OS, which is not guaranteed for the test host.
 	const dangerousOptions = "--pid=host --ipc=host --uts=host --cgroupns=host " +
 		"--userns=host --cap-add=ALL --security-opt seccomp=unconfined " +
-		"--security-opt apparmor=unconfined --volumes-from other " +
+		"--security-opt apparmor=unconfined --volumes-from other --isolation process " +
 		"--runtime runc --cgroup-parent /custom --sysctl net.ipv4.ip_forward=1"
 
 	t.Run("unprivileged strips host-escape options", func(t *testing.T) {
@@ -665,6 +653,7 @@ func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.
 		assert.Empty(t, hostConfig.SecurityOpt)
 		assert.Empty(t, hostConfig.VolumesFrom)
 		assert.Empty(t, hostConfig.Runtime)
+		assert.Empty(t, string(hostConfig.Isolation))
 		assert.Empty(t, hostConfig.CgroupParent)
 		assert.Empty(t, hostConfig.Sysctls)
 	})
