@@ -71,7 +71,7 @@ runner:
   # This ensures bursty output (e.g., npm install) is delivered promptly.
   #log_report_batch_size: 100
   # The interval for reporting task state (step status, timing) to the Gitea instance.
-  # State is also reported immediately on step transitions (start/stop).
+  # State is also reported on step transitions (start/stop) and after each log flush.
   #state_report_interval: 5s
   # Per-attempt deadline for flushing the final logs and task state when a job
   # finishes, on a detached context so a server cancel can't block the acknowledgement.
@@ -219,6 +219,8 @@ container:
   # A volume declared here replaces the one the runner would mount on the same container path, so the
   # tool cache can be kept on the host. Its source must also be allowed by valid_volumes below:
   #   options: --volume /host/toolcache:/opt/hostedtoolcache
+  # With privileged disabled, options that could escape the container (--security-opt, --device,
+  # --cap-add, --pid, ...) are ignored in a workflow's container.options, but keep working here.
   #options:
   # The parent directory of a job's working directory.
   # NOTE: There is no need to add the first '/' of the path as runner will add it automatically.

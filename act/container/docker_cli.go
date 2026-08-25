@@ -17,8 +17,7 @@
 package container
 
 import (
-	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"net"
@@ -351,7 +350,7 @@ type containerConfig struct {
 // parse parses the args for the specified command and generates a Config,
 // a HostConfig and returns them with the specified command.
 // If the specified args are not valid, it will return an error.
-func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*containerConfig, error) { //nolint:gocyclo // verbatim copy from docker/cli
+func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*containerConfig, error) { //nolint:gocyclo,unparam // verbatim copy from docker/cli
 	var (
 		attachStdin  = copts.attach.Get("stdin")
 		attachStdout = copts.attach.Get("stdout")
@@ -959,11 +958,11 @@ func parseSecurityOpts(securityOpts []string) ([]string, error) {
 				if err != nil {
 					return securityOpts, fmt.Errorf("opening seccomp profile (%s) failed: %w", v, err)
 				}
-				var b bytes.Buffer
-				if err := json.Compact(&b, f); err != nil {
+				profile := jsontext.Value(f)
+				if err := profile.Compact(); err != nil {
 					return securityOpts, fmt.Errorf("compacting json for seccomp profile (%s) failed: %w", v, err)
 				}
-				securityOpts[key] = "seccomp=" + b.String()
+				securityOpts[key] = "seccomp=" + string(profile)
 			}
 		}
 	}

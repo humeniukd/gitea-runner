@@ -219,7 +219,7 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 				rc.JobContainer.Exec(execArgs, *step.getEnv(), "", ""),
 			)(ctx)
 		default:
-			return fmt.Errorf("The runs.using key must be one of: %v, got %s", []string{
+			return fmt.Errorf("the runs.using key must be one of: %v, got %s", []string{
 				model.ActionRunsUsingDocker,
 				model.ActionRunsUsingNode12,
 				model.ActionRunsUsingNode16,
@@ -422,7 +422,7 @@ func evalDockerArgs(ctx context.Context, step step, action *model.Action, cmd *[
 	}
 }
 
-func newStepContainer(ctx context.Context, step step, image string, cmd, entrypoint []string, options string) container.Container {
+func newStepContainer(ctx context.Context, step step, image string, cmd, entrypoint []string, runnerOptions string) container.Container {
 	rc := step.getRunContext()
 	logWriter := rc.commandLogWriter(ctx)
 	envList := make([]string, 0)
@@ -438,24 +438,24 @@ func newStepContainer(ctx context.Context, step step, image string, cmd, entrypo
 		networkMode = "default"
 	}
 	return ContainerNewContainer(&container.NewContainerInput{
-		Cmd:          cmd,
-		Entrypoint:   entrypoint,
-		WorkingDir:   rc.JobContainer.ToContainerPath(rc.Config.Workdir),
-		Image:        image,
-		Name:         createContainerName(rc.jobContainerName(), "STEP-"+step.getStepModel().ID),
-		Env:          envList,
-		Mounts:       mounts,
-		NetworkMode:  networkMode,
-		Binds:        binds,
-		Stdout:       logWriter,
-		Stderr:       logWriter,
-		Privileged:   rc.Config.Privileged,
-		UsernsMode:   rc.Config.UsernsMode,
-		Platform:     rc.Config.ContainerArchitecture,
-		Options:      options,
-		AutoRemove:   true,
-		ValidVolumes: rc.validVolumes(),
-		AllocatePTY:  rc.Config.AllocatePTY,
+		Cmd:           cmd,
+		Entrypoint:    entrypoint,
+		WorkingDir:    rc.JobContainer.ToContainerPath(rc.Config.Workdir),
+		Image:         image,
+		Name:          createContainerName(rc.jobContainerName(), "STEP-"+step.getStepModel().ID),
+		Env:           envList,
+		Mounts:        mounts,
+		NetworkMode:   networkMode,
+		Binds:         binds,
+		Stdout:        logWriter,
+		Stderr:        logWriter,
+		Privileged:    rc.Config.Privileged,
+		UsernsMode:    rc.Config.UsernsMode,
+		Platform:      rc.Config.ContainerArchitecture,
+		RunnerOptions: runnerOptions,
+		AutoRemove:    true,
+		ValidVolumes:  rc.validVolumes(),
+		AllocatePTY:   rc.Config.AllocatePTY,
 	})
 }
 
