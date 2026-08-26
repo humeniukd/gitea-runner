@@ -346,7 +346,7 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 			logger.Debugf("image '%s' for architecture '%s' already exists", image, rc.Config.ContainerArchitecture)
 		}
 	}
-	eval := rc.NewStepExpressionEvaluator(ctx, step)
+	eval := rc.NewActionInputsExpressionEvaluator(ctx, step)
 	cmd, err := shellquote.Split(eval.Interpolate(ctx, step.getStepModel().With["args"]))
 	if err != nil {
 		return err
@@ -410,19 +410,19 @@ func evalDockerArgs(ctx context.Context, step step, action *model.Action, cmd *[
 	}
 	mergeIntoMap(step, step.getEnv(), inputs)
 
-	stepEE := rc.NewStepExpressionEvaluator(ctx, step)
+	stepEE := rc.NewActionInputsExpressionEvaluator(ctx, step)
 	for i, v := range *cmd {
 		(*cmd)[i] = stepEE.Interpolate(ctx, v)
 	}
 	mergeIntoMap(step, step.getEnv(), action.Runs.Env)
 
-	ee := rc.NewStepExpressionEvaluator(ctx, step)
+	ee := rc.NewActionInputsExpressionEvaluator(ctx, step)
 	for k, v := range *step.getEnv() {
 		(*step.getEnv())[k] = ee.Interpolate(ctx, v)
 	}
 }
 
-func newStepContainer(ctx context.Context, step step, image string, cmd, entrypoint []string, options string) container.Container {
+func newStepContainer(ctx context.Context, step step, image string, cmd, entrypoint []string, runnerOptions string) container.Container {
 	rc := step.getRunContext()
 	logWriter := rc.commandLogWriter(ctx)
 	envList := make([]string, 0)
@@ -438,24 +438,24 @@ func newStepContainer(ctx context.Context, step step, image string, cmd, entrypo
 		networkMode = "default"
 	}
 	return ContainerNewContainer(&container.NewContainerInput{
-		Cmd:          cmd,
-		Entrypoint:   entrypoint,
-		WorkingDir:   rc.JobContainer.ToContainerPath(rc.Config.Workdir),
-		Image:        image,
-		Name:         createContainerName(rc.jobContainerName(), "STEP-"+step.getStepModel().ID),
-		Env:          envList,
-		Mounts:       mounts,
-		NetworkMode:  networkMode,
-		Binds:        binds,
-		Stdout:       logWriter,
-		Stderr:       logWriter,
-		Privileged:   rc.Config.Privileged,
-		UsernsMode:   rc.Config.UsernsMode,
-		Platform:     rc.Config.ContainerArchitecture,
-		Options:      options,
-		AutoRemove:   true,
-		ValidVolumes: rc.validVolumes(),
-		AllocatePTY:  rc.Config.AllocatePTY,
+		Cmd:           cmd,
+		Entrypoint:    entrypoint,
+		WorkingDir:    rc.JobContainer.ToContainerPath(rc.Config.Workdir),
+		Image:         image,
+		Name:          createContainerName(rc.jobContainerName(), "STEP-"+step.getStepModel().ID),
+		Env:           envList,
+		Mounts:        mounts,
+		NetworkMode:   networkMode,
+		Binds:         binds,
+		Stdout:        logWriter,
+		Stderr:        logWriter,
+		Privileged:    rc.Config.Privileged,
+		UsernsMode:    rc.Config.UsernsMode,
+		Platform:      rc.Config.ContainerArchitecture,
+		RunnerOptions: runnerOptions,
+		AutoRemove:    true,
+		ValidVolumes:  rc.validVolumes(),
+		AllocatePTY:   rc.Config.AllocatePTY,
 	})
 }
 
