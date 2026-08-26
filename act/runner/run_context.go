@@ -180,6 +180,13 @@ func (rc *RunContext) GetEnv() map[string]string {
 	return rc.Env
 }
 
+// setActionEnv sets a composite action's env, keeping the `inputs` context it derives from
+// in sync. Remote actions re-evaluate it per stage, so inputs may change between them.
+func (rc *RunContext) setActionEnv(env map[string]string) {
+	rc.Env = env
+	rc.actionInputs = inputsFromEnv(env)
+}
+
 func (rc *RunContext) jobContainerName() string {
 	// The job id, never evaluated, keeps two jobs apart when masking collapses their names.
 	nameParts := []string{rc.Config.ContainerNamePrefix, "WORKFLOW-" + rc.Run.Workflow.Name, "JOB-" + rc.Run.JobID, rc.Name}

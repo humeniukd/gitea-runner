@@ -75,14 +75,13 @@ func newCompositeRunContext(ctx context.Context, parent *RunContext, step action
 		StepResults:  map[string]*model.StepResult{},
 		JobContainer: parent.JobContainer,
 		ActionPath:   actionPath,
-		Env:          env,
-		actionInputs: inputsFromEnv(env),
 		GlobalEnv:    parent.GlobalEnv,
 		Masks:        parent.Masks,
 		ExtraPath:    parent.ExtraPath,
 		Parent:       parent,
 		EventJSON:    parent.EventJSON,
 	}
+	compositerc.setActionEnv(env)
 	compositerc.ExprEval = compositerc.NewExpressionEvaluator(ctx)
 
 	return compositerc
