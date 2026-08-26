@@ -227,9 +227,8 @@ func (rc *RunContext) containerDaemonSocket() string {
 
 const sharedToolCacheVolume = "act-toolcache" // mounted only when the tool cache is shared
 
-// validVolumes returns the volumes allowed on this job's containers: the configured base
-// plus the volumes the runner mounts automatically. It derives a fresh slice every call and
-// never mutates the shared Config (see containerDaemonSocket).
+// validVolumes returns what the job and action containers may mount, the configured base plus
+// the runner's own volumes. Fresh slice per call, the shared Config is never mutated.
 func (rc *RunContext) validVolumes() []string {
 	name := rc.jobContainerName()
 	volumes := slices.Clone(rc.Config.ValidVolumes)
@@ -275,7 +274,7 @@ func splitVolumes(specs []string) ([]string, map[string]string, map[string]bool)
 	for _, spec := range specs {
 		parsed, err := loader.ParseVolume(spec)
 		if err != nil {
-			binds = append(binds, spec) // let Docker report the malformed spec
+			binds = append(binds, spec) // unclassifiable, sanitizeConfig warns and drops it
 			continue
 		}
 		targets[parsed.Target] = true

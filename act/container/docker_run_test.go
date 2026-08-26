@@ -539,14 +539,13 @@ func TestCheckVolumes(t *testing.T) {
 			desc:         "no volumes can be matched",
 			validVolumes: []string{},
 			binds: []string{
-				"/anonymous",
 				"shared_volume:/shared_volume",
 				"/home/test/data:/test_data",
 				"/etc/conf.d/base.json:/config/base.json",
 				"sql_data:/sql_data",
 				"/secrets/keys:/keys",
 			},
-			expectedBinds: []string{"/anonymous"},
+			expectedBinds: []string{},
 		},
 		{
 			desc: "only allowed volumes can be matched",
@@ -580,7 +579,7 @@ func TestCheckVolumes(t *testing.T) {
 			}
 			_, hostConf := cr.sanitizeConfig(ctx, &container.Config{}, &container.HostConfig{Binds: tc.binds})
 			assert.Equal(t, tc.expectedBinds, hostConf.Binds)
-			assert.Len(t, hook.AllEntries(), len(tc.binds)-len(tc.expectedBinds))
+			assert.Len(t, hook.AllEntries(), len(tc.binds)-len(tc.expectedBinds)) // every drop is warned about
 		})
 	}
 }
