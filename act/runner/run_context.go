@@ -62,6 +62,7 @@ type RunContext struct {
 	JobName             string
 	ActionPath          string
 	Parent              *RunContext
+	actionInputs        map[string]any // inputs of the composite action this runs, nil for a job
 	Masks               []string
 	cleanUpJobContainer common.Executor
 	caller              *caller // job calling this RunContext (reusable workflows)

@@ -287,7 +287,7 @@ func isStepEnabled(ctx context.Context, expr string, step step, stage stepStage)
 		defaultStatusCheck = exprparser.DefaultStatusCheckSuccess
 	}
 
-	runStep, err := EvalBool(ctx, rc.NewStepExpressionEvaluatorExt(ctx, step, stage == stepStageMain), expr, defaultStatusCheck)
+	runStep, err := EvalBool(ctx, rc.NewStepExpressionEvaluator(ctx, step), expr, defaultStatusCheck)
 	if err != nil {
 		return false, fmt.Errorf("if-expression %q evaluation failed: %s", expr, err)
 	}
