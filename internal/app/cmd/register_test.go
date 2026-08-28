@@ -4,11 +4,17 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"gitea.com/gitea/runner/internal/pkg/config"
 
+	"connectrpc.com/connect"
+	pingv1 "gitea.dev/actionslib/ping/v1"
+	"gitea.dev/actionslib/ping/v1/pingv1connect"
 	"github.com/stretchr/testify/require"
 	"gotest.tools/v3/assert"
 )
@@ -245,4 +251,31 @@ func TestInitInputs(t *testing.T) {
 		})
 		require.Nil(t, inputs.Labels)
 	})
+}
+
+type fakePingClient struct {
+	pingv1connect.PingServiceClient
+	calls int
+	errs  int
+}
+
+func (f *fakePingClient) Ping(_ context.Context, _ *connect.Request[pingv1.PingRequest]) (*connect.Response[pingv1.PingResponse], error) {
+	f.calls++
+	if f.calls <= f.errs {
+		return nil, errors.New("tls: failed to verify certificate")
+	}
+	return connect.NewResponse(&pingv1.PingResponse{}), nil
+}
+
+func TestPingInstanceGivesUp(t *testing.T) {
+	cli := &fakePingClient{errs: 100}
+	err := pingInstance(t.Context(), cli, "runner", 3, time.Millisecond)
+	assert.ErrorContains(t, err, "after 3 attempts")
+	assert.Equal(t, 3, cli.calls)
+}
+
+func TestPingInstanceRetriesUntilReachable(t *testing.T) {
+	cli := &fakePingClient{errs: 2}
+	require.NoError(t, pingInstance(t.Context(), cli, "runner", 5, time.Millisecond))
+	assert.Equal(t, 3, cli.calls)
 }

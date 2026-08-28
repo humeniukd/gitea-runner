@@ -23,6 +23,7 @@ import (
 
 	"connectrpc.com/connect"
 	pingv1 "gitea.dev/actionslib/ping/v1"
+	"gitea.dev/actionslib/ping/v1/pingv1connect"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	"github.com/mattn/go-isatty"
 	log "github.com/sirupsen/logrus"
@@ -346,6 +347,40 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
 	return nil
 }
 
+// pingAttempts bounds the wait for the instance to come up, so a permanent
+// failure (bad URL, untrusted certificate) reports an error instead of looping
+// forever.
+const (
+	pingAttempts = 10
+	pingInterval = time.Second
+)
+
+func pingInstance(ctx context.Context, cli pingv1connect.PingServiceClient, runnerName string, attempts int, interval time.Duration) error {
+	var err error
+	for i := range attempts {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		_, err = cli.Ping(ctx, connect.NewRequest(&pingv1.PingRequest{
+			Data: runnerName,
+		}))
+		if err == nil {
+			log.Debugln("Successfully pinged the Gitea instance server")
+			return nil
+		}
+		log.WithError(err).Errorln("Cannot ping the Gitea instance server")
+		if i == attempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+	return fmt.Errorf("cannot ping the Gitea instance server after %d attempts: %w", attempts, err)
+}
+
 func doRegister(ctx context.Context, cfg *config.Config, inputs *registerInputs) error {
 	// Refuse to rewrite the runner file while another process is using it.
 	releaseLock, err := lock.TryLock(cfg.Runner.File)
@@ -370,27 +405,8 @@ func doRegister(ctx context.Context, cfg *config.Config, inputs *registerInputs)
 		config.RequestTimeout,
 	)
 
-	for {
-		_, err := cli.Ping(ctx, connect.NewRequest(&pingv1.PingRequest{
-			Data: inputs.RunnerName,
-		}))
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		if ctx.Err() != nil {
-			break
-		}
-		if err != nil {
-			log.WithError(err).
-				Errorln("Cannot ping the Gitea instance server")
-			// TODO: if ping failed, retry or exit
-			time.Sleep(time.Second)
-		} else {
-			log.Debugln("Successfully pinged the Gitea instance server")
-			break
-		}
+	if err := pingInstance(ctx, cli, inputs.RunnerName, pingAttempts, pingInterval); err != nil {
+		return err
 	}
 
 	reg := &config.Registration{
