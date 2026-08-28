@@ -37,7 +37,6 @@ fi
 test -f "$RUNNER_STATE_FILE" || echo "$RUNNER_STATE_FILE is missing or not a regular file"
 
 if [[ ! -s "$RUNNER_STATE_FILE" ]]; then
-  try=$((try + 1))
   success=0
 
   # The point of this loop is to make it simple, when running both runner and gitea in docker,
@@ -59,6 +58,7 @@ if [[ ! -s "$RUNNER_STATE_FILE" ]]; then
       echo "Waiting to retry ..."
       sleep 5
     fi
+    try=$((try + 1))
   done
 fi
 # Prevent reading the token from the gitea-runner process
