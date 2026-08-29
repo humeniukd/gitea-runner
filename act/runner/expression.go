@@ -26,20 +26,12 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
-// ExpressionEvaluator is the interface for evaluating expressions
-type ExpressionEvaluator interface {
-	evaluate(context.Context, string, exprparser.DefaultStatusCheck) (any, error)
-	interpolate(context.Context, string) (string, error)
-	EvaluateYamlNode(context.Context, *yaml.Node) error
-	Interpolate(context.Context, string) string
-}
-
 // NewExpressionEvaluator creates a new evaluator
-func (rc *RunContext) NewExpressionEvaluator(ctx context.Context) ExpressionEvaluator {
+func (rc *RunContext) NewExpressionEvaluator(ctx context.Context) *ExpressionEvaluator {
 	return rc.NewExpressionEvaluatorWithEnv(ctx, rc.GetEnv())
 }
 
-func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map[string]string) ExpressionEvaluator {
+func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map[string]string) *ExpressionEvaluator {
 	var workflowCallResult map[string]*model.WorkflowCallResult
 
 	// todo: cleanup EvaluationEnvironment creation
@@ -79,7 +71,7 @@ func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map
 	}
 
 	ghc := rc.getGithubContext(ctx)
-	inputs := getEvaluatorInputs(ctx, rc, nil, ghc)
+	inputs := getEvaluatorInputs(ctx, rc, rc.actionInputs, ghc)
 
 	ee := &exprparser.EvaluationEnvironment{
 		Github: ghc,
@@ -98,7 +90,7 @@ func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map
 		HashFiles: getHashFilesFunction(ctx, rc),
 	}
 	ee.Runner = rc.getRunnerContext(ctx)
-	return expressionEvaluator{
+	return &expressionEvaluator{
 		interpreter: exprparser.NewInterpeter(ee, exprparser.Config{
 			Run:        rc.Run,
 			WorkingDir: rc.Config.Workdir,
@@ -110,8 +102,17 @@ func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map
 //go:embed hashfiles/index.js
 var hashfiles string
 
-// NewStepExpressionEvaluator creates a new evaluator
-func (rc *RunContext) NewStepExpressionEvaluator(ctx context.Context, step step) ExpressionEvaluator {
+// NewStepExpressionEvaluator creates a new evaluator with the `inputs` of the enclosing workflow or composite action
+func (rc *RunContext) NewStepExpressionEvaluator(ctx context.Context, step step) *ExpressionEvaluator {
+	return rc.newStepExpressionEvaluator(ctx, step, rc.actionInputs)
+}
+
+// NewActionInputsExpressionEvaluator creates a new evaluator with the step's own with: values as `inputs`
+func (rc *RunContext) NewActionInputsExpressionEvaluator(ctx context.Context, step step) *ExpressionEvaluator {
+	return rc.newStepExpressionEvaluator(ctx, step, inputsFromEnv(*step.getEnv()))
+}
+
+func (rc *RunContext) newStepExpressionEvaluator(ctx context.Context, step step, stepInputs map[string]any) *ExpressionEvaluator {
 	// todo: cleanup EvaluationEnvironment creation
 	job := rc.Run.Job()
 	strategy := make(map[string]any)
@@ -131,9 +132,6 @@ func (rc *RunContext) NewStepExpressionEvaluator(ctx context.Context, step step)
 		}
 	}
 
-	ghc := rc.getGithubContext(ctx)
-	inputs := getEvaluatorInputs(ctx, rc, step, ghc)
-
 	ee := &exprparser.EvaluationEnvironment{
 		Github:   step.getGithubContext(ctx),
 		Env:      *step.getEnv(),
@@ -146,11 +144,11 @@ func (rc *RunContext) NewStepExpressionEvaluator(ctx context.Context, step step)
 		Needs:    using,
 		// todo: should be unavailable
 		// but required to interpolate/evaluate the inputs in actions/composite
-		Inputs:    inputs,
+		Inputs:    getEvaluatorInputs(ctx, rc, stepInputs, rc.getGithubContext(ctx)),
 		HashFiles: getHashFilesFunction(ctx, rc),
 	}
 	ee.Runner = rc.getRunnerContext(ctx)
-	return expressionEvaluator{
+	return &expressionEvaluator{
 		interpreter: exprparser.NewInterpeter(ee, exprparser.Config{
 			Run:        rc.Run,
 			WorkingDir: rc.Config.Workdir,
@@ -178,7 +176,7 @@ func getHashFilesFunction(ctx context.Context, rc *RunContext) func(v []reflect.
 							followSymlink = true
 							continue
 						}
-						return "", fmt.Errorf("Invalid glob option %s, available option: '--follow-symbolic-links'", s)
+						return "", fmt.Errorf("invalid glob option %s, available option: '--follow-symbolic-links'", s)
 					}
 				}
 				patterns = append(patterns, s)
@@ -196,7 +194,7 @@ func getHashFilesFunction(ctx context.Context, rc *RunContext) func(v []reflect.
 				Mode: 0o644,
 				Body: hashfiles,
 			}).
-				Then(rc.execJobContainer([]string{"node", path.Join(rc.JobContainer.GetActPath(), name)},
+				Then(rc.JobContainer.Exec([]string{"node", path.Join(rc.JobContainer.GetActPath(), name)},
 					env, "", "")).
 				Finally(func(context.Context) error {
 					rc.JobContainer.ReplaceLogWriter(stdout, stderr)
@@ -221,6 +219,8 @@ func getHashFilesFunction(ctx context.Context, rc *RunContext) func(v []reflect.
 type expressionEvaluator struct {
 	interpreter exprparser.Interpreter
 }
+
+type ExpressionEvaluator = expressionEvaluator
 
 func (ee expressionEvaluator) evaluate(ctx context.Context, in string, defaultStatusCheck exprparser.DefaultStatusCheck) (any, error) {
 	logger := common.Logger(ctx)
@@ -261,29 +261,27 @@ func (ee expressionEvaluator) interpolate(ctx context.Context, in string) (strin
 
 // EvalBool evaluates an expression against given evaluator. An `if:` is an expression even without
 // `${{ }}`, while literal text around one makes the whole value a string.
-func EvalBool(ctx context.Context, evaluator ExpressionEvaluator, expr string, defaultStatusCheck exprparser.DefaultStatusCheck) (bool, error) {
+func EvalBool(ctx context.Context, evaluator *expressionEvaluator, expr string, defaultStatusCheck exprparser.DefaultStatusCheck) (bool, error) {
 	return expreval.New(func(in string, dsc exprparser.DefaultStatusCheck) (any, error) {
 		return evaluator.evaluate(ctx, in, dsc)
 	}).EvalBool(expr, defaultStatusCheck)
 }
 
-func getEvaluatorInputs(ctx context.Context, rc *RunContext, step step, ghc *model.GithubContext) map[string]any {
+func inputsFromEnv(env map[string]string) map[string]any {
 	inputs := map[string]any{}
-
-	setupWorkflowInputs(ctx, &inputs, rc)
-
-	var env map[string]string
-	if step != nil {
-		env = *step.getEnv()
-	} else {
-		env = rc.GetEnv()
-	}
-
 	for k, v := range env {
 		if after, ok := strings.CutPrefix(k, "INPUT_"); ok {
 			inputs[strings.ToLower(after)] = v
 		}
 	}
+	return inputs
+}
+
+func getEvaluatorInputs(ctx context.Context, rc *RunContext, stepInputs map[string]any, ghc *model.GithubContext) map[string]any {
+	inputs := map[string]any{}
+
+	setupWorkflowInputs(ctx, &inputs, rc)
+	maps.Copy(inputs, stepInputs)
 
 	if ghc.EventName == "workflow_dispatch" {
 		config := rc.Run.Workflow.WorkflowDispatchConfig()

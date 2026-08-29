@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,10 +20,13 @@ import (
 	"gitea.com/gitea/runner/act/runner"
 	"gitea.com/gitea/runner/internal/pkg/client/mocks"
 	"gitea.com/gitea/runner/internal/pkg/config"
+	"gitea.com/gitea/runner/internal/pkg/metrics"
 
 	connect_go "connectrpc.com/connect"
+	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	log "github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -206,7 +210,7 @@ func TestReporter_parseLogRow(t *testing.T) {
 				got := "<nil>"
 
 				if rv != nil {
-					got = rv.Content
+					got = r.mask(rv.Content)
 				}
 
 				assert.Equal(t, tt.want[idx], got)
@@ -223,8 +227,7 @@ func TestReporter_parseLogRowAddMask(t *testing.T) {
 
 		assert.Nil(t, r.parseLogRow(&log.Entry{Message: line}), line)
 
-		row := r.parseLogRow(&log.Entry{Message: "using supersecret now"})
-		assert.Equal(t, "using *** now", row.Content, line)
+		assert.Equal(t, "using *** now", r.mask("using supersecret now"), line)
 	}
 }
 
@@ -271,14 +274,14 @@ func TestReporter_Fire(t *testing.T) {
 			"stepID":     []string{"0", "0"},
 			"stepNumber": 0,
 			"raw_output": true,
-			"stepResult": "failure",
+			"stepResult": model.StepStatusFailure,
 		}}))
 		assert.Equal(t, runnerv1.Result_RESULT_UNSPECIFIED, reporter.state.Steps[0].Result)
 		require.NoError(t, reporter.Fire(&log.Entry{Message: "step result", Data: map[string]any{
 			"stage":      "Main",
 			"stepNumber": 0,
 			"raw_output": true,
-			"stepResult": "success",
+			"stepResult": model.StepStatusSuccess,
 		}}))
 		assert.Equal(t, runnerv1.Result_RESULT_SUCCESS, reporter.state.Steps[0].Result)
 
@@ -1038,18 +1041,17 @@ func TestReporter_StopHeartbeats(t *testing.T) {
 		"Close() must still send a final UpdateTask after StopHeartbeats")
 }
 
-func TestAppendIfNotNil(t *testing.T) {
-	var s []*int
-	s = appendIfNotNil(s, nil)
-	assert.Empty(t, s)
+func TestAppendLogRow(t *testing.T) {
+	r := &Reporter{logReplacer: strings.NewReplacer("supersecret", "***")}
+	r.appendLogRow(nil)
+	r.appendLogRow(&runnerv1.LogRow{Time: timestamppb.Now(), Content: "hello supersecret"})
+	require.Len(t, r.logRows, 1)
+	assert.Equal(t, "hello ***", r.logRows[0].Content)
 
-	v := 7
-	s = appendIfNotNil(s, &v)
-	require.Len(t, s, 1)
-	assert.Equal(t, &v, s[0])
-
-	s = appendIfNotNil(s, nil)
-	require.Len(t, s, 1)
+	// repairing the invalid byte spells out the secret, so the repair has to come first
+	r = &Reporter{logReplacer: strings.NewReplacer("a?b", "***")}
+	r.appendLogRow(&runnerv1.LogRow{Time: timestamppb.Now(), Content: "a\xffb"})
+	assert.Equal(t, "***", r.logRows[0].Content)
 }
 
 func TestReporter_Levels(t *testing.T) {
@@ -1062,7 +1064,7 @@ func TestReporter_Result(t *testing.T) {
 }
 
 func TestReporter_SetOutputs(t *testing.T) {
-	r := &Reporter{state: &runnerv1.TaskState{}, logReplacer: strings.NewReplacer()}
+	r := &Reporter{state: &runnerv1.TaskState{}, logReplacer: strings.NewReplacer("s3cr3t", "***")}
 
 	r.SetOutputs(map[string]string{"foo": "bar"})
 	got, ok := r.outputs["foo"]
@@ -1085,12 +1087,43 @@ func TestReporter_SetOutputs(t *testing.T) {
 	_, ok = r.outputs["big"]
 	assert.False(t, ok)
 
+	// a value carrying a secret is skipped, as GitHub does, rather than sent masked
+	r.SetOutputs(map[string]string{"leaky": "has s3cr3t in it"})
+	_, ok = r.outputs["leaky"]
+	assert.False(t, ok)
+
+	// invalid UTF-8 is not a secret, so the value is kept as it is rather than dropped
+	r.SetOutputs(map[string]string{"binary": "caf\xff"})
+	got, ok = r.outputs["binary"]
+	require.True(t, ok)
+	assert.Equal(t, "caf\xff", got.value)
+
 	// a value at exactly the limit is still stored
 	maxValue := strings.Repeat("v", maxOutputValueLen)
 	r.SetOutputs(map[string]string{"atlimit": maxValue})
 	got, ok = r.outputs["atlimit"]
 	require.True(t, ok)
 	assert.Len(t, got.value, maxOutputValueLen)
+}
+
+// Gitea delivers ACTIONS_STEP_DEBUG as a secret, so masking "true" would drop any job output
+// saying it. GitHub skips the same two keys.
+func TestReporter_DebugSettingsAreNotMasked(t *testing.T) {
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+
+	reporter := NewReporter(context.Background(), nil, nil, &runnerv1.Task{
+		Context: taskCtx,
+		Secrets: map[string]string{"ACTIONS_STEP_DEBUG": "true", "ACTIONS_RUNNER_DEBUG": "true", "TOKEN": "s3cr3t"},
+	}, &config.Config{})
+	defer deregisterGlobalMasks(reporter)
+
+	assert.True(t, reporter.debugOutputEnabled)
+	assert.Equal(t, "debug is true", reporter.mask("debug is true"))
+	assert.Equal(t, "***", reporter.mask("s3cr3t"))
+
+	reporter.SetOutputs(map[string]string{"changed": "true"})
+	assert.Equal(t, "true", reporter.outputs["changed"].value) // needs.<job>.outputs.changed == 'true' still works
 }
 
 // An output the server acknowledged is not reported again.
@@ -1162,10 +1195,297 @@ func TestReporter_masksEncodedSecrets(t *testing.T) {
 		"basic " + base64.StdEncoding.EncodeToString([]byte(secret)),
 		"https://example.com/?token=" + url.QueryEscape(secret),
 	} {
-		row := r.parseLogRow(&log.Entry{Message: line})
-		require.NotNil(t, row)
-		assert.Contains(t, row.Content, "***")
-		assert.NotContains(t, row.Content, secret)
-		assert.NotContains(t, row.Content, base64.StdEncoding.EncodeToString([]byte(secret)))
+		masked := r.mask(line)
+		assert.Contains(t, masked, "***")
+		assert.NotContains(t, masked, secret)
+		assert.NotContains(t, masked, base64.StdEncoding.EncodeToString([]byte(secret)))
 	}
+}
+
+// A server that acknowledges more rows than were sent must not take the runner
+// process down with it.
+func TestReporter_AckIndexBeyondBuffer(t *testing.T) {
+	client := mocks.NewClient(t)
+	client.On("UpdateLog", mock.Anything, mock.Anything).Return(func(_ context.Context, _ *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
+		return connect_go.NewResponse(&runnerv1.UpdateLogResponse{AckIndex: 1000}), nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+	cfg, _ := config.LoadDefault("")
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx}, cfg)
+	reporter.ResetSteps(1)
+
+	require.NoError(t, reporter.Fire(&log.Entry{
+		Message: "hello",
+		Data:    log.Fields{"stage": "Main", "stepNumber": 0, "raw_output": true},
+		Level:   log.InfoLevel,
+	}))
+
+	require.NoError(t, reporter.ReportLog(false))
+}
+
+// Close has to survive giving up on a daemon still parked in an RPC.
+func TestReporter_CloseWithStuckDaemon(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+
+	client := mocks.NewClient(t)
+	client.On("UpdateLog", mock.Anything, mock.Anything).Return(func(_ context.Context, req *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+		return connect_go.NewResponse(&runnerv1.UpdateLogResponse{
+			AckIndex: req.Msg.Index + int64(len(req.Msg.Rows)),
+		}), nil
+	})
+	client.On("UpdateTask", mock.Anything, mock.Anything).Return(func(_ context.Context, _ *connect_go.Request[runnerv1.UpdateTaskRequest]) (*connect_go.Response[runnerv1.UpdateTaskResponse], error) {
+		return connect_go.NewResponse(&runnerv1.UpdateTaskResponse{}), nil
+	}).Maybe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+	cfg, _ := config.LoadDefault("")
+	cfg.Runner.LogReportInterval = 10 * time.Millisecond
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx}, cfg)
+	reporter.daemonWait = time.Millisecond
+	reporter.RunDaemon()
+	reporter.ResetSteps(1)
+
+	require.NoError(t, reporter.Fire(&log.Entry{
+		Message: "hello",
+		Data:    log.Fields{"stage": "Main", "stepNumber": 0, "raw_output": true},
+		Level:   log.InfoLevel,
+	}))
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon never reached UpdateLog")
+	}
+	go func() {
+		time.Sleep(10 * reporter.daemonWait)
+		close(release)
+	}()
+
+	require.NoError(t, reporter.Close(""))
+}
+
+// The zombie reaper marks a task failed, and cancelling the context is how the
+// runner stops, so the two must not be conflated into "cancelled".
+func TestReporter_ServerFailureResultIsReportedAsFailure(t *testing.T) {
+	var lastState *runnerv1.TaskState
+	client := mocks.NewClient(t)
+	client.On("UpdateTask", mock.Anything, mock.Anything).Return(func(_ context.Context, req *connect_go.Request[runnerv1.UpdateTaskRequest]) (*connect_go.Response[runnerv1.UpdateTaskResponse], error) {
+		lastState = req.Msg.State
+		return connect_go.NewResponse(&runnerv1.UpdateTaskResponse{
+			State: &runnerv1.TaskState{Result: runnerv1.Result_RESULT_FAILURE},
+		}), nil
+	})
+	client.On("UpdateLog", mock.Anything, mock.Anything).Return(func(_ context.Context, req *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
+		return connect_go.NewResponse(&runnerv1.UpdateLogResponse{
+			AckIndex: req.Msg.Index + int64(len(req.Msg.Rows)),
+		}), nil
+	}).Maybe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+	cfg, _ := config.LoadDefault("")
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx}, cfg)
+	close(reporter.daemon) // no daemon loop to acknowledge
+
+	require.NoError(t, reporter.ReportState(false))
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.NoError(t, reporter.Close(""))
+
+	require.NotNil(t, lastState)
+	assert.Equal(t, runnerv1.Result_RESULT_FAILURE, lastState.Result)
+}
+
+func TestReporter_NoteReport(t *testing.T) {
+	hook := logrustest.NewGlobal()
+	defer hook.Reset()
+
+	reporter := &Reporter{reportFailing: map[string]bool{}}
+
+	// A pending output is not a transport failure and must not read as one.
+	reporter.noteReport(metrics.LabelMethodUpdateTask, fmt.Errorf("wrapped: %w", errOutputsNotSent))
+	assert.Empty(t, hook.AllEntries())
+
+	// An outage logs once at each end, not every report interval for hours.
+	reporter.noteReport(metrics.LabelMethodUpdateTask, errors.New("connection refused"))
+	reporter.noteReport(metrics.LabelMethodUpdateTask, errors.New("connection refused"))
+	require.Len(t, hook.AllEntries(), 1)
+	assert.Contains(t, hook.LastEntry().Message, "connection refused")
+
+	reporter.noteReport(metrics.LabelMethodUpdateTask, nil)
+	require.Len(t, hook.AllEntries(), 2)
+	assert.Contains(t, hook.LastEntry().Message, "reconnected")
+}
+
+// A job's final error can carry a secret, e.g. one interpolated into a failing
+// expression, so Close must mask it like every other row.
+func TestReporter_CloseMasksLastWords(t *testing.T) {
+	const secret = "supersecret"
+	var rows []*runnerv1.LogRow
+
+	client := mocks.NewClient(t)
+	client.On("UpdateLog", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
+			rows = append(rows, req.Msg.Rows...)
+			return connect_go.NewResponse(&runnerv1.UpdateLogResponse{
+				AckIndex: req.Msg.Index + int64(len(req.Msg.Rows)),
+			}), nil
+		},
+	)
+	client.On("UpdateTask", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ *connect_go.Request[runnerv1.UpdateTaskRequest]) (*connect_go.Response[runnerv1.UpdateTaskResponse], error) {
+			return connect_go.NewResponse(&runnerv1.UpdateTaskResponse{}), nil
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const idToken = "id-token-request-secret"
+	taskCtx, err := structpb.NewStruct(map[string]any{"actions_id_token_request_token": idToken})
+	require.NoError(t, err)
+	cfg, _ := config.LoadDefault("")
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{
+		Context: taskCtx,
+		Secrets: map[string]string{"TOKEN": secret},
+	}, cfg)
+	close(reporter.daemon)
+
+	require.NoError(t, reporter.Close("could not get job matrix: "+secret+" "+idToken))
+
+	require.Len(t, rows, 1)
+	assert.Equal(t, "could not get job matrix: *** ***", rows[0].Content)
+}
+
+// giteaLogModel mirrors how Gitea stores a task log: UpdateLog appends rows to one
+// stream, and UpdateTask overwrites the per-step ranges the web UI slices that stream by
+// (modules/actions/task_state.go, FullSteps).
+type giteaLogModel struct {
+	mu      sync.Mutex
+	rows    int64
+	claimed int64
+}
+
+func (m *giteaLogModel) appendRows(n int) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rows += int64(n)
+	return m.rows
+}
+
+func (m *giteaLogModel) applyState(state *runnerv1.TaskState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range state.GetSteps() {
+		m.claimed = max(m.claimed, s.LogIndex+s.LogLength)
+	}
+}
+
+// snapshot returns the accepted rows and how far the reported step ranges reach into
+// them. The remainder is what the web UI renders under "Complete job".
+func (m *giteaLogModel) snapshot() (rows, claimed int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rows, m.claimed
+}
+
+// Regression test for https://gitea.com/gitea/runner/issues/1184.
+func TestReporter_StepRangeCoversAckedRows(t *testing.T) {
+	server := &giteaLogModel{}
+
+	client := mocks.NewClient(t)
+	client.On("UpdateLog", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
+			return connect_go.NewResponse(&runnerv1.UpdateLogResponse{
+				AckIndex: server.appendRows(len(req.Msg.Rows)),
+			}), nil
+		},
+	)
+	client.On("UpdateTask", mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req *connect_go.Request[runnerv1.UpdateTaskRequest]) (*connect_go.Response[runnerv1.UpdateTaskResponse], error) {
+			server.applyState(req.Msg.State)
+			return connect_go.NewResponse(&runnerv1.UpdateTaskResponse{}), nil
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+
+	// Only the batch threshold may flush: the tickers are the periodic repair this test
+	// must not depend on, and Close() is the one after the damage is done.
+	cfg, _ := config.LoadDefault("")
+	cfg.Runner.LogReportInterval = time.Hour
+	cfg.Runner.LogReportMaxLatency = time.Hour
+	cfg.Runner.StateReportInterval = time.Hour
+	cfg.Runner.LogReportBatchSize = 5
+
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx}, cfg)
+	reporter.ResetSteps(1)
+	reporter.RunDaemon()
+	defer func() {
+		_ = reporter.Close("")
+	}()
+
+	stepData := log.Fields{"stage": "Main", "stepNumber": 0, "raw_output": true}
+
+	// The step's first row is a transition, so it flushes state as well as logs.
+	require.NoError(t, reporter.Fire(&log.Entry{Message: "step starting", Data: stepData}))
+	require.Eventually(t, func() bool {
+		rows, claimed := server.snapshot()
+		return rows == 1 && claimed == rows
+	}, time.Second, 10*time.Millisecond, "the step transition should have flushed both log and state")
+
+	for i := range cfg.Runner.LogReportBatchSize {
+		require.NoError(t, reporter.Fire(&log.Entry{
+			Message: fmt.Sprintf("step output %d", i),
+			Data:    stepData,
+		}))
+	}
+
+	assert.Eventually(t, func() bool {
+		rows, claimed := server.snapshot()
+		return rows == 1+int64(cfg.Runner.LogReportBatchSize) && claimed == rows
+	}, time.Second, 10*time.Millisecond,
+		"every log row the server accepted must be covered by a reported step range")
+}
+
+// A flush the server took no rows for describes nothing new, so it must not spend an
+// UpdateTask. UpdateTask is never registered on the client, so calling it fails the test.
+func TestReporter_FlushWithoutAckedRowsSkipsState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taskCtx, err := structpb.NewStruct(map[string]any{})
+	require.NoError(t, err)
+
+	client := mocks.NewClient(t)
+	client.On("UpdateLog", mock.Anything, mock.Anything).Once().Return(
+		func(_ context.Context, _ *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
+			return connect_go.NewResponse(&runnerv1.UpdateLogResponse{AckIndex: 0}), nil
+		},
+	)
+
+	cfg, _ := config.LoadDefault("")
+	reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx}, cfg)
+
+	// An idle job: no rows, so not even an UpdateLog.
+	reporter.reportLogWithState()
+
+	// A row the server declines to take: an UpdateLog, but still no step range to report.
+	reporter.Logf("row")
+	reporter.reportLogWithState()
 }

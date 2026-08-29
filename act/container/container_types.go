@@ -25,26 +25,27 @@ func (e ExitCodeError) Error() string {
 
 // NewContainerInput the input for the New function
 type NewContainerInput struct {
-	Image          string
-	Username       string
-	Password       string
-	Entrypoint     []string
-	Cmd            []string
-	WorkingDir     string
-	Env            []string
-	Binds          []string
-	Mounts         map[string]string
-	Name           string
-	Stdout         io.Writer
-	Stderr         io.Writer
-	NetworkMode    string
-	Privileged     bool
-	UsernsMode     string
-	Platform       string
-	Options        string
-	NetworkAliases []string
-	ExposedPorts   nat.PortSet
-	PortBindings   nat.PortMap
+	Image           string
+	Username        string
+	Password        string
+	Entrypoint      []string
+	Cmd             []string
+	WorkingDir      string
+	Env             []string
+	Binds           []string
+	Mounts          map[string]string
+	Name            string
+	Stdout          io.Writer
+	Stderr          io.Writer
+	NetworkMode     string
+	Privileged      bool
+	UsernsMode      string
+	Platform        string
+	RunnerOptions   string // container options the runner was configured with, trusted
+	WorkflowOptions string // container options the workflow asked for, untrusted
+	NetworkAliases  []string
+	ExposedPorts    nat.PortSet
+	PortBindings    nat.PortMap
 
 	// Gitea specific
 	AutoRemove   bool
@@ -88,9 +89,7 @@ type Info struct {
 // Container for managing docker run containers
 type Container interface {
 	Create(capAdd, capDrop []string) common.Executor
-	ConnectToNetwork(name string) common.Executor
 	Copy(destPath string, files ...*FileEntry) common.Executor
-	CopyTarStream(ctx context.Context, destPath string, tarStream io.Reader) error
 	CopyDir(destPath, srcPath string, useGitIgnore bool) common.Executor
 	GetContainerArchive(ctx context.Context, srcPath string) (io.ReadCloser, error)
 	Inspect(ctx context.Context) (*Info, error)

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"gitea.com/gitea/runner/internal/pkg/config"
+
 	"gitea.dev/actionslib/pkg/model"
 	"github.com/stretchr/testify/require"
 	"go.yaml.in/yaml/v4"
@@ -28,6 +30,19 @@ func TestExecuteArgsResolve(t *testing.T) {
 	require.Equal(t, abs, args.resolve(abs))
 }
 
+func TestSharedToolCache(t *testing.T) {
+	shared, err := sharedToolCache(config.ToolCacheModeShared)
+	require.NoError(t, err)
+	require.True(t, shared)
+
+	shared, err = sharedToolCache(config.ToolCacheModeNone)
+	require.NoError(t, err)
+	require.False(t, shared)
+
+	_, err = sharedToolCache("everyone")
+	require.ErrorContains(t, err, "tool-cache-mode")
+}
+
 func TestExecuteArgsPaths(t *testing.T) {
 	workdir := t.TempDir()
 	args := &executeArgs{
@@ -39,6 +54,81 @@ func TestExecuteArgsPaths(t *testing.T) {
 	require.Equal(t, filepath.Join(workdir, ".gitea/workflows"), args.WorkflowsPath())
 	require.Equal(t, filepath.Join(workdir, ".env"), args.Envfile())
 	require.Equal(t, workdir, args.Workdir())
+}
+
+func TestExecuteArgsLoadInputs(t *testing.T) {
+	require.Empty(t, (&executeArgs{}).LoadInputs())
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	require.NoError(t, os.WriteFile(envFile, []byte("BAZ=qux\nOVERRIDE=from_file\n"), 0o600))
+
+	args := &executeArgs{inputs: []string{"FOO=bar", "EMPTY", "WITH=eq=sign", "OVERRIDE=from_cli"}, inputfile: envFile}
+	require.Equal(t, map[string]string{
+		"FOO":      "bar",
+		"EMPTY":    "",
+		"WITH":     "eq=sign",
+		"BAZ":      "qux",
+		"OVERRIDE": "from_cli",
+	}, args.LoadInputs())
+}
+
+func TestExecuteArgsEventJSON(t *testing.T) {
+	payload := func(content string) string {
+		path := filepath.Join(t.TempDir(), "event.json")
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		return path
+	}
+
+	tests := []struct {
+		name      string
+		eventpath string
+		inputs    []string
+		expected  string
+	}{
+		{
+			name:      "keeps a payload without inputs to merge",
+			eventpath: payload(`{"inputs": {"kept": "from_event"}}`),
+			expected:  `{"inputs": {"kept": "from_event"}}`,
+		},
+		{
+			name:      "overrides the event inputs it names, keeping the rest",
+			eventpath: payload(`{"inputs": {"kept": "from_event", "named": "from_event"}}`),
+			inputs:    []string{"named=from_cli"},
+			expected:  `{"inputs": {"kept": "from_event", "named": "from_cli"}}`,
+		},
+		{
+			name:      "adds inputs to a payload carrying none",
+			eventpath: payload(`{"repository": {"name": "test-repo"}}`),
+			inputs:    []string{"flag=val"},
+			expected:  `{"repository": {"name": "test-repo"}, "inputs": {"flag": "val"}}`,
+		},
+		{
+			name:      "handles a null payload",
+			eventpath: payload("null"),
+			inputs:    []string{"flag=val"},
+			expected:  `{"inputs": {"flag": "val"}}`,
+		},
+		{
+			name:     "builds a payload without an event file",
+			inputs:   []string{"flag=val"},
+			expected: `{"inputs": {"flag": "val"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eventJSON, err := (&executeArgs{eventpath: tt.eventpath, inputs: tt.inputs}).eventJSON()
+			require.NoError(t, err)
+			require.JSONEq(t, tt.expected, eventJSON)
+		})
+	}
+
+	args := &executeArgs{inputs: []string{"flag=val"}}
+	config, err := args.runnerConfig("workflow_dispatch", nil, nil, 0, false)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"inputs": {"flag": "val"}}`, config.EventJSON)
+	require.Equal(t, "workflow_dispatch", config.EventName) // the inputs context stays empty without it
 }
 
 func TestExecuteArgsLoadVars(t *testing.T) {

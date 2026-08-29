@@ -23,12 +23,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type closerMock struct {
-	mock.Mock
-}
+type closerFunc func()
 
-func (m *closerMock) Close() error {
-	m.Called()
+func (close closerFunc) Close() error {
+	close()
 	return nil
 }
 
@@ -39,6 +37,15 @@ runs:
 	using: 'node16'
 	main: 'main.js'
 `, "\t", "  ")
+	yamlAction := &model.Action{
+		Name: "name",
+		Runs: model.ActionRuns{
+			Using:  "node16",
+			Main:   "main.js",
+			PreIf:  "always()",
+			PostIf: "always()",
+		},
+	}
 
 	table := []struct {
 		name        string
@@ -52,30 +59,14 @@ runs:
 			step:        &model.Step{},
 			filename:    "action.yml",
 			fileContent: yaml,
-			expected: &model.Action{
-				Name: "name",
-				Runs: model.ActionRuns{
-					Using:  "node16",
-					Main:   "main.js",
-					PreIf:  "always()",
-					PostIf: "always()",
-				},
-			},
+			expected:    yamlAction,
 		},
 		{
 			name:        "readActionYaml",
 			step:        &model.Step{},
 			filename:    "action.yaml",
 			fileContent: yaml,
-			expected: &model.Action{
-				Name: "name",
-				Runs: model.ActionRuns{
-					Using:  "node16",
-					Main:   "main.js",
-					PreIf:  "always()",
-					PostIf: "always()",
-				},
-			},
+			expected:    yamlAction,
 		},
 		{
 			name:        "readDockerfile",
@@ -121,14 +112,14 @@ runs:
 
 	for _, tt := range table {
 		t.Run(tt.name, func(t *testing.T) {
-			closerMock := &closerMock{}
+			closed := false
 
 			readFile := func(filename string) (io.Reader, io.Closer, error) {
 				if tt.filename != filename {
 					return nil, nil, fs.ErrNotExist
 				}
 
-				return strings.NewReader(tt.fileContent), closerMock, nil
+				return strings.NewReader(tt.fileContent), closerFunc(func() { closed = true }), nil
 			}
 
 			writeFile := func(filename string, data []byte, perm fs.FileMode) error {
@@ -137,55 +128,13 @@ runs:
 				return nil
 			}
 
-			if tt.filename != "" {
-				closerMock.On("Close")
-			}
-
 			action, err := readActionImpl(context.Background(), tt.step, "actionDir", "actionPath", readFile, writeFile)
 
 			assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
 			assert.Equal(t, tt.expected, action)
 
-			closerMock.AssertExpectations(t)
+			assert.Equal(t, tt.filename != "", closed)
 		})
-	}
-}
-
-// With AutoRemove the daemon reaps the container on exit, so act must not remove it afterwards.
-func TestExecAsDockerAutoRemove(t *testing.T) {
-	orig := ContainerNewContainer
-	defer func() { ContainerNewContainer = orig }()
-
-	for _, tc := range []struct {
-		autoRemove bool
-		removes    int
-	}{
-		{false, 2}, // stale + post-run
-		{true, 1},  // post-run skipped
-	} {
-		cm := &containerMock{}
-		ContainerNewContainer = func(*container.NewContainerInput) container.ExecutionsEnvironment { return cm }
-
-		step := &stepActionRemote{
-			Step: &model.Step{ID: "1", Uses: "org/action@v1"},
-			RunContext: &RunContext{
-				Config:       &Config{AutoRemove: tc.autoRemove},
-				Run:          &model.Run{JobID: "1", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}}},
-				JobContainer: cm,
-			},
-			action: &model.Action{Runs: model.ActionRuns{Using: "docker", Image: "docker://node:14"}},
-		}
-
-		removes := 0
-		cm.On("Pull", false).Return(func(context.Context) error { return nil })
-		cm.On("Remove").Return(func(context.Context) error { removes++; return nil })
-		cm.On("Create", []string(nil), []string(nil)).Return(func(context.Context) error { return nil })
-		cm.On("Start", true).Return(func(context.Context) error { return nil })
-		cm.On("Close").Return(func(context.Context) error { return nil })
-
-		require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, stepStageMain))
-		cm.AssertExpectations(t)
-		assert.Equal(t, tc.removes, removes)
 	}
 }
 
@@ -337,11 +286,12 @@ func TestNewStepContainerDoesNotUseDockerSecrets(t *testing.T) {
 	step.On("getStepModel").Return(&model.Step{ID: "action"})
 	step.On("getEnv").Return(&env)
 
-	_ = newStepContainer(ctx, step, "registry.example.com/action:tag", nil, nil)
+	_ = newStepContainer(ctx, step, "registry.example.com/action:tag", nil, nil, "")
 
 	// DOCKER_USERNAME/DOCKER_PASSWORD should not be injected as pull credentials for docker action containers.
 	assert.Empty(t, captured.Username)
 	assert.Empty(t, captured.Password)
+	assert.True(t, captured.AutoRemove)
 	step.AssertExpectations(t)
 }
 
@@ -542,8 +492,6 @@ func TestDockerActionImageTag(t *testing.T) {
 	)
 }
 
-// Only the entrypoint is stage specific: every stage of a docker action receives runs.args
-// and runs.env, and the `entrypoint` input applies to the main stage alone.
 func TestExecAsDockerStageEntrypoint(t *testing.T) {
 	orig := ContainerNewContainer
 	defer func() { ContainerNewContainer = orig }()
@@ -551,25 +499,62 @@ func TestExecAsDockerStageEntrypoint(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		stage          stepStage
+		with           map[string]string
+		runs           model.ActionRuns
+		env            map[string]string
+		wantCmd        []string
 		wantEntrypoint []string
 	}{
 		{
-			name:           "main stage prefers the entrypoint input",
-			stage:          stepStageMain,
-			wantEntrypoint: []string{"input.sh"},
+			name:  "main stage prefers manifest values",
+			stage: stepStageMain,
+			with:  map[string]string{"args": "caller", "entrypoint": "input.sh"},
+			runs: model.ActionRuns{
+				Entrypoint: "main.sh",
+				Args:       []string{"manifest"},
+				Env:        map[string]string{"ACTION_ONLY": "manifest"},
+			},
+			wantCmd:        []string{"manifest"},
+			wantEntrypoint: []string{"main.sh"},
 		},
 		{
-			name:           "pre stage uses runs.pre-entrypoint",
-			stage:          stepStagePre,
+			name:           "main stage uses caller fallbacks",
+			stage:          stepStageMain,
+			with:           map[string]string{"args": "caller --flag", "entrypoint": "input.sh --verbose"},
+			runs:           model.ActionRuns{Env: map[string]string{"ACTION_ONLY": "manifest"}},
+			wantCmd:        []string{"caller", "--flag"},
+			wantEntrypoint: []string{"input.sh", "--verbose"},
+		},
+		{
+			name:    "explicit empty manifest args suppress caller args",
+			stage:   stepStageMain,
+			with:    map[string]string{"args": "caller"},
+			runs:    model.ActionRuns{Args: []string{}},
+			wantCmd: []string{},
+		},
+		{
+			name:  "pre stage keeps step environment",
+			stage: stepStagePre,
+			with:  map[string]string{"entrypoint": "input.sh"},
+			runs: model.ActionRuns{
+				PreEntrypoint: "pre.sh --verbose",
+				Args:          []string{"hello"},
+				Env:           map[string]string{"SHARED": "manifest"},
+			},
+			env:            map[string]string{"SHARED": "step"},
+			wantCmd:        []string{"hello"},
 			wantEntrypoint: []string{"pre.sh", "--verbose"},
 		},
 		{
-			name:           "post stage uses runs.post-entrypoint",
+			name:           "post stage uses manifest entrypoint",
 			stage:          stepStagePost,
+			runs:           model.ActionRuns{PostEntrypoint: "post.sh", Args: []string{"hello"}},
+			wantCmd:        []string{"hello"},
 			wantEntrypoint: []string{"post.sh"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			tc.runs.Using, tc.runs.Image = "docker", "docker://node:14"
 			cm := &containerMock{}
 			var input *container.NewContainerInput
 			ContainerNewContainer = func(in *container.NewContainerInput) container.ExecutionsEnvironment {
@@ -578,22 +563,14 @@ func TestExecAsDockerStageEntrypoint(t *testing.T) {
 			}
 
 			step := &stepActionRemote{
-				Step: &model.Step{ID: "1", Uses: "org/action@v1", With: map[string]string{"entrypoint": "input.sh"}},
+				Step: &model.Step{ID: "1", Uses: "org/action@v1", With: tc.with},
 				RunContext: &RunContext{
 					Config:       &Config{},
 					Run:          &model.Run{JobID: "1", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"1": {}}}},
 					JobContainer: cm,
 				},
-				action: &model.Action{Runs: model.ActionRuns{
-					Using:          "docker",
-					Image:          "docker://node:14",
-					PreEntrypoint:  "pre.sh --verbose",
-					Entrypoint:     "main.sh",
-					PostEntrypoint: "post.sh",
-					Args:           []string{"hello"},
-					Env:            map[string]string{"MY_VAR": "world"},
-				}},
-				env: map[string]string{},
+				action: &model.Action{Runs: tc.runs},
+				env:    mergeMaps(tc.env),
 			}
 
 			cm.On("Pull", false).Return(func(context.Context) error { return nil })
@@ -604,9 +581,11 @@ func TestExecAsDockerStageEntrypoint(t *testing.T) {
 
 			require.NoError(t, execAsDocker(context.Background(), step, "action", t.TempDir(), t.TempDir(), false, tc.stage))
 			require.NotNil(t, input)
+			assert.Equal(t, tc.wantCmd, input.Cmd)
 			assert.Equal(t, tc.wantEntrypoint, input.Entrypoint)
-			assert.Equal(t, []string{"hello"}, input.Cmd)
-			assert.Contains(t, input.Env, "MY_VAR=world")
+			for key, value := range mergeMaps(tc.runs.Env, tc.env) {
+				assert.Contains(t, input.Env, key+"="+value)
+			}
 		})
 	}
 }

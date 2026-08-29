@@ -124,19 +124,7 @@ func readActionImpl(ctx context.Context, step *model.Step, actionDir, actionPath
 	defer closer.Close()
 
 	action, err := model.ReadAction(reader)
-	// For Gitea, reduce log noise
-	// logger.Debugf("Read action %v from '%s'", action, "Unknown")
 	return action, err
-}
-
-// cachedActionTar returns the action's tree from the action cache, which only a remote action
-// has an entry in.
-func cachedActionTar(ctx context.Context, step actionStep, name, includePrefix string) (io.ReadCloser, error) {
-	remote, ok := step.(*stepActionRemote)
-	if !ok {
-		return nil, fmt.Errorf("action %q is a remote action but runs as %T", name, step)
-	}
-	return step.getRunContext().Config.ActionCache.GetTarArchive(ctx, remote.cacheDir, remote.resolvedSha, includePrefix)
 }
 
 func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir, actionPath, containerActionDir string) error {
@@ -148,24 +136,19 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir, actio
 		return nil
 	}
 
-	var containerActionDirCopy string
-	containerActionDirCopy = strings.TrimSuffix(containerActionDir, actionPath)
+	containerActionDirCopy := strings.TrimSuffix(containerActionDir, actionPath)
 	logger.Debug(containerActionDirCopy)
 
 	if !strings.HasSuffix(containerActionDirCopy, `/`) {
 		containerActionDirCopy += `/`
 	}
 
-	if rc.Config != nil && rc.Config.ActionCache != nil {
-		ta, err := cachedActionTar(ctx, step, stepModel.Uses, "")
-		if err != nil {
-			return err
-		}
-		defer ta.Close()
-		return rc.JobContainer.CopyTarStream(ctx, containerActionDirCopy, ta)
-	}
-
 	defer git.AcquireCloneLock(actionDir)()
+
+	if !rc.Config.NoActionPatch {
+		// A concurrent job's prepare resets this directory, so patch under the copy's lock.
+		patchActions(ctx, actionScriptPaths(filepath.Join(actionDir, actionPath), step.getActionModel()))
+	}
 
 	if err := removeGitIgnore(ctx, actionDir); err != nil {
 		return err
@@ -186,13 +169,10 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 		}
 
 		action := step.getActionModel()
-		// For Gitea, reduce log noise
-		// logger.Debugf("About to run action %v", action)
 
-		err := setupActionEnv(ctx, step, remoteAction)
-		if err != nil {
-			return err
-		}
+		rc.withGithubEnv(ctx, step.getGithubContext(ctx), *step.getEnv())
+		populateEnvsFromSavedState(step.getEnv(), step, rc)
+		populateEnvsFromInput(ctx, step.getEnv(), action, rc)
 
 		actionLocation := path.Join(actionDir, actionPath)
 		actionName, containerActionDir := getContainerActionPaths(stepModel, actionLocation, rc)
@@ -210,7 +190,7 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 
 			rc.ApplyExtraPath(ctx, step.getEnv())
 
-			return rc.execJobContainer(containerArgs, *step.getEnv(), "", "")(ctx)
+			return rc.JobContainer.Exec(containerArgs, *step.getEnv(), "", "")(ctx)
 		case x.IsDocker():
 			location := actionLocation
 			if remoteAction == nil {
@@ -235,11 +215,11 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 			execArgs := []string{filepath.Join(containerActionDir, execFileName)}
 
 			return common.NewPipelineExecutor(
-				rc.execJobContainer(buildArgs, *step.getEnv(), "", containerActionDir),
-				rc.execJobContainer(execArgs, *step.getEnv(), "", ""),
+				rc.JobContainer.Exec(buildArgs, *step.getEnv(), "", containerActionDir),
+				rc.JobContainer.Exec(execArgs, *step.getEnv(), "", ""),
 			)(ctx)
 		default:
-			return fmt.Errorf("The runs.using key must be one of: %v, got %s", []string{
+			return fmt.Errorf("the runs.using key must be one of: %v, got %s", []string{
 				model.ActionRunsUsingDocker,
 				model.ActionRunsUsingNode12,
 				model.ActionRunsUsingNode16,
@@ -250,20 +230,6 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 			}, action.Runs.Using)
 		}
 	}
-}
-
-func setupActionEnv(ctx context.Context, step actionStep, _ *remoteAction) error {
-	rc := step.getRunContext()
-
-	// A few fields in the environment (e.g. GITHUB_ACTION_REPOSITORY)
-	// are dependent on the action. That means we can complete the
-	// setup only after resolving the whole action model and cloning
-	// the action
-	rc.withGithubEnv(ctx, step.getGithubContext(ctx), *step.getEnv())
-	populateEnvsFromSavedState(step.getEnv(), step, rc)
-	populateEnvsFromInput(ctx, step.getEnv(), step.getActionModel(), rc)
-
-	return nil
 }
 
 // https://github.com/nektos/act/issues/228#issuecomment-629709055
@@ -359,12 +325,6 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 					return err
 				}
 				defer buildContext.Close()
-			} else if rc.Config.ActionCache != nil {
-				buildContext, err = cachedActionTar(ctx, step, actionName, contextDir)
-				if err != nil {
-					return err
-				}
-				defer buildContext.Close()
 			}
 			prepImage = ContainerNewDockerBuildExecutor(container.NewDockerBuildExecutorInput{
 				ContextDir:   contextDir,
@@ -386,34 +346,36 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 			logger.Debugf("image '%s' for architecture '%s' already exists", image, rc.Config.ContainerArchitecture)
 		}
 	}
-	eval := rc.NewStepExpressionEvaluator(ctx, step)
+	eval := rc.NewActionInputsExpressionEvaluator(ctx, step)
 	cmd, err := shellquote.Split(eval.Interpolate(ctx, step.getStepModel().With["args"]))
 	if err != nil {
 		return err
 	}
-	if len(cmd) == 0 {
-		cmd = action.Runs.Args
-		evalDockerArgs(ctx, step, action, &cmd)
+	ee := evalDockerEnv(ctx, step, action)
+	if action.Runs.Args != nil {
+		// a fresh slice, the manifest is evaluated again for every stage
+		cmd = make([]string, len(action.Runs.Args))
+		for i, v := range action.Runs.Args {
+			cmd[i] = ee.Interpolate(ctx, v)
+		}
 	}
 	entrypoint, err := dockerEntrypoint(ctx, step, eval, stage)
 	if err != nil {
 		return err
 	}
-	stepContainer := newStepContainer(ctx, step, image, cmd, entrypoint)
+	stepContainer := newStepContainer(ctx, step, image, cmd, entrypoint, rc.Config.ContainerOptions)
 	return common.NewPipelineExecutor(
 		prepImage,
 		stepContainer.Pull(forcePull),
-		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
+		stepContainer.Remove(),
 		stepContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 		stepContainer.Start(true),
-	).Finally(
-		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers && !rc.Config.AutoRemove),
 	).Finally(stepContainer.Close())(ctx)
 }
 
 // dockerEntrypoint returns the entrypoint the action's image runs with for the given
 // stage. Only the main stage honours the `entrypoint` input.
-func dockerEntrypoint(ctx context.Context, step actionStep, eval ExpressionEvaluator, stage stepStage) ([]string, error) {
+func dockerEntrypoint(ctx context.Context, step actionStep, eval *expressionEvaluator, stage stepStage) ([]string, error) {
 	runs := step.getActionModel().Runs
 
 	var entrypoint string
@@ -423,10 +385,12 @@ func dockerEntrypoint(ctx context.Context, step actionStep, eval ExpressionEvalu
 	case stepStagePost:
 		entrypoint = runs.PostEntrypoint
 	default:
-		if fields := strings.Fields(eval.Interpolate(ctx, step.getStepModel().With["entrypoint"])); len(fields) > 0 {
-			return fields, nil
-		}
 		entrypoint = runs.Entrypoint
+		if entrypoint == "" {
+			if fields := strings.Fields(eval.Interpolate(ctx, step.getStepModel().With["entrypoint"])); len(fields) > 0 {
+				return fields, nil
+			}
+		}
 	}
 
 	if entrypoint == "" {
@@ -435,7 +399,8 @@ func dockerEntrypoint(ctx context.Context, step actionStep, eval ExpressionEvalu
 	return shellquote.Split(entrypoint)
 }
 
-func evalDockerArgs(ctx context.Context, step step, action *model.Action, cmd *[]string) {
+// evalDockerEnv returns an evaluator bound to the environment it installed.
+func evalDockerEnv(ctx context.Context, step step, action *model.Action) *expressionEvaluator {
 	rc := step.getRunContext()
 	stepModel := step.getStepModel()
 
@@ -452,30 +417,20 @@ func evalDockerArgs(ctx context.Context, step step, action *model.Action, cmd *[
 	}
 	mergeIntoMap(step, step.getEnv(), inputs)
 
-	stepEE := rc.NewStepExpressionEvaluator(ctx, step)
-	for i, v := range *cmd {
-		(*cmd)[i] = stepEE.Interpolate(ctx, v)
-	}
-	mergeIntoMap(step, step.getEnv(), action.Runs.Env)
+	env := make(map[string]string, len(action.Runs.Env)+len(*step.getEnv()))
+	mergeIntoMap(step, &env, action.Runs.Env, *step.getEnv())
+	*step.getEnv() = env
 
-	ee := rc.NewStepExpressionEvaluator(ctx, step)
+	ee := rc.NewActionInputsExpressionEvaluator(ctx, step)
 	for k, v := range *step.getEnv() {
 		(*step.getEnv())[k] = ee.Interpolate(ctx, v)
 	}
+	return ee
 }
 
-func newStepContainer(ctx context.Context, step step, image string, cmd, entrypoint []string) container.Container {
+func newStepContainer(ctx context.Context, step step, image string, cmd, entrypoint []string, runnerOptions string) container.Container {
 	rc := step.getRunContext()
-	stepModel := step.getStepModel()
-	rawLogger := common.Logger(ctx).WithField("raw_output", true)
-	logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
-		if rc.Config.LogOutput {
-			rawLogger.Infof("%s", s)
-		} else {
-			rawLogger.Debugf("%s", s)
-		}
-		return true
-	})
+	logWriter := rc.commandLogWriter(ctx)
 	envList := make([]string, 0)
 	for k, v := range *step.getEnv() {
 		envList = append(envList, fmt.Sprintf("%s=%s", k, v))
@@ -488,27 +443,26 @@ func newStepContainer(ctx context.Context, step step, image string, cmd, entrypo
 	if rc.IsHostEnv(ctx) {
 		networkMode = "default"
 	}
-	stepContainer := ContainerNewContainer(&container.NewContainerInput{
-		Cmd:          cmd,
-		Entrypoint:   entrypoint,
-		WorkingDir:   rc.JobContainer.ToContainerPath(rc.Config.Workdir),
-		Image:        image,
-		Name:         createContainerName(rc.jobContainerName(), "STEP-"+stepModel.ID),
-		Env:          envList,
-		Mounts:       mounts,
-		NetworkMode:  networkMode,
-		Binds:        binds,
-		Stdout:       logWriter,
-		Stderr:       logWriter,
-		Privileged:   rc.Config.Privileged,
-		UsernsMode:   rc.Config.UsernsMode,
-		Platform:     rc.Config.ContainerArchitecture,
-		Options:      rc.Config.ContainerOptions,
-		AutoRemove:   rc.Config.AutoRemove,
-		ValidVolumes: rc.validVolumes(),
-		AllocatePTY:  rc.Config.AllocatePTY,
+	return ContainerNewContainer(&container.NewContainerInput{
+		Cmd:           cmd,
+		Entrypoint:    entrypoint,
+		WorkingDir:    rc.JobContainer.ToContainerPath(rc.Config.Workdir),
+		Image:         image,
+		Name:          createContainerName(rc.jobContainerName(), "STEP-"+step.getStepModel().ID),
+		Env:           envList,
+		Mounts:        mounts,
+		NetworkMode:   networkMode,
+		Binds:         binds,
+		Stdout:        logWriter,
+		Stderr:        logWriter,
+		Privileged:    rc.Config.Privileged,
+		UsernsMode:    rc.Config.UsernsMode,
+		Platform:      rc.Config.ContainerArchitecture,
+		RunnerOptions: runnerOptions,
+		AutoRemove:    true,
+		ValidVolumes:  rc.validVolumes(),
+		AllocatePTY:   rc.Config.AllocatePTY,
 	})
-	return stepContainer
 }
 
 func populateEnvsFromSavedState(env *map[string]string, step actionStep, rc *RunContext) {
@@ -643,7 +597,7 @@ func runPreStep(step actionStep) common.Executor {
 
 			rc.ApplyExtraPath(ctx, step.getEnv())
 
-			return rc.execJobContainer(containerArgs, *step.getEnv(), "", "")(ctx)
+			return rc.JobContainer.Exec(containerArgs, *step.getEnv(), "", "")(ctx)
 
 		case x.IsDocker():
 			// defaults in pre steps were missing, however provided inputs are available
@@ -676,8 +630,8 @@ func runPreStep(step actionStep) common.Executor {
 			execArgs := []string{filepath.Join(containerActionDir, execFileName)}
 
 			return common.NewPipelineExecutor(
-				rc.execJobContainer(buildArgs, *step.getEnv(), "", containerActionDir),
-				rc.execJobContainer(execArgs, *step.getEnv(), "", ""),
+				rc.JobContainer.Exec(buildArgs, *step.getEnv(), "", containerActionDir),
+				rc.JobContainer.Exec(execArgs, *step.getEnv(), "", ""),
 			)(ctx)
 		default:
 			return nil
@@ -744,7 +698,7 @@ func runPostStep(step actionStep) common.Executor {
 
 			rc.ApplyExtraPath(ctx, step.getEnv())
 
-			return rc.execJobContainer(containerArgs, *step.getEnv(), "", "")(ctx)
+			return rc.JobContainer.Exec(containerArgs, *step.getEnv(), "", "")(ctx)
 
 		case x.IsDocker():
 			populateEnvsFromSavedState(step.getEnv(), step, rc)
@@ -770,8 +724,8 @@ func runPostStep(step actionStep) common.Executor {
 			execArgs := []string{filepath.Join(containerActionDir, execFileName)}
 
 			return common.NewPipelineExecutor(
-				rc.execJobContainer(buildArgs, *step.getEnv(), "", containerActionDir),
-				rc.execJobContainer(execArgs, *step.getEnv(), "", ""),
+				rc.JobContainer.Exec(buildArgs, *step.getEnv(), "", containerActionDir),
+				rc.JobContainer.Exec(execArgs, *step.getEnv(), "", ""),
 			)(ctx)
 
 		default:

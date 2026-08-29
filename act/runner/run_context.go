@@ -11,7 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +37,8 @@ import (
 	"github.com/moby/moby/api/types/mount"
 	"github.com/opencontainers/selinux/go-selinux"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 )
 
 // RunContext contains info about current job
@@ -56,13 +58,13 @@ type RunContext struct {
 	CurrentStepIndex    int
 	StepResults         map[string]*model.StepResult
 	IntraActionState    map[string]map[string]string
-	ExprEval            ExpressionEvaluator
+	ExprEval            *expressionEvaluator
 	JobContainer        container.ExecutionsEnvironment
 	serviceContainers   []*serviceContainer
-	OutputMappings      map[MappableOutput]MappableOutput
 	JobName             string
 	ActionPath          string
 	Parent              *RunContext
+	actionInputs        map[string]any // inputs of the composite action this runs, nil for a job
 	Masks               []string
 	cleanUpJobContainer common.Executor
 	caller              *caller // job calling this RunContext (reusable workflows)
@@ -88,6 +90,7 @@ type RunContext struct {
 	jobFailed bool
 	// empty for a host-mode job, which starts no container
 	jobContainerID string
+	hasBash        *bool // memoized implicit-shell probe, only set on the top-level RunContext
 	jobNetworkName string
 	// stepEnv is a copy of the running step's environment, so that workflow commands parsed out
 	// of the container's output can be judged against it. Written by runStepExecutor and read on
@@ -148,11 +151,6 @@ func (rc *RunContext) AddMask(mask string) {
 	rc.Masks = append(rc.Masks, mask)
 }
 
-type MappableOutput struct {
-	StepID     string
-	OutputName string
-}
-
 func (rc *RunContext) String() string {
 	name := fmt.Sprintf("%s/%s", rc.Run.Workflow.Name, rc.Name)
 	if rc.caller != nil {
@@ -185,8 +183,16 @@ func (rc *RunContext) GetEnv() map[string]string {
 	return rc.Env
 }
 
+// setActionEnv sets a composite action's env, keeping the `inputs` context it derives from
+// in sync. Remote actions re-evaluate it per stage, so inputs may change between them.
+func (rc *RunContext) setActionEnv(env map[string]string) {
+	rc.Env = env
+	rc.actionInputs = inputsFromEnv(env)
+}
+
 func (rc *RunContext) jobContainerName() string {
-	nameParts := []string{rc.Config.ContainerNamePrefix, "WORKFLOW-" + rc.Run.Workflow.Name, "JOB-" + rc.Name}
+	// The job id, never evaluated, keeps two jobs apart when masking collapses their names.
+	nameParts := []string{rc.Config.ContainerNamePrefix, "WORKFLOW-" + rc.Run.Workflow.Name, "JOB-" + rc.Run.JobID, rc.Name}
 	if rc.caller != nil {
 		nameParts = append(nameParts, "CALLED-BY-"+rc.caller.runContext.JobName)
 	}
@@ -204,14 +210,15 @@ func (rc *RunContext) networkNameForGitea() (string, bool) {
 func getDockerDaemonSocketMountPath(daemonPath string) string {
 	if before, after, ok := strings.Cut(daemonPath, "://"); ok {
 		scheme := before
-		if strings.EqualFold(scheme, "npipe") {
+		switch {
+		case strings.EqualFold(scheme, "npipe"):
 			// linux container mount on windows, use the default socket path of the VM / wsl2
 			return "/var/run/docker.sock"
-		} else if strings.EqualFold(scheme, "unix") {
+		case strings.EqualFold(scheme, "unix"):
 			return after
-		} else if strings.IndexFunc(scheme, func(r rune) bool {
+		case strings.IndexFunc(scheme, func(r rune) bool {
 			return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
-		}) == -1 {
+		}) == -1:
 			// unknown protocol use default
 			return "/var/run/docker.sock"
 		}
@@ -229,14 +236,18 @@ func (rc *RunContext) containerDaemonSocket() string {
 	return rc.Config.ContainerDaemonSocket
 }
 
-// validVolumes returns the volumes allowed on this job's containers: the configured base
-// plus the volumes the runner mounts automatically. It derives a fresh slice every call and
-// never mutates the shared Config (see containerDaemonSocket).
+const sharedToolCacheVolume = "act-toolcache" // mounted only when the tool cache is shared
+
+// validVolumes returns what the job and action containers may mount, the configured base plus
+// the runner's own volumes. Fresh slice per call, the shared Config is never mutated.
 func (rc *RunContext) validVolumes() []string {
 	name := rc.jobContainerName()
 	volumes := slices.Clone(rc.Config.ValidVolumes)
+	if rc.Config.SharedToolCache {
+		volumes = append(volumes, sharedToolCacheVolume)
+	}
 	// TODO: add a new configuration to control whether the docker daemon can be mounted
-	return append(volumes, "act-toolcache", name, name+"-env",
+	return append(volumes, name, name+"-env",
 		getDockerDaemonSocketMountPath(rc.containerDaemonSocket()))
 }
 
@@ -274,7 +285,7 @@ func splitVolumes(specs []string) ([]string, map[string]string, map[string]bool)
 	for _, spec := range specs {
 		parsed, err := loader.ParseVolume(spec)
 		if err != nil {
-			binds = append(binds, spec) // let Docker report the malformed spec
+			binds = append(binds, spec) // unclassifiable, sanitizeConfig warns and drops it
 			continue
 		}
 		targets[parsed.Target] = true
@@ -309,8 +320,10 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" && !claimed["/var/run/docker.sock"] {
 		binds = append(binds, getDockerDaemonSocketMountPath(daemonSocket)+":/var/run/docker.sock")
 	}
-	if toolCache := rc.toolCache(container.DefaultToolCache); !claimed[toolCache] {
-		mounts["act-toolcache"] = toolCache
+	if rc.Config.SharedToolCache {
+		if toolCache := rc.toolCache(container.DefaultToolCache); !claimed[toolCache] {
+			mounts[sharedToolCacheVolume] = toolCache
+		}
 	}
 	mounts[name+"-env"] = ext.GetActPath() // runner-internal, never overridable
 
@@ -334,16 +347,7 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 
 func (rc *RunContext) startHostEnvironment() common.Executor {
 	return func(ctx context.Context) error {
-		logger := common.Logger(ctx)
-		rawLogger := logger.WithField(rawOutputField, true)
-		logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
-			if rc.Config.LogOutput {
-				rawLogger.Infof("%s", s)
-			} else {
-				rawLogger.Debugf("%s", s)
-			}
-			return true
-		})
+		logWriter := rc.commandLogWriter(ctx)
 		cacheDir := rc.ActionCacheDir()
 		randBytes := make([]byte, 8)
 		_, _ = rand.Read(randBytes)
@@ -360,7 +364,11 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 		if err := os.MkdirAll(runnerTmp, 0o777); err != nil {
 			return err
 		}
-		toolCache := rc.toolCache(filepath.Join(cacheDir, "tool_cache"))
+		toolCacheParent := miscpath // per job, so cleanup removes it with the job
+		if rc.Config.SharedToolCache {
+			toolCacheParent = cacheDir
+		}
+		toolCache := rc.toolCache(filepath.Join(toolCacheParent, "tool_cache"))
 		if err := os.MkdirAll(toolCache, 0o777); err != nil {
 			return err
 		}
@@ -426,15 +434,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
 		image := rc.platformImage(ctx)
-		rawLogger := logger.WithField(rawOutputField, true)
-		logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
-			if rc.Config.LogOutput {
-				rawLogger.Infof("%s", s)
-			} else {
-				rawLogger.Debugf("%s", s)
-			}
-			return true
-		})
+		logWriter := rc.commandLogWriter(ctx)
 
 		username, password, err := rc.handleCredentials(ctx)
 		if err != nil {
@@ -486,7 +486,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			}
 			// keep these local: reusing username/password would overwrite the
 			// credentials the job container is pulled with further down
-			serviceUsername, servicePassword, err := rc.handleServiceCredentials(ctx, spec.Credentials)
+			serviceUsername, servicePassword, err := rc.interpolateCredentials(ctx, spec.Credentials, "")
 			if err != nil {
 				return fmt.Errorf("failed to handle service %s credentials: %w", serviceID, err)
 			}
@@ -495,7 +495,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			for _, volume := range spec.Volumes {
 				interpolatedVolumes = append(interpolatedVolumes, rc.ExprEval.Interpolate(ctx, volume))
 			}
-			serviceBinds, serviceMounts := rc.GetServiceBindsAndMounts(interpolatedVolumes)
+			serviceBinds, serviceMounts, _ := splitVolumes(interpolatedVolumes)
 
 			interpolatedPorts := make([]string, 0, len(spec.Ports))
 			for _, port := range spec.Ports {
@@ -508,27 +508,27 @@ func (rc *RunContext) startJobContainer() common.Executor {
 
 			serviceContainerName := createContainerName(rc.jobContainerName(), serviceID)
 			c := newContainer(&container.NewContainerInput{
-				Name:           serviceContainerName,
-				WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
-				Image:          serviceImage,
-				Username:       serviceUsername,
-				Password:       servicePassword,
-				Cmd:            interpolatedCmd,
-				Env:            envs,
-				Mounts:         serviceMounts,
-				Binds:          serviceBinds,
-				Stdout:         logWriter,
-				Stderr:         logWriter,
-				Privileged:     rc.Config.Privileged,
-				UsernsMode:     rc.Config.UsernsMode,
-				Platform:       rc.Config.ContainerArchitecture,
-				AutoRemove:     false, // so a dead service's log survives, cleanupJobResources removes it
-				Options:        rc.ExprEval.Interpolate(ctx, spec.Options),
-				NetworkMode:    networkName,
-				NetworkAliases: []string{serviceID},
-				ExposedPorts:   exposedPorts,
-				PortBindings:   portBindings,
-				AllocatePTY:    rc.Config.AllocatePTY,
+				Name:            serviceContainerName,
+				Image:           serviceImage,
+				Username:        serviceUsername,
+				Password:        servicePassword,
+				Cmd:             interpolatedCmd,
+				Env:             envs,
+				Mounts:          serviceMounts,
+				Binds:           serviceBinds,
+				Stdout:          logWriter,
+				Stderr:          logWriter,
+				Privileged:      rc.Config.Privileged,
+				UsernsMode:      rc.Config.UsernsMode,
+				Platform:        rc.Config.ContainerArchitecture,
+				AutoRemove:      false, // so a dead service's log survives, cleanupJobResources removes it
+				WorkflowOptions: rc.ExprEval.Interpolate(ctx, spec.Options),
+				NetworkMode:     networkName,
+				NetworkAliases:  []string{serviceID},
+				ExposedPorts:    exposedPorts,
+				PortBindings:    portBindings,
+				ValidVolumes:    rc.Config.ValidVolumes, // not validVolumes(), a service gets no docker socket
+				AllocatePTY:     rc.Config.AllocatePTY,
 			})
 			rc.serviceContainers = append(rc.serviceContainers, &serviceContainer{name: serviceID, image: serviceImage, container: c})
 		}
@@ -539,30 +539,31 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		jobContainerNetwork := networkName
 
 		rc.JobContainer = newContainer(&container.NewContainerInput{
-			Cmd:            nil,
-			Entrypoint:     []string{"/bin/sleep", fmt.Sprint(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds())},
-			WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
-			Image:          image,
-			Username:       username,
-			Password:       password,
-			Name:           name,
-			Env:            envList,
-			Mounts:         mounts,
-			NetworkMode:    jobContainerNetwork,
-			NetworkAliases: []string{rc.Name},
-			Binds:          binds,
-			Stdout:         logWriter,
-			Stderr:         logWriter,
-			Privileged:     rc.Config.Privileged,
-			UsernsMode:     rc.Config.UsernsMode,
-			Platform:       rc.Config.ContainerArchitecture,
-			Options:        rc.options(ctx),
-			AutoRemove:     rc.Config.AutoRemove,
-			ValidVolumes:   rc.validVolumes(),
-			AllocatePTY:    rc.Config.AllocatePTY,
+			Cmd:             nil,
+			Entrypoint:      []string{"/bin/sleep", fmt.Sprint(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds())},
+			WorkingDir:      ext.ToContainerPath(rc.Config.Workdir),
+			Image:           image,
+			Username:        username,
+			Password:        password,
+			Name:            name,
+			Env:             envList,
+			Mounts:          mounts,
+			NetworkMode:     jobContainerNetwork,
+			NetworkAliases:  []string{rc.Name},
+			Binds:           binds,
+			Stdout:          logWriter,
+			Stderr:          logWriter,
+			Privileged:      rc.Config.Privileged,
+			UsernsMode:      rc.Config.UsernsMode,
+			Platform:        rc.Config.ContainerArchitecture,
+			RunnerOptions:   rc.Config.ContainerOptions,
+			WorkflowOptions: rc.workflowOptions(ctx),
+			AutoRemove:      true,
+			ValidVolumes:    rc.validVolumes(),
+			AllocatePTY:     rc.Config.AllocatePTY,
 		})
 		if rc.JobContainer == nil {
-			return errors.New("Failed to create job container")
+			return errors.New("failed to create job container")
 		}
 
 		rc.jobNetworkName = networkName
@@ -593,12 +594,20 @@ func (rc *RunContext) startJobContainer() common.Executor {
 	}
 }
 
+func (rc *RunContext) commandLogWriter(ctx context.Context) io.Writer {
+	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+	return common.NewLineWriter(rc.commandHandler(ctx), func(line string) bool {
+		rawLogger.Infof("%s", line)
+		return true
+	})
+}
+
 // cleanupJobResources removes everything the job created, continuing past failures.
 // Only job container and volume errors are returned, the rest are logged.
 func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNetwork bool) common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
-		removeJobContainer := rc.JobContainer != nil && !rc.Config.ReuseContainers
+		removeJobContainer := rc.JobContainer != nil
 
 		var errs []error
 		if removeJobContainer {
@@ -625,12 +634,6 @@ func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNet
 			}
 		}
 		return errors.Join(errs...)
-	}
-}
-
-func (rc *RunContext) execJobContainer(cmd []string, env map[string]string, user, workdir string) common.Executor { //nolint:unparam // pre-existing issue from nektos/act
-	return func(ctx context.Context) error {
-		return rc.JobContainer.Exec(cmd, env, user, workdir)(ctx)
 	}
 }
 
@@ -678,12 +681,17 @@ func (rc *RunContext) UpdateExtraPath(ctx context.Context, githubEnvPath string)
 	if err != nil && err != io.EOF {
 		return err
 	}
-	s := bufio.NewScanner(reader)
+	decoded := transform.NewReader(reader, unicode.BOMOverride(unicode.UTF8.NewDecoder()))
+	s := bufio.NewScanner(decoded)
+	s.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for s.Scan() {
 		line := s.Text()
 		if len(line) > 0 {
 			rc.addPath(ctx, line)
 		}
+	}
+	if err := s.Err(); err != nil {
+		return fmt.Errorf("reading path file: %w", err)
 	}
 	return nil
 }
@@ -916,11 +924,24 @@ func (rc *RunContext) interpolateOutputs() common.Executor {
 		// pristine snapshot (outputTemplate) and write under the lock, so each combo overwrites
 		// with its own resolved values (last wins, as on GitHub) instead of the first combo's
 		// resolved values freezing the shared template against later combos.
-		defer lockJob(job)()
+		// Resolved up front so one failure publishes none of them, as GitHub does.
+		outputs := make(map[string]string, len(rc.outputTemplate))
+		var err error
 		for k, v := range rc.outputTemplate {
-			job.Outputs[k] = ee.Interpolate(ctx, v)
+			if outputs[k], err = ee.interpolate(ctx, v); err != nil {
+				err = fmt.Errorf("failed to evaluate job output %q: %w", k, err)
+				break
+			}
 		}
-		return nil
+		defer lockJob(job)()
+		for k := range rc.outputTemplate {
+			if err != nil {
+				job.Outputs[k] = ""
+				continue
+			}
+			job.Outputs[k] = outputs[k]
+		}
+		return err
 	}
 }
 
@@ -1034,7 +1055,7 @@ func (rc *RunContext) Executor() (common.Executor, error) {
 			// unfinished. rc.caller is only set for reusable workflows.
 			rc.result("failure")
 			if rc.caller != nil { // For Gitea
-				rc.caller.setReusedWorkflowJobResult(rc.JobName, "failure")
+				rc.caller.setReusedWorkflowJobResult(rc.Run.JobID, "failure")
 			}
 			return err
 		}
@@ -1067,19 +1088,9 @@ func (rc *RunContext) runsOnImage(ctx context.Context) string {
 		runsOn[i] = rc.ExprEval.Interpolate(ctx, v)
 	}
 
-	if pick := rc.Config.PlatformPicker; pick != nil {
-		if image := pick(runsOn); image != "" {
-			return image
-		}
+	if rc.Config.PlatformPicker != nil {
+		return rc.Config.PlatformPicker(runsOn)
 	}
-
-	for _, platformName := range rc.runsOnPlatformNames(ctx) {
-		image := rc.Config.Platforms[strings.ToLower(platformName)]
-		if image != "" {
-			return image
-		}
-	}
-
 	return ""
 }
 
@@ -1109,14 +1120,13 @@ func (rc *RunContext) platformImage(ctx context.Context) string {
 	return rc.runsOnImage(ctx)
 }
 
-func (rc *RunContext) options(ctx context.Context) string {
-	job := rc.Run.Job()
-	c := job.Container()
-	if c != nil {
-		return rc.Config.ContainerOptions + " " + rc.ExprEval.Interpolate(ctx, c.Options)
+func (rc *RunContext) workflowOptions(ctx context.Context) string {
+	c := rc.Run.Job().Container()
+	if c == nil {
+		return ""
 	}
 
-	return rc.Config.ContainerOptions
+	return rc.ExprEval.Interpolate(ctx, c.Options)
 }
 
 func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
@@ -1135,7 +1145,7 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 
 	if !runJob {
 		if rc.caller != nil { // For Gitea
-			rc.caller.setReusedWorkflowJobResult(rc.JobName, "skipped")
+			rc.caller.setReusedWorkflowJobResult(rc.Run.JobID, "skipped")
 			return false, nil
 		}
 		l.WithField("jobResult", "skipped").Debugf("Skipping job '%s' due to '%s'", job.Name, job.If.Value)
@@ -1255,10 +1265,21 @@ func (rc *RunContext) getRunnerContext(ctx context.Context) map[string]any {
 	}
 	runnerContext["name"] = rc.Config.RunnerName
 	runnerContext["environment"] = "self-hosted"
+	runnerContext["workspace"] = parentDir(rc.githubWorkspace())
 	if rc.Config.RunnerDebug() {
 		runnerContext["debug"] = "1"
 	}
 	return runnerContext
+}
+
+func (rc *RunContext) githubWorkspace() string {
+	if rc.JobContainer != nil {
+		return rc.JobContainer.ToContainerPath(rc.Config.Workdir)
+	}
+	if workspace := rc.Config.Env["GITHUB_WORKSPACE"]; workspace != "" {
+		return workspace
+	}
+	return rc.Config.Workdir
 }
 
 func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext {
@@ -1287,11 +1308,10 @@ func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext
 		RefType:          rc.Config.Env["GITHUB_REF_TYPE"],
 		BaseRef:          rc.Config.Env["GITHUB_BASE_REF"],
 		HeadRef:          rc.Config.Env["GITHUB_HEAD_REF"],
-		Workspace:        rc.Config.Env["GITHUB_WORKSPACE"],
+		Workspace:        rc.githubWorkspace(),
 	}
 	if rc.JobContainer != nil {
 		ghc.EventPath = rc.JobContainer.GetActPath() + "/workflow/event.json"
-		ghc.Workspace = rc.JobContainer.ToContainerPath(rc.Config.Workdir)
 	}
 
 	if ghc.RunID == "" {
@@ -1356,9 +1376,9 @@ func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext
 
 	ghc.SetBaseAndHeadRef()
 	repoPath := rc.Config.Workdir
-	ghcontext.SetRepositoryAndOwner(ctx, ghc, rc.Config.GitHubInstance, rc.Config.RemoteName, repoPath)
+	ghcontext.SetRepositoryAndOwner(ctx, ghc, rc.Config.GitHubInstance, repoPath)
 	if ghc.Ref == "" {
-		ghcontext.SetRef(ctx, ghc, rc.Config.DefaultBranch, repoPath)
+		ghcontext.SetRef(ctx, ghc, repoPath)
 	}
 	if ghc.Sha == "" {
 		ghcontext.SetSha(ctx, ghc, repoPath)
@@ -1574,58 +1594,26 @@ func (rc *RunContext) handleCredentials(ctx context.Context) (string, string, er
 		return "", "", nil
 	}
 
-	if len(container.Credentials) != 2 {
-		err := errors.New("invalid property count for key 'credentials:'")
-		return "", "", err
+	return rc.interpolateCredentials(ctx, container.Credentials, "container.")
+}
+
+func (rc *RunContext) interpolateCredentials(ctx context.Context, credentials map[string]string, prefix string) (string, string, error) {
+	if credentials == nil {
+		return "", "", nil
+	}
+	if len(credentials) != 2 {
+		return "", "", errors.New("invalid property count for key 'credentials:'")
 	}
 
 	ee := rc.NewExpressionEvaluator(ctx)
-	var username, password string
-	if username = ee.Interpolate(ctx, container.Credentials["username"]); username == "" {
-		err := errors.New("failed to interpolate container.credentials.username")
-		return "", "", err
+	username := ee.Interpolate(ctx, credentials["username"])
+	if username == "" {
+		return "", "", errors.New("failed to interpolate " + prefix + "credentials.username")
 	}
-	if password = ee.Interpolate(ctx, container.Credentials["password"]); password == "" {
-		err := errors.New("failed to interpolate container.credentials.password")
-		return "", "", err
-	}
-
-	if container.Credentials["username"] == "" || container.Credentials["password"] == "" {
-		err := errors.New("container.credentials cannot be empty")
-		return "", "", err
+	password := ee.Interpolate(ctx, credentials["password"])
+	if password == "" {
+		return "", "", errors.New("failed to interpolate " + prefix + "credentials.password")
 	}
 
 	return username, password, nil
-}
-
-func (rc *RunContext) handleServiceCredentials(ctx context.Context, creds map[string]string) (username, password string, err error) {
-	if creds == nil {
-		return username, password, err
-	}
-	if len(creds) != 2 {
-		err = errors.New("invalid property count for key 'credentials:'")
-		return username, password, err
-	}
-
-	ee := rc.NewExpressionEvaluator(ctx)
-	if username = ee.Interpolate(ctx, creds["username"]); username == "" {
-		err = errors.New("failed to interpolate credentials.username")
-		return username, password, err
-	}
-
-	if password = ee.Interpolate(ctx, creds["password"]); password == "" {
-		err = errors.New("failed to interpolate credentials.password")
-		return username, password, err
-	}
-
-	return username, password, err
-}
-
-// GetServiceBindsAndMounts returns the binds and mounts for the service container, resolving paths as appopriate
-func (rc *RunContext) GetServiceBindsAndMounts(svcVolumes []string) ([]string, map[string]string) {
-	binds, mounts, claimed := splitVolumes(svcVolumes)
-	if daemonSocket := rc.containerDaemonSocket(); daemonSocket != "-" && !claimed["/var/run/docker.sock"] {
-		binds = append(binds, getDockerDaemonSocketMountPath(daemonSocket)+":/var/run/docker.sock")
-	}
-	return binds, mounts
 }

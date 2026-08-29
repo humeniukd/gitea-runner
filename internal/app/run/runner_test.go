@@ -12,6 +12,7 @@ import (
 	"gitea.com/gitea/runner/act/runner"
 	clientmocks "gitea.com/gitea/runner/internal/pkg/client/mocks"
 	"gitea.com/gitea/runner/internal/pkg/config"
+	"gitea.com/gitea/runner/internal/pkg/labels"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"connectrpc.com/connect"
@@ -86,7 +87,7 @@ func TestNewRunnerInitializesLabelsAndEnvironment(t *testing.T) {
 		Labels: []string{"ubuntu:host", "", "pool:e57e18d4"},
 	}
 	cli := clientmocks.NewClient(t)
-	cli.On("Address").Return("https://gitea.example/").Maybe()
+	cli.AddressValue = "https://gitea.example/"
 
 	r := NewRunner(cfg, reg, cli)
 
@@ -102,6 +103,34 @@ func TestNewRunnerInitializesLabelsAndEnvironment(t *testing.T) {
 	require.Empty(t, r.envs[runner.CacheServiceV2Env], "no cache server, nothing to serve v2 from")
 }
 
+func TestRunnerFallbackPlatform(t *testing.T) {
+	tests := []struct {
+		name          string
+		label         string
+		dockerRunning bool
+		want          string
+	}{
+		{"a docker label needs no daemon probe", "ubuntu:docker://node:18", false, "mirror.example/ci:noble"},
+		{"host labels keep the image where docker runs", "ubuntu:host", true, "mirror.example/ci:noble"},
+		{"host labels without docker run on the host", "ubuntu:host", false, labels.SelfHostedPlatform},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reachable := dockerReachable
+			dockerReachable = func(context.Context) bool { return tt.dockerRunning }
+			t.Cleanup(func() { dockerReachable = reachable })
+
+			label, err := labels.Parse(tt.label)
+			require.NoError(t, err)
+			cfg := &config.Config{}
+			cfg.Runner.DefaultImage = "mirror.example/ci:noble"
+			r := &Runner{cfg: cfg, labels: labels.Labels{label}}
+
+			require.Equal(t, tt.want, r.fallbackPlatform(t.Context()))
+		})
+	}
+}
+
 // Proxy variables are assembled per task, because a job's service containers have to be
 // reached directly and they are only known once the workflow is parsed.
 func TestNewRunnerLeavesProxyToTheTask(t *testing.T) {
@@ -112,7 +141,7 @@ func TestNewRunnerLeavesProxyToTheTask(t *testing.T) {
 	cfg.Cache.ExternalServer = "http://cache.local:8088/"
 	reg := &config.Registration{Name: "runner"}
 	cli := clientmocks.NewClient(t)
-	cli.On("Address").Return("https://gitea.example/").Maybe()
+	cli.AddressValue = "https://gitea.example/"
 
 	r := NewRunner(cfg, reg, cli)
 
@@ -136,7 +165,7 @@ func TestNewRunnerCacheServiceV2(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Cache.Dir, cfg.Cache.Host = t.TempDir(), "127.0.0.1"
 	cli := clientmocks.NewClient(t)
-	cli.On("Address").Return("https://gitea.example/").Maybe()
+	cli.AddressValue = "https://gitea.example/"
 
 	r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
 	t.Cleanup(func() { _ = r.Close() })
@@ -144,7 +173,6 @@ func TestNewRunnerCacheServiceV2(t *testing.T) {
 
 	assert.Equal(t, "https://gitea.example", r.envs["ACTIONS_RESULTS_URL"])
 	assert.Empty(t, r.envs[runner.CacheServiceV2Env], "a promise the runner has not made yet")
-	assert.True(t, r.patchToolkit())
 
 	// The registration is what makes it true: the cache server takes the results service over,
 	// having been told which instance to forward the artifact half to.
@@ -165,6 +193,11 @@ func TestNewRunnerCacheServiceV2(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "the advertised results service serves no cache service")
+
+	// Turning v2 off withdraws the advertisement and nothing else.
+	assert.True(t, r.cacheServiceV2())
+	cfg.Cache.V2 = new(bool)
+	assert.False(t, r.cacheServiceV2())
 }
 
 // The v1 cache client appends its path to ACTIONS_CACHE_URL without a separator, so a configured
@@ -173,16 +206,15 @@ func TestNewRunnerNormalizesTheExternalCacheServer(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Cache.ExternalServer = "http://cache.local:8088//"
 	cli := clientmocks.NewClient(t)
-	cli.On("Address").Return("https://gitea.example/").Maybe()
+	cli.AddressValue = "https://gitea.example/"
 
 	r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
 
 	assert.Equal(t, "http://cache.local:8088/", r.envs["ACTIONS_CACHE_URL"])
-	// Nothing to front the results service with, so the variable stays unset, but the bundles are
-	// still patched: artifacts v4 need that, and the patch keeps the cache client on the cache URL.
+	// Nothing to front the results service with, so the variable stays unset and the client keeps
+	// to v1, which reads the cache URL first.
 	assert.Equal(t, "https://gitea.example", r.envs["ACTIONS_RESULTS_URL"])
 	assert.Empty(t, r.envs[runner.CacheServiceV2Env])
-	assert.True(t, r.patchToolkit())
 }
 
 func TestWorkflowCallInputsFromTask(t *testing.T) {

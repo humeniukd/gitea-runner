@@ -5,7 +5,6 @@
 package container
 
 import (
-	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
@@ -17,7 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"gitea.com/gitea/runner/act/common"
 
@@ -77,6 +75,11 @@ func TestDocker(t *testing.T) {
 type mockDockerClient struct {
 	mobyclient.APIClient
 	mock.Mock
+}
+
+func (m *mockDockerClient) ServerVersion(ctx context.Context, opts mobyclient.ServerVersionOptions) (mobyclient.ServerVersionResult, error) {
+	args := m.Called(ctx, opts)
+	return args.Get(0).(mobyclient.ServerVersionResult), args.Error(1)
 }
 
 func (m *mockDockerClient) ExecCreate(ctx context.Context, id string, opts mobyclient.ExecCreateOptions) (mobyclient.ExecCreateResult, error) {
@@ -144,12 +147,17 @@ func (m *mockDockerClient) NetworkRemove(ctx context.Context, id string, opts mo
 	return args.Get(0).(mobyclient.NetworkRemoveResult), args.Error(1)
 }
 
-type endlessReader struct {
-	io.Reader
+type interruptReader struct {
+	started     chan struct{}
+	interrupted chan struct{}
+	stopped     chan struct{}
 }
 
-func (r endlessReader) Read(_ []byte) (n int, err error) {
-	return 1, nil
+func (r *interruptReader) Read(_ []byte) (int, error) {
+	close(r.started)
+	<-r.interrupted
+	close(r.stopped)
+	return 0, io.EOF
 }
 
 type mockConn struct {
@@ -169,16 +177,17 @@ func (m *mockConn) Close() (err error) {
 func TestDockerExecAbort(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	reader := &interruptReader{started: make(chan struct{}), interrupted: make(chan struct{}), stopped: make(chan struct{})}
 	conn := &mockConn{}
-	conn.On("Write", mock.AnythingOfType("[]uint8")).Return(1, nil)
+	conn.On("Write", []byte{3}).
+		Run(func(mock.Arguments) { close(reader.interrupted) }).
+		Return(1, nil)
 
 	client := &mockDockerClient{}
 	client.On("ExecCreate", ctx, "123", mock.AnythingOfType("client.ExecCreateOptions")).Return(mobyclient.ExecCreateResult{ID: "id"}, nil)
 	client.On("ExecAttach", ctx, "id", mock.AnythingOfType("client.ExecAttachOptions")).Return(mobyclient.ExecAttachResult{
-		HijackedResponse: mobyclient.HijackedResponse{
-			Conn:   conn,
-			Reader: bufio.NewReader(endlessReader{}),
-		},
+		Conn:   conn,
+		Reader: bufio.NewReader(reader),
 	}, nil)
 
 	cr := &containerReference{
@@ -195,11 +204,11 @@ func TestDockerExecAbort(t *testing.T) {
 		channel <- cr.exec([]string{""}, map[string]string{}, "user", "workdir")(ctx)
 	}()
 
-	time.Sleep(500 * time.Millisecond)
-
+	<-reader.started
 	cancel()
 
 	err := <-channel
+	<-reader.stopped
 	assert.ErrorIs(t, err, context.Canceled) //nolint:testifylint // pre-existing issue from nektos/act
 
 	conn.AssertExpectations(t)
@@ -214,10 +223,8 @@ func TestDockerExecFailure(t *testing.T) {
 	client := &mockDockerClient{}
 	client.On("ExecCreate", ctx, "123", mock.AnythingOfType("client.ExecCreateOptions")).Return(mobyclient.ExecCreateResult{ID: "id"}, nil)
 	client.On("ExecAttach", ctx, "id", mock.AnythingOfType("client.ExecAttachOptions")).Return(mobyclient.ExecAttachResult{
-		HijackedResponse: mobyclient.HijackedResponse{
-			Conn:   conn,
-			Reader: bufio.NewReader(strings.NewReader("output")),
-		},
+		Conn:   conn,
+		Reader: bufio.NewReader(strings.NewReader("output")),
 	}, nil)
 	client.On("ExecInspect", ctx, "id", mobyclient.ExecInspectOptions{}).Return(mobyclient.ExecInspectResult{
 		ExitCode: 1,
@@ -269,10 +276,8 @@ func TestDockerAttachFlushesTrailingLine(t *testing.T) {
 	client := &mockDockerClient{}
 	client.On("ContainerAttach", ctx, "123", mock.AnythingOfType("client.ContainerAttachOptions")).
 		Return(mobyclient.ContainerAttachResult{
-			HijackedResponse: mobyclient.HijackedResponse{
-				Conn:   &mockConn{},
-				Reader: bufio.NewReader(framed),
-			},
+			Conn:   &mockConn{},
+			Reader: bufio.NewReader(framed),
 		}, nil)
 
 	statusCh := make(chan container.WaitResponse, 1)
@@ -333,116 +338,6 @@ func TestDockerWaitFailure(t *testing.T) {
 	require.ErrorAs(t, err, &exitErr)
 	assert.Equal(t, ExitCodeError(2), exitErr)
 	assert.Equal(t, "Process completed with exit code 2.", err.Error())
-
-	client.AssertExpectations(t)
-}
-
-func TestDockerCopyTarStream(t *testing.T) {
-	ctx := context.Background()
-
-	client := &mockDockerClient{}
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		return opts.DestinationPath == "/" && opts.Content != nil
-	})).Return(mobyclient.CopyToContainerResult{}, nil)
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		return opts.DestinationPath == "/var/run/act" && opts.Content != nil
-	})).Return(mobyclient.CopyToContainerResult{}, nil)
-	cr := &containerReference{
-		id:  "123",
-		cli: client,
-		input: &NewContainerInput{
-			Image: "image",
-		},
-	}
-
-	_ = cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
-
-	client.AssertExpectations(t)
-}
-
-// Docker 29.5+ rejects absolute names in the mkdir tarball with
-// "path escapes from parent", since it is extracted relative to "/".
-func TestDockerCopyTarStreamMkdirEntryIsRelative(t *testing.T) {
-	ctx := context.Background()
-
-	var mkdirNames []string
-	client := &mockDockerClient{}
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		if opts.DestinationPath != "/" || opts.Content == nil {
-			return false
-		}
-		tr := tar.NewReader(opts.Content)
-		for {
-			hdr, err := tr.Next()
-			if err != nil {
-				break
-			}
-			mkdirNames = append(mkdirNames, hdr.Name)
-		}
-		return true
-	})).Return(mobyclient.CopyToContainerResult{}, nil)
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		return opts.DestinationPath == "/var/run/act" && opts.Content != nil
-	})).Return(mobyclient.CopyToContainerResult{}, nil)
-	cr := &containerReference{
-		id:  "123",
-		cli: client,
-		input: &NewContainerInput{
-			Image: "image",
-		},
-	}
-
-	require.NoError(t, cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{}))
-	assert.Equal(t, []string{"var/run/act"}, mkdirNames)
-
-	client.AssertExpectations(t)
-}
-
-func TestDockerCopyTarStreamErrorInCopyFiles(t *testing.T) {
-	ctx := context.Background()
-
-	merr := errors.New("Failure")
-
-	client := &mockDockerClient{}
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		return opts.DestinationPath == "/" && opts.Content != nil
-	})).Return(mobyclient.CopyToContainerResult{}, merr)
-	cr := &containerReference{
-		id:  "123",
-		cli: client,
-		input: &NewContainerInput{
-			Image: "image",
-		},
-	}
-
-	err := cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
-	assert.ErrorIs(t, err, merr) //nolint:testifylint // pre-existing issue from nektos/act
-
-	client.AssertExpectations(t)
-}
-
-func TestDockerCopyTarStreamErrorInMkdir(t *testing.T) {
-	ctx := context.Background()
-
-	merr := errors.New("Failure")
-
-	client := &mockDockerClient{}
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		return opts.DestinationPath == "/" && opts.Content != nil
-	})).Return(mobyclient.CopyToContainerResult{}, nil)
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		return opts.DestinationPath == "/var/run/act" && opts.Content != nil
-	})).Return(mobyclient.CopyToContainerResult{}, merr)
-	cr := &containerReference{
-		id:  "123",
-		cli: client,
-		input: &NewContainerInput{
-			Image: "image",
-		},
-	}
-
-	err := cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
-	assert.ErrorIs(t, err, merr) //nolint:testifylint // pre-existing issue from nektos/act
 
 	client.AssertExpectations(t)
 }
@@ -577,7 +472,6 @@ func TestRejectsMissingContainer(t *testing.T) {
 	}
 	check("copyContent", cr.copyContent("/var/run/act", &FileEntry{Name: "x", Mode: 0o644})(ctx))
 	check("copyDir", cr.copyDir("/var/run/act", "/src", false)(ctx))
-	check("CopyTarStream", cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{}))
 	check("exec", cr.exec([]string{"echo"}, nil, "", "")(ctx))
 	_, err := cr.GetContainerArchive(ctx, "/var/run/act/x")
 	check("GetContainerArchive", err)
@@ -611,35 +505,6 @@ func TestPublicCopyPipelineHandlesStaleID(t *testing.T) {
 	require.NoError(t, cr.Copy("/var/run/act", &FileEntry{Name: "x", Mode: 0o644})(ctx))
 	assert.Equal(t, "fresh", cr.id)
 	client.AssertExpectations(t)
-}
-
-// TestDockerCopyToSymlinkPath is a regression test for gitea/runner#981. Most base images
-// symlink /var/run to /run, so copying into /var/run/act traverses that symlink. The broken
-// docker 29.5.1 daemon fails the extraction with "mkdirat var/run: file exists" (fixed in
-// 29.5.2). Running against the daemon shipped in the dind image, this catches a bad bump.
-func TestDockerCopyToSymlinkPath(t *testing.T) {
-	requireDocker(t)
-	ctx := context.Background()
-
-	rc := NewContainer(&NewContainerInput{
-		Image:      "alpine:latest",
-		Entrypoint: []string{"sleep", "30"},
-		Name:       "act-test-symlink-" + time.Now().Format("20060102150405.000000"),
-		AutoRemove: true,
-	})
-	require.NoError(t, rc.Pull(false)(ctx))
-	require.NoError(t, rc.Create(nil, nil)(ctx))
-	require.NoError(t, rc.Start(false)(ctx))
-	t.Cleanup(func() {
-		_ = rc.Remove()(ctx)
-		_ = rc.Close()(ctx)
-	})
-
-	// CopyTarStream first creates the destination directory by extracting a tar at "/",
-	// which makes the daemon mkdir var, then var/run (the symlink), then act — the exact
-	// step that fails on the broken daemon.
-	err := rc.CopyTarStream(ctx, "/var/run/act/actions/", &bytes.Buffer{})
-	require.NoError(t, err)
 }
 
 // Type assert containerReference implements ExecutionsEnvironment
@@ -705,7 +570,7 @@ func TestCheckVolumes(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			logger, _ := test.NewNullLogger()
+			logger, hook := test.NewNullLogger()
 			ctx := common.WithLogger(context.Background(), logger)
 			cr := &containerReference{
 				input: &NewContainerInput{
@@ -714,112 +579,138 @@ func TestCheckVolumes(t *testing.T) {
 			}
 			_, hostConf := cr.sanitizeConfig(ctx, &container.Config{}, &container.HostConfig{Binds: tc.binds})
 			assert.Equal(t, tc.expectedBinds, hostConf.Binds)
+			assert.Len(t, hook.AllEntries(), len(tc.binds)-len(tc.expectedBinds)) // every drop is warned about
 		})
 	}
+}
+
+// A volume driver decides for itself what it mounts, e.g. the local driver with device= binds
+// any host path, which valid_volumes never gets to see.
+func TestMergeContainerConfigsDropsVolumeDriversFromWorkflows(t *testing.T) {
+	const escape = "--mount type=volume,src=job-escape,dst=/host,volume-driver=local,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/"
+
+	hostConfig, _ := mergeOptions(t, "", escape+" --mount type=volume,src=job-plain,dst=/cache", false)
+	require.Len(t, hostConfig.Mounts, 1)
+	assert.Equal(t, "job-plain", hostConfig.Mounts[0].Source)
+
+	// the same mount from the runner's own options is the administrator's to make
+	hostConfig, _ = mergeOptions(t, escape, "", false)
+	require.Len(t, hostConfig.Mounts, 1)
+	assert.Equal(t, "job-escape", hostConfig.Mounts[0].Source)
+}
+
+// Both of these are read here, on the runner, so a workflow could read the runner's files
+// and environment with them.
+func TestMergeContainerConfigsKeepsTheRunnersFilesAndEnvToItself(t *testing.T) {
+	hostFile := filepath.Join(t.TempDir(), "host.env")
+	require.NoError(t, os.WriteFile(hostFile, []byte("STOLEN=from-the-host\n"), 0o600))
+	t.Setenv("RUNNER_SECRET", "s3cr3t")
+
+	for _, option := range []string{"--env-file " + hostFile, "--label-file " + hostFile} {
+		logger, _ := test.NewNullLogger()
+		cr := &containerReference{input: &NewContainerInput{NetworkMode: "bridge", WorkflowOptions: option}}
+
+		_, _, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{})
+		require.ErrorContains(t, err, "not allowed in a workflow")
+
+		// the runner reading its own files is what those options are for
+		cr = &containerReference{input: &NewContainerInput{NetworkMode: "bridge", RunnerOptions: option}}
+		_, _, err = cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{})
+		require.NoError(t, err)
+	}
+
+	// a bare name is no longer resolved from the runner's environment, for either source
+	logger, _ := test.NewNullLogger()
+	cr := &containerReference{input: &NewContainerInput{
+		NetworkMode:     "bridge",
+		RunnerOptions:   "--env RUNNER_SECRET",
+		WorkflowOptions: "--env RUNNER_SECRET --env GIVEN=value",
+	}}
+
+	config, _, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"RUNNER_SECRET", "RUNNER_SECRET", "GIVEN=value"}, config.Env)
 }
 
 func TestSanitizeOptionsHostConfig(t *testing.T) {
 	logger, _ := test.NewNullLogger()
 
-	dangerous := func() *container.HostConfig {
-		return &container.HostConfig{
-			PidMode:      "host",
-			IpcMode:      "host",
-			UTSMode:      "host",
-			CgroupnsMode: "host",
-			UsernsMode:   "host",
-			CapAdd:       []string{"ALL"},
-			SecurityOpt:  []string{"seccomp=unconfined", "apparmor=unconfined"},
-			VolumesFrom:  []string{"other"},
-			Runtime:      "runc",
-			Resources: container.Resources{
-				CgroupParent:      "/custom",
-				Devices:           []container.DeviceMapping{{PathOnHost: "/dev/sda", PathInContainer: "/dev/sda", CgroupPermissions: "rwm"}},
-				DeviceCgroupRules: []string{"a *:* rwm"},
-			},
-			Sysctls: map[string]string{"net.ipv4.ip_forward": "1"},
-		}
+	// every field the sanitizer resets, so a reset dropped in a refactor fails here
+	hostConfig := &container.HostConfig{
+		PidMode:           "host",
+		IpcMode:           "host",
+		UTSMode:           "host",
+		CgroupnsMode:      "host",
+		UsernsMode:        "host",
+		CapAdd:            []string{"ALL"},
+		SecurityOpt:       []string{"seccomp=unconfined", "apparmor=unconfined"},
+		VolumesFrom:       []string{"other"},
+		Runtime:           "runc",
+		Isolation:         "process",
+		VolumeDriver:      "rogue",
+		MaskedPaths:       []string{},
+		ReadonlyPaths:     []string{},
+		CgroupParent:      "/custom",
+		Devices:           []container.DeviceMapping{{PathOnHost: "/dev/sda", PathInContainer: "/dev/sda", CgroupPermissions: "rwm"}},
+		DeviceCgroupRules: []string{"a *:* rwm"},
+		DeviceRequests:    []container.DeviceRequest{{Count: -1, Capabilities: [][]string{{"gpu"}}}},
+		Sysctls:           map[string]string{"net.ipv4.ip_forward": "1"},
 	}
 
-	hostConfig := dangerous()
-	sanitizeOptionsHostConfig(logger, hostConfig)
+	sanitizeOptionsHostConfig(logger, hostConfig, &container.HostConfig{})
 
-	assert.Empty(t, string(hostConfig.PidMode))
-	assert.Empty(t, string(hostConfig.IpcMode))
-	assert.Empty(t, string(hostConfig.UTSMode))
-	assert.Empty(t, string(hostConfig.CgroupnsMode))
-	assert.Empty(t, string(hostConfig.UsernsMode))
-	assert.Empty(t, hostConfig.CapAdd)
-	assert.Empty(t, hostConfig.SecurityOpt)
-	assert.Empty(t, hostConfig.Devices)
-	assert.Empty(t, hostConfig.DeviceCgroupRules)
-	assert.Empty(t, hostConfig.VolumesFrom)
-	assert.Empty(t, hostConfig.Runtime)
-	assert.Empty(t, hostConfig.CgroupParent)
-	assert.Empty(t, hostConfig.Sysctls)
+	assert.Equal(t, &container.HostConfig{}, hostConfig)
+}
+
+// mergeOptions merges both option sources into a bare container, returning the result and its log.
+func mergeOptions(t *testing.T, runnerOptions, workflowOptions string, privileged bool) (*container.HostConfig, *test.Hook) {
+	t.Helper()
+	logger, hook := test.NewNullLogger()
+	cr := &containerReference{input: &NewContainerInput{
+		RunnerOptions:   runnerOptions,
+		WorkflowOptions: workflowOptions,
+		NetworkMode:     "bridge",
+		UsernsMode:      "private",
+	}}
+
+	_, hostConfig, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{
+		Privileged:  privileged,
+		UsernsMode:  container.UsernsMode("private"),
+		NetworkMode: container.NetworkMode("bridge"),
+	})
+	require.NoError(t, err)
+	return hostConfig, hook
 }
 
 func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.T) {
-	// OS-independent options only: --device parsing requires a linux/windows
-	// server OS, which is not guaranteed for the test host.
+	// OS-independent options only, --device and --gpus need a linux/windows server OS
 	const dangerousOptions = "--pid=host --ipc=host --uts=host --cgroupns=host " +
 		"--userns=host --cap-add=ALL --security-opt seccomp=unconfined " +
-		"--security-opt apparmor=unconfined --volumes-from other " +
+		"--security-opt apparmor=unconfined --volumes-from other --isolation process " +
 		"--runtime runc --cgroup-parent /custom --sysctl net.ipv4.ip_forward=1"
 
-	t.Run("unprivileged strips host-escape options", func(t *testing.T) {
-		logger, _ := test.NewNullLogger()
-		ctx := common.WithLogger(context.Background(), logger)
-		cr := &containerReference{
-			input: &NewContainerInput{
-				Options:     dangerousOptions,
-				NetworkMode: "bridge",
-				UsernsMode:  "private",
-			},
-		}
+	// whatever the workflow adds, an unprivileged container comes out exactly as the runner's
+	// own options alone describe it, field for field
+	for _, runnerOptions := range []string{"--shm-size 1g", dangerousOptions, "--cap-add SYS_ADMIN --security-opt seccomp=unconfined"} {
+		runnerOnly, _ := mergeOptions(t, runnerOptions, "", false)
+		withWorkflow, _ := mergeOptions(t, runnerOptions, dangerousOptions, false)
 
-		_, hostConfig, err := cr.mergeContainerConfigs(ctx, &container.Config{}, &container.HostConfig{
-			Privileged:  false,
-			UsernsMode:  container.UsernsMode("private"),
-			NetworkMode: container.NetworkMode("bridge"),
-		})
-		require.NoError(t, err)
+		assert.Equal(t, runnerOnly, withWorkflow, "runner options: %q", runnerOptions)
+	}
 
-		assert.False(t, hostConfig.Privileged)
-		assert.Empty(t, string(hostConfig.PidMode))
-		assert.Empty(t, string(hostConfig.IpcMode))
-		assert.Empty(t, string(hostConfig.UTSMode))
-		assert.Empty(t, string(hostConfig.CgroupnsMode))
-		// UsernsMode must keep the runner-controlled value, not the one from options.
-		assert.Equal(t, "private", string(hostConfig.UsernsMode))
-		assert.Empty(t, hostConfig.CapAdd)
-		assert.Empty(t, hostConfig.SecurityOpt)
-		assert.Empty(t, hostConfig.VolumesFrom)
-		assert.Empty(t, hostConfig.Runtime)
-		assert.Empty(t, hostConfig.CgroupParent)
-		assert.Empty(t, hostConfig.Sysctls)
-	})
+	// the same options from the runner reach the daemon, even --userns, which no workflow may set
+	kept, _ := mergeOptions(t, dangerousOptions, "", false)
+	assert.Equal(t, "host", string(kept.PidMode))
+	assert.Equal(t, []string{"ALL"}, kept.CapAdd)
+	assert.Equal(t, "runc", kept.Runtime)
+	assert.Equal(t, "host", string(kept.UsernsMode))
+	assert.False(t, kept.Privileged)
 
-	t.Run("privileged preserves options", func(t *testing.T) {
-		logger, _ := test.NewNullLogger()
-		ctx := common.WithLogger(context.Background(), logger)
-		cr := &containerReference{
-			input: &NewContainerInput{
-				Options:     "--pid=host --cap-add=ALL --security-opt seccomp=unconfined",
-				NetworkMode: "bridge",
-			},
-		}
-
-		_, hostConfig, err := cr.mergeContainerConfigs(ctx, &container.Config{}, &container.HostConfig{
-			Privileged:  true,
-			NetworkMode: container.NetworkMode("bridge"),
-		})
-		require.NoError(t, err)
-
-		assert.Equal(t, "host", string(hostConfig.PidMode))
-		assert.Equal(t, []string{"ALL"}, hostConfig.CapAdd)
-		assert.Equal(t, []string{"seccomp=unconfined"}, hostConfig.SecurityOpt)
-	})
+	// privileged is the administrator opting in, so the workflow's options are honored
+	privileged, _ := mergeOptions(t, "", dangerousOptions, true)
+	assert.Equal(t, "host", string(privileged.PidMode))
+	assert.Equal(t, []string{"ALL"}, privileged.CapAdd)
+	assert.Equal(t, []string{"seccomp=unconfined", "apparmor=unconfined"}, privileged.SecurityOpt)
 }
 
 func TestCheckVolumesRejectsEscapingHostPaths(t *testing.T) {
@@ -917,8 +808,8 @@ func TestMergeContainerConfigsVolumesReplaceRunnerMounts(t *testing.T) {
 	ctx := common.WithLogger(context.Background(), logger)
 	cr := &containerReference{
 		input: &NewContainerInput{
-			NetworkMode: "bridge",
-			Options:     "--volume /host/tools:/opt/hostedtoolcache",
+			NetworkMode:   "bridge",
+			RunnerOptions: "--volume /host/tools:/opt/hostedtoolcache",
 		},
 	}
 
@@ -929,4 +820,38 @@ func TestMergeContainerConfigsVolumesReplaceRunnerMounts(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"/var/run/docker.sock:/var/run/docker.sock", "/host/tools:/opt/hostedtoolcache"}, hostConf.Binds)
 	assert.Empty(t, hostConf.Mounts)
+}
+
+func TestMergeContainerConfigsWarnsOnlyAboutOptionsThatWereGiven(t *testing.T) {
+	warnings := func(runnerOptions, workflowOptions string) int {
+		_, hook := mergeOptions(t, runnerOptions, workflowOptions, false)
+		return len(hook.AllEntries())
+	}
+
+	assert.Zero(t, warnings("--volume /host/tools:/opt/hostedtoolcache", ""))
+	assert.Zero(t, warnings("", "--shm-size 1g"))
+	assert.Equal(t, 1, warnings("--network host", ""))
+}
+
+func TestMergeContainerConfigsKeepsNetworkAliasesFromOptions(t *testing.T) {
+	logger, _ := test.NewNullLogger()
+	cr := &containerReference{input: &NewContainerInput{
+		NetworkMode: "job-network", NetworkAliases: []string{"redis"}, WorkflowOptions: "--network-alias redis-primary",
+	}}
+
+	_, _, err := cr.mergeContainerConfigs(common.WithLogger(t.Context(), logger), &container.Config{}, &container.HostConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"redis", "redis-primary"}, cr.input.NetworkAliases)
+}
+
+// A dead daemon must fail the job, not panic through logrus and not silently
+// drop the requested platform.
+func TestSupportsContainerImagePlatformDaemonError(t *testing.T) {
+	cli := &mockDockerClient{}
+	cli.On("ServerVersion", mock.Anything, mock.Anything).
+		Return(mobyclient.ServerVersionResult{}, errors.New("cannot connect to the Docker daemon"))
+
+	supported, err := supportsContainerImagePlatform(t.Context(), cli)
+	require.ErrorContains(t, err, "cannot connect to the Docker daemon")
+	assert.False(t, supported)
 }

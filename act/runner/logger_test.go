@@ -47,7 +47,7 @@ func TestValueMasker(t *testing.T) {
 	for _, entry := range table {
 		t.Run(entry.name, func(t *testing.T) {
 			ctx := WithMasks(t.Context(), &entry.masks)
-			masker := valueMasker(false, entry.secrets)
+			masker := valueMasker(false, AppendSecretMaskers(nil, entry.secrets))
 			for line := range strings.SplitSeq(entry.lines, "\n") {
 				lentry := masker(&logrus.Entry{
 					Context: ctx,
@@ -64,26 +64,27 @@ func TestValueMasker(t *testing.T) {
 // A secret that reaches the log through an encoding — a base64 payload, a JSON body, a
 // URL — must be masked as well: masking only the verbatim value leaks it.
 func TestValueMaskerEncodedSecrets(t *testing.T) {
-	secret := `p@ss w"rd/1`
-	masker := valueMasker(false, map[string]string{"TOKEN": secret})
-
 	for _, tc := range []struct {
-		name string
-		line string
+		name, secret string
+		encoded      []string
 	}{
-		{"verbatim", "the token is " + secret},
-		{"base64", "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(secret))},
-		{"json", `{"token":"` + jsonStringEscape(secret) + `"}`},
-		{"query escaped", "https://example.com/?token=" + url.QueryEscape(secret)},
-		{"path escaped", "https://example.com/" + url.PathEscape(secret) + "/x"},
+		{"common encodings", `p@ss w"rd/1`, []string{
+			`p@ss w"rd/1`, base64.StdEncoding.EncodeToString([]byte(`p@ss w"rd/1`)),
+			jsonStringEscape(`p@ss w"rd/1`), url.PathEscape(`p@ss w"rd/1`),
+		}},
+		{"XML expression and quotes", `"a'b&c<d>"`, []string{
+			`&quot;a&apos;b&amp;c&lt;d&gt;&quot;`, `"a''b&c<d>"`, `a'b&c<d>`,
+		}},
+		{"URI spaces", "a b", []string{"a%20b", "a+b"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			entry := masker(&logrus.Entry{Context: t.Context(), Message: tc.line})
+			masker := valueMasker(false, AppendSecretMaskers(nil, map[string]string{"TOKEN": tc.secret}))
+			entry := masker(&logrus.Entry{Context: t.Context(), Message: strings.Join(tc.encoded, " ")})
 
 			assert.Contains(t, entry.Message, "***")
-			assert.NotContains(t, entry.Message, secret)
-			assert.NotContains(t, entry.Message, base64.StdEncoding.EncodeToString([]byte(secret)))
-			assert.NotContains(t, entry.Message, url.QueryEscape(secret))
+			for _, disallowed := range tc.encoded {
+				assert.NotContains(t, entry.Message, disallowed)
+			}
 		})
 	}
 }
@@ -94,7 +95,7 @@ func TestValueMaskerEncodedSecrets(t *testing.T) {
 // form, so a JS-serialized JSON body does not leak it.
 func TestValueMaskerJSONEscapesBothWays(t *testing.T) {
 	secret := `a"<b>&c`
-	masker := valueMasker(false, map[string]string{"TOKEN": secret})
+	masker := valueMasker(false, AppendSecretMaskers(nil, map[string]string{"TOKEN": secret}))
 
 	for _, tc := range []struct {
 		name string
@@ -112,17 +113,33 @@ func TestValueMaskerJSONEscapesBothWays(t *testing.T) {
 	}
 }
 
+// With debug logging on, the job logger writes to stdout, which no reporter masks, so it has
+// to hide the values that are not job secrets too.
+func TestValueMaskerHidesExtraMasks(t *testing.T) {
+	masker := valueMasker(false, (&Config{ExtraMasks: []string{"pr0xypw"}}).maskers())
+
+	entry := masker(&logrus.Entry{Context: t.Context(), Message: "proxy is http://user:pr0xypw@proxy:3128"})
+
+	assert.Equal(t, "proxy is http://user:***@proxy:3128", entry.Message)
+}
+
 // ::add-mask:: values go through the same masker, so they get the same treatment.
 func TestValueMaskerEncodedMasks(t *testing.T) {
-	masks := []string{"s3cr3t value"}
-	masker := valueMasker(false, nil)
+	masks := []string{"s3cr3t value", "first\rsecond", " s3cr3t "}
+	masker := valueMasker(false, AppendSecretMaskers(nil, nil))
 
-	entry := masker(&logrus.Entry{
-		Context: WithMasks(t.Context(), &masks),
-		Message: "encoded: " + base64.StdEncoding.EncodeToString([]byte("s3cr3t value")),
-	})
-
-	assert.Equal(t, "encoded: ***", entry.Message)
+	for _, tc := range []struct {
+		line, want string
+	}{
+		{"encoded: " + base64.StdEncoding.EncodeToString([]byte("s3cr3t value")), "encoded: ***"},
+		{"first and second", "*** and ***"},
+		{"encoded: " + base64.StdEncoding.EncodeToString([]byte(" s3cr3t ")), "encoded: ***"},
+		{"encoded: " + base64.StdEncoding.EncodeToString([]byte("s3cr3t")), "encoded: ***"},
+		{"encoded: " + base64.StdEncoding.EncodeToString([]byte("first")), "encoded: ***"},
+	} {
+		entry := masker(&logrus.Entry{Context: WithMasks(t.Context(), &masks), Message: tc.line})
+		assert.Equal(t, tc.want, entry.Message, tc.line)
+	}
 }
 
 // A token in a Basic auth header is base64'd together with the user name, so the token's
@@ -130,8 +147,8 @@ func TestValueMaskerEncodedMasks(t *testing.T) {
 // alignments must be masked as well, or `Authorization: Basic base64("user:token")` leaks
 // the token to anyone who can decode the log.
 func TestValueMaskerBase64Alignments(t *testing.T) {
-	secret := "s3cr3t-token-value"
-	masker := valueMasker(false, map[string]string{"TOKEN": secret})
+	secret := "s3cr3t"
+	masker := valueMasker(false, AppendSecretMaskers(nil, map[string]string{"TOKEN": secret}))
 
 	// One prefix per alignment: len%3 of 0, 1 and 2.
 	for _, prefix := range []string{"x-access-token:", "user:", "ab:"} {
@@ -140,8 +157,6 @@ func TestValueMaskerBase64Alignments(t *testing.T) {
 			entry := masker(&logrus.Entry{Context: t.Context(), Message: "Authorization: Basic " + encoded})
 
 			assert.Contains(t, entry.Message, "***")
-			// The aligned middle of the secret must be gone, so the payload can no longer be
-			// decoded back into the token.
 			assert.NotEqual(t, "Authorization: Basic "+encoded, entry.Message)
 			decodable := strings.TrimPrefix(entry.Message, "Authorization: Basic ")
 			decoded, err := base64.StdEncoding.DecodeString(decodable)
@@ -155,7 +170,7 @@ func TestValueMaskerBase64Alignments(t *testing.T) {
 // The masker caches its replacer, so it has to notice both a mask appended to the same
 // slice and a composite action logging with a slice of its own.
 func TestValueMaskerCachedReplacerSeesNewMasks(t *testing.T) {
-	masker := valueMasker(false, map[string]string{"TOKEN": "secret-token"})
+	masker := valueMasker(false, AppendSecretMaskers(nil, map[string]string{"TOKEN": "secret-token"}))
 	mask := func(masks *[]string, message string) string {
 		return masker(&logrus.Entry{Context: WithMasks(t.Context(), masks), Message: message}).Message
 	}
@@ -180,15 +195,14 @@ func TestAppendSecretMaskerSkipsUselessEncodings(t *testing.T) {
 	// JSON, query and path escaping all leave it unchanged.
 	pairs := AppendSecretMasker(nil, "plaintoken")
 	assert.Equal(t, []string{
-		"plaintoken", "***",
-		base64.StdEncoding.EncodeToString([]byte("plaintoken")), "***",
-		// The two shifted alignments, each without its leading and trailing group.
-		"YWludG9r", "***",
-		"bGFpbnRv", "***",
+		"plaintoken", "***", "cGxhaW50b2tlbg==", "***", "bGFpbnRva2Vu", "***", "YWludG9rZW4=", "***",
+		"aW50b2tl", "***", "YWludG9r", "***", "bGFpbnRv", "***",
 	}, pairs)
 
 	// Too short to mask.
 	assert.Empty(t, AppendSecretMasker(nil, "x"))
+	assert.Empty(t, AppendSecretMasker(nil, " \t"))
+	assert.NotContains(t, AppendSecretMasker(nil, `"123456"`), "123456")
 }
 
 func TestJobLogFormatterDecodesCommandData(t *testing.T) {

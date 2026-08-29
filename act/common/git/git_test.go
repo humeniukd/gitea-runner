@@ -6,18 +6,24 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
 
+	gogit "github.com/go-git/go-git/v5"
+	gogitconfig "github.com/go-git/go-git/v5/config"
 	log "github.com/sirupsen/logrus"
 	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
@@ -45,9 +51,7 @@ func TestFindGitSlug(t *testing.T) {
 	}
 
 	for _, tt := range slugTests {
-		provider, slug, err := findGitSlug(tt.url, "github.com")
-
-		assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
+		provider, slug := findGitSlug(tt.url, "github.com")
 		assert.Equal(tt.provider, provider)
 		assert.Equal(tt.slug, slug)
 	}
@@ -81,45 +85,20 @@ func cleanGitHooks(dir string) error {
 	return nil
 }
 
-func TestFindGitRemoteURL(t *testing.T) {
-	assert := assert.New(t)
-
+func TestFindGithubRepoUsesOrigin(t *testing.T) {
 	basedir := t.TempDir()
-	err := gitCmd("init", basedir)
-	assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
-	err = cleanGitHooks(basedir)
-	assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
-
-	remoteURL := "https://git-codecommit.us-east-1.amazonaws.com/v1/repos/my-repo-name"
-	err = gitCmd("-C", basedir, "remote", "add", "origin", remoteURL)
-	assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
-
-	u, err := findGitRemoteURL(context.Background(), basedir, "origin")
-	assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
-	assert.Equal(remoteURL, u)
-
-	remoteURL = "git@github.com/AwesomeOwner/MyAwesomeRepo.git"
-	err = gitCmd("-C", basedir, "remote", "add", "upstream", remoteURL)
-	assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
-	u, err = findGitRemoteURL(context.Background(), basedir, "upstream")
-	assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
-	assert.Equal(remoteURL, u)
-}
-
-func TestFindGithubRepoUsesOriginAndCustomRemote(t *testing.T) {
-	basedir := t.TempDir()
+	const remoteURL = "https://github.com/owner/repo.git"
 	require.NoError(t, gitCmd("init", basedir))
 	require.NoError(t, cleanGitHooks(basedir))
-	require.NoError(t, gitCmd("-C", basedir, "remote", "add", "origin", "https://github.com/owner/repo.git"))
-	require.NoError(t, gitCmd("-C", basedir, "remote", "add", "ghe", "git@git.example.com:team/project.git"))
+	require.NoError(t, gitCmd("-C", basedir, "remote", "add", "origin", remoteURL))
 
-	slug, err := FindGithubRepo(context.Background(), basedir, "github.com", "")
+	url, err := findGitRemoteURL(context.Background(), basedir, "origin")
+	require.NoError(t, err)
+	require.Equal(t, remoteURL, url)
+
+	slug, err := FindGithubRepo(context.Background(), basedir, "github.com")
 	require.NoError(t, err)
 	require.Equal(t, "owner/repo", slug)
-
-	slug, err = FindGithubRepo(context.Background(), basedir, "git.example.com", "ghe")
-	require.NoError(t, err)
-	require.Equal(t, "team/project", slug)
 }
 
 func TestGitFindRef(t *testing.T) {
@@ -609,4 +588,56 @@ func TestAcquireCloneLock(t *testing.T) {
 			t.Fatal("acquire on a different directory must not block")
 		}
 	})
+}
+
+// An unresponsive remote must not pin a job: the refresh has to be interruptible.
+func TestNewGitCloneExecutorFetchHonoursContext(t *testing.T) {
+	block := make(chan struct{})
+	reached := make(chan struct{})
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		once.Do(func() { close(reached) })
+		<-block
+	}))
+	t.Cleanup(func() {
+		close(block)
+		server.Close()
+	})
+
+	dir := filepath.Join(t.TempDir(), "cached-action")
+	repo, err := gogit.PlainInit(dir, false)
+	require.NoError(t, err)
+	_, err = repo.CreateRemote(&gogitconfig.RemoteConfig{Name: "origin", URLs: []string{server.URL}})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- NewGitCloneExecutor(NewGitCloneExecutorInput{URL: server.URL, Ref: "main", Dir: dir})(ctx)
+	}()
+
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the executor never reached the remote")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("fetch ignored context cancellation")
+	}
+}
+
+func TestStaleRefreshErr(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	require.NoError(t, staleRefreshErr(ctx, errors.New("remote hung up")))
+
+	cancel()
+	require.ErrorIs(t, staleRefreshErr(ctx, errors.New("remote hung up")), context.Canceled)
+	require.NoError(t, staleRefreshErr(ctx, gogit.NoErrAlreadyUpToDate))
 }

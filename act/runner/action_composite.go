@@ -28,7 +28,7 @@ func evaluateCompositeInputAndEnv(ctx context.Context, parent *RunContext, step 
 		}
 	}
 
-	ee := parent.NewStepExpressionEvaluator(ctx, step)
+	ee := parent.NewActionInputsExpressionEvaluator(ctx, step)
 
 	for inputID, input := range step.getActionModel().Inputs {
 		envKey := regexp.MustCompile("[^A-Z0-9-]").ReplaceAllString(strings.ToUpper(inputID), "_")
@@ -36,7 +36,13 @@ func evaluateCompositeInputAndEnv(ctx context.Context, parent *RunContext, step 
 
 		// lookup if key is defined in the step but the already
 		// evaluated value from the environment
-		_, defined := step.getStepModel().With[inputID]
+		defined := false
+		for key := range step.getStepModel().With {
+			if strings.EqualFold(key, inputID) {
+				defined = true
+				break
+			}
+		}
 		if value, ok := stepEnv[envKey]; defined && ok {
 			env[envKey] = value
 		} else {
@@ -51,23 +57,33 @@ func evaluateCompositeInputAndEnv(ctx context.Context, parent *RunContext, step 
 	return env
 }
 
+func (rc *RunContext) setCompositeActionEnv(env map[string]string) {
+	rc.setActionEnv(env)
+	for key := range rc.Env {
+		if strings.HasPrefix(key, "INPUT_") {
+			delete(rc.Env, key)
+		}
+	}
+}
+
 func newCompositeRunContext(ctx context.Context, parent *RunContext, step actionStep, actionPath string) *RunContext {
 	env := evaluateCompositeInputAndEnv(ctx, parent, step)
 
 	// run with the global config but without secrets
-	configCopy := *(parent.Config)
+	configCopy := *parent.Config
 	configCopy.Secrets = nil
 
 	// create a run context for the composite action to run in
 	compositerc := &RunContext{
 		Name:    parent.Name,
 		JobName: parent.JobName,
+		Matrix:  parent.Matrix,
 		Run: &model.Run{
 			JobID: parent.Run.JobID,
 			Workflow: &model.Workflow{
 				Name: parent.Run.Workflow.Name,
 				Jobs: map[string]*model.Job{
-					parent.Run.JobID: {},
+					parent.Run.JobID: {Strategy: parent.Run.Job().Strategy},
 				},
 			},
 		},
@@ -75,13 +91,13 @@ func newCompositeRunContext(ctx context.Context, parent *RunContext, step action
 		StepResults:  map[string]*model.StepResult{},
 		JobContainer: parent.JobContainer,
 		ActionPath:   actionPath,
-		Env:          env,
 		GlobalEnv:    parent.GlobalEnv,
 		Masks:        parent.Masks,
 		ExtraPath:    parent.ExtraPath,
 		Parent:       parent,
 		EventJSON:    parent.EventJSON,
 	}
+	compositerc.setCompositeActionEnv(env)
 	compositerc.ExprEval = compositerc.NewExpressionEvaluator(ctx)
 
 	return compositerc
@@ -131,7 +147,7 @@ func execAsComposite(step actionStep) common.Executor {
 		// repeated composite actions grow rc.Masks exponentially.
 		rc.Masks = appendUniqueMasks(rc.Masks, compositeRC.Masks)
 		rc.ExtraPath = compositeRC.ExtraPath
-		// compositeRC.Env is dirty, contains INPUT_ and merged step env, only rely on compositeRC.GlobalEnv
+		// Propagate GlobalEnv only, so composite inputs and step-local values do not escape.
 		mergeIntoMap := mergeIntoMapCaseSensitive
 		if rc.JobContainer.IsEnvironmentCaseInsensitive() {
 			mergeIntoMap = mergeIntoMapCaseInsensitive
@@ -181,20 +197,7 @@ func (rc *RunContext) compositeExecutor(action *model.Action) *compositeSteps {
 		stepPre := rc.newCompositeCommandExecutor(step.pre())
 		preSteps = append(preSteps, newCompositeStepLogExecutor(stepPre, stepID))
 
-		steps = append(steps, func(ctx context.Context) error {
-			ctx = WithCompositeStepLogger(ctx, stepID)
-			logger := common.Logger(ctx)
-			err := rc.newCompositeCommandExecutor(step.main())(ctx)
-
-			if err != nil {
-				logger.Errorf("##[error]%s", EscapeCommandData(err.Error()))
-				common.SetJobError(ctx, err)
-			} else if ctx.Err() != nil {
-				logger.Errorf("##[error]%s", EscapeCommandData(ctx.Err().Error()))
-				common.SetJobError(ctx, ctx.Err())
-			}
-			return nil
-		})
+		steps = append(steps, newCompositeStepLogExecutor(rc.newCompositeCommandExecutor(step.main()), stepID))
 
 		// run the post executor in reverse order
 		if postExecutor != nil {
@@ -207,6 +210,7 @@ func (rc *RunContext) compositeExecutor(action *model.Action) *compositeSteps {
 	}
 
 	steps = append(steps, common.JobError)
+	preSteps = append(preSteps, common.JobError)
 	return &compositeSteps{
 		pre: func(ctx context.Context) error {
 			return common.NewPipelineExecutor(preSteps...)(common.WithJobErrorContainer(ctx))
@@ -222,19 +226,7 @@ func (rc *RunContext) newCompositeCommandExecutor(executor common.Executor) comm
 	return func(ctx context.Context) error {
 		ctx = WithCompositeLogger(ctx, &rc.Masks)
 
-		// We need to inject a composite RunContext related command
-		// handler into the current running job container
-		// We need this, to support scoping commands to the composite action
-		// executing.
-		rawLogger := common.Logger(ctx).WithField("raw_output", true)
-		logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
-			if rc.Config.LogOutput {
-				rawLogger.Infof("%s", s)
-			} else {
-				rawLogger.Debugf("%s", s)
-			}
-			return true
-		})
+		logWriter := rc.commandLogWriter(ctx)
 
 		oldout, olderr := rc.JobContainer.ReplaceLogWriter(logWriter, logWriter)
 		defer rc.JobContainer.ReplaceLogWriter(oldout, olderr)

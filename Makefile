@@ -5,7 +5,7 @@ GO ?= go
 SHASUM ?= shasum -a 256
 HAS_GO = $(shell hash $(GO) > /dev/null 2>&1 && echo "GO" || echo "NOGO" )
 XGO_PACKAGE ?= src.techknowlogick.com/xgo@v1.9.0 # renovate: datasource=go
-XGO_VERSION := go-1.26.x
+XGO_VERSION := go-1.27.x
 GXZ_PACKAGE ?= github.com/ulikunitz/xz/cmd/gxz@v0.5.16 # renovate: datasource=go
 
 LINUX_ARCHS ?= linux/amd64,linux/arm64
@@ -18,8 +18,8 @@ DOCKER_TAG ?= nightly
 DOCKER_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)
 DOCKER_ROOTLESS_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)-dind-rootless
 
-GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # renovate: datasource=go
-GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.6.0 # renovate: datasource=go
+GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1 # renovate: datasource=go
+GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.7.0 # renovate: datasource=go
 
 GOTEST_FLAGS ?= -race -timeout 20m -parallel 8
 
@@ -137,7 +137,7 @@ lint-pr-title: ## lint PR title against Conventional Commits (set PR_TITLE=...)
 
 .PHONY: security-check
 security-check:
-	GOEXPERIMENT= $(GO) run $(GOVULNCHECK_PACKAGE) -show color ./... || true
+	$(GO) run $(GOVULNCHECK_PACKAGE) -show color ./... || true
 
 .PHONY: tidy
 tidy: ## run go mod tidy
@@ -170,6 +170,15 @@ coverage-report: ## turn coverage.txt from `make test` into .tmp/coverage.md
 .PHONY: test-dind
 test-dind: ## run the daemon-facing tests against the built dind image (TARGET=dind|dind-rootless)
 	@./scripts/test-dind.sh $(TARGET)
+
+E2E_JOB_IMAGE ?= node:24-bookworm@sha256:be23f54a88d34e8824c741b19b91064094f92c1c97b194144bfc8b50d67258e2 # renovate: datasource=docker
+SERVICE_IMAGE ?= nginx:1.31.4-alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913 # renovate: datasource=docker
+E2E_GITEA_IMAGE ?= gitea/gitea:main-nightly
+E2E_CONCURRENCY ?= 8
+
+.PHONY: test-e2e
+test-e2e: ## run Gitea compatibility tests against E2E_GITEA_IMAGE
+	@E2E_CONCURRENCY=$(E2E_CONCURRENCY) E2E_GITEA_IMAGE=$(E2E_GITEA_IMAGE) E2E_JOB_IMAGE=$(E2E_JOB_IMAGE) GO=$(GO) SERVICE_IMAGE=$(SERVICE_IMAGE) ./tools/test-e2e.sh
 
 .PHONY: install
 install: $(GOFILES) ## install the runner binary via `go install`

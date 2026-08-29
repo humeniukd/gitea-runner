@@ -24,6 +24,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/labels"
 	"gitea.com/gitea/runner/internal/pkg/lock"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
+	"gitea.com/gitea/runner/internal/pkg/report"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"connectrpc.com/connect"
@@ -54,15 +55,16 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		// processes with the same identity are indistinguishable to Gitea and
 		// end up cancelling each other's jobs.
 		releaseLock, err := lock.TryLock(cfg.Runner.File)
-		if errors.Is(err, lock.ErrLocked) {
+		switch {
+		case errors.Is(err, lock.ErrLocked):
 			log.Errorf("another gitea-runner process is already using %q; each runner process needs its own runner file (runner.file)", cfg.Runner.File)
 			return err
-		} else if err != nil {
+		case err != nil:
 			// Best-effort guard: if the lock file can't be created (e.g. a
 			// read-only runner-file mount), warn and start anyway rather than
 			// refusing to run.
 			log.Warnf("could not lock runner file %q, continuing without the single-process guard: %v", cfg.Runner.File, err)
-		} else {
+		default:
 			// Held until shutdown finishes: the draining runner still owns this
 			// identity on the server, so releasing early would let a restart
 			// reintroduce the duplicate-identity job cancellations.
@@ -158,6 +160,7 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			cfg.Runner.Insecure,
 			reg.UUID,
 			reg.Token,
+			config.RequestTimeout,
 		)
 
 		runner := run.NewRunner(cfg, reg, cli)
@@ -169,13 +172,14 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 
 		// declare the labels of the runner before fetching tasks
 		resp, err := runner.Declare(ctx, ls.Names())
-		if err != nil && connect.CodeOf(err) == connect.CodeUnimplemented {
+		switch {
+		case err != nil && connect.CodeOf(err) == connect.CodeUnimplemented:
 			log.Errorf("Your Gitea version is too old to support runner declare, please upgrade to v1.21 or later")
 			return err
-		} else if err != nil {
+		case err != nil:
 			log.WithError(err).Error("fail to invoke Declare")
 			return err
-		} else {
+		default:
 			log.Infof("runner: %s, with version: %s, with labels: %v, declare successfully",
 				resp.Msg.Runner.Name, resp.Msg.Runner.Version, resp.Msg.Runner.Labels)
 		}
@@ -280,7 +284,7 @@ func initLogging(cfg *config.Config) {
 		FullTimestamp:    true,
 		CallerPrettyfier: callPrettyfier,
 	}
-	log.SetFormatter(format)
+	log.SetFormatter(report.MaskingFormatter(format))
 
 	l := cfg.Log.Level
 	if l == "" {
