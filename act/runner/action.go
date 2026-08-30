@@ -185,7 +185,7 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 			if err := maybeCopyToActionDir(ctx, step, actionDir, actionPath, containerActionDir); err != nil {
 				return err
 			}
-			containerArgs := []string{"node", path.Join(containerActionDir, action.Runs.Main)}
+			containerArgs := nodeActionCommand(path.Join(containerActionDir, action.Runs.Main))
 			logger.Debugf("executing remote job container: %s", containerArgs)
 
 			rc.ApplyExtraPath(ctx, step.getEnv())
@@ -230,6 +230,10 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 			}, action.Runs.Using)
 		}
 	}
+}
+
+func nodeActionCommand(script string) []string {
+	return []string{"node", "--preserve-symlinks-main", script}
 }
 
 // https://github.com/nektos/act/issues/228#issuecomment-629709055
@@ -592,7 +596,7 @@ func runPreStep(step actionStep) common.Executor {
 				return err
 			}
 
-			containerArgs := []string{"node", path.Join(containerActionDir, action.Runs.Pre)}
+			containerArgs := nodeActionCommand(path.Join(containerActionDir, action.Runs.Pre))
 			logger.Debugf("executing remote job container: %s", containerArgs)
 
 			rc.ApplyExtraPath(ctx, step.getEnv())
@@ -693,7 +697,7 @@ func runPostStep(step actionStep) common.Executor {
 
 			populateEnvsFromSavedState(step.getEnv(), step, rc)
 
-			containerArgs := []string{"node", path.Join(containerActionDir, action.Runs.Post)}
+			containerArgs := nodeActionCommand(path.Join(containerActionDir, action.Runs.Post))
 			logger.Debugf("executing remote job container: %s", containerArgs)
 
 			rc.ApplyExtraPath(ctx, step.getEnv())
