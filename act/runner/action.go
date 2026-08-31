@@ -232,6 +232,7 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 	}
 }
 
+// /var/run is a symlink, so without the flag node's import.meta.url differs from argv[1], which ESM actions compare.
 func nodeActionCommand(script string) []string {
 	return []string{"node", "--preserve-symlinks-main", script}
 }

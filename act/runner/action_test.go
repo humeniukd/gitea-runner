@@ -260,7 +260,11 @@ func TestNodeActionCommandPreservesSymlinkedEntrypoint(t *testing.T) {
 	entrypoint := filepath.Join(actionDir, "index.mjs")
 	require.NoError(t, os.WriteFile(entrypoint, []byte(`
 import {fileURLToPath} from "node:url";
-if (process.argv[1] !== fileURLToPath(import.meta.url)) process.exitCode = 1;
+const self = fileURLToPath(import.meta.url);
+if (process.argv[1] !== self) {
+	console.log("argv[1]:", process.argv[1], "import.meta.url:", self);
+	process.exitCode = 1;
+}
 `), 0o600))
 
 	symlinkedActionDir := filepath.Join(t.TempDir(), "action")
