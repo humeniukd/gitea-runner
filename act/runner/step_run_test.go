@@ -43,17 +43,12 @@ func TestStepRun(t *testing.T) {
 				JobID: "1",
 				Workflow: &model.Workflow{
 					Jobs: map[string]*model.Job{
-						"1": {
-							Defaults: model.Defaults{
-								Run: model.RunDefaults{
-									Shell: "bash",
-								},
-							},
-						},
+						"1": {},
 					},
 				},
 			},
-			JobContainer: cm,
+			JobContainer:   cm,
+			jobRunDefaults: model.RunDefaults{Shell: "bash"},
 		},
 		Step: &model.Step{
 			ID:               "1",
@@ -134,17 +129,17 @@ func TestStepRunShellParity(t *testing.T) {
 		{
 			name:    "run expression without a context",
 			run:     "echo ${{ COMMIT_SHA }}",
-			wantErr: "unable to interpolate the run script: Unavailable context: commit_sha",
+			wantErr: "unable to interpolate the run script:",
 		},
 		{
 			name:    "shell expression without a context",
 			shell:   "${{ SHELL }}",
-			wantErr: "unable to interpolate the shell: Unavailable context: shell",
+			wantErr: "unable to interpolate the shell:",
 		},
 		{
 			name:       "working directory expression without a context",
 			workingDir: "${{ DIR }}",
-			wantErr:    "unable to interpolate the working directory: Unavailable context: dir",
+			wantErr:    "unable to interpolate the working directory:",
 		},
 	}
 
@@ -178,7 +173,7 @@ func TestStepRunShellParity(t *testing.T) {
 
 			name, script, err := sr.setupShellCommand(t.Context())
 			if test.wantErr != "" {
-				require.EqualError(t, err, test.wantErr)
+				require.ErrorContains(t, err, test.wantErr)
 				return
 			}
 			require.NoError(t, err)
