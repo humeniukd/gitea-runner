@@ -75,6 +75,17 @@ const (
 // fragment, missingContainerError composes it into the message every operation shares.
 var ErrContainerNotFound = errors.New("does not exist")
 
+// DockerProxy is a job's docker socket, fronting the daemon's for the job's lifetime.
+type DockerProxy struct {
+	Socket string
+	close  func(context.Context) error
+}
+
+// Close removes what the job created through the socket, then stops serving it.
+func (p *DockerProxy) Close(ctx context.Context) error {
+	return p.close(ctx)
+}
+
 // Info is a snapshot of a container, as of one inspect.
 type Info struct {
 	ID       string

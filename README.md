@@ -275,7 +275,7 @@ volumes:
   - ${GITEA_DOCKER_WORKSPACE:-.}/data:/app/data
 ```
 
-Stop such containers with `docker compose down` before the job ends, the workspace volume is removed regardless. The runner does not set the variable for jobs on the host, where `.` already works.
+The socket itself is a per-job proxy: containers, networks and volumes created through it are labelled `com.gitea.runner.job=<job container name>` and removed when the job ends. Where the daemon cannot open a socket the runner serves, a host daemon reached from inside a runner container, the job gets the daemon socket directly, without labels or cleanup. Jobs on the host get neither the variable nor the proxy, there `.` already works.
 
 #### Proxy
 
