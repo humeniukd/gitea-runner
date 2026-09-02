@@ -84,6 +84,7 @@ type Info struct {
 	// HealthOutput is the last healthcheck probe's output.
 	HealthOutput string
 	Ports        map[string]string // container port ("5432") to the host port it is published on
+	Mounts       map[string]string // container path to its source on the daemon
 }
 
 // Container for managing docker run containers

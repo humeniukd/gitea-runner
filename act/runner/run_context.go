@@ -885,6 +885,9 @@ func (rc *RunContext) captureJobContainerInfo() common.Executor {
 			return nil
 		}
 		rc.jobContainerID = info.ID
+		if source := info.Mounts[rc.githubWorkspace()]; source != "" {
+			rc.Env["GITEA_DOCKER_WORKSPACE"] = source
+		}
 		return nil
 	}
 }

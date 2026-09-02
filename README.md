@@ -266,6 +266,17 @@ A job in a container reaches a service by its id on the job network, on the port
 
 Unlike GitHub, a job whose steps run on the host (a `host` label without `container:`) starts no service containers, so `job.services` and `job.container` stay empty. Give such a job a `container:` when it needs services.
 
+#### Docker from a job (`GITEA_DOCKER_WORKSPACE`)
+
+Containers a job starts through the Docker socket are siblings of the job container, and the daemon resolves their bind-mount sources on its own filesystem, where the job's workspace path does not exist. `GITEA_DOCKER_WORKSPACE` holds the workspace path as the daemon sees it. Use it as the prefix of workspace-relative binds, with `.` as the fallback for local use:
+
+```yaml
+volumes:
+  - ${GITEA_DOCKER_WORKSPACE:-.}/data:/app/data
+```
+
+Stop such containers with `docker compose down` before the job ends, the workspace volume is removed regardless. The runner does not set the variable for jobs on the host, where `.` already works.
+
 #### Proxy
 
 Set these variables in the runner's environment, with systemd `Environment=`, `docker run -e`, or Kubernetes `env:`:
