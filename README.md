@@ -268,14 +268,14 @@ Unlike GitHub, a job whose steps run on the host (a `host` label without `contai
 
 #### Docker from a job (`GITEA_DOCKER_WORKSPACE`)
 
-Containers a job starts through the Docker socket are siblings of the job container, and the daemon resolves their bind-mount sources on its own filesystem, where the job's workspace path does not exist. `GITEA_DOCKER_WORKSPACE` holds the workspace path as the daemon sees it. Use it as the prefix of workspace-relative binds, with `.` as the fallback for local use:
+A container a job starts through the Docker socket cannot bind-mount the workspace by the job's own path, the daemon does not have it. `GITEA_DOCKER_WORKSPACE` holds the path the daemon sees. Use it as the prefix of workspace binds, with `.` as the fallback for local use:
 
 ```yaml
 volumes:
   - ${GITEA_DOCKER_WORKSPACE:-.}/data:/app/data
 ```
 
-The socket itself is a per-job proxy: containers, networks and volumes created through it are labelled `com.gitea.runner.job=<job container name>` and removed when the job ends. Where the daemon cannot open a socket the runner serves, a host daemon reached from inside a runner container, the job gets the daemon socket directly, without labels or cleanup. Jobs on the host get neither the variable nor the proxy, there `.` already works.
+Containers, networks and volumes a job creates through the socket are removed when the job ends. Both apply to jobs in containers, on the host `.` already works.
 
 #### Proxy
 
