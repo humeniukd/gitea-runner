@@ -268,7 +268,7 @@ Unlike GitHub, a job whose steps run on the host (a `host` label without `contai
 
 #### Docker from a job (`GITEA_DOCKER_WORKSPACE`)
 
-A container a job starts through the Docker socket cannot bind-mount the workspace by the job's own path, the daemon does not have it. `GITEA_DOCKER_WORKSPACE` holds the path the daemon sees. Use it as the prefix of workspace binds, with `.` as the fallback for local use:
+A container a job starts through the Docker socket cannot bind-mount the workspace by the job's own path, the daemon does not have it. `GITEA_DOCKER_WORKSPACE` holds the path the daemon sees. Use it as the prefix of workspace binds, with `.` as the fallback for local use, here in a `docker-compose.yaml`:
 
 ```yaml
 volumes:
