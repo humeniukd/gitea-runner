@@ -3,9 +3,9 @@
 The runner can send [OpenTelemetry](https://opentelemetry.io) traces and metrics
 about the jobs it runs:
 
-- **Traces** show each job as a tree of timed **spans** — the workflow run, the
-  job, and each step — so you can see where a slow or failed job spent its time
-  without reading the logs.
+- **Traces** show each job as a tree of timed **spans** — the job and each step —
+  so you can see where a slow or failed job spent its time without reading the
+  logs.
 - **Metrics** are counts and durations over time: job durations, active jobs,
   and errors.
 
@@ -160,14 +160,17 @@ and passes them to job containers as above.
 
 ## Spans
 
-Each task produces a three-level tree: a **pipeline-run** span for the workflow,
-a **job** span under it, and one **step** span per step — with
+Each task produces a **job** span with one **step** span per step, using
 [CI/CD](https://opentelemetry.io/docs/specs/semconv/cicd/cicd-spans/) attributes.
 
-### Pipeline-run span
+A task runs one job of a workflow, so today one span covers both; a separate
+per-workflow span that ties a run's jobs together is left to Gitea.
 
-Kind `SERVER`, named `RUN <workflow>`. The reporter's calls to Gitea and the job
-span are children of it.
+### Job span
+
+Kind `SERVER`, named `RUN <workflow> <job>` (the job name, else its id) once the
+workflow is parsed. The reporter's calls to Gitea and the step spans are children
+of it.
 
 | Attribute | Value |
 | --- | --- |
@@ -178,25 +181,14 @@ span are children of it.
 | `cicd.pipeline.result` | `success`, `failure`, `cancellation`, `skip`, or `error` |
 | `cicd.worker.id` | runner UUID |
 | `cicd.worker.name` | runner name |
+| `gitea.job.id` | job id (the `jobs.<id>` key) |
+| `gitea.job.name` | job `name:` (may be empty) |
 | `vcs.owner.name` | repository owner |
 | `vcs.repository.name` | repository name |
 | `vcs.repository.url.full` | repository URL |
 | `vcs.ref.head.name` | branch or tag name |
 | `vcs.ref.head.revision` | commit SHA |
 | `vcs.ref.head.type` | `branch` or `tag` |
-
-The status is set to error for any non-success result.
-
-### Job span
-
-Kind `INTERNAL`, named after the job (`jobs.<id>.name`, else the job id). Child
-of the pipeline-run span; the step spans nest under it.
-
-| Attribute | Value |
-| --- | --- |
-| `gitea.job.id` | job id (the `jobs.<id>` key) |
-| `gitea.job.name` | job `name:` (may be empty) |
-| `gitea.job.result` | `success`, `failure`, `cancellation`, `skip`, or `error` |
 
 The status is set to error for any non-success result.
 

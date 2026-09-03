@@ -40,7 +40,6 @@ import (
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	docker_container "github.com/moby/moby/api/types/container"
 	log "github.com/sirupsen/logrus"
-	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -403,21 +402,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	job := workflow.GetJob(jobID)
 	reporter.ResetSteps(len(job.Steps))
 
-	if workflow.Name != "" {
-		pipelineSpan.SetName("RUN " + workflow.Name)
-		pipelineSpan.SetAttributes(semconv.CICDPipelineName(workflow.Name))
-	}
-
-	// Child span named after the job, so the job name shows in the trace and the
-	// step spans nest under it rather than directly under the pipeline run.
-	ctx, jobSpan := tracing.StartJob(ctx, jobID, job.Name)
-	defer func() {
-		tracing.SetJobResult(jobSpan, tracing.ResultToSemconv(reporter.Result()))
-		if err != nil {
-			jobSpan.RecordError(err)
-		}
-		jobSpan.End()
-	}()
+	tracing.SetPipelineName(pipelineSpan, workflow.Name, jobID, job.Name)
 
 	taskContext := task.Context.Fields
 	envs := r.cloneEnvs()

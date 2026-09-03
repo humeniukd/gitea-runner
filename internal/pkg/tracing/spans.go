@@ -23,8 +23,8 @@ import (
 // global provider (e.g. after a re-Setup in tests).
 const scopeName = "gitea.com/gitea/runner"
 
-// StartPipeline opens the pipeline-run span for one fetched task. The workflow
-// name is unknown yet, so the caller refines the name to "RUN {workflow}" later.
+// StartPipeline opens the top span for one task (kind SERVER). The workflow and
+// job names are unknown yet, so the caller refines the name via SetPipelineName.
 func StartPipeline(ctx context.Context, task *runnerv1.Task, uuid, name, instanceURL string) (context.Context, trace.Span) {
 	f := task.Context.Fields
 	attrs := []attribute.KeyValue{
@@ -81,19 +81,27 @@ func vcsAttributes(repository, owner, refName, sha, refType, instanceURL string)
 	return attrs
 }
 
-// StartJob opens the span for the single job the task runs, as a child of the
-// pipeline-run span, so the job name is visible and the step spans nest under
-// it. jobName is the job's name:, falling back to its workflow id when unset.
-func StartJob(ctx context.Context, jobID, jobName string) (context.Context, trace.Span) {
-	name := jobName
-	if name == "" {
-		name = jobID
+// SetPipelineName refines the top span once the workflow is parsed: it names it
+// "RUN {workflow} {job}" and adds the pipeline name and job attributes. The job
+// is a single task, so its steps stay children of this one span.
+func SetPipelineName(span trace.Span, workflowName, jobID, jobName string) {
+	job := jobName
+	if job == "" {
+		job = jobID
 	}
-	return otel.Tracer(scopeName).Start(ctx, name, trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(
-			attribute.String("gitea.job.id", jobID),
-			attribute.String("gitea.job.name", jobName),
-		))
+	parts := []string{"RUN"}
+	if workflowName != "" {
+		parts = append(parts, workflowName)
+	}
+	if job != "" {
+		parts = append(parts, job)
+	}
+	span.SetName(strings.Join(parts, " "))
+	span.SetAttributes(
+		semconv.CICDPipelineName(workflowName),
+		attribute.String("gitea.job.id", jobID),
+		attribute.String("gitea.job.name", jobName),
+	)
 }
 
 // StartStep opens the task-run span for one step's main stage, named as the
@@ -120,14 +128,6 @@ func StartStep(ctx context.Context, step *model.Step, taskID int64) (context.Con
 // SetPipelineResult marks the pipeline-run span with the run's outcome.
 func SetPipelineResult(span trace.Span, result string) {
 	setResult(span, semconv.CICDPipelineResultKey, result)
-}
-
-// SetJobResult marks the job span with the run's outcome.
-func SetJobResult(span trace.Span, result string) {
-	span.SetAttributes(attribute.String("gitea.job.result", result))
-	if result != "success" {
-		span.SetStatus(codes.Error, result)
-	}
 }
 
 // SetTaskResult marks a task-run span with the step's outcome.

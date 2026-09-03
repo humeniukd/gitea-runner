@@ -108,25 +108,28 @@ func TestStartStepName(t *testing.T) {
 	}
 }
 
-func TestStartJobName(t *testing.T) {
+func TestSetPipelineName(t *testing.T) {
 	sr := tracetest.NewSpanRecorder()
 	prev := otel.GetTracerProvider()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)))
 	t.Cleanup(func() { otel.SetTracerProvider(prev) })
 
-	_, named := StartJob(context.Background(), "build", "Build and test")
-	named.End()
-	_, unnamed := StartJob(context.Background(), "deploy", "")
-	unnamed.End()
+	_, span := otel.Tracer("test").Start(context.Background(), "RUN")
+	SetPipelineName(span, "Tests", "build", "Build and test")
+	span.End()
+
+	_, fallback := otel.Tracer("test").Start(context.Background(), "RUN")
+	SetPipelineName(fallback, "Tests", "deploy", "")
+	fallback.End()
 
 	byName := make(map[string]sdktrace.ReadOnlySpan)
 	for _, s := range sr.Ended() {
 		byName[s.Name()] = s
 	}
-	require.Contains(t, byName, "Build and test", "job span uses the job name")
-	require.Contains(t, byName, "deploy", "job span falls back to the job id")
+	require.Contains(t, byName, "RUN Tests Build and test", "combined workflow and job name")
+	require.Contains(t, byName, "RUN Tests deploy", "job name falls back to the job id")
 
-	id, ok := attrString(byName["Build and test"].Attributes(), "gitea.job.id")
+	id, ok := attrString(byName["RUN Tests Build and test"].Attributes(), "gitea.job.id")
 	require.True(t, ok)
 	assert.Equal(t, "build", id)
 }

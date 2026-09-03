@@ -80,7 +80,6 @@ func Setup(ctx context.Context, serviceName string, otelCfg config.Otel) (func(c
 	if metricsOn {
 		cfg.MeterProvider = meterProviderConfig(otelCfg)
 	}
-
 	sdk, err := otelconf.NewSDK(otelconf.WithOpenTelemetryConfiguration(cfg))
 	if err != nil {
 		return noop, err
