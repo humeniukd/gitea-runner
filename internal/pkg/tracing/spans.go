@@ -25,15 +25,60 @@ const scopeName = "gitea.com/gitea/runner"
 
 // StartPipeline opens the pipeline-run span for one fetched task. The workflow
 // name is unknown yet, so the caller refines the name to "RUN {workflow}" later.
-func StartPipeline(ctx context.Context, task *runnerv1.Task, uuid, name string) (context.Context, trace.Span) {
-	return otel.Tracer(scopeName).Start(ctx, "RUN", trace.WithSpanKind(trace.SpanKindServer),
-		trace.WithAttributes(
-			semconv.CICDPipelineRunID(task.Context.Fields["run_id"].GetStringValue()),
-			semconv.CICDPipelineTaskRunID(strconv.FormatInt(task.Id, 10)),
-			semconv.CICDPipelineActionNameRun,
-			semconv.CICDWorkerID(uuid),
-			semconv.CICDWorkerName(name),
-		))
+func StartPipeline(ctx context.Context, task *runnerv1.Task, uuid, name, instanceURL string) (context.Context, trace.Span) {
+	f := task.Context.Fields
+	attrs := []attribute.KeyValue{
+		semconv.CICDPipelineRunID(f["run_id"].GetStringValue()),
+		semconv.CICDPipelineTaskRunID(strconv.FormatInt(task.Id, 10)),
+		semconv.CICDPipelineActionNameRun,
+		semconv.CICDWorkerID(uuid),
+		semconv.CICDWorkerName(name),
+	}
+	attrs = append(attrs, vcsAttributes(
+		f["repository"].GetStringValue(),
+		f["repository_owner"].GetStringValue(),
+		f["ref_name"].GetStringValue(),
+		f["sha"].GetStringValue(),
+		f["ref_type"].GetStringValue(),
+		instanceURL,
+	)...)
+	return otel.Tracer(scopeName).Start(ctx, "RUN", trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(attrs...))
+}
+
+// vcsAttributes describes the repository and ref the pipeline runs against, per
+// the OTel VCS semantic conventions. repository is "owner/name"; owner falls
+// back to its first segment.
+func vcsAttributes(repository, owner, refName, sha, refType, instanceURL string) []attribute.KeyValue {
+	name := repository
+	if i := strings.LastIndex(repository, "/"); i >= 0 {
+		if owner == "" {
+			owner = repository[:i]
+		}
+		name = repository[i+1:]
+	}
+	var attrs []attribute.KeyValue
+	if owner != "" {
+		attrs = append(attrs, semconv.VCSOwnerName(owner))
+	}
+	if name != "" {
+		attrs = append(attrs, semconv.VCSRepositoryName(name))
+	}
+	if repository != "" && instanceURL != "" {
+		attrs = append(attrs, semconv.VCSRepositoryURLFull(strings.TrimRight(instanceURL, "/")+"/"+repository))
+	}
+	if refName != "" {
+		attrs = append(attrs, semconv.VCSRefHeadName(refName))
+	}
+	if sha != "" {
+		attrs = append(attrs, semconv.VCSRefHeadRevision(sha))
+	}
+	switch refType {
+	case "branch":
+		attrs = append(attrs, semconv.VCSRefHeadTypeBranch)
+	case "tag":
+		attrs = append(attrs, semconv.VCSRefHeadTypeTag)
+	}
+	return attrs
 }
 
 // StartJob opens the span for the single job the task runs, as a child of the

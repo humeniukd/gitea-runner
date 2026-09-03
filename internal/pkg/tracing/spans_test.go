@@ -139,3 +139,29 @@ func attrString(attrs []attribute.KeyValue, key string) (string, bool) {
 	}
 	return "", false
 }
+
+func TestVCSAttributes(t *testing.T) {
+	byKey := func(attrs []attribute.KeyValue) map[string]string {
+		m := make(map[string]string, len(attrs))
+		for _, a := range attrs {
+			m[string(a.Key)] = a.Value.AsString()
+		}
+		return m
+	}
+
+	got := byKey(vcsAttributes("octocat/hello", "octocat", "main", "abc123", "branch", "https://gitea.example.com/"))
+	assert.Equal(t, "octocat", got["vcs.owner.name"])
+	assert.Equal(t, "hello", got["vcs.repository.name"])
+	assert.Equal(t, "https://gitea.example.com/octocat/hello", got["vcs.repository.url.full"])
+	assert.Equal(t, "main", got["vcs.ref.head.name"])
+	assert.Equal(t, "abc123", got["vcs.ref.head.revision"])
+	assert.Equal(t, "branch", got["vcs.ref.head.type"])
+
+	// owner falls back to the first path segment; empty inputs are omitted.
+	got = byKey(vcsAttributes("octocat/hello", "", "", "", "tag", ""))
+	assert.Equal(t, "octocat", got["vcs.owner.name"])
+	assert.Equal(t, "hello", got["vcs.repository.name"])
+	assert.Equal(t, "tag", got["vcs.ref.head.type"])
+	assert.NotContains(t, got, "vcs.repository.url.full")
+	assert.NotContains(t, got, "vcs.ref.head.name")
+}

@@ -178,6 +178,12 @@ span are children of it.
 | `cicd.pipeline.result` | `success`, `failure`, `cancellation`, `skip`, or `error` |
 | `cicd.worker.id` | runner UUID |
 | `cicd.worker.name` | runner name |
+| `vcs.owner.name` | repository owner |
+| `vcs.repository.name` | repository name |
+| `vcs.repository.url.full` | repository URL |
+| `vcs.ref.head.name` | branch or tag name |
+| `vcs.ref.head.revision` | commit SHA |
+| `vcs.ref.head.type` | `branch` or `tag` |
 
 The status is set to error for any non-success result.
 

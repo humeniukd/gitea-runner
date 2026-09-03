@@ -298,7 +298,7 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 	defer cancel()
 	// The pipeline-run span bounds the whole task, so the reporter RPCs made with
 	// this ctx nest under it; the job span (added in run) nests the step spans.
-	ctx, pipelineSpan := tracing.StartPipeline(ctx, task, r.uuid, r.name)
+	ctx, pipelineSpan := tracing.StartPipeline(ctx, task, r.uuid, r.name, r.client.Address())
 	defer pipelineSpan.End()
 	// A proxy URL may carry credentials, and every job is given it; keep them out of the log.
 	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg, proxyPasswords()...)
