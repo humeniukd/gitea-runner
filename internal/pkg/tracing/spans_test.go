@@ -8,9 +8,11 @@ import (
 	"errors"
 	"testing"
 
+	"gitea.dev/actionslib/pkg/model"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -74,4 +76,35 @@ func TestLogHookNoopWithoutSpan(t *testing.T) {
 	require.NoError(t, logHook{}.Fire(entry))
 	assert.NotContains(t, entry.Data, "trace_id")
 	assert.NotContains(t, entry.Data, "span_id")
+}
+
+func TestStartStepName(t *testing.T) {
+	sr := tracetest.NewSpanRecorder()
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)))
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	cases := []struct {
+		label string
+		step  model.Step
+		want  string
+	}{
+		{"named", model.Step{Name: "Build", Number: 0}, "Build"},
+		{"uses falls back", model.Step{Uses: "actions/checkout@v4", Number: 1}, "actions/checkout@v4"},
+		{"run falls back", model.Step{Run: "make test", Number: 2}, "make test"},
+		{"empty is step N", model.Step{Number: 3}, "step 3"},
+	}
+	for _, tc := range cases {
+		step := tc.step
+		_, span := StartStep(context.Background(), &step, 42)
+		span.End()
+	}
+
+	got := make(map[string]bool)
+	for _, s := range sr.Ended() {
+		got[s.Name()] = true
+	}
+	for _, tc := range cases {
+		assert.Truef(t, got[tc.want], "%s: expected a span named %q", tc.label, tc.want)
+	}
 }

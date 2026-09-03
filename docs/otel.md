@@ -210,12 +210,13 @@ recorded on the span.
 
 ### Step span
 
-One per workflow step (main stage), kind `INTERNAL`, named after the step
-(`<step name>`, or `step <n>` when unnamed).
+One per workflow step (main stage), kind `INTERNAL`, named the way the runner
+logs the step: its `name:`, else the `uses:` action reference, else the `run:`
+script, and only `step <n>` (0-based) when it has none of those.
 
 | Attribute | Value |
 | --- | --- |
-| `cicd.pipeline.task.name` | step name |
+| `cicd.pipeline.task.name` | step name (same resolution as the span name) |
 | `cicd.pipeline.task.run.id` | `<task id>.<step index>` |
 | `cicd.pipeline.task.type` | `build` |
 | `cicd.pipeline.task.run.result` | `success`, `failure`, or `cancellation` |

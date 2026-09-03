@@ -36,14 +36,17 @@ func StartJob(ctx context.Context, task *runnerv1.Task, uuid, name string) (cont
 		))
 }
 
-// StartStep opens the task-run span for one workflow step's main stage.
+// StartStep opens the task-run span for one workflow step's main stage. The span
+// is named after the step the way the runner logs it — the step name, else the
+// action reference (uses:), else the run script — falling back to "step N" only
+// when the step has none of those (mirrors model.Step.String()).
 func StartStep(ctx context.Context, step *model.Step, taskID int64) (context.Context, trace.Span) {
-	name := step.Name
+	name := step.String()
 	if name == "" {
 		name = fmt.Sprintf("step %d", step.Number)
 	}
 	attrs := []attribute.KeyValue{
-		semconv.CICDPipelineTaskName(step.Name),
+		semconv.CICDPipelineTaskName(name),
 		semconv.CICDPipelineTaskRunID(fmt.Sprintf("%d.%d", taskID, step.Number)),
 		semconv.CICDPipelineTaskTypeBuild,
 	}
