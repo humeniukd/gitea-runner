@@ -51,10 +51,8 @@ func StartJob(ctx context.Context, jobID, jobName string) (context.Context, trac
 		))
 }
 
-// StartStep opens the task-run span for one workflow step's main stage. The span
-// is named after the step the way the runner logs it — the step name, else the
-// action reference (uses:), else the run script — falling back to "step N" only
-// when the step has none of those (mirrors model.Step.String()).
+// StartStep opens the task-run span for one step's main stage, named as the
+// runner logs it (model.Step.String()), else "step N".
 func StartStep(ctx context.Context, step *model.Step, taskID int64) (context.Context, trace.Span) {
 	name := step.String()
 	if name == "" {
@@ -92,9 +90,8 @@ func SetTaskResult(span trace.Span, result string) {
 	setResult(span, semconv.CICDPipelineTaskRunResultKey, result)
 }
 
-// SetTaskFailed marks a task-run span failed, recording the step error and
-// setting the status to the last command output line when there is one — more
-// useful than the bare exit error (e.g. "Process completed with exit code 1").
+// SetTaskFailed marks a task-run span failed, recording the error and using the
+// last command output as the status when present (clearer than the exit error).
 func SetTaskFailed(span trace.Span, err error, lastOutput string) {
 	span.SetAttributes(semconv.CICDPipelineTaskRunResultKey.String("failure"))
 	span.RecordError(err)

@@ -120,18 +120,16 @@ func TestNewRPCTracesToggle(t *testing.T) {
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
-	// An active parent span provides context that could be propagated.
+	// parent span gives context that could propagate.
 	ctx, span := tp.Tracer("test").Start(context.Background(), "parent")
 	defer span.End()
 
-	// Off (default): no client span and no traceparent sent to Gitea.
 	off := New(server.URL, false, "", "", time.Minute, false)
 	_, _ = off.Ping(ctx, connect.NewRequest(&pingv1.PingRequest{Data: "x"}))
 	require.Empty(t, sr.Ended(), "no RPC spans when rpcTraces is off")
 	require.Len(t, traceparents, 1)
 	require.Empty(t, traceparents[0], "no traceparent propagated when rpcTraces is off")
 
-	// On: the RPC produces a client span and propagates traceparent.
 	on := New(server.URL, false, "", "", time.Minute, true)
 	_, _ = on.Ping(ctx, connect.NewRequest(&pingv1.PingRequest{Data: "x"}))
 	require.NotEmpty(t, sr.Ended(), "RPC span recorded when rpcTraces is on")

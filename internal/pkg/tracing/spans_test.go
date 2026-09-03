@@ -67,12 +67,10 @@ func TestLogHookAddsTraceAndSpanID(t *testing.T) {
 }
 
 func TestLogHookNoopWithoutSpan(t *testing.T) {
-	// No context.
 	entry := logrus.NewEntry(logrus.New())
 	require.NoError(t, logHook{}.Fire(entry))
 	assert.NotContains(t, entry.Data, "trace_id")
 
-	// Context without a span.
 	entry = logrus.NewEntry(logrus.New()).WithContext(context.Background())
 	require.NoError(t, logHook{}.Fire(entry))
 	assert.NotContains(t, entry.Data, "trace_id")

@@ -1,81 +1,67 @@
 # OpenTelemetry
 
-The runner can export telemetry about the jobs it executes through
-[OpenTelemetry](https://opentelemetry.io) (OTel), a vendor-neutral standard
-with two parts:
+The runner can send [OpenTelemetry](https://opentelemetry.io) traces and metrics
+about the jobs it runs:
 
-- **Traces** follow one job from start to finish as a tree of **spans** — each
-  span is one unit of work with a name, timing, and success/failure status.
-  Spans nest — the workflow run, the job, then each workflow step (plus the HTTP
-  calls the runner makes, and optionally its Gitea RPCs) — so a slow or failed
-  job can be decomposed into where the time went without reading logs.
-- **Metrics** are aggregate numbers over time — job durations, active jobs,
-  error counts — sent to the same destination.
+- **Traces** show each job as a tree of timed **spans** — the workflow run, the
+  job, and each step — so you can see where a slow or failed job spent its time
+  without reading the logs.
+- **Metrics** are counts and durations over time: job durations, active jobs,
+  and errors.
 
-Both are delivered with OTLP (OpenTelemetry's wire protocol) to a **collector**,
-a small server you run that forwards to any backend (Jaeger, Tempo, Datadog,
-Grafana Cloud, ...). Attribute names follow the OTel **semantic conventions**
-("semconv") — standardized names such as `cicd.pipeline.run.id`, so backends
-and dashboards understand them without runner-specific mapping.
+Both are sent over OTLP to a **collector** you run, which forwards them to a
+backend such as Jaeger, Tempo, or Grafana. Span and metric names follow the
+OpenTelemetry [semantic conventions](https://opentelemetry.io/docs/specs/semconv/),
+so backends understand them without extra mapping.
 
-**This feature is opt-in.** The runner exports nothing, and starts no OTel
-SDK at all, until you configure an OTLP endpoint — in the config file or
-through the standard `OTEL_*` environment variables. The Prometheus
-`/metrics` endpoint is independent and unaffected.
+This is **opt-in**: nothing is exported, and no SDK starts, until you set an OTLP
+endpoint. The Prometheus `/metrics` endpoint is separate and unchanged.
 
 ## Configuration
 
-A "signal" is one of the two exports — traces or metrics; each is off until its
-OTLP endpoint is configured. Configuration comes from two sources, merged per
-setting: the runner's own config file wins, and the standard `OTEL_*`
-environment variables fill in everything it leaves empty. The top-level
-`otel.{enabled,endpoint,protocol,headers}` are shared defaults for both
-signals — mirroring the generic `OTEL_EXPORTER_OTLP_*` env vars — and each
-per-signal section overrides them.
+Configure it in the runner config file or with the standard `OTEL_*` environment
+variables; the file wins per setting, env fills the rest. Traces and metrics are
+configured separately, and the top-level `otel.*` keys are shared defaults each
+section can override.
 
 ```yaml
 otel:
-  enabled: true                       # shared default; false turns both signals off (also honors OTEL_SDK_DISABLED)
-  resource_attributes:                # extra resource attributes, merged over OTEL_RESOURCE_ATTRIBUTES (see below)
-    deployment.environment.name: "production"
-  endpoint: "http://collector:4318"   # shared base; the signal path is appended (mirrors OTEL_EXPORTER_OTLP_ENDPOINT)
-  protocol: "http/protobuf"           # shared; "http/protobuf" or "grpc" (mirrors OTEL_EXPORTER_OTLP_PROTOCOL)
-  headers:                            # shared; merged over OTEL_EXPORTER_OTLP_HEADERS, per key
+  enabled: true                       # false turns everything off (also honors OTEL_SDK_DISABLED)
+  endpoint: "http://collector:4318"   # the signal path (/v1/traces, /v1/metrics) is appended
+  protocol: "http/protobuf"           # or "grpc"
+  headers:                            # sent on every export
     authorization: "Bearer secret"
+  resource_attributes:                # attached to every span and metric (see below)
+    deployment.environment.name: "production"
   traces:
     enabled: true                     # defaults to otel.enabled
-    endpoint: "http://collector:4318/v1/traces" # used as-is; wins over otel.endpoint and the env vars
-    protocol: "grpc"                  # wins over otel.protocol
-    headers:                          # merged over otel.headers, per key
+    endpoint: "http://collector:4318/v1/traces" # used as-is; overrides otel.endpoint
+    protocol: "grpc"
+    headers:
       x-scope-orgid: "ci"
-    sampler_ratio: 0.25               # parent-based traceidratio; wins over OTEL_TRACES_SAMPLER
-    rpc: false                        # record noisy client RPC spans + trace propagation to Gitea; off by default
+    sampler_ratio: 0.25               # sample this fraction of traces
+    rpc: false                        # also trace the runner's own calls to Gitea; off (noisy)
   metrics:
-    enabled: true                     # defaults to otel.enabled
-    endpoint: "http://collector:4318/v1/metrics" # used as-is
+    enabled: true
+    endpoint: "http://collector:4318/v1/metrics"
     protocol: "http/protobuf"
-    headers:                          # merged over otel.headers, per key
+    headers:
       x-scope-orgid: "ci"
 ```
 
-Setting only `otel.endpoint` (or the standard `OTEL_EXPORTER_OTLP_ENDPOINT`)
-enables and points both signals. Endpoint path handling matches the OTLP spec:
-a shared/generic endpoint has the signal path (`/v1/traces`, `/v1/metrics`)
-appended, while a per-signal endpoint is used as-is (include the path). The
-Prometheus metrics endpoint (`metrics.*`) is independent of `otel.metrics`.
-When OTel metrics export is on, the runner emits the CI/CD semconv metrics
-(`cicd.pipeline.run.duration`, `cicd.pipeline.run.active`, `cicd.worker.count`,
-`cicd.system.errors`), poll instruments under `gitea.runner.poll.*`, the Go
-runtime metrics (`go.*`) from the contrib runtime instrumentation, and the
-connect RPC client metrics.
+Setting just `otel.endpoint` turns on both traces and metrics. A shared endpoint
+has `/v1/traces` or `/v1/metrics` appended; an endpoint set under `traces:` or
+`metrics:` is used exactly as given (include the path).
 
-`otel.resource_attributes` sets [resource attributes](https://opentelemetry.io/docs/specs/semconv/resource/) that identify the runner on every span and metric, and are also passed to job containers (via `OTEL_RESOURCE_ATTRIBUTES`) so in-job telemetry carries them too. They resolve per key: the built-in default, then `OTEL_RESOURCE_ATTRIBUTES`, then `otel.resource_attributes` (most specific wins). `deployment.environment.name` defaults to `test`, and that default persists unless it is overridden explicitly — setting other attributes does not remove it.
+`otel.resource_attributes` labels every span and metric, and is also passed to
+job containers. Values resolve per key: a built-in default, then
+`OTEL_RESOURCE_ATTRIBUTES`, then `otel.resource_attributes`.
+`deployment.environment.name` defaults to `test` and stays unless you set it.
 
 ### Environment variables
 
-Every setting can also be given as a [standard `OTEL_*` variable](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/)
-instead of the config file. The runner reads them directly, and
-config-file value (when set) wins per setting.
+Every setting also has a [standard `OTEL_*` variable](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/);
+the config file wins over it per setting.
 
 | Config key | Environment variable |
 | --- | --- |
@@ -103,42 +89,32 @@ gitea-runner daemon
 
 ## Job containers
 
-The runner gives job containers the full OTLP configuration so applications
-running inside a job continue the CI trace and export to the same collector
-instead of starting disjoint traces. Each container receives:
+So tools inside a job can add to the same trace, each job container gets:
 
-- every `OTEL_*` variable from the runner's own environment;
-- the `otel.*` config settings translated to their `OTEL_*` env vars (endpoint,
-  protocol, headers, `resource_attributes`, and per-signal equivalents), so file
-  config reaches jobs too — the yml config is otherwise never in the process
-  environment. The config value wins over the runner env, per setting;
-- `TRACEPARENT` and `TRACESTATE` (W3C trace context in environment variables)
-  pointing at the job's span, enabling spans inside the job to be tied to the
-  job itself.
+- every `OTEL_*` variable from the runner's environment;
+- the `otel.*` config settings as their `OTEL_*` equivalents (config-file
+  settings do not otherwise reach the container);
+- `TRACEPARENT`/`TRACESTATE` pointing at the job's span, so spans created inside
+  the job attach to it.
 
-A signal disabled with `otel.traces.enabled: false` or `otel.metrics.enabled:
-false` contributes no OTLP env vars to the container and is turned off in-job
-with `OTEL_TRACES_EXPORTER=none` / `OTEL_METRICS_EXPORTER=none`, so a shared
-endpoint does not re-enable it.
+Disabling traces or metrics (`otel.traces.enabled: false` /
+`otel.metrics.enabled: false`) drops that section's variables and sets
+`OTEL_TRACES_EXPORTER=none` / `OTEL_METRICS_EXPORTER=none`, so a shared endpoint
+cannot turn it back on.
 
-> **Security limitation.** Exporter credentials are **not** withheld: job code —
-> including jobs from untrusted pull requests — can read the collector headers
-> (`OTEL_EXPORTER_OTLP*_HEADERS`) and any TLS client key/certificate passed to
-> the SDK. Do not put credentials for a shared backend on the runner. The
-> recommended setup is to point the runner at a local collector that accepts
-> OTLP with no authentication and forwards to the real destination, keeping the
-> backend credentials on the collector.
+> **Security.** Exporter credentials are not hidden from jobs: workflow code —
+> including from untrusted pull requests — can read the collector headers and any
+> TLS client key/cert. Do not put shared-backend credentials on the runner; point
+> it at a local collector that accepts OTLP without auth and forwards on, keeping
+> the credentials on the collector.
 
 ## Kubernetes: inject config with the OpenTelemetry Operator
 
-If you run the [OpenTelemetry Operator](https://github.com/open-telemetry/opentelemetry-operator),
-you can let it inject the OTLP configuration into the runner pod instead of
-setting the variables by hand. The runner already ships its own SDK, so use the
-`inject-sdk` annotation: it injects only the `OTEL_*` environment (endpoint,
-resource attributes, propagators, sampler) from an `Instrumentation` resource,
-without adding a language auto-instrumentation agent.
-
-Define an `Instrumentation` resource:
+With the [OpenTelemetry Operator](https://github.com/open-telemetry/opentelemetry-operator)
+you can inject the `OTEL_*` configuration into the runner pod instead of setting
+it by hand. The runner already has its own SDK, so use the `inject-sdk`
+annotation, which only injects the config from an `Instrumentation` resource and
+adds no language agent.
 
 ```yaml
 apiVersion: opentelemetry.io/v1alpha1
@@ -179,22 +155,19 @@ spec:
           image: gitea/runner:nightly
 ```
 
-The operator adds `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_ATTRIBUTES`,
-`OTEL_PROPAGATORS` and the sampler variables to the container. The runner reads
-them like any other `OTEL_*` env and passes them on to job containers as
-described above.
+The operator adds the `OTEL_*` variables to the container; the runner reads them
+and passes them to job containers as above.
 
 ## Spans
 
 Each task produces a three-level tree: a **pipeline-run** span for the workflow,
-one **job** span beneath it, and one **step** span per workflow step — using
-[CI/CD semantic-convention](https://opentelemetry.io/docs/specs/semconv/cicd/cicd-spans/)
-attributes.
+a **job** span under it, and one **step** span per step — with
+[CI/CD](https://opentelemetry.io/docs/specs/semconv/cicd/cicd-spans/) attributes.
 
 ### Pipeline-run span
 
-Kind `SERVER`, named `RUN` and refined to `RUN <workflow>` once the workflow is
-parsed. Reporter RPCs and the job span are children of it.
+Kind `SERVER`, named `RUN <workflow>`. The reporter's calls to Gitea and the job
+span are children of it.
 
 | Attribute | Value |
 | --- | --- |
@@ -206,13 +179,12 @@ parsed. Reporter RPCs and the job span are children of it.
 | `cicd.worker.id` | runner UUID |
 | `cicd.worker.name` | runner name |
 
-The span status is set to error for any non-success result, and a run error is
-recorded on the span.
+The status is set to error for any non-success result.
 
 ### Job span
 
-Kind `INTERNAL`, named after the job (`jobs.<id>.name`, falling back to the job
-id). Child of the pipeline-run span; the step spans nest under it.
+Kind `INTERNAL`, named after the job (`jobs.<id>.name`, else the job id). Child
+of the pipeline-run span; the step spans nest under it.
 
 | Attribute | Value |
 | --- | --- |
@@ -224,52 +196,44 @@ The status is set to error for any non-success result.
 
 ### Step span
 
-One per workflow step (main stage), kind `INTERNAL`, named the way the runner
-logs the step: its `name:`, else the `uses:` action reference, else the `run:`
-script, and only `step <n>` (0-based) when it has none of those.
+Kind `INTERNAL`, named as the runner logs the step: its `name:`, else the
+`uses:` action, else the `run:` script, and only `step <n>` (0-based) when it has
+none of those.
 
 | Attribute | Value |
 | --- | --- |
-| `cicd.pipeline.task.name` | step name (same resolution as the span name) |
+| `cicd.pipeline.task.name` | step name (as above) |
 | `cicd.pipeline.task.run.id` | `<task id>.<step index>` |
 | `cicd.pipeline.task.type` | `build` |
 | `cicd.pipeline.task.run.result` | `success`, `failure`, or `cancellation` |
 | `gitea.step.uses` | action reference, for `uses:` steps |
 | `gitea.step.run` | script, for `run:` steps |
 
-On failure the span status is set to error; its description is the step's last
-command output line when there is one (for example `npm ERR! missing script:
-build`), which is more useful than the bare exit error, and the error itself is
-recorded as an exception event on the span.
+On failure the status is set to error and its message is the step's last output
+line (e.g. `npm ERR! missing script: build`), which is clearer than the bare exit
+code; the error is also recorded as an event.
 
 ### Instrumented clients
 
-The job cache server and job-summary uploads (HTTP) carry the standard `http.*`
-span attributes from the OpenTelemetry contrib instrumentation. Spans emitted by
-applications inside a job attach to the job span through the injected
-`TRACEPARENT`.
+The job cache server and job-summary uploads (HTTP) get `http.*` spans, and
+spans from applications inside a job attach through the injected `TRACEPARENT`.
 
-Client RPCs to Gitea (connect) are **not** traced by default: the control-plane
-chatter (FetchTask long-polls, log and status updates) is very noisy and rarely
-useful. Set `otel.traces.rpc: true` to record these `rpc.*` client spans and
-propagate W3C trace context to Gitea when debugging. When off (the default) no
-RPC spans are created and no `traceparent` is sent to Gitea; RPC client metrics
-(`rpc.client.*`) are recorded either way.
+The runner's own calls to Gitea are **not** traced by default — the polling and
+status-update calls are constant and rarely useful. Set `otel.traces.rpc: true`
+to record them (and propagate trace context to Gitea) when debugging. RPC
+metrics (`rpc.client.*`) are recorded either way.
 
 ## Logs
 
-When tracing is enabled, the runner's own log lines emitted within a job carry
-`trace_id` and `span_id` fields identifying the job span, so an operator can jump
-from a runner log line to the corresponding trace. Lines logged outside a job
-(startup, polling) have no span and are unchanged.
+When tracing is on, the runner's log lines for a job carry `trace_id` and
+`span_id`, so you can jump from a log line to the trace. Lines outside a job
+(startup, polling) are unchanged.
 
 ## Metrics
 
-When OTel metrics export is on, the runner emits its own instruments — named to
-the CI/CD semantic conventions where one applies, otherwise under the
-`gitea.runner.*` namespace — plus instrumentation-library and Go runtime
-metrics. This is independent of the Prometheus `/metrics` endpoint, which is
-unchanged.
+When metrics are on, the runner reports its own instruments — named to the CI/CD
+conventions where one fits, otherwise under `gitea.runner.*` — plus library and
+Go runtime metrics. This is separate from the Prometheus `/metrics` endpoint.
 
 ### Runner instruments
 
@@ -284,12 +248,12 @@ unchanged.
 | `gitea.runner.poll.backoff` | gauge | `s` | — |
 
 `cicd.pipeline.name` is the repository: the workflow name is not known at job
-start, and the repository is the low-cardinality grouping.
+start, and the repository keeps the label low-cardinality.
 
 ### Library and runtime metrics
 
 - Connect RPC client metrics (`rpc.client.duration`, `rpc.client.request.size`,
-  `rpc.client.response.size`) from the connect instrumentation, and HTTP client
-  metrics (`http.client.*`) from the cache and job-summary clients.
+  `rpc.client.response.size`), and HTTP client metrics (`http.client.*`) from the
+  cache and job-summary clients.
 - Go runtime metrics (`go.memory.*`, `go.gc.*`, `go.goroutine.count`,
-  `go.schedule.duration`, …) from the contrib runtime instrumentation.
+  `go.schedule.duration`, …).

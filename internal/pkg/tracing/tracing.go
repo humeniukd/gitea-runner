@@ -410,7 +410,6 @@ func setJobOtelEnv(envs map[string]string, cfg config.Otel) {
 	}
 }
 
-// setEnvIf sets key only when value is non-empty.
 func setEnvIf(envs map[string]string, key, value string) {
 	if value != "" {
 		envs[key] = value

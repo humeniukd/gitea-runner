@@ -25,8 +25,7 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
-// unsetConfigFile removes OTEL_CONFIG_FILE and restores it at test end;
-// otelconf reacts to a present-but-empty value by trying to read a "" file.
+// unsetConfigFile clears OTEL_CONFIG_FILE, which otelconf treats as a file to read even when empty.
 func unsetConfigFile(t *testing.T) {
 	t.Helper()
 	old, had := os.LookupEnv("OTEL_CONFIG_FILE")
@@ -38,7 +37,6 @@ func unsetConfigFile(t *testing.T) {
 	})
 }
 
-// clearEnv drops the OTLP endpoint env so a test starts from a known state.
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
@@ -53,7 +51,6 @@ func clearEnv(t *testing.T) {
 	}
 }
 
-// otlpSink records the request paths and Authorization headers of OTLP posts.
 type otlpSink struct {
 	mu    sync.Mutex
 	paths map[string]int
@@ -103,7 +100,6 @@ func resetGlobals(t *testing.T) {
 	})
 }
 
-// emit produces one span and one metric point, then flushes via shutdown.
 func emit(t *testing.T, shutdown func(context.Context) error) {
 	t.Helper()
 	_, span := otel.Tracer("test").Start(context.Background(), "op")
@@ -135,44 +131,22 @@ func TestJobEnvPassthroughAndTraceparent(t *testing.T) {
 	cctx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": envs["TRACEPARENT"]})
 	assert.True(t, trace.SpanContextFromContext(cctx).IsValid())
 
-	// OTEL_* pass through unfiltered, credentials included (documented limitation).
 	assert.Equal(t, "authorization=Bearer secret", envs["OTEL_EXPORTER_OTLP_HEADERS"])
 	assert.NotContains(t, JobEnv(context.Background(), config.Otel{}), "TRACEPARENT")
-}
-
-func TestJobEnvResourceAttributes(t *testing.T) {
-	unsetConfigFile(t)
-	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "team=ci")
-
-	// yml overrides the default deployment.environment.name; unrelated env attr survives.
-	envs := JobEnv(context.Background(), config.Otel{ResourceAttributes: map[string]string{"deployment.environment.name": "production"}})
-	assert.Equal(t, "deployment.environment.name=production,team=ci", envs["OTEL_RESOURCE_ATTRIBUTES"])
-}
-
-func TestJobEnvDefaultEnvironmentPersists(t *testing.T) {
-	unsetConfigFile(t)
-
-	// A different attribute set via env leaves the default deployment.environment.name intact.
-	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "team=ci")
-	assert.Equal(t, "deployment.environment.name=test,team=ci",
-		JobEnv(context.Background(), config.Otel{})["OTEL_RESOURCE_ATTRIBUTES"])
-
-	// A different attribute set via config leaves the default intact too.
-	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
-	assert.Equal(t, "deployment.environment.name=test,team=ci",
-		JobEnv(context.Background(), config.Otel{ResourceAttributes: map[string]string{"team": "ci"}})["OTEL_RESOURCE_ATTRIBUTES"])
 }
 
 func TestJobEnvConfigToEnv(t *testing.T) {
 	unsetConfigFile(t)
 	clearEnv(t)
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "team=ci")
 	ratio := 0.25
 	cfg := config.Otel{
-		Endpoint: "http://collector:4318",
-		Protocol: "grpc",
-		Headers:  map[string]string{"authorization": "Bearer shared"},
-		Traces:   config.OtelTraces{Endpoint: "http://collector:4318/v1/traces", SamplerRatio: &ratio},
-		Metrics:  config.OtelMetrics{Headers: map[string]string{"x-scope-orgid": "ci"}},
+		Endpoint:           "http://collector:4318",
+		Protocol:           "grpc",
+		Headers:            map[string]string{"authorization": "Bearer shared"},
+		ResourceAttributes: map[string]string{"deployment.environment.name": "production"},
+		Traces:             config.OtelTraces{Endpoint: "http://collector:4318/v1/traces", SamplerRatio: &ratio},
+		Metrics:            config.OtelMetrics{Headers: map[string]string{"x-scope-orgid": "ci"}},
 	}
 	envs := JobEnv(context.Background(), cfg)
 	assert.Equal(t, "http://collector:4318", envs["OTEL_EXPORTER_OTLP_ENDPOINT"])
@@ -182,46 +156,41 @@ func TestJobEnvConfigToEnv(t *testing.T) {
 	assert.Equal(t, "parentbased_traceidratio", envs["OTEL_TRACES_SAMPLER"])
 	assert.Equal(t, "0.25", envs["OTEL_TRACES_SAMPLER_ARG"])
 	assert.Equal(t, "x-scope-orgid=ci", envs["OTEL_EXPORTER_OTLP_METRICS_HEADERS"])
+	assert.Equal(t, "deployment.environment.name=production,team=ci", envs["OTEL_RESOURCE_ATTRIBUTES"])
 }
 
 func TestJobEnvDisabledSignal(t *testing.T) {
 	unsetConfigFile(t)
 	clearEnv(t)
-	// Runner env carries a shared endpoint and a stale traces endpoint.
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://collector:4318/v1/traces")
 
 	envs := JobEnv(context.Background(), config.Otel{Traces: config.OtelTraces{Enabled: new(false)}})
 	assert.Equal(t, "none", envs["OTEL_TRACES_EXPORTER"], "disabled traces turned off in-job")
 	assert.NotContains(t, envs, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "disabled signal's env dropped")
-	// The still-enabled metrics signal keeps the shared endpoint and gets no disable switch.
-	assert.Equal(t, "http://collector:4318", envs["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	assert.Equal(t, "http://collector:4318", envs["OTEL_EXPORTER_OTLP_ENDPOINT"], "enabled metrics keep the shared endpoint")
 	assert.NotContains(t, envs, "OTEL_METRICS_EXPORTER")
 }
 
-func TestMergedResourceAttributes(t *testing.T) {
-	// Default only.
+func TestResourceAttributeResolution(t *testing.T) {
 	assert.Equal(t, map[string]string{"deployment.environment.name": "test"},
 		mergedResourceAttributes("", nil))
-	// env overrides default; unrelated env attr kept.
-	assert.Equal(t, map[string]string{"deployment.environment.name": "staging", "team": "ci"},
-		mergedResourceAttributes("deployment.environment.name=staging,team=ci", nil))
-	// yml wins over env, default persists for other keys.
+	assert.Equal(t, map[string]string{"deployment.environment.name": "test", "team": "ci"},
+		mergedResourceAttributes("team=ci", nil))
 	assert.Equal(t, map[string]string{"deployment.environment.name": "prod", "team": "ci"},
 		mergedResourceAttributes("deployment.environment.name=staging,team=ci", map[string]string{"deployment.environment.name": "prod"}))
-}
 
-func TestResourceAttributesExtra(t *testing.T) {
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
-	byName := func(attrs []otelconf.AttributeNameValue) map[string]any {
-		out := make(map[string]any, len(attrs))
+	deploymentEnv := func(attrs []otelconf.AttributeNameValue) any {
 		for _, a := range attrs {
-			out[a.Name] = a.Value
+			if a.Name == "deployment.environment.name" {
+				return a.Value
+			}
 		}
-		return out
+		return nil
 	}
-	assert.Equal(t, "test", byName(resourceAttributes("runner", nil))["deployment.environment.name"], "default applied")
-	assert.Equal(t, "prod", byName(resourceAttributes("runner", map[string]string{"deployment.environment.name": "prod"}))["deployment.environment.name"])
+	assert.Equal(t, "test", deploymentEnv(resourceAttributes("runner", nil)))
+	assert.Equal(t, "prod", deploymentEnv(resourceAttributes("runner", map[string]string{"deployment.environment.name": "prod"})))
 }
 
 func TestSetupNoopWithoutEndpoint(t *testing.T) {
@@ -233,69 +202,68 @@ func TestSetupNoopWithoutEndpoint(t *testing.T) {
 	require.NoError(t, shutdown(context.Background()))
 }
 
-func TestSetupSharedEndpointEnablesBothSignals(t *testing.T) {
-	resetGlobals(t)
-	unsetConfigFile(t)
-	clearEnv(t)
-	sink := newSink(t)
-
-	shutdown, err := Setup(context.Background(), "runner", config.Otel{Endpoint: sink.URL})
-	require.NoError(t, err)
-	emit(t, shutdown)
-
-	// Generic endpoint: the signal path is appended for each signal.
-	assert.Positive(t, sink.count("/v1/traces"), "traces exported to appended path")
-	assert.Positive(t, sink.count("/v1/metrics"), "metrics exported to appended path")
-}
-
-func TestSetupSignalEndpointUsedAsIs(t *testing.T) {
-	resetGlobals(t)
-	unsetConfigFile(t)
-	clearEnv(t)
-	sink := newSink(t)
-
-	shutdown, err := Setup(context.Background(), "runner", config.Otel{
-		Traces: config.OtelTraces{Endpoint: sink.URL + "/custom/traces"},
-	})
-	require.NoError(t, err)
-	emit(t, shutdown)
-
-	// Signal endpoint used as-is: no signal path appended.
-	assert.Positive(t, sink.count("/custom/traces"))
-	assert.Equal(t, 0, sink.count("/custom/traces/v1/traces"))
-}
-
-func TestSetupSharedEnabledFalseDisablesBoth(t *testing.T) {
-	resetGlobals(t)
-	unsetConfigFile(t)
-	clearEnv(t)
-	sink := newSink(t)
-
-	shutdown, err := Setup(context.Background(), "runner", config.Otel{
-		Enabled:  new(false),
-		Endpoint: sink.URL,
-	})
-	require.NoError(t, err)
-	emit(t, shutdown)
-	assert.Equal(t, 0, sink.total(), "otel.enabled=false disables both signals")
-}
-
-func TestSetupSignalEnabledOverridesShared(t *testing.T) {
-	resetGlobals(t)
-	unsetConfigFile(t)
-	clearEnv(t)
-	sink := newSink(t)
-
-	// Shared disabled, but traces re-enabled per signal.
-	shutdown, err := Setup(context.Background(), "runner", config.Otel{
-		Enabled:  new(false),
-		Endpoint: sink.URL,
-		Traces:   config.OtelTraces{Enabled: new(true)},
-	})
-	require.NoError(t, err)
-	emit(t, shutdown)
-	assert.Positive(t, sink.count("/v1/traces"), "traces.enabled=true overrides otel.enabled=false")
-	assert.Equal(t, 0, sink.count("/v1/metrics"), "metrics stays disabled by otel.enabled")
+func TestSetupSignalGating(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   map[string]string
+		cfg   func(url string) config.Otel
+		check func(t *testing.T, s *otlpSink)
+	}{
+		{
+			name: "shared endpoint enables both signals",
+			cfg:  func(url string) config.Otel { return config.Otel{Endpoint: url} },
+			check: func(t *testing.T, s *otlpSink) {
+				assert.Positive(t, s.count("/v1/traces"))
+				assert.Positive(t, s.count("/v1/metrics"))
+			},
+		},
+		{
+			name: "signal endpoint used as-is, no path appended",
+			cfg: func(url string) config.Otel {
+				return config.Otel{Traces: config.OtelTraces{Endpoint: url + "/custom/traces"}}
+			},
+			check: func(t *testing.T, s *otlpSink) {
+				assert.Positive(t, s.count("/custom/traces"))
+				assert.Equal(t, 0, s.count("/custom/traces/v1/traces"))
+			},
+		},
+		{
+			name:  "otel.enabled=false disables both",
+			cfg:   func(url string) config.Otel { return config.Otel{Enabled: new(false), Endpoint: url} },
+			check: func(t *testing.T, s *otlpSink) { assert.Equal(t, 0, s.total()) },
+		},
+		{
+			name: "traces.enabled=true overrides otel.enabled=false",
+			cfg: func(url string) config.Otel {
+				return config.Otel{Enabled: new(false), Endpoint: url, Traces: config.OtelTraces{Enabled: new(true)}}
+			},
+			check: func(t *testing.T, s *otlpSink) {
+				assert.Positive(t, s.count("/v1/traces"))
+				assert.Equal(t, 0, s.count("/v1/metrics"))
+			},
+		},
+		{
+			name:  "OTEL_SDK_DISABLED=true disables both",
+			env:   map[string]string{"OTEL_SDK_DISABLED": "true"},
+			cfg:   func(url string) config.Otel { return config.Otel{Endpoint: url} },
+			check: func(t *testing.T, s *otlpSink) { assert.Equal(t, 0, s.total()) },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetGlobals(t)
+			unsetConfigFile(t)
+			clearEnv(t)
+			sink := newSink(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			shutdown, err := Setup(context.Background(), "runner", tc.cfg(sink.URL))
+			require.NoError(t, err)
+			emit(t, shutdown)
+			tc.check(t, sink)
+		})
+	}
 }
 
 func TestSetupYmlEndpointWinsOverEnv(t *testing.T) {
@@ -322,7 +290,6 @@ func TestSetupYmlHeadersOverrideEnv(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", sink.URL)
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer env-token")
 
-	// Shared yml header overrides the env header for both signals.
 	shutdown, err := Setup(context.Background(), "runner", config.Otel{
 		Headers: map[string]string{"authorization": "Bearer yml-token"},
 	})
@@ -335,17 +302,4 @@ func TestSetupYmlHeadersOverrideEnv(t *testing.T) {
 	defer sink.mu.Unlock()
 	assert.Equal(t, "Bearer yml-token", sink.auth["/v1/traces"], "yml header wins over env for traces")
 	assert.Equal(t, "Bearer yml-token", sink.auth["/v1/metrics"], "shared yml header reaches metrics")
-}
-
-func TestSetupSdkDisabledEnv(t *testing.T) {
-	resetGlobals(t)
-	unsetConfigFile(t)
-	clearEnv(t)
-	sink := newSink(t)
-	t.Setenv("OTEL_SDK_DISABLED", "true")
-
-	shutdown, err := Setup(context.Background(), "runner", config.Otel{Endpoint: sink.URL})
-	require.NoError(t, err)
-	emit(t, shutdown)
-	assert.Equal(t, 0, sink.total(), "OTEL_SDK_DISABLED=true disables both signals")
 }
