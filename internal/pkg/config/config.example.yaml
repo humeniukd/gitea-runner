@@ -303,6 +303,8 @@ otel:
   # or via OTEL_* env vars (https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/).
   # Keys below are shared defaults; traces:/metrics: override them.
   #enabled: true
+  #resource_attributes:            # extra resource attrs, merged over OTEL_RESOURCE_ATTRIBUTES; also given to jobs
+  #  deployment.environment.name: "production" # defaults to "test" unless overridden
   #endpoint: "http://localhost:4318" # signal path (/v1/traces, /v1/metrics) is appended
   #protocol: "http/protobuf"        # or "grpc"
   #headers:                         # merged over OTEL_EXPORTER_OTLP_HEADERS, per key

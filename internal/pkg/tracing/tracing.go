@@ -13,6 +13,7 @@ import (
 	"maps"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -70,10 +71,7 @@ func Setup(ctx context.Context, serviceName string, otelCfg config.Otel) (func(c
 	cfg := otelconf.OpenTelemetryConfiguration{
 		FileFormat: "1.0",
 		Resource: &otelconf.Resource{
-			Attributes: []otelconf.AttributeNameValue{
-				{Name: "service.name", Value: serviceName},
-				{Name: "service.version", Value: ver.Version()},
-			},
+			Attributes: resourceAttributes(serviceName, otelCfg.ResourceAttributes),
 		},
 	}
 	if tracesOn {
@@ -92,6 +90,22 @@ func Setup(ctx context.Context, serviceName string, otelCfg config.Otel) (func(c
 		otel.SetMeterProvider(sdk.MeterProvider())
 	}
 	return sdk.Shutdown, nil
+}
+
+// resourceAttributes builds the OTel resource identifying the runner. Attributes
+// resolve as the built-in default, then OTEL_RESOURCE_ATTRIBUTES, then the yml
+// attributes — most specific winning per key; keys are sorted for determinism.
+// They are applied after otelconf's env detector so they take effect as resolved.
+func resourceAttributes(serviceName string, extra map[string]string) []otelconf.AttributeNameValue {
+	attrs := []otelconf.AttributeNameValue{
+		{Name: "service.name", Value: serviceName},
+		{Name: "service.version", Value: ver.Version()},
+	}
+	merged := mergedResourceAttributes(os.Getenv("OTEL_RESOURCE_ATTRIBUTES"), extra)
+	for _, k := range slices.Sorted(maps.Keys(merged)) {
+		attrs = append(attrs, otelconf.AttributeNameValue{Name: k, Value: merged[k]})
+	}
+	return attrs
 }
 
 // signalEnabled resolves a signal's enabled flag: signal, then the shared
@@ -317,12 +331,14 @@ func samplerArg() float64 {
 // JobEnv returns the env to inject into job containers: every process OTEL_*
 // variable, plus TRACEPARENT/TRACESTATE continuing the trace of ctx's span, so
 // applications running in the job join the CI trace and export to the same
-// collector.
+// collector. resourceAttrs are merged into OTEL_RESOURCE_ATTRIBUTES so in-job
+// telemetry carries them too (yml config does not otherwise reach containers,
+// unlike the process OTEL_* env).
 //
 // Collector credentials stay on the runner: header and TLS client-key variables
 // are withheld from job containers, which are reachable by untrusted workflow
 // code.
-func JobEnv(ctx context.Context) map[string]string {
+func JobEnv(ctx context.Context, resourceAttrs map[string]string) map[string]string {
 	envs := make(map[string]string)
 	for _, kv := range os.Environ() {
 		name, value, found := strings.Cut(kv, "=")
@@ -330,6 +346,8 @@ func JobEnv(ctx context.Context) map[string]string {
 			envs[name] = value
 		}
 	}
+	merged := mergedResourceAttributes(envs["OTEL_RESOURCE_ATTRIBUTES"], resourceAttrs)
+	envs["OTEL_RESOURCE_ATTRIBUTES"] = serializeResourceAttributes(merged)
 
 	sc := trace.SpanContextFromContext(ctx)
 	if !sc.IsValid() {
@@ -352,4 +370,33 @@ func isJobSecretVar(name string) bool {
 	return strings.Contains(name, "HEADERS") ||
 		strings.Contains(name, "CLIENT_KEY") ||
 		strings.Contains(name, "CLIENT_CERTIFICATE")
+}
+
+// defaultDeploymentEnvironment is the deployment.environment.name applied to the
+// runner and to job containers unless overridden by env or yml config.
+const defaultDeploymentEnvironment = "test"
+
+// mergedResourceAttributes resolves the resource attributes: the built-in
+// default, then OTEL_RESOURCE_ATTRIBUTES (envValue, comma-separated key=value),
+// then the yml attributes — most specific winning per key, so a caller-set
+// attribute never displaces the default of a different key.
+func mergedResourceAttributes(envValue string, yml map[string]string) map[string]string {
+	merged := map[string]string{"deployment.environment.name": defaultDeploymentEnvironment}
+	for pair := range strings.SplitSeq(envValue, ",") {
+		k, v, found := strings.Cut(strings.TrimSpace(pair), "=")
+		if found && k != "" {
+			merged[k] = v
+		}
+	}
+	maps.Copy(merged, yml)
+	return merged
+}
+
+// serializeResourceAttributes renders attributes as a sorted OTEL_RESOURCE_ATTRIBUTES value.
+func serializeResourceAttributes(attrs map[string]string) string {
+	pairs := make([]string, 0, len(attrs))
+	for _, k := range slices.Sorted(maps.Keys(attrs)) {
+		pairs = append(pairs, k+"="+attrs[k])
+	}
+	return strings.Join(pairs, ",")
 }

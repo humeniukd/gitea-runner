@@ -199,12 +199,13 @@ type HealthCheck struct {
 // Otel configures OpenTelemetry, opt-in via endpoint. File wins over env per
 // setting; per-signal sections override the shared defaults.
 type Otel struct {
-	Enabled  *bool             `yaml:"enabled"`  // shared default; true also honors OTEL_SDK_DISABLED
-	Endpoint string            `yaml:"endpoint"` // shared OTLP endpoint for both signals; mirrors OTEL_EXPORTER_OTLP_ENDPOINT
-	Protocol string            `yaml:"protocol"` // shared "http/protobuf" or "grpc"; mirrors OTEL_EXPORTER_OTLP_PROTOCOL
-	Headers  map[string]string `yaml:"headers"`  // shared header set; mirrors OTEL_EXPORTER_OTLP_HEADERS
-	Traces   OtelTraces        `yaml:"traces"`
-	Metrics  OtelMetrics       `yaml:"metrics"`
+	Enabled            *bool             `yaml:"enabled"`             // shared default; true also honors OTEL_SDK_DISABLED
+	ResourceAttributes map[string]string `yaml:"resource_attributes"` // extra resource attrs (e.g. deployment.environment.name); merged over OTEL_RESOURCE_ATTRIBUTES, per key
+	Endpoint           string            `yaml:"endpoint"`            // shared OTLP endpoint for both signals; mirrors OTEL_EXPORTER_OTLP_ENDPOINT
+	Protocol           string            `yaml:"protocol"`            // shared "http/protobuf" or "grpc"; mirrors OTEL_EXPORTER_OTLP_PROTOCOL
+	Headers            map[string]string `yaml:"headers"`             // shared header set; mirrors OTEL_EXPORTER_OTLP_HEADERS
+	Traces             OtelTraces        `yaml:"traces"`
+	Metrics            OtelMetrics       `yaml:"metrics"`
 }
 
 // OtelTraces configures tracing. Empty fields fall back to the shared otel.*

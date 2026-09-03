@@ -108,6 +108,8 @@ func TestLoadDefault_LoadsOtel(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte(`
 otel:
   enabled: true
+  resource_attributes:
+    deployment.environment.name: production
   endpoint: "http://collector:4318"
   protocol: grpc
   headers:
@@ -126,6 +128,7 @@ otel:
 	assert.True(t, *cfg.Otel.Enabled)
 	assert.Equal(t, "http://collector:4318", cfg.Otel.Endpoint)
 	assert.Equal(t, "grpc", cfg.Otel.Protocol)
+	assert.Equal(t, map[string]string{"deployment.environment.name": "production"}, cfg.Otel.ResourceAttributes)
 	assert.Equal(t, map[string]string{"authorization": "Bearer shared"}, cfg.Otel.Headers)
 	require.NotNil(t, cfg.Otel.Traces.Enabled)
 	assert.False(t, *cfg.Otel.Traces.Enabled)

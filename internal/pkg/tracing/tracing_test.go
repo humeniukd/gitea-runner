@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/contrib/otelconf"
 	"go.opentelemetry.io/otel"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
@@ -125,16 +126,66 @@ func TestJobEnvPassthroughAndTraceparent(t *testing.T) {
 	ctx, span := tracer.Start(context.Background(), "op")
 	defer span.End()
 
-	envs := JobEnv(ctx)
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+	envs := JobEnv(ctx, nil)
 	assert.Equal(t, "1", envs["OTEL_TEST_PROP"])
 	assert.NotContains(t, envs, "OTHER_VAR")
+	assert.Equal(t, "deployment.environment.name=test", envs["OTEL_RESOURCE_ATTRIBUTES"], "default persists")
 
 	cctx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": envs["TRACEPARENT"]})
 	assert.True(t, trace.SpanContextFromContext(cctx).IsValid())
 
 	// Collector credentials stay on the runner and out of job containers.
 	assert.NotContains(t, envs, "OTEL_EXPORTER_OTLP_HEADERS")
-	assert.NotContains(t, JobEnv(context.Background()), "TRACEPARENT")
+	assert.NotContains(t, JobEnv(context.Background(), nil), "TRACEPARENT")
+}
+
+func TestJobEnvResourceAttributes(t *testing.T) {
+	unsetConfigFile(t)
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "team=ci")
+
+	// yml overrides the default deployment.environment.name; unrelated env attr survives.
+	envs := JobEnv(context.Background(), map[string]string{"deployment.environment.name": "production"})
+	assert.Equal(t, "deployment.environment.name=production,team=ci", envs["OTEL_RESOURCE_ATTRIBUTES"])
+}
+
+func TestJobEnvDefaultEnvironmentPersists(t *testing.T) {
+	unsetConfigFile(t)
+
+	// A different attribute set via env leaves the default deployment.environment.name intact.
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "team=ci")
+	assert.Equal(t, "deployment.environment.name=test,team=ci",
+		JobEnv(context.Background(), nil)["OTEL_RESOURCE_ATTRIBUTES"])
+
+	// A different attribute set via config leaves the default intact too.
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+	assert.Equal(t, "deployment.environment.name=test,team=ci",
+		JobEnv(context.Background(), map[string]string{"team": "ci"})["OTEL_RESOURCE_ATTRIBUTES"])
+}
+
+func TestMergedResourceAttributes(t *testing.T) {
+	// Default only.
+	assert.Equal(t, map[string]string{"deployment.environment.name": "test"},
+		mergedResourceAttributes("", nil))
+	// env overrides default; unrelated env attr kept.
+	assert.Equal(t, map[string]string{"deployment.environment.name": "staging", "team": "ci"},
+		mergedResourceAttributes("deployment.environment.name=staging,team=ci", nil))
+	// yml wins over env, default persists for other keys.
+	assert.Equal(t, map[string]string{"deployment.environment.name": "prod", "team": "ci"},
+		mergedResourceAttributes("deployment.environment.name=staging,team=ci", map[string]string{"deployment.environment.name": "prod"}))
+}
+
+func TestResourceAttributesExtra(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+	byName := func(attrs []otelconf.AttributeNameValue) map[string]any {
+		out := make(map[string]any, len(attrs))
+		for _, a := range attrs {
+			out[a.Name] = a.Value
+		}
+		return out
+	}
+	assert.Equal(t, "test", byName(resourceAttributes("runner", nil))["deployment.environment.name"], "default applied")
+	assert.Equal(t, "prod", byName(resourceAttributes("runner", map[string]string{"deployment.environment.name": "prod"}))["deployment.environment.name"])
 }
 
 func TestSetupNoopWithoutEndpoint(t *testing.T) {

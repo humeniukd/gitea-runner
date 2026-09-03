@@ -36,6 +36,8 @@ per-signal section overrides them.
 ```yaml
 otel:
   enabled: true                       # shared default; false turns both signals off (also honors OTEL_SDK_DISABLED)
+  resource_attributes:                # extra resource attributes, merged over OTEL_RESOURCE_ATTRIBUTES (see below)
+    deployment.environment.name: "production"
   endpoint: "http://collector:4318"   # shared base; the signal path is appended (mirrors OTEL_EXPORTER_OTLP_ENDPOINT)
   protocol: "http/protobuf"           # shared; "http/protobuf" or "grpc" (mirrors OTEL_EXPORTER_OTLP_PROTOCOL)
   headers:                            # shared; merged over OTEL_EXPORTER_OTLP_HEADERS, per key
@@ -72,6 +74,8 @@ Every other [standard `OTEL_*` variable](https://opentelemetry.io/docs/specs/ote
 `OTEL_CONFIG_FILE`, which hands the SDK a full OpenTelemetry configuration file
 and supersedes the settings above. Invalid values are ignored with a warning;
 the runner keeps working untraced if the SDK cannot start.
+
+`otel.resource_attributes` sets [resource attributes](https://opentelemetry.io/docs/specs/semconv/resource/) that identify the runner on every span and metric, and are also passed to job containers (via `OTEL_RESOURCE_ATTRIBUTES`) so in-job telemetry carries them too. They resolve per key: the built-in default, then `OTEL_RESOURCE_ATTRIBUTES`, then `otel.resource_attributes` (most specific wins). `deployment.environment.name` defaults to `test`, and that default persists unless it is overridden explicitly — setting other attributes does not remove it.
 
 ## Job containers
 
