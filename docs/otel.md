@@ -68,14 +68,37 @@ When OTel metrics export is on, the runner emits the CI/CD semconv metrics
 runtime metrics (`go.*`) from the contrib runtime instrumentation, and the
 connect RPC client metrics.
 
-Every other [standard `OTEL_*` variable](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/) is honored, including
-`OTEL_EXPORTER_OTLP_COMPRESSION`, `OTEL_EXPORTER_OTLP_TIMEOUT`,
-`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, and (as a spec escape hatch)
-`OTEL_CONFIG_FILE`, which hands the SDK a full OpenTelemetry configuration file
-and supersedes the settings above. Invalid values are ignored with a warning;
-the runner keeps working untraced if the SDK cannot start.
-
 `otel.resource_attributes` sets [resource attributes](https://opentelemetry.io/docs/specs/semconv/resource/) that identify the runner on every span and metric, and are also passed to job containers (via `OTEL_RESOURCE_ATTRIBUTES`) so in-job telemetry carries them too. They resolve per key: the built-in default, then `OTEL_RESOURCE_ATTRIBUTES`, then `otel.resource_attributes` (most specific wins). `deployment.environment.name` defaults to `test`, and that default persists unless it is overridden explicitly — setting other attributes does not remove it.
+
+### Environment variables
+
+Every setting can also be given as a [standard `OTEL_*` variable](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/)
+instead of the config file. The runner reads them directly, and
+config-file value (when set) wins per setting.
+
+| Config key | Environment variable |
+| --- | --- |
+| `otel.endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT` |
+| `otel.protocol` | `OTEL_EXPORTER_OTLP_PROTOCOL` |
+| `otel.headers` | `OTEL_EXPORTER_OTLP_HEADERS` |
+| `otel.resource_attributes` | `OTEL_RESOURCE_ATTRIBUTES` |
+| `otel.traces.endpoint` | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` |
+| `otel.traces.protocol` | `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` |
+| `otel.traces.headers` | `OTEL_EXPORTER_OTLP_TRACES_HEADERS` |
+| `otel.traces.sampler_ratio` | `OTEL_TRACES_SAMPLER=parentbased_traceidratio` + `OTEL_TRACES_SAMPLER_ARG` |
+| `otel.metrics.endpoint` | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` |
+| `otel.metrics.protocol` | `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` |
+| `otel.metrics.headers` | `OTEL_EXPORTER_OTLP_METRICS_HEADERS` |
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://collector:4318"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer secret"
+export OTEL_RESOURCE_ATTRIBUTES="deployment.environment.name=production"
+export OTEL_TRACES_SAMPLER="parentbased_traceidratio"
+export OTEL_TRACES_SAMPLER_ARG="0.25"
+gitea-runner daemon
+```
 
 ## Job containers
 
@@ -89,7 +112,8 @@ instead of starting disjoint traces. Each container receives:
   config reaches jobs too — the yml config is otherwise never in the process
   environment. The config value wins over the runner env, per setting;
 - `TRACEPARENT` and `TRACESTATE` (W3C trace context in environment variables)
-  pointing at the job's span.
+  pointing at the job's span, enabling spans inside the job to be tied to the
+  job itself.
 
 A signal disabled with `otel.traces.enabled: false` or `otel.metrics.enabled:
 false` contributes no OTLP env vars to the container and is turned off in-job
@@ -103,6 +127,61 @@ endpoint does not re-enable it.
 > recommended setup is to point the runner at a local collector that accepts
 > OTLP with no authentication and forwards to the real destination, keeping the
 > backend credentials on the collector.
+
+## Kubernetes: inject config with the OpenTelemetry Operator
+
+If you run the [OpenTelemetry Operator](https://github.com/open-telemetry/opentelemetry-operator),
+you can let it inject the OTLP configuration into the runner pod instead of
+setting the variables by hand. The runner already ships its own SDK, so use the
+`inject-sdk` annotation: it injects only the `OTEL_*` environment (endpoint,
+resource attributes, propagators, sampler) from an `Instrumentation` resource,
+without adding a language auto-instrumentation agent.
+
+Define an `Instrumentation` resource:
+
+```yaml
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: gitea-runner
+spec:
+  exporter:
+    endpoint: http://collector.observability:4318
+  propagators:
+    - tracecontext
+    - baggage
+  resource:
+    resourceAttributes:
+      deployment.environment.name: production
+  sampler:
+    type: parentbased_traceidratio
+    argument: "0.25"
+```
+
+Annotate the runner's pod template so the operator mutates the pod on creation:
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: runner
+spec:
+  template:
+    metadata:
+      annotations:
+        # "<namespace>/<name>" of the Instrumentation, or "true" for one named
+        # "default" in the pod's namespace.
+        instrumentation.opentelemetry.io/inject-sdk: "gitea-runner"
+    spec:
+      containers:
+        - name: runner
+          image: gitea/runner:nightly
+```
+
+The operator adds `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_ATTRIBUTES`,
+`OTEL_PROPAGATORS` and the sampler variables to the container. The runner reads
+them like any other `OTEL_*` env and passes them on to job containers as
+described above.
 
 ## Spans
 
