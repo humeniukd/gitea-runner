@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
@@ -102,6 +103,10 @@ type RunContext struct {
 	stepEnv            map[string]string
 	unsecureCommandErr error // refused ::set-env::/::add-path::, turned into a step failure
 	unsecureCommandMu  sync.Mutex
+	// lastCommandOutput holds the most recent non-empty command output line. A
+	// failed step uses it to enrich its trace span with the real error text
+	// instead of only the exit code. Written on the log-writer goroutine.
+	lastCommandOutput atomic.Pointer[string]
 }
 
 // serviceContainer pairs a service container with the workflow id that keys job.services.
@@ -630,8 +635,30 @@ func (rc *RunContext) commandLogWriter(ctx context.Context) io.Writer {
 	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
 	return common.NewLineWriter(rc.commandHandler(ctx), func(line string) bool {
 		rawLogger.Infof("%s", line)
+		rc.recordCommandOutput(line)
 		return true
 	})
+}
+
+// recordCommandOutput remembers the most recent non-empty command output line.
+func (rc *RunContext) recordCommandOutput(line string) {
+	if s := strings.TrimSpace(line); s != "" {
+		rc.lastCommandOutput.Store(&s)
+	}
+}
+
+// resetCommandOutput clears the recorded line, called before a step's main stage
+// so LastCommandOutput reflects only that step.
+func (rc *RunContext) resetCommandOutput() {
+	rc.lastCommandOutput.Store(nil)
+}
+
+// LastCommandOutput returns the most recent non-empty command output line, or "".
+func (rc *RunContext) LastCommandOutput() string {
+	if s := rc.lastCommandOutput.Load(); s != nil {
+		return *s
+	}
+	return ""
 }
 
 // cleanupJobResources removes everything the job created, continuing past failures.

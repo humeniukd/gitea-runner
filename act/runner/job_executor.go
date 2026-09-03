@@ -202,11 +202,12 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			rc.CurrentStepIndex = stepIdx
 			ctx, stepSpan := tracing.StartStep(ctx, stepModel, rc.Config.TaskID)
 			defer stepSpan.End()
+			rc.resetCommandOutput()
 			err := stepExec(ctx)
 			switch {
 			case err != nil:
 				reportStepError(ctx, rc, err)
-				tracing.SetTaskResult(stepSpan, "failure")
+				tracing.SetTaskFailed(stepSpan, err, rc.LastCommandOutput())
 			case ctx.Err() != nil:
 				reportStepError(ctx, rc, ctx.Err())
 				tracing.SetTaskResult(stepSpan, "cancellation")

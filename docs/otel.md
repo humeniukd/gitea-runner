@@ -221,6 +221,11 @@ One per workflow step (main stage), kind `INTERNAL`, named after the step
 | `gitea.step.uses` | action reference, for `uses:` steps |
 | `gitea.step.run` | script, for `run:` steps |
 
+On failure the span status is set to error; its description is the step's last
+command output line when there is one (for example `npm ERR! missing script:
+build`), which is more useful than the bare exit error, and the error itself is
+recorded as an exception event on the span.
+
 ### Instrumented clients
 
 RPCs to Gitea (connect) and the job cache server plus job-summary uploads (HTTP)
@@ -228,6 +233,13 @@ carry the standard `rpc.*` / `http.*` span attributes from the OpenTelemetry
 contrib instrumentation, and propagate W3C context to the peer. Spans emitted by
 applications inside a job attach to the job span through the injected
 `TRACEPARENT`.
+
+## Logs
+
+When tracing is enabled, the runner's own log lines emitted within a job carry
+`trace_id` and `span_id` fields identifying the job span, so an operator can jump
+from a runner log line to the corresponding trace. Lines logged outside a job
+(startup, polling) have no span and are unchanged.
 
 ## Metrics
 

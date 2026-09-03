@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
@@ -63,6 +64,29 @@ func SetJobResult(span trace.Span, result string) {
 // SetTaskResult marks a task-run span with the step's outcome.
 func SetTaskResult(span trace.Span, result string) {
 	setResult(span, semconv.CICDPipelineTaskRunResultKey, result)
+}
+
+// SetTaskFailed marks a task-run span failed, recording the step error and
+// setting the status to the last command output line when there is one — more
+// useful than the bare exit error (e.g. "Process completed with exit code 1").
+func SetTaskFailed(span trace.Span, err error, lastOutput string) {
+	span.SetAttributes(semconv.CICDPipelineTaskRunResultKey.String("failure"))
+	span.RecordError(err)
+	span.SetStatus(codes.Error, stepFailureMessage(err, lastOutput))
+}
+
+// stepFailureMessage combines the step error with the last command output line,
+// falling back to the error alone when no output was captured.
+func stepFailureMessage(err error, lastOutput string) string {
+	out := strings.TrimSpace(lastOutput)
+	switch {
+	case err == nil:
+		return out
+	case out == "":
+		return err.Error()
+	default:
+		return err.Error() + ": " + out
+	}
 }
 
 func setResult(span trace.Span, key attribute.Key, result string) {

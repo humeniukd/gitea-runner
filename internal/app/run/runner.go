@@ -428,7 +428,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// collector.
 	maps.Copy(envs, tracing.JobEnv(ctx, r.cfg.Otel))
 
-	log.Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
+	log.WithContext(ctx).Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
 		r.getDefaultActionsURL(task),
 		r.client.Address())
 

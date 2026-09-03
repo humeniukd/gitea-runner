@@ -307,6 +307,9 @@ func initLogging(cfg *config.Config) {
 		CallerPrettyfier: callPrettyfier,
 	}
 	log.SetFormatter(report.MaskingFormatter(format))
+	// Correlate runner logs with traces: adds trace_id/span_id when a log entry
+	// carries a span context, and is a no-op otherwise.
+	log.AddHook(tracing.NewLogHook())
 
 	l := cfg.Log.Level
 	if l == "" {
