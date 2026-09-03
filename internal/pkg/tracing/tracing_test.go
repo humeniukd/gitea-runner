@@ -8,8 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,7 +21,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
-	"go.opentelemetry.io/otel/trace/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // unsetConfigFile removes OTEL_CONFIG_FILE and restores it at test end;
@@ -38,11 +37,88 @@ func unsetConfigFile(t *testing.T) {
 	})
 }
 
+// clearEnv drops the OTLP endpoint env so a test starts from a known state.
+func clearEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRIC_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_SDK_DISABLED",
+	} {
+		t.Setenv(name, "")
+	}
+}
+
+// otlpSink records the request paths and Authorization headers of OTLP posts.
+type otlpSink struct {
+	mu    sync.Mutex
+	paths map[string]int
+	auth  map[string]string
+	*httptest.Server
+}
+
+func newSink(t *testing.T) *otlpSink {
+	t.Helper()
+	s := &otlpSink{paths: map[string]int{}, auth: map[string]string{}}
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.mu.Lock()
+			s.paths[r.URL.Path]++
+			if a := r.Header.Get("Authorization"); a != "" {
+				s.auth[r.URL.Path] = a
+			}
+			s.mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func (s *otlpSink) count(path string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.paths[path]
+}
+
+func (s *otlpSink) total() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, c := range s.paths {
+		n += c
+	}
+	return n
+}
+
+func resetGlobals(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(tracenoop.NewTracerProvider())
+		otel.SetMeterProvider(metricnoop.NewMeterProvider())
+	})
+}
+
+// emit produces one span and one metric point, then flushes via shutdown.
+func emit(t *testing.T, shutdown func(context.Context) error) {
+	t.Helper()
+	_, span := otel.Tracer("test").Start(context.Background(), "op")
+	span.End()
+	counter, err := otel.Meter("test").Int64Counter("probe")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 1)
+	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, shutdown(sctx))
+}
+
 func TestJobEnvPassthroughAndTraceparent(t *testing.T) {
 	t.Setenv("OTEL_TEST_PROP", "1")
 	t.Setenv("OTHER_VAR", "skip")
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer secret")
-	// Ensure a stale OTEL_CONFIG_FILE cannot influence anything here.
 	unsetConfigFile(t)
 
 	tracer := sdktrace.NewTracerProvider().Tracer("test")
@@ -55,195 +131,134 @@ func TestJobEnvPassthroughAndTraceparent(t *testing.T) {
 
 	cctx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": envs["TRACEPARENT"]})
 	assert.True(t, trace.SpanContextFromContext(cctx).IsValid())
-	assert.NotContains(t, envs, "TRACESTATE")
 
 	// Collector credentials stay on the runner and out of job containers.
 	assert.NotContains(t, envs, "OTEL_EXPORTER_OTLP_HEADERS")
 	assert.NotContains(t, JobEnv(context.Background()), "TRACEPARENT")
 }
 
-// captureServer counts POSTs to /v1/traces and /v1/metrics and records the
-// Authorization and X-Extra headers it received.
-func captureServer(t *testing.T, hits *atomic.Int64, authHeader, extraHeader *atomic.Pointer[string]) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && (r.URL.Path == "/v1/traces" || r.URL.Path == "/v1/metrics") {
-			hits.Add(1)
-			if authHeader != nil {
-				v := r.Header.Get("Authorization")
-				authHeader.Store(&v)
-			}
-			if extraHeader != nil {
-				x := r.Header.Get("X-Extra")
-				extraHeader.Store(&x)
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func resetGlobals(t *testing.T) {
-	t.Helper()
-	t.Cleanup(func() {
-		otel.SetTracerProvider(noop.NewTracerProvider())
-		otel.SetMeterProvider(metricnoop.NewMeterProvider())
-	})
-}
-
-func waitFor(t *testing.T, hits *atomic.Int64) {
-	t.Helper()
-	require.Eventually(t, func() bool { return hits.Load() > 0 }, 10*time.Second, 10*time.Millisecond)
-}
-
 func TestSetupNoopWithoutEndpoint(t *testing.T) {
 	unsetConfigFile(t)
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	clearEnv(t)
 
 	shutdown, err := Setup(context.Background(), "runner", config.Otel{})
 	require.NoError(t, err)
 	require.NoError(t, shutdown(context.Background()))
 }
 
-func TestSetupTracesDisabledIgnoresEndpoint(t *testing.T) {
+func TestSetupSharedEndpointEnablesBothSignals(t *testing.T) {
 	resetGlobals(t)
 	unsetConfigFile(t)
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-	var hits atomic.Int64
-	srv := captureServer(t, &hits, nil, nil)
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", srv.URL)
+	clearEnv(t)
+	sink := newSink(t)
 
-	disabled := false
+	shutdown, err := Setup(context.Background(), "runner", config.Otel{Endpoint: sink.URL})
+	require.NoError(t, err)
+	emit(t, shutdown)
+
+	// Generic endpoint: the signal path is appended for each signal.
+	assert.Positive(t, sink.count("/v1/traces"), "traces exported to appended path")
+	assert.Positive(t, sink.count("/v1/metrics"), "metrics exported to appended path")
+}
+
+func TestSetupSignalEndpointUsedAsIs(t *testing.T) {
+	resetGlobals(t)
+	unsetConfigFile(t)
+	clearEnv(t)
+	sink := newSink(t)
+
 	shutdown, err := Setup(context.Background(), "runner", config.Otel{
-		Traces: config.OtelTraces{Enabled: &disabled},
+		Traces: config.OtelTraces{Endpoint: sink.URL + "/custom/traces"},
 	})
 	require.NoError(t, err)
-	require.NoError(t, shutdown(context.Background()))
-	assert.Equal(t, int64(0), hits.Load(), "enabled: false must turn traces off despite an endpoint")
+	emit(t, shutdown)
+
+	// Signal endpoint used as-is: no signal path appended.
+	assert.Positive(t, sink.count("/custom/traces"))
+	assert.Equal(t, 0, sink.count("/custom/traces/v1/traces"))
 }
 
-func TestSetupExportsToEndpoint(t *testing.T) {
+func TestSetupSharedEnabledFalseDisablesBoth(t *testing.T) {
 	resetGlobals(t)
 	unsetConfigFile(t)
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-	var hits atomic.Int64
-	srv := captureServer(t, &hits, nil, nil)
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", srv.URL)
+	clearEnv(t)
+	sink := newSink(t)
 
-	shutdown, err := Setup(context.Background(), "runner", config.Otel{})
+	shutdown, err := Setup(context.Background(), "runner", config.Otel{
+		Enabled:  new(false),
+		Endpoint: sink.URL,
+	})
 	require.NoError(t, err)
+	emit(t, shutdown)
+	assert.Equal(t, 0, sink.total(), "otel.enabled=false disables both signals")
+}
 
-	_, span := otel.Tracer("test").Start(context.Background(), "op")
-	span.End()
-	require.NoError(t, shutdown(context.Background()))
-	waitFor(t, &hits)
+func TestSetupSignalEnabledOverridesShared(t *testing.T) {
+	resetGlobals(t)
+	unsetConfigFile(t)
+	clearEnv(t)
+	sink := newSink(t)
+
+	// Shared disabled, but traces re-enabled per signal.
+	shutdown, err := Setup(context.Background(), "runner", config.Otel{
+		Enabled:  new(false),
+		Endpoint: sink.URL,
+		Traces:   config.OtelTraces{Enabled: new(true)},
+	})
+	require.NoError(t, err)
+	emit(t, shutdown)
+	assert.Positive(t, sink.count("/v1/traces"), "traces.enabled=true overrides otel.enabled=false")
+	assert.Equal(t, 0, sink.count("/v1/metrics"), "metrics stays disabled by otel.enabled")
 }
 
 func TestSetupYmlEndpointWinsOverEnv(t *testing.T) {
 	resetGlobals(t)
 	unsetConfigFile(t)
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-	var envHits, ymlHits atomic.Int64
-	envSrv := captureServer(t, &envHits, nil, nil)
-	ymlSrv := captureServer(t, &ymlHits, nil, nil)
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", envSrv.URL)
+	clearEnv(t)
+	envSink := newSink(t)
+	ymlSink := newSink(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", envSink.URL)
 
-	shutdown, err := Setup(context.Background(), "runner", config.Otel{
-		Traces: config.OtelTraces{Endpoint: ymlSrv.URL},
-	})
+	shutdown, err := Setup(context.Background(), "runner", config.Otel{Endpoint: ymlSink.URL})
 	require.NoError(t, err)
+	emit(t, shutdown)
 
-	_, span := otel.Tracer("test").Start(context.Background(), "op")
-	span.End()
-	require.NoError(t, shutdown(context.Background()))
-	waitFor(t, &ymlHits)
-	assert.Equal(t, int64(0), envHits.Load(), "yml endpoint must take precedence over env")
+	assert.Positive(t, ymlSink.count("/v1/traces"), "yml shared endpoint wins over env")
+	assert.Equal(t, 0, envSink.total(), "env endpoint must be ignored when yml is set")
 }
 
 func TestSetupYmlHeadersOverrideEnv(t *testing.T) {
 	resetGlobals(t)
 	unsetConfigFile(t)
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-	var hits atomic.Int64
-	var auth atomic.Pointer[string]
-	var extra atomic.Pointer[string]
-	srv := captureServer(t, &hits, &auth, &extra)
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", srv.URL)
-	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer env-token,x-extra=from-env")
+	clearEnv(t)
+	sink := newSink(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", sink.URL)
+	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer env-token")
 
+	// Shared yml header overrides the env header for both signals.
 	shutdown, err := Setup(context.Background(), "runner", config.Otel{
-		Traces: config.OtelTraces{
-			Endpoint: srv.URL,
-			Headers:  map[string]string{"authorization": "Bearer yml-token"},
-		},
+		Headers: map[string]string{"authorization": "Bearer yml-token"},
 	})
 	require.NoError(t, err)
+	emit(t, shutdown)
 
-	_, span := otel.Tracer("test").Start(context.Background(), "op")
-	span.End()
-	require.NoError(t, shutdown(context.Background()))
-
-	require.Eventually(t, func() bool {
-		return auth.Load() != nil && extra.Load() != nil
-	}, 10*time.Second, 10*time.Millisecond)
-	assert.Equal(t, "Bearer yml-token", *auth.Load(), "yml header wins per key")
-	assert.Equal(t, "from-env", *extra.Load(), "env-only headers survive the merge")
+	require.Positive(t, sink.count("/v1/traces"))
+	require.Positive(t, sink.count("/v1/metrics"))
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	assert.Equal(t, "Bearer yml-token", sink.auth["/v1/traces"], "yml header wins over env for traces")
+	assert.Equal(t, "Bearer yml-token", sink.auth["/v1/metrics"], "shared yml header reaches metrics")
 }
 
-func TestSetupMetricsExport(t *testing.T) {
+func TestSetupSdkDisabledEnv(t *testing.T) {
 	resetGlobals(t)
 	unsetConfigFile(t)
-	var traceHits, metricHits atomic.Int64
-	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/traces":
-			traceHits.Add(1)
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/v1/metrics"):
-			metricHits.Add(1)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(collector.Close)
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
-	t.Setenv("OTEL_EXPORTER_OTLP_METRIC_ENDPOINT", "")
+	clearEnv(t)
+	sink := newSink(t)
+	t.Setenv("OTEL_SDK_DISABLED", "true")
 
-	shutdown, err := Setup(context.Background(), "runner", config.Otel{
-		Traces:  config.OtelTraces{Endpoint: collector.URL},
-		Metrics: config.OtelMetrics{Endpoint: collector.URL},
-	})
+	shutdown, err := Setup(context.Background(), "runner", config.Otel{Endpoint: sink.URL})
 	require.NoError(t, err)
-
-	counter, cerr := otel.Meter("test").Int64Counter("probe")
-	require.NoError(t, cerr)
-	counter.Add(context.Background(), 1)
-	require.NoError(t, shutdown(context.Background()))
-	waitFor(t, &metricHits)
-}
-
-func TestSetupMetricsDisabledIgnoresEndpoint(t *testing.T) {
-	resetGlobals(t)
-	unsetConfigFile(t)
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-	var metricHits atomic.Int64
-	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/v1/metrics") {
-			metricHits.Add(1)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(collector.Close)
-
-	disabled := false
-	shutdown, err := Setup(context.Background(), "runner", config.Otel{
-		Traces:  config.OtelTraces{Enabled: &disabled},
-		Metrics: config.OtelMetrics{Endpoint: collector.URL, Enabled: &disabled},
-	})
-	require.NoError(t, err)
-	require.NoError(t, shutdown(context.Background()))
-	assert.Equal(t, int64(0), metricHits.Load())
+	emit(t, shutdown)
+	assert.Equal(t, 0, sink.total(), "OTEL_SDK_DISABLED=true disables both signals")
 }

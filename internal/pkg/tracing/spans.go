@@ -17,12 +17,15 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-var tracer = otel.Tracer("gitea.com/gitea/runner")
+// scopeName is the instrumentation scope for the runner's own spans. The
+// tracer is resolved per call, not cached, so it always follows the current
+// global provider (e.g. after a re-Setup in tests).
+const scopeName = "gitea.com/gitea/runner"
 
 // StartJob opens the pipeline-run span for one fetched task. The workflow name
 // is unknown yet, so the caller refines the name to "RUN {workflow}" later.
 func StartJob(ctx context.Context, task *runnerv1.Task, uuid, name string) (context.Context, trace.Span) {
-	return tracer.Start(ctx, "RUN", trace.WithSpanKind(trace.SpanKindServer),
+	return otel.Tracer(scopeName).Start(ctx, "RUN", trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(
 			semconv.CICDPipelineRunID(task.Context.Fields["run_id"].GetStringValue()),
 			semconv.CICDPipelineTaskRunID(strconv.FormatInt(task.Id, 10)),
@@ -49,7 +52,7 @@ func StartStep(ctx context.Context, step *model.Step, taskID int64) (context.Con
 	if step.Run != "" {
 		attrs = append(attrs, attribute.String("gitea.step.run", step.Run))
 	}
-	return tracer.Start(ctx, name, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+	return otel.Tracer(scopeName).Start(ctx, name, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
 }
 
 // SetJobResult marks the pipeline-run span with the run's outcome.

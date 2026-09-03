@@ -11,30 +11,43 @@ instrumented as well.
 A signal is off unless its OTLP endpoint is configured. Configuration comes
 from two sources, merged per setting: the runner's own config file wins, and
 the standard `OTEL_*` environment variables fill in everything it leaves empty.
+The top-level `otel.{enabled,endpoint,protocol,headers}` are shared defaults for
+both signals — mirroring the generic `OTEL_EXPORTER_OTLP_*` env vars — and each
+per-signal section overrides them.
 
 ```yaml
 otel:
+  enabled: true                       # shared default; false turns both signals off (also honors OTEL_SDK_DISABLED)
+  endpoint: "http://collector:4318"   # shared base; the signal path is appended (mirrors OTEL_EXPORTER_OTLP_ENDPOINT)
+  protocol: "http/protobuf"           # shared; "http/protobuf" or "grpc" (mirrors OTEL_EXPORTER_OTLP_PROTOCOL)
+  headers:                            # shared; merged over OTEL_EXPORTER_OTLP_HEADERS, per key
+    authorization: "Bearer secret"
   traces:
-    enabled: true                    # false turns tracing off even with an endpoint
-    endpoint: "http://collector:4318" # wins over OTEL_EXPORTER_OTLP(_TRACES)_ENDPOINT
-    protocol: "http/protobuf"        # or "grpc"; wins over OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
-    headers:                         # merged over OTEL_EXPORTER_OTLP_HEADERS, per key
-      authorization: "Bearer secret"
-    sampler_ratio: 0.25              # parent-based traceidratio; wins over OTEL_TRACES_SAMPLER
+    enabled: true                     # defaults to otel.enabled
+    endpoint: "http://collector:4318/v1/traces" # used as-is; wins over otel.endpoint and the env vars
+    protocol: "grpc"                  # wins over otel.protocol
+    headers:                          # merged over otel.headers, per key
+      x-scope-orgid: "ci"
+    sampler_ratio: 0.25               # parent-based traceidratio; wins over OTEL_TRACES_SAMPLER
   metrics:
-    enabled: true                    # false turns OTel metrics export off
-    endpoint: "http://collector:4318"
+    enabled: true                     # defaults to otel.enabled
+    endpoint: "http://collector:4318/v1/metrics" # used as-is
     protocol: "http/protobuf"
+    headers:                          # merged over otel.headers, per key
+      x-scope-orgid: "ci"
 ```
 
-Both `enabled` flags default to true; a signal exports only when its endpoint
-is set. The Prometheus metrics endpoint (`metrics.*`) is independent of
-`otel.metrics`. When OTel metrics export is on, the runner also emits the
-CI/CD semconv metrics (`cicd.pipeline.run.duration`, `cicd.pipeline.run.active`,
-`cicd.worker.count`, `cicd.system.errors`), poll instruments under
-`gitea.runner.poll.*`, and the Go runtime metrics (`go.*`) from the
-contrib runtime instrumentation; RPC client metrics come from the connect
-instrumentation.
+Setting only `otel.endpoint` (or the standard `OTEL_EXPORTER_OTLP_ENDPOINT`)
+enables and points both signals. Endpoint path handling matches the OTLP spec:
+a shared/generic endpoint has the signal path (`/v1/traces`, `/v1/metrics`)
+appended, while a per-signal endpoint is used as-is (include the path). The
+Prometheus metrics endpoint (`metrics.*`) is independent of `otel.metrics`.
+When OTel metrics export is on, the runner emits the CI/CD semconv metrics
+(`cicd.pipeline.run.duration`, `cicd.pipeline.run.active`, `cicd.worker.count`,
+`cicd.system.errors`), poll instruments under `gitea.runner.poll.*`, the Go
+runtime metrics (`go.*`) from the contrib runtime instrumentation, and the
+connect RPC client metrics.
+
 Every other standard variable is honored, including
 `OTEL_EXPORTER_OTLP_COMPRESSION`, `OTEL_EXPORTER_OTLP_TIMEOUT`,
 `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, and (as a spec escape hatch)

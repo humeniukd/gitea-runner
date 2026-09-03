@@ -6,11 +6,18 @@
 // merges the runner yml `otel:` section (higher precedence) with the standard
 // OTEL_* environment variables; a signal exports only when its enabled flag is
 // not false and an endpoint is configured.
+//
+// Endpoint resolution follows the OTLP spec: a signal-specific endpoint (yml
+// otel.traces/metrics.endpoint or OTEL_EXPORTER_OTLP_<signal>_ENDPOINT) is used
+// as-is, while a generic endpoint (yml otel.endpoint or
+// OTEL_EXPORTER_OTLP_ENDPOINT) has the signal path (/v1/traces, /v1/metrics)
+// appended.
 package tracing
 
 import (
 	"context"
 	"maps"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -29,6 +36,9 @@ import (
 const (
 	protocolHTTP = "http/protobuf"
 	protocolGRPC = "grpc"
+
+	tracesPath  = "/v1/traces"
+	metricsPath = "/v1/metrics"
 )
 
 // Setup builds the tracing and metrics SDKs from the merged yml and env
@@ -45,21 +55,20 @@ func Setup(ctx context.Context, serviceName string, otelCfg config.Otel) (func(c
 
 	// OTEL_CONFIG_FILE is the spec escape hatch: otelconf reads the file and
 	// env itself, and the file supersedes anything passed programmatically.
-	configFile := os.Getenv("OTEL_CONFIG_FILE")
-	if configFile != "" {
+	if os.Getenv("OTEL_CONFIG_FILE") != "" {
 		sdk, err := otelconf.NewSDK()
 		if err != nil {
 			return noop, err
 		}
 		otel.SetTracerProvider(sdk.TracerProvider())
-		if enabled(otelCfg.Metrics.Enabled) && metricsEndpoint(otelCfg.Metrics) != "" {
+		if signalEnabled(otelCfg.Metrics.Enabled, otelCfg.Enabled) {
 			otel.SetMeterProvider(sdk.MeterProvider())
 		}
 		return sdk.Shutdown, nil
 	}
 
-	tracesOn := enabled(otelCfg.Traces.Enabled) && tracesEndpoint(otelCfg.Traces) != ""
-	metricsOn := enabled(otelCfg.Metrics.Enabled) && metricsEndpoint(otelCfg.Metrics) != ""
+	tracesOn := signalEnabled(otelCfg.Traces.Enabled, otelCfg.Enabled) && tracesEndpointConfigured(otelCfg)
+	metricsOn := signalEnabled(otelCfg.Metrics.Enabled, otelCfg.Enabled) && metricsEndpointConfigured(otelCfg)
 	if !tracesOn && !metricsOn {
 		return noop, nil
 	}
@@ -74,10 +83,10 @@ func Setup(ctx context.Context, serviceName string, otelCfg config.Otel) (func(c
 		},
 	}
 	if tracesOn {
-		cfg.TracerProvider = traceProviderConfig(otelCfg.Traces)
+		cfg.TracerProvider = traceProviderConfig(otelCfg)
 	}
 	if metricsOn {
-		cfg.MeterProvider = meterProviderConfig(otelCfg.Metrics)
+		cfg.MeterProvider = meterProviderConfig(otelCfg)
 	}
 
 	sdk, err := otelconf.NewSDK(otelconf.WithOpenTelemetryConfiguration(cfg))
@@ -91,40 +100,86 @@ func Setup(ctx context.Context, serviceName string, otelCfg config.Otel) (func(c
 	return sdk.Shutdown, nil
 }
 
-func enabled(flag *bool) bool {
-	return flag == nil || *flag
+// signalEnabled resolves a signal's enabled flag: signal, then the shared
+// otel.enabled, then the OTEL_SDK_DISABLED env, defaulting to true.
+func signalEnabled(signal, shared *bool) bool {
+	if signal != nil {
+		return *signal
+	}
+	if shared != nil {
+		return *shared
+	}
+	disabled, _ := strconv.ParseBool(os.Getenv("OTEL_SDK_DISABLED"))
+	return !disabled
 }
 
-func tracesEndpoint(cfg config.OtelTraces) string {
-	if cfg.Endpoint != "" {
-		return cfg.Endpoint
-	}
-	if v := os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"); v != "" {
-		return v
-	}
-	return os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-}
-
-func metricsEndpoint(cfg config.OtelMetrics) string {
-	if cfg.Endpoint != "" {
-		return cfg.Endpoint
-	}
-	if v := os.Getenv("OTEL_EXPORTER_OTLP_METRIC_ENDPOINT"); v != "" {
-		return v
-	}
-	return os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-}
-
-// signalProtocol resolves the protocol with the config file winning over env;
-// an invalid file value is ignored in favor of the env/default.
-func signalProtocol(yml, traceEnv, genericEnv string) string {
-	if yml != "" {
-		if yml == protocolHTTP || yml == protocolGRPC {
-			return yml
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
 		}
-		log.Warnf("invalid otel protocol %q, falling back to env or %s", yml, protocolHTTP)
 	}
-	for _, envName := range []string{traceEnv, genericEnv} {
+	return ""
+}
+
+// tracesEndpointConfigured reports whether any yml or env source provides a
+// traces endpoint, which is what gates the signal on.
+func tracesEndpointConfigured(cfg config.Otel) bool {
+	return firstNonEmpty(cfg.Traces.Endpoint, cfg.Endpoint,
+		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"), os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != ""
+}
+
+func metricsEndpointConfigured(cfg config.Otel) bool {
+	return firstNonEmpty(cfg.Metrics.Endpoint, cfg.Endpoint,
+		os.Getenv("OTEL_EXPORTER_OTLP_METRIC_ENDPOINT"), os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"),
+		os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != ""
+}
+
+// ymlEndpoint resolves the endpoint URL to configure on the exporter from the
+// yml sources only, applying OTLP path semantics: a signal endpoint is used
+// as-is (a bare host posts to the root path), a generic endpoint has the
+// signal path appended. Returns ("", false) when only env provides the
+// endpoint, so the otlp exporter applies its own env handling.
+func ymlEndpoint(signal, generic, protocol, signalPath string) (string, bool) {
+	switch {
+	case signal != "":
+		if protocol == protocolGRPC {
+			return signal, true
+		}
+		return asIsHTTP(signal), true
+	case generic != "":
+		if protocol == protocolGRPC {
+			return generic, true
+		}
+		return strings.TrimRight(generic, "/") + signalPath, true
+	}
+	return "", false
+}
+
+// asIsHTTP keeps a signal-specific HTTP endpoint verbatim; a bare host with no
+// path is given the root path so otelconf does not append a default signal
+// path to it.
+func asIsHTTP(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Path != "" {
+		return raw
+	}
+	u.Path = "/"
+	return u.String()
+}
+
+// signalProtocol resolves the protocol: yml signal, yml shared, env signal, env
+// generic, then http/protobuf. An invalid yml value is ignored with a warning.
+func signalProtocol(signalYml, sharedYml, signalEnv, genericEnv string) string {
+	for _, v := range []string{signalYml, sharedYml} {
+		if v == protocolHTTP || v == protocolGRPC {
+			return v
+		}
+		if v != "" {
+			log.Warnf("invalid otel protocol %q, ignoring", v)
+		}
+	}
+	for _, envName := range []string{signalEnv, genericEnv} {
 		if v := os.Getenv(envName); v == protocolGRPC || v == protocolHTTP {
 			return v
 		}
@@ -132,28 +187,33 @@ func signalProtocol(yml, traceEnv, genericEnv string) string {
 	return protocolHTTP
 }
 
-func traceProviderConfig(cfg config.OtelTraces) *otelconf.TracerProvider {
+func traceProviderConfig(cfg config.Otel) *otelconf.TracerProvider {
+	protocol := signalProtocol(cfg.Traces.Protocol, cfg.Protocol,
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_PROTOCOL")
+	headers := mergedHeaders(cfg.Traces.Headers, cfg.Headers, "OTEL_EXPORTER_OTLP_TRACES_HEADERS")
+	endpoint, fromYml := ymlEndpoint(cfg.Traces.Endpoint, cfg.Endpoint, protocol, tracesPath)
+
 	exporter := otelconf.SpanExporter{}
-	switch signalProtocol(cfg.Protocol, "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_PROTOCOL") {
+	switch protocol {
 	case protocolGRPC:
-		exp := &otelconf.OTLPGrpcExporter{Headers: mergedHeaders(cfg.Headers)}
-		if cfg.Endpoint != "" {
-			ep := cfg.Endpoint
+		exp := &otelconf.OTLPGrpcExporter{Headers: headers}
+		if fromYml {
+			ep := endpoint
 			exp.Endpoint = &ep
 		}
 		exporter.OTLPGrpc = exp
 	default:
-		exp := &otelconf.OTLPHttpExporter{Headers: mergedHeaders(cfg.Headers)}
-		if cfg.Endpoint != "" {
-			ep := cfg.Endpoint
+		exp := &otelconf.OTLPHttpExporter{Headers: headers}
+		if fromYml {
+			ep := endpoint
 			exp.Endpoint = &ep
 		}
 		exporter.OTLPHttp = exp
 	}
 
 	sampler := envSampler()
-	if cfg.SamplerRatio != nil {
-		ratio := *cfg.SamplerRatio
+	if cfg.Traces.SamplerRatio != nil {
+		ratio := *cfg.Traces.SamplerRatio
 		sampler = &otelconf.Sampler{
 			ParentBased: &otelconf.ParentBasedSampler{
 				Root: &otelconf.Sampler{
@@ -171,20 +231,25 @@ func traceProviderConfig(cfg config.OtelTraces) *otelconf.TracerProvider {
 	}
 }
 
-func meterProviderConfig(cfg config.OtelMetrics) *otelconf.MeterProvider {
+func meterProviderConfig(cfg config.Otel) *otelconf.MeterProvider {
+	protocol := signalProtocol(cfg.Metrics.Protocol, cfg.Protocol,
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "OTEL_EXPORTER_OTLP_PROTOCOL")
+	endpoint, fromYml := ymlEndpoint(cfg.Metrics.Endpoint, cfg.Endpoint, protocol, metricsPath)
+	headers := mergedHeaders(cfg.Metrics.Headers, cfg.Headers, "OTEL_EXPORTER_OTLP_METRICS_HEADERS")
+
 	exporter := otelconf.PushMetricExporter{}
-	switch signalProtocol(cfg.Protocol, "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "OTEL_EXPORTER_OTLP_PROTOCOL") {
+	switch protocol {
 	case protocolGRPC:
-		exp := &otelconf.OTLPGrpcMetricExporter{}
-		if cfg.Endpoint != "" {
-			ep := cfg.Endpoint
+		exp := &otelconf.OTLPGrpcMetricExporter{Headers: headers}
+		if fromYml {
+			ep := endpoint
 			exp.Endpoint = &ep
 		}
 		exporter.OTLPGrpc = exp
 	default:
-		exp := &otelconf.OTLPHttpMetricExporter{}
-		if cfg.Endpoint != "" {
-			ep := cfg.Endpoint
+		exp := &otelconf.OTLPHttpMetricExporter{Headers: headers}
+		if fromYml {
+			ep := endpoint
 			exp.Endpoint = &ep
 		}
 		exporter.OTLPHttp = exp
@@ -197,15 +262,15 @@ func meterProviderConfig(cfg config.OtelMetrics) *otelconf.MeterProvider {
 	}
 }
 
-// mergedHeaders merges the env OTLP headers with the yml ones, file wins per
-// key. Needed whenever the yml section is non-empty because otlptrace's
-// WithHeaders replaces the env-derived map wholesale.
-func mergedHeaders(otelCfg map[string]string) []otelconf.NameStringValuePair {
-	if len(otelCfg) == 0 {
+// mergedHeaders merges the env OTLP headers with the shared and signal yml
+// ones, most specific winning per key. Needed whenever any yml header is set
+// because otlptrace's WithHeaders replaces the env-derived map wholesale.
+func mergedHeaders(signal, shared map[string]string, signalEnv string) []otelconf.NameStringValuePair {
+	if len(signal) == 0 && len(shared) == 0 {
 		return nil
 	}
 	merged := make(map[string]string)
-	for _, envName := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS"} {
+	for _, envName := range []string{"OTEL_EXPORTER_OTLP_HEADERS", signalEnv} {
 		for pair := range strings.SplitSeq(os.Getenv(envName), ",") {
 			k, v, found := strings.Cut(strings.TrimSpace(pair), "=")
 			if found {
@@ -213,7 +278,8 @@ func mergedHeaders(otelCfg map[string]string) []otelconf.NameStringValuePair {
 			}
 		}
 	}
-	maps.Copy(merged, otelCfg)
+	maps.Copy(merged, shared)
+	maps.Copy(merged, signal)
 	pairs := make([]otelconf.NameStringValuePair, 0, len(merged))
 	for k, v := range merged {
 		name := k

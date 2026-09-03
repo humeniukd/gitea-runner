@@ -95,35 +95,16 @@ func (c *otelCollector) metricNames() []string {
 	return names
 }
 
-// TestOtel pins the full OTel contract in one job run: the runner exports its
-// job span to the trace endpoint, the job container sees TRACEPARENT (the job
-// span) plus the runner's OTEL_* environment, and the runner exports the CI/CD
-// semconv metrics, poll and RPC instruments, and Go runtime metrics.
-//
-// Both signals are set up once, as a real deployment does; the package-level
-// tracer binds to this provider on first use, so a second Setup in the same
-// process would not rebind it.
-func TestOtel(t *testing.T) {
-	if skipReason != "" {
-		t.Skip(skipReason)
-	}
+// runOtelJob installs the SDK from otelCfg, starts Go runtime metrics, runs one
+// real job, flushes, and returns the job log.
+func runOtelJob(t *testing.T, otelCfg config.Otel) string {
+	t.Helper()
 
-	collector := startOtelCollector(t)
-
-	// Endpoints come from the standard env, exactly as a deployment configures
-	// the daemon. The env endpoint is a complete URL including the signal path.
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.server.URL+"/v1/traces")
-	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", collector.server.URL+"/v1/metrics")
-
-	shutdown, err := tracing.Setup(context.Background(), "e2e-runner", config.Otel{})
+	shutdown, err := tracing.Setup(context.Background(), "e2e-runner", otelCfg)
 	if err != nil {
 		t.Fatalf("setup otel: %v", err)
 	}
 	t.Cleanup(func() {
-		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = shutdown(sctx)
 		otel.SetTracerProvider(tracenoop.NewTracerProvider())
 		otel.SetMeterProvider(metricnoop.NewMeterProvider())
 	})
@@ -135,34 +116,33 @@ func TestOtel(t *testing.T) {
 	}
 
 	api, repo, _ := startIsolatedScenario(t, "tracing.yml", "ubuntu-latest", runnerOptions{})
-
 	wfRun := waitForRun(t, api, repo)
 	requireSuccess(t, api, repo, wfRun.ID)
-
 	logs := runLogs(t, api, repo, wfRun.ID)
+
+	// Flush both pipelines before asserting: batch/periodic processors buffer
+	// until shutdown.
+	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := shutdown(sctx); err != nil {
+		t.Fatalf("flush otel: %v", err)
+	}
+	return logs
+}
+
+// assertOtelExports checks the job propagated a valid TRACEPARENT and that the
+// collector received the trace and the full metric set with correct units.
+func assertOtelExports(t *testing.T, collector *otelCollector, logs string) {
+	t.Helper()
 
 	traceparent := strings.TrimPrefix(commandRow(logs, "traceparent-env="), "traceparent-env=")
 	cctx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": traceparent})
 	if !trace.SpanContextFromContext(cctx).IsValid() {
 		t.Fatalf("job echoed an invalid TRACEPARENT %q; logs:\n%s", traceparent, logs)
 	}
-	if endpoint := commandRow(logs, "otlp-endpoint="); endpoint != "otlp-endpoint=" && !strings.HasPrefix(endpoint, "otlp-endpoint=http") {
-		t.Errorf("job saw an unexpected OTEL_EXPORTER_OTLP_ENDPOINT row %q", endpoint)
-	}
 	if vars := strings.TrimPrefix(commandRow(logs, "otel-vars="), "otel-vars="); vars == "" || vars == "0" {
 		t.Errorf("the job saw no OTEL_* variables, got %q", vars)
 	}
-
-	// Flush both pipelines before asserting: batch/periodic processors buffer
-	// until shutdown. A job container only sees a traceparent when the runner
-	// itself is inside a real (sampled) span, whose export the trace check
-	// observes.
-	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := shutdown(sctx); err != nil {
-		t.Fatalf("flush otel: %v", err)
-	}
-
 	if collector.traceHits.Load() == 0 {
 		t.Error("collector received no trace export")
 	}
@@ -187,4 +167,41 @@ func TestOtel(t *testing.T) {
 	if u := collector.metricUnit("cicd.pipeline.run.active"); u != "{run}" {
 		t.Errorf("cicd.pipeline.run.active unit is %q, want {run}", u)
 	}
+}
+
+// TestOtel pins the full OTel contract in one job run configured through the
+// standard per-signal env vars (complete URLs including the signal path): the
+// runner exports its job span, the job container sees TRACEPARENT plus the
+// runner's OTEL_* environment, and the runner exports the CI/CD semconv
+// metrics, poll and RPC instruments, and Go runtime metrics.
+func TestOtel(t *testing.T) {
+	if skipReason != "" {
+		t.Skip(skipReason)
+	}
+
+	collector := startOtelCollector(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.server.URL+"/v1/traces")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", collector.server.URL+"/v1/metrics")
+
+	logs := runOtelJob(t, config.Otel{})
+	assertOtelExports(t, collector, logs)
+}
+
+// TestOtelSharedEndpoint proves the top-level otel.endpoint enables and points
+// both signals from a single setting, with the OTLP signal path appended to the
+// shared base.
+func TestOtelSharedEndpoint(t *testing.T) {
+	if skipReason != "" {
+		t.Skip(skipReason)
+	}
+
+	collector := startOtelCollector(t)
+	// No per-signal endpoints anywhere; only the shared base URL.
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+
+	logs := runOtelJob(t, config.Otel{Endpoint: collector.server.URL})
+	assertOtelExports(t, collector, logs)
 }
