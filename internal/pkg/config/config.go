@@ -196,6 +196,15 @@ type HealthCheck struct {
 	Timeout            time.Duration `yaml:"timeout"`                // Timeout caps one health-check script invocation.
 }
 
+// Otel configures OpenTelemetry tracing. Each value set here overrides its
+// OTEL_* env counterpart; env vars fill everything the file leaves empty.
+type Otel struct {
+	Endpoint     string            `yaml:"endpoint"`      // Endpoint is the OTLP traces endpoint; wins over OTEL_EXPORTER_OTLP(_TRACES)_ENDPOINT
+	Protocol     string            `yaml:"protocol"`      // Protocol is "http/protobuf" or "grpc"; wins over OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
+	Headers      map[string]string `yaml:"headers"`       // Headers is merged over OTEL_EXPORTER_OTLP_HEADERS, per key
+	SamplerRatio *float64          `yaml:"sampler_ratio"` // SamplerRatio enables traceidratio sampling when set; nil defers to OTEL_TRACES_SAMPLER
+}
+
 // Config represents the overall configuration.
 type Config struct {
 	Log         Log         `yaml:"log"`          // Log represents the configuration for logging.
@@ -205,6 +214,7 @@ type Config struct {
 	Host        Host        `yaml:"host"`         // Host represents the configuration for the host.
 	Metrics     Metrics     `yaml:"metrics"`      // Metrics represents the configuration for the Prometheus metrics endpoint.
 	HealthCheck HealthCheck `yaml:"health_check"` // HealthCheck controls opt-in local task-admission checks.
+	Otel        Otel        `yaml:"otel"`         // Otel configures OpenTelemetry tracing.
 }
 
 // LoadDefault returns the default configuration.

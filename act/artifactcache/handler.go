@@ -35,6 +35,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/timshannon/bolthold"
 	"go.etcd.io/bbolt"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const (
@@ -219,7 +220,7 @@ func StartHandler(opts Options) (*Handler, error) {
 	h.port = addr.Port
 	server := &http.Server{
 		ReadHeaderTimeout: 2 * time.Second,
-		Handler:           router,
+		Handler:           otelhttp.NewHandler(router, "artifactcache"),
 	}
 	go func() {
 		if err := server.Serve(listener); err != nil && errors.Is(err, net.ErrClosed) {

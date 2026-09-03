@@ -102,6 +102,27 @@ metrics:
 	assert.Equal(t, 45*time.Second, cfg.Metrics.ReadinessGrace)
 }
 
+func TestLoadDefault_LoadsOtel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+otel:
+  endpoint: "http://collector:4318"
+  protocol: grpc
+  headers:
+    authorization: "Bearer tok"
+  sampler_ratio: 0.25
+`), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, "http://collector:4318", cfg.Otel.Endpoint)
+	assert.Equal(t, "grpc", cfg.Otel.Protocol)
+	assert.Equal(t, map[string]string{"authorization": "Bearer tok"}, cfg.Otel.Headers)
+	require.NotNil(t, cfg.Otel.SamplerRatio)
+	assert.InDelta(t, 0.25, *cfg.Otel.SamplerRatio, 0)
+}
+
 func TestLoadDefault_UsesConfiguredWorkdirCleanupAge(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

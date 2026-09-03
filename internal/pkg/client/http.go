@@ -13,9 +13,11 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"connectrpc.com/connect"
+	"connectrpc.com/otelconnect"
 	"gitea.dev/actionslib/ping/v1/pingv1connect"
 	"gitea.dev/actionslib/pkg/protocol"
 	"gitea.dev/actionslib/runner/v1/runnerv1connect"
+	log "github.com/sirupsen/logrus"
 )
 
 func getHTTPClient(endpoint string, insecure bool, timeout time.Duration) *http.Client {
@@ -39,6 +41,14 @@ func getHTTPClient(endpoint string, insecure bool, timeout time.Duration) *http.
 func New(endpoint string, insecure bool, uuid, token string, timeout time.Duration, opts ...connect.ClientOption) *HTTPClient {
 	baseURL := strings.TrimRight(endpoint, "/") + "/api/actions"
 
+	// Traces every RPC and propagates W3C context to the server; spans nest
+	// under whatever ctx the caller had (job span for reporter calls).
+	otelInterceptor, err := otelconnect.NewInterceptor()
+	if err != nil {
+		log.WithError(err).Warn("otel rpc tracing disabled")
+	} else {
+		opts = append(opts, connect.WithInterceptors(otelInterceptor))
+	}
 	opts = append(opts, connect.WithInterceptors(connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
 			req.Header().Set("User-Agent", "gitea-runner/"+ver.Version())

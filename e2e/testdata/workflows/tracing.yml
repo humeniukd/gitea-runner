@@ -1,0 +1,10 @@
+name: tracing
+on: push
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "traceparent-env=$TRACEPARENT"
+          echo "otlp-endpoint=$OTEL_EXPORTER_OTLP_ENDPOINT"
+          echo "otel-vars=$(env | grep -c '^OTEL_')"

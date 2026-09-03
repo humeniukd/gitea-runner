@@ -32,6 +32,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/labels"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 	"gitea.com/gitea/runner/internal/pkg/report"
+	"gitea.com/gitea/runner/internal/pkg/tracing"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"connectrpc.com/connect"
@@ -39,6 +40,8 @@ import (
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	docker_container "github.com/moby/moby/api/types/container"
 	log "github.com/sirupsen/logrus"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // CapabilityCancelling tells the server this runner understands the
@@ -291,6 +294,10 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Runner.Timeout)
 	defer cancel()
+	// The job span bounds the whole task, so the reporter RPCs made with this
+	// ctx (and every step span) nest under it.
+	ctx, jobSpan := tracing.StartJob(ctx, task, r.uuid, r.name)
+	defer jobSpan.End()
 	// A proxy URL may carry credentials, and every job is given it; keep them out of the log.
 	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg, proxyPasswords()...)
 	var runErr error
@@ -303,11 +310,17 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 		}
 		_ = reporter.Close(lastWords)
 
+		jobResult := tracing.ResultToSemconv(reporter.Result())
+		tracing.SetJobResult(jobSpan, jobResult)
+		if runErr != nil {
+			jobSpan.RecordError(runErr)
+		}
+
 		metrics.JobDuration.Observe(time.Since(start).Seconds())
 		metrics.JobsTotal.WithLabelValues(metrics.ResultToStatusLabel(reporter.Result())).Inc()
 	}()
 	reporter.RunDaemon()
-	runErr = r.run(ctx, task, reporter)
+	runErr = r.run(ctx, task, reporter, jobSpan)
 
 	return nil
 }
@@ -362,7 +375,7 @@ func (r *Runner) fallbackPlatform(ctx context.Context) string {
 	return labels.SelfHostedPlatform
 }
 
-func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.Reporter) (err error) {
+func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.Reporter, jobSpan trace.Span) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v", r)
@@ -383,6 +396,11 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	job := workflow.GetJob(jobID)
 	reporter.ResetSteps(len(job.Steps))
 
+	if workflow.Name != "" {
+		jobSpan.SetName("RUN " + workflow.Name)
+		jobSpan.SetAttributes(semconv.CICDPipelineName(workflow.Name))
+	}
+
 	taskContext := task.Context.Fields
 	envs := r.cloneEnvs()
 
@@ -397,6 +415,11 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	if v := taskContext["run_id"].GetStringValue(); v != "" {
 		envs["GITEA_RUN_ID"] = v
 	}
+
+	// Give the job containers the trace context and exporter config, so
+	// applications running in them join the CI trace and export to the same
+	// collector.
+	maps.Copy(envs, tracing.JobEnv(ctx))
 
 	log.Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
 		r.getDefaultActionsURL(task),
@@ -537,7 +560,6 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 			RunnerUUID: r.uuid,
 		},
 		ContainerOptions:                  r.cfg.Container.Options,
-		ServiceReadyTimeout:               r.cfg.Container.ServiceReadyTimeout,
 		ContainerDaemonSocket:             r.cfg.Container.DockerHost,
 		Privileged:                        r.cfg.Container.Privileged,
 		DefaultActionInstance:             r.getDefaultActionsURL(task),
@@ -547,8 +569,10 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
 		Vars:                              task.Vars,
 		ValidVolumes:                      r.cfg.Container.ValidVolumes,
+		ServiceReadyTimeout:               r.cfg.Container.ServiceReadyTimeout,
 		SharedToolCache:                   r.cfg.Runner.ToolCacheMode == config.ToolCacheModeShared,
 		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
+		TaskID:                            task.Id,
 		RunnerName:                        r.name,
 	}
 

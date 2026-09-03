@@ -25,6 +25,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/lock"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 	"gitea.com/gitea/runner/internal/pkg/report"
+	"gitea.com/gitea/runner/internal/pkg/tracing"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"connectrpc.com/connect"
@@ -50,6 +51,20 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		} else if err != nil {
 			return fmt.Errorf("failed to load registration file: %w", err)
 		}
+
+		// Bind the tracing SDK after the registration is known, so service.name
+		// is the runner name; tracing failures only downgrade to untraced runs.
+		shutdownTracing, err := tracing.Setup(ctx, reg.Name, cfg.Otel)
+		if err != nil {
+			log.WithError(err).Warn("otel tracing disabled")
+		}
+		defer func() {
+			sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer scancel()
+			if err := shutdownTracing(sctx); err != nil {
+				log.Warnf("otel tracer shutdown: %v", err)
+			}
+		}()
 
 		// Guard against a second runner process sharing this runner file: two
 		// processes with the same identity are indistinguishable to Gitea and

@@ -297,3 +297,15 @@ metrics:
   #addr: "127.0.0.1:9101"
   # Consecutive polling failures may last this long before /readyz returns 503.
   #readiness_grace: 30s
+
+otel:
+  # OTLP endpoint for trace export. Empty means tracing is off unless an
+  # OTEL_* environment variable provides an endpoint.
+  #endpoint: "http://localhost:4318"
+  # OTLP wire protocol: "http/protobuf" (default) or "grpc".
+  #protocol: "http/protobuf"
+  # Headers merged over OTEL_EXPORTER_OTLP_HEADERS, per key.
+  #headers:
+  #  authorization: "Bearer secret"
+  # Sample this fraction of root traces (0-1). Unset honors OTEL_TRACES_SAMPLER.
+  #sampler_ratio: 1.0

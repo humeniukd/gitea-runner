@@ -386,6 +386,12 @@ Both hooks are synchronous and block the job while they run. Either one exiting 
 
 See **[docs/job-hooks.md](docs/job-hooks.md)** for the execution order, environment, and platform notes.
 
+#### Tracing (`otel.*`, `OTEL_*`)
+
+The runner can export OpenTelemetry traces for the jobs it runs: a span per job and a span per step, with the job's containers given `TRACEPARENT` and the runner's `OTEL_*` environment so applications inside the job continue the same trace. Configure it through the `otel:` config section or the standard `OTEL_*` environment variables; the config file wins per setting. Off by default.
+
+See **[docs/tracing.md](docs/tracing.md)** for the config keys, the merge rules, and the emitted spans.
+
 #### Local job logs (`log.job.dir`)
 
 Set `log.job.dir` to a path and the runner writes a copy of every task's log there as `<start time>-task-<id>.log`: the rows exactly as Gitea received them, with the same secrets masked and the job's result on the last line. Off by default, and what Gitea shows does not change.

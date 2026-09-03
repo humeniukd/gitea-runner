@@ -23,9 +23,11 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/internal/pkg/tracing"
 
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const maxJobSummaryBytes = 1024 * 1024
@@ -199,11 +201,18 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		stepExec := step.main()
 		steps = append(steps, useStepLogger(rc, stepModel, stepStageMain, func(ctx context.Context) error {
 			rc.CurrentStepIndex = stepIdx
+			ctx, stepSpan := tracing.StartStep(ctx, stepModel, rc.Config.TaskID)
+			defer stepSpan.End()
 			err := stepExec(ctx)
-			if err != nil {
+			switch {
+			case err != nil:
 				reportStepError(ctx, rc, err)
-			} else if ctx.Err() != nil {
+				tracing.SetTaskResult(stepSpan, "failure")
+			case ctx.Err() != nil:
 				reportStepError(ctx, rc, ctx.Err())
+				tracing.SetTaskResult(stepSpan, "cancellation")
+			default:
+				tracing.SetTaskResult(stepSpan, "success")
 			}
 			return nil
 		}))
@@ -493,7 +502,7 @@ func tryUploadJobSummary(ctx context.Context, rc *RunContext) {
 		"/jobs/" + strconv.FormatInt(jobID, 10) + "/steps/"
 	actPath := rc.JobContainer.GetActPath()
 	// Reuse a single client across all step uploads so connections can be pooled.
-	client := &http.Client{Timeout: jobSummaryUploadRequestTimeout}
+	client := &http.Client{Timeout: jobSummaryUploadRequestTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)}
 	for i := range rc.Run.Job().Steps {
 		summaryPath := path.Join(actPath, "workflow", "step-summary-"+strconv.Itoa(i)+".md")
 		body, ok := readSingleFileFromContainerArchive(ctx, rc.JobContainer, summaryPath, maxJobSummaryBytes)

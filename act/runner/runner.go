@@ -80,6 +80,7 @@ type Config struct {
 	AllocatePTY                       bool          // allocate a pseudo-TTY for each step's process
 	ServiceReadyTimeout               time.Duration // how long a job waits for its service containers to report healthy (0 uses the default)
 	RunnerName                        string        // name this runner registered with, reported as `runner.name`, defaults to the hostname
+	TaskID                            int64         // the server task id this runner executes a workflow for, used for trace spans
 	JobStartedHook                    string        // script run inside the job environment before the job's first step; ACTIONS_RUNNER_HOOK_JOB_STARTED is read from Env when empty
 	JobCompletedHook                  string        // script run inside the job environment after the job's last step; ACTIONS_RUNNER_HOOK_JOB_COMPLETED is read from Env when empty
 }
