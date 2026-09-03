@@ -32,6 +32,7 @@ import (
 	"github.com/mattn/go-isatty"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	contribruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 )
 
 func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) func(cmd *cobra.Command, args []string) error {
@@ -57,6 +58,12 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		shutdownTracing, err := tracing.Setup(ctx, reg.Name, cfg.Otel)
 		if err != nil {
 			log.WithError(err).Warn("otel tracing disabled")
+		}
+
+		// Runtime/process metrics (go.* semconv) ride on the global meter
+		// provider; Start is a no-op when it is the noop provider.
+		if err := contribruntime.Start(contribruntime.WithMinimumReadMemStatsInterval(30 * time.Second)); err != nil {
+			log.WithError(err).Warn("otel runtime metrics unavailable")
 		}
 		defer func() {
 			sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)

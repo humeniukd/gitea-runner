@@ -73,6 +73,7 @@ type Runner struct {
 	runningCount            atomic.Int64
 	lastIdleCleanupUnixNano atomic.Int64
 	now                     func() time.Time
+	telemetry               *metrics.Telemetry
 	healthCheckLast         time.Time
 	healthCheckReady        bool
 	healthCheckReason       string
@@ -135,6 +136,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		cacheHandler:   cacheHandler,
 		now:            time.Now,
 		runHealthCheck: executeHealthCheck,
+		telemetry:      metrics.NewTelemetry(),
 	}
 	return runner
 }
@@ -301,6 +303,7 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 	// A proxy URL may carry credentials, and every job is given it; keep them out of the log.
 	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg, proxyPasswords()...)
 	var runErr error
+	r.telemetry.RecordJobStart(ctx, r.pipelineName(task))
 	defer func() {
 		r.runningCount.Add(-1)
 
@@ -318,6 +321,10 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 
 		metrics.JobDuration.Observe(time.Since(start).Seconds())
 		metrics.JobsTotal.WithLabelValues(metrics.ResultToStatusLabel(reporter.Result())).Inc()
+
+		elapsed := time.Since(start).Seconds()
+		r.telemetry.RecordPipelineRunDuration(ctx, r.pipelineName(task), jobResult, elapsed)
+		r.telemetry.RecordJobEnd(ctx, r.pipelineName(task), jobResult, connect.CodeOf(runErr).String())
 	}()
 	reporter.RunDaemon()
 	runErr = r.run(ctx, task, reporter, jobSpan)
@@ -822,4 +829,14 @@ func warnIgnoredCacheSecret(cfg *config.Config) {
 		key = "cache.external_secret_file"
 	}
 	log.Warnf("%s is set but cache.external_server is not; the built-in cache server does not use a shared secret, so the value is ignored", key)
+}
+
+// pipelineName returns the semconv pipeline name for a task. The task context
+// carries no workflow name; the repository is the stable low-cardinality
+// grouping available at job start.
+func (r *Runner) pipelineName(task *runnerv1.Task) string {
+	if name := task.Context.Fields["repository"].GetStringValue(); name != "" {
+		return name
+	}
+	return "unknown"
 }

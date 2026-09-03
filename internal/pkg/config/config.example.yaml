@@ -299,13 +299,24 @@ metrics:
   #readiness_grace: 30s
 
 otel:
-  # OTLP endpoint for trace export. Empty means tracing is off unless an
-  # OTEL_* environment variable provides an endpoint.
-  #endpoint: "http://localhost:4318"
-  # OTLP wire protocol: "http/protobuf" (default) or "grpc".
-  #protocol: "http/protobuf"
-  # Headers merged over OTEL_EXPORTER_OTLP_HEADERS, per key.
-  #headers:
-  #  authorization: "Bearer secret"
-  # Sample this fraction of root traces (0-1). Unset honors OTEL_TRACES_SAMPLER.
-  #sampler_ratio: 1.0
+  traces:
+    # Enabled turns tracing off when false; true by default. With no endpoint,
+    # tracing stays off regardless.
+    #enabled: true
+    # OTLP endpoint for trace export.
+    #endpoint: "http://localhost:4318"
+    # OTLP wire protocol: "http/protobuf" (default) or "grpc".
+    #protocol: "http/protobuf"
+    # Headers merged over OTEL_EXPORTER_OTLP_HEADERS, per key.
+    #headers:
+    #  authorization: "Bearer secret"
+    # Sample this fraction of root traces (0-1). Unset honors OTEL_TRACES_SAMPLER.
+    #sampler_ratio: 1.0
+  metrics:
+    # Enabled turns OTel metrics export off when false; true by default. The
+    # Prometheus endpoint is unaffected by this section.
+    #enabled: true
+    # OTLP endpoint for metrics export.
+    #endpoint: "http://localhost:4318"
+    # OTLP wire protocol: "http/protobuf" (default) or "grpc".
+    #protocol: "http/protobuf"

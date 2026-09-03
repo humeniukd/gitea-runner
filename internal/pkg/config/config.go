@@ -196,13 +196,30 @@ type HealthCheck struct {
 	Timeout            time.Duration `yaml:"timeout"`                // Timeout caps one health-check script invocation.
 }
 
-// Otel configures OpenTelemetry tracing. Each value set here overrides its
-// OTEL_* env counterpart; env vars fill everything the file leaves empty.
+// Otel configures OpenTelemetry. Shared settings here apply to both signals;
+// the traces and metrics sections carry signal-specific settings, and each
+// value set in the file overrides its OTEL_* env counterpart.
 type Otel struct {
+	Traces  OtelTraces  `yaml:"traces"`  // Traces configures distributed tracing.
+	Metrics OtelMetrics `yaml:"metrics"` // Metrics configures OTel metrics export.
+}
+
+// OtelTraces configures distributed tracing.
+type OtelTraces struct {
+	Enabled      *bool             `yaml:"enabled"`       // Enabled turns tracing off when false; true by default
 	Endpoint     string            `yaml:"endpoint"`      // Endpoint is the OTLP traces endpoint; wins over OTEL_EXPORTER_OTLP(_TRACES)_ENDPOINT
 	Protocol     string            `yaml:"protocol"`      // Protocol is "http/protobuf" or "grpc"; wins over OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
 	Headers      map[string]string `yaml:"headers"`       // Headers is merged over OTEL_EXPORTER_OTLP_HEADERS, per key
 	SamplerRatio *float64          `yaml:"sampler_ratio"` // SamplerRatio enables traceidratio sampling when set; nil defers to OTEL_TRACES_SAMPLER
+}
+
+// OtelMetrics configures OTel metrics export, alongside the Prometheus
+// endpoint, which is unaffected by this section.
+type OtelMetrics struct {
+	Enabled  *bool             `yaml:"enabled"`  // Enabled turns OTel metrics export off when false; true by default
+	Endpoint string            `yaml:"endpoint"` // Endpoint is the OTLP metrics endpoint; wins over OTEL_EXPORTER_OTLP_METRIC(S)_ENDPOINT
+	Protocol string            `yaml:"protocol"` // Protocol is "http/protobuf" or "grpc"; wins over OTEL_EXPORTER_OTLP_METRICS_PROTOCOL
+	Headers  map[string]string `yaml:"headers"`  // Headers is merged over OTEL_EXPORTER_OTLP_METRICS_HEADERS, per key
 }
 
 // Config represents the overall configuration.
@@ -214,7 +231,7 @@ type Config struct {
 	Host        Host        `yaml:"host"`         // Host represents the configuration for the host.
 	Metrics     Metrics     `yaml:"metrics"`      // Metrics represents the configuration for the Prometheus metrics endpoint.
 	HealthCheck HealthCheck `yaml:"health_check"` // HealthCheck controls opt-in local task-admission checks.
-	Otel        Otel        `yaml:"otel"`         // Otel configures OpenTelemetry tracing.
+	Otel        Otel        `yaml:"otel"`         // Otel configures OpenTelemetry traces and metrics.
 }
 
 // LoadDefault returns the default configuration.

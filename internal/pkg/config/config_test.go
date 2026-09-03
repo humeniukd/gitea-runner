@@ -107,20 +107,30 @@ func TestLoadDefault_LoadsOtel(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 otel:
-  endpoint: "http://collector:4318"
-  protocol: grpc
-  headers:
-    authorization: "Bearer tok"
-  sampler_ratio: 0.25
+  traces:
+    enabled: false
+    endpoint: "http://collector:4318"
+    protocol: grpc
+    headers:
+      authorization: "Bearer tok"
+    sampler_ratio: 0.25
+  metrics:
+    endpoint: "http://collector:4317"
+    protocol: grpc
 `), 0o600))
 
 	cfg, err := LoadDefault(path)
 	require.NoError(t, err)
-	assert.Equal(t, "http://collector:4318", cfg.Otel.Endpoint)
-	assert.Equal(t, "grpc", cfg.Otel.Protocol)
-	assert.Equal(t, map[string]string{"authorization": "Bearer tok"}, cfg.Otel.Headers)
-	require.NotNil(t, cfg.Otel.SamplerRatio)
-	assert.InDelta(t, 0.25, *cfg.Otel.SamplerRatio, 0)
+	require.NotNil(t, cfg.Otel.Traces.Enabled)
+	assert.False(t, *cfg.Otel.Traces.Enabled)
+	assert.Equal(t, "http://collector:4318", cfg.Otel.Traces.Endpoint)
+	assert.Equal(t, "grpc", cfg.Otel.Traces.Protocol)
+	assert.Equal(t, map[string]string{"authorization": "Bearer tok"}, cfg.Otel.Traces.Headers)
+	require.NotNil(t, cfg.Otel.Traces.SamplerRatio)
+	assert.InDelta(t, 0.25, *cfg.Otel.Traces.SamplerRatio, 0)
+	assert.Nil(t, cfg.Otel.Metrics.Enabled, "metrics enabled defaults to true via nil")
+	assert.Equal(t, "http://collector:4317", cfg.Otel.Metrics.Endpoint)
+	assert.Equal(t, "grpc", cfg.Otel.Metrics.Protocol)
 }
 
 func TestLoadDefault_UsesConfiguredWorkdirCleanupAge(t *testing.T) {

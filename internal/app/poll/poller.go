@@ -42,6 +42,7 @@ type Poller struct {
 	client       client.Client
 	runner       TaskRunner
 	cfg          *config.Config
+	telemetry    *metrics.Telemetry
 	tasksVersion atomic.Int64 // tasksVersion used to store the version of the last task fetched from the Gitea.
 
 	pollingCtx      context.Context
@@ -70,7 +71,7 @@ type workerState struct {
 	consecutiveErrors int64
 	// fetchTimedOut suppresses repeats of the fetch timeout warning.
 	fetchTimedOut bool
-	// lastBackoff is the last interval reported to the PollBackoffSeconds gauge;
+	// lastBackoff is the last interval reported to the poll backoff gauges;
 	// used to suppress redundant no-op Set calls when the backoff plateaus
 	// (e.g. at FetchIntervalMax).
 	lastBackoff time.Duration
@@ -84,9 +85,10 @@ func New(cfg *config.Config, client client.Client, runner TaskRunner) *Poller {
 	done := make(chan struct{})
 
 	p := &Poller{
-		client: client,
-		runner: runner,
-		cfg:    cfg,
+		client:    client,
+		runner:    runner,
+		cfg:       cfg,
+		telemetry: metrics.NewTelemetry(),
 
 		pollingCtx:      pollingCtx,
 		shutdownPolling: shutdownPolling,
@@ -280,6 +282,7 @@ func (p *Poller) waitBackoff(s *workerState) bool {
 	base := p.calculateInterval(s)
 	if base != s.lastBackoff {
 		metrics.PollBackoffSeconds.Set(base.Seconds())
+		p.telemetry.RecordPollBackoff(p.pollingCtx, base.Seconds())
 		s.lastBackoff = base
 	}
 	timer := time.NewTimer(addJitter(base))
@@ -359,10 +362,12 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 		}
 		s.consecutiveEmpty++
 		metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultEmpty).Inc()
+		p.telemetry.RecordPollFetch(reqCtx, metrics.LabelResultEmpty)
 		return nil, false
 	}
 	s.fetchTimedOut = false
 	metrics.PollFetchDuration.Observe(time.Since(start).Seconds())
+	p.telemetry.RecordPollFetchDuration(reqCtx, time.Since(start).Seconds())
 
 	if err != nil {
 		// An Unauthenticated response means the server no longer knows this
@@ -384,6 +389,7 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 		p.lastPollFailed.Store(true)
 		s.consecutiveErrors++
 		metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultError).Inc()
+		p.telemetry.RecordPollFetch(reqCtx, metrics.LabelResultError)
 		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodFetchTask).Inc()
 		return nil, false
 	}
@@ -395,6 +401,7 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 	if resp == nil || resp.Msg == nil {
 		s.consecutiveEmpty++
 		metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultEmpty).Inc()
+		p.telemetry.RecordPollFetch(reqCtx, metrics.LabelResultEmpty)
 		return nil, false
 	}
 
@@ -405,6 +412,7 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 	if resp.Msg.Task == nil {
 		s.consecutiveEmpty++
 		metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultEmpty).Inc()
+		p.telemetry.RecordPollFetch(reqCtx, metrics.LabelResultEmpty)
 		return nil, false
 	}
 
@@ -412,6 +420,7 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 	p.tasksVersion.CompareAndSwap(resp.Msg.TasksVersion, 0)
 
 	metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultTask).Inc()
+	p.telemetry.RecordPollFetch(reqCtx, metrics.LabelResultTask)
 	return resp.Msg.Task, true
 }
 
