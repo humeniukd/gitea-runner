@@ -79,18 +79,30 @@ the runner keeps working untraced if the SDK cannot start.
 
 ## Job containers
 
-The runner passes its own `OTEL_*` environment variables into the containers
-where jobs run, plus `TRACEPARENT` and `TRACESTATE` (W3C trace context in
-environment variables) pointing at the job's span. Applications running inside
-a job that use OpenTelemetry therefore continue the CI trace and export to the
-same collector, instead of starting disjoint traces.
+The runner gives job containers the full OTLP configuration so applications
+running inside a job continue the CI trace and export to the same collector
+instead of starting disjoint traces. Each container receives:
 
-The runner's own collector credentials are withheld: variables carrying
-exporter headers (`*HEADERS`) or a TLS client key/certificate are not handed to
-job containers, because they are readable by workflow code, including jobs from
-untrusted pull requests. Configure those in the runner's environment only; a
-job application that needs its own collector credentials should receive them
-through a workflow secret.
+- every `OTEL_*` variable from the runner's own environment;
+- the `otel.*` config settings translated to their `OTEL_*` env vars (endpoint,
+  protocol, headers, `resource_attributes`, and per-signal equivalents), so file
+  config reaches jobs too — the yml config is otherwise never in the process
+  environment. The config value wins over the runner env, per setting;
+- `TRACEPARENT` and `TRACESTATE` (W3C trace context in environment variables)
+  pointing at the job's span.
+
+A signal disabled with `otel.traces.enabled: false` or `otel.metrics.enabled:
+false` contributes no OTLP env vars to the container and is turned off in-job
+with `OTEL_TRACES_EXPORTER=none` / `OTEL_METRICS_EXPORTER=none`, so a shared
+endpoint does not re-enable it.
+
+> **Security limitation.** Exporter credentials are **not** withheld: job code —
+> including jobs from untrusted pull requests — can read the collector headers
+> (`OTEL_EXPORTER_OTLP*_HEADERS`) and any TLS client key/certificate passed to
+> the SDK. Do not put credentials for a shared backend on the runner. The
+> recommended setup is to point the runner at a local collector that accepts
+> OTLP with no authentication and forwards to the real destination, keeping the
+> backend credentials on the collector.
 
 ## Spans
 

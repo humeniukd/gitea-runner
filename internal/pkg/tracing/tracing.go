@@ -329,25 +329,31 @@ func samplerArg() float64 {
 }
 
 // JobEnv returns the env to inject into job containers: every process OTEL_*
-// variable, plus TRACEPARENT/TRACESTATE continuing the trace of ctx's span, so
-// applications running in the job join the CI trace and export to the same
-// collector. resourceAttrs are merged into OTEL_RESOURCE_ATTRIBUTES so in-job
-// telemetry carries them too (yml config does not otherwise reach containers,
-// unlike the process OTEL_* env).
+// variable, the yml otel.* settings translated to their OTEL_* env vars (so
+// file config reaches jobs too, since yml is never in the process env), and
+// TRACEPARENT/TRACESTATE continuing the trace of ctx's span. Applications in the
+// job then join the CI trace and export with the same settings. yml wins over
+// the process env, per setting.
 //
-// Collector credentials stay on the runner: header and TLS client-key variables
-// are withheld from job containers, which are reachable by untrusted workflow
-// code.
-func JobEnv(ctx context.Context, resourceAttrs map[string]string) map[string]string {
+// A disabled signal contributes no OTLP env vars and is turned off in-job with
+// OTEL_{TRACES,METRICS}_EXPORTER=none, so a shared endpoint does not re-enable it.
+//
+// Security limitation: OTEL_* vars are passed through unfiltered, so job code
+// (including untrusted pull requests) can read the collector credentials in
+// OTEL_EXPORTER_OTLP*_HEADERS and TLS client key/cert vars. Point the runner at
+// a local collector that accepts OTLP without auth and forwards to the real
+// backend, rather than putting backend credentials on the runner.
+func JobEnv(ctx context.Context, otelCfg config.Otel) map[string]string {
 	envs := make(map[string]string)
 	for _, kv := range os.Environ() {
 		name, value, found := strings.Cut(kv, "=")
-		if found && strings.HasPrefix(name, "OTEL_") && !isJobSecretVar(name) {
+		if found && strings.HasPrefix(name, "OTEL_") {
 			envs[name] = value
 		}
 	}
-	merged := mergedResourceAttributes(envs["OTEL_RESOURCE_ATTRIBUTES"], resourceAttrs)
-	envs["OTEL_RESOURCE_ATTRIBUTES"] = serializeResourceAttributes(merged)
+	setJobOtelEnv(envs, otelCfg)
+	envs["OTEL_RESOURCE_ATTRIBUTES"] = serializeKeyValues(
+		mergedResourceAttributes(envs["OTEL_RESOURCE_ATTRIBUTES"], otelCfg.ResourceAttributes))
 
 	sc := trace.SpanContextFromContext(ctx)
 	if !sc.IsValid() {
@@ -364,12 +370,51 @@ func JobEnv(ctx context.Context, resourceAttrs map[string]string) map[string]str
 	return envs
 }
 
-// isJobSecretVar reports whether an OTEL_* variable carries collector
-// credentials that must not reach job containers.
-func isJobSecretVar(name string) bool {
-	return strings.Contains(name, "HEADERS") ||
-		strings.Contains(name, "CLIENT_KEY") ||
-		strings.Contains(name, "CLIENT_CERTIFICATE")
+// setJobOtelEnv overlays the yml otel.* settings onto the job env as their
+// OTEL_* env vars, gating each signal on its enabled flag. yml wins per setting.
+func setJobOtelEnv(envs map[string]string, cfg config.Otel) {
+	setEnvIf(envs, "OTEL_EXPORTER_OTLP_ENDPOINT", cfg.Endpoint)
+	setEnvIf(envs, "OTEL_EXPORTER_OTLP_PROTOCOL", cfg.Protocol)
+	setEnvIf(envs, "OTEL_EXPORTER_OTLP_HEADERS", serializeKeyValues(cfg.Headers))
+
+	if signalEnabled(cfg.Traces.Enabled, cfg.Enabled) {
+		setEnvIf(envs, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", cfg.Traces.Endpoint)
+		setEnvIf(envs, "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", cfg.Traces.Protocol)
+		setEnvIf(envs, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", serializeKeyValues(cfg.Traces.Headers))
+		if cfg.Traces.SamplerRatio != nil {
+			envs["OTEL_TRACES_SAMPLER"] = "parentbased_traceidratio"
+			envs["OTEL_TRACES_SAMPLER_ARG"] = strconv.FormatFloat(*cfg.Traces.SamplerRatio, 'g', -1, 64)
+		}
+	} else {
+		for _, k := range []string{
+			"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+			"OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG",
+		} {
+			delete(envs, k)
+		}
+		envs["OTEL_TRACES_EXPORTER"] = "none"
+	}
+
+	if signalEnabled(cfg.Metrics.Enabled, cfg.Enabled) {
+		setEnvIf(envs, "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", cfg.Metrics.Endpoint)
+		setEnvIf(envs, "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", cfg.Metrics.Protocol)
+		setEnvIf(envs, "OTEL_EXPORTER_OTLP_METRICS_HEADERS", serializeKeyValues(cfg.Metrics.Headers))
+	} else {
+		for _, k := range []string{
+			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+			"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		} {
+			delete(envs, k)
+		}
+		envs["OTEL_METRICS_EXPORTER"] = "none"
+	}
+}
+
+// setEnvIf sets key only when value is non-empty.
+func setEnvIf(envs map[string]string, key, value string) {
+	if value != "" {
+		envs[key] = value
+	}
 }
 
 // defaultDeploymentEnvironment is the deployment.environment.name applied to the
@@ -392,8 +437,9 @@ func mergedResourceAttributes(envValue string, yml map[string]string) map[string
 	return merged
 }
 
-// serializeResourceAttributes renders attributes as a sorted OTEL_RESOURCE_ATTRIBUTES value.
-func serializeResourceAttributes(attrs map[string]string) string {
+// serializeKeyValues renders a map as a sorted comma-separated key=value list,
+// the format of OTEL_RESOURCE_ATTRIBUTES and OTEL_EXPORTER_OTLP_HEADERS.
+func serializeKeyValues(attrs map[string]string) string {
 	pairs := make([]string, 0, len(attrs))
 	for _, k := range slices.Sorted(maps.Keys(attrs)) {
 		pairs = append(pairs, k+"="+attrs[k])

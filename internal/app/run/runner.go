@@ -426,7 +426,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// Give the job containers the trace context and exporter config, so
 	// applications running in them join the CI trace and export to the same
 	// collector.
-	maps.Copy(envs, tracing.JobEnv(ctx, r.cfg.Otel.ResourceAttributes))
+	maps.Copy(envs, tracing.JobEnv(ctx, r.cfg.Otel))
 
 	log.Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
 		r.getDefaultActionsURL(task),

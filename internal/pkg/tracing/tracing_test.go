@@ -127,7 +127,7 @@ func TestJobEnvPassthroughAndTraceparent(t *testing.T) {
 	defer span.End()
 
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
-	envs := JobEnv(ctx, nil)
+	envs := JobEnv(ctx, config.Otel{})
 	assert.Equal(t, "1", envs["OTEL_TEST_PROP"])
 	assert.NotContains(t, envs, "OTHER_VAR")
 	assert.Equal(t, "deployment.environment.name=test", envs["OTEL_RESOURCE_ATTRIBUTES"], "default persists")
@@ -135,9 +135,9 @@ func TestJobEnvPassthroughAndTraceparent(t *testing.T) {
 	cctx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": envs["TRACEPARENT"]})
 	assert.True(t, trace.SpanContextFromContext(cctx).IsValid())
 
-	// Collector credentials stay on the runner and out of job containers.
-	assert.NotContains(t, envs, "OTEL_EXPORTER_OTLP_HEADERS")
-	assert.NotContains(t, JobEnv(context.Background(), nil), "TRACEPARENT")
+	// OTEL_* pass through unfiltered, credentials included (documented limitation).
+	assert.Equal(t, "authorization=Bearer secret", envs["OTEL_EXPORTER_OTLP_HEADERS"])
+	assert.NotContains(t, JobEnv(context.Background(), config.Otel{}), "TRACEPARENT")
 }
 
 func TestJobEnvResourceAttributes(t *testing.T) {
@@ -145,7 +145,7 @@ func TestJobEnvResourceAttributes(t *testing.T) {
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "team=ci")
 
 	// yml overrides the default deployment.environment.name; unrelated env attr survives.
-	envs := JobEnv(context.Background(), map[string]string{"deployment.environment.name": "production"})
+	envs := JobEnv(context.Background(), config.Otel{ResourceAttributes: map[string]string{"deployment.environment.name": "production"}})
 	assert.Equal(t, "deployment.environment.name=production,team=ci", envs["OTEL_RESOURCE_ATTRIBUTES"])
 }
 
@@ -155,12 +155,48 @@ func TestJobEnvDefaultEnvironmentPersists(t *testing.T) {
 	// A different attribute set via env leaves the default deployment.environment.name intact.
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "team=ci")
 	assert.Equal(t, "deployment.environment.name=test,team=ci",
-		JobEnv(context.Background(), nil)["OTEL_RESOURCE_ATTRIBUTES"])
+		JobEnv(context.Background(), config.Otel{})["OTEL_RESOURCE_ATTRIBUTES"])
 
 	// A different attribute set via config leaves the default intact too.
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
 	assert.Equal(t, "deployment.environment.name=test,team=ci",
-		JobEnv(context.Background(), map[string]string{"team": "ci"})["OTEL_RESOURCE_ATTRIBUTES"])
+		JobEnv(context.Background(), config.Otel{ResourceAttributes: map[string]string{"team": "ci"}})["OTEL_RESOURCE_ATTRIBUTES"])
+}
+
+func TestJobEnvConfigToEnv(t *testing.T) {
+	unsetConfigFile(t)
+	clearEnv(t)
+	ratio := 0.25
+	cfg := config.Otel{
+		Endpoint: "http://collector:4318",
+		Protocol: "grpc",
+		Headers:  map[string]string{"authorization": "Bearer shared"},
+		Traces:   config.OtelTraces{Endpoint: "http://collector:4318/v1/traces", SamplerRatio: &ratio},
+		Metrics:  config.OtelMetrics{Headers: map[string]string{"x-scope-orgid": "ci"}},
+	}
+	envs := JobEnv(context.Background(), cfg)
+	assert.Equal(t, "http://collector:4318", envs["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	assert.Equal(t, "grpc", envs["OTEL_EXPORTER_OTLP_PROTOCOL"])
+	assert.Equal(t, "authorization=Bearer shared", envs["OTEL_EXPORTER_OTLP_HEADERS"])
+	assert.Equal(t, "http://collector:4318/v1/traces", envs["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"])
+	assert.Equal(t, "parentbased_traceidratio", envs["OTEL_TRACES_SAMPLER"])
+	assert.Equal(t, "0.25", envs["OTEL_TRACES_SAMPLER_ARG"])
+	assert.Equal(t, "x-scope-orgid=ci", envs["OTEL_EXPORTER_OTLP_METRICS_HEADERS"])
+}
+
+func TestJobEnvDisabledSignal(t *testing.T) {
+	unsetConfigFile(t)
+	clearEnv(t)
+	// Runner env carries a shared endpoint and a stale traces endpoint.
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://collector:4318/v1/traces")
+
+	envs := JobEnv(context.Background(), config.Otel{Traces: config.OtelTraces{Enabled: new(false)}})
+	assert.Equal(t, "none", envs["OTEL_TRACES_EXPORTER"], "disabled traces turned off in-job")
+	assert.NotContains(t, envs, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "disabled signal's env dropped")
+	// The still-enabled metrics signal keeps the shared endpoint and gets no disable switch.
+	assert.Equal(t, "http://collector:4318", envs["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	assert.NotContains(t, envs, "OTEL_METRICS_EXPORTER")
 }
 
 func TestMergedResourceAttributes(t *testing.T) {
