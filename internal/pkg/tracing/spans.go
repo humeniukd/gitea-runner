@@ -142,7 +142,9 @@ func setResult(span trace.Span, key attribute.Key, result string) {
 	span.SetAttributes(key.String(result))
 	if result != "success" {
 		span.SetStatus(codes.Error, result)
+		return
 	}
+	span.SetStatus(codes.Ok, "")
 }
 
 func ResultToSemconv(result runnerv1.Result) string {

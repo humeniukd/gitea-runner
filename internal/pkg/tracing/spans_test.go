@@ -114,6 +114,7 @@ func TestSetPipelineName(t *testing.T) {
 
 	_, span := otel.Tracer("test").Start(context.Background(), "RUN")
 	SetPipelineName(span, "Tests", "build", "Build and test")
+	SetPipelineResult(span, "success")
 	span.End()
 
 	_, fallback := otel.Tracer("test").Start(context.Background(), "RUN")
@@ -130,6 +131,7 @@ func TestSetPipelineName(t *testing.T) {
 	id, ok := attrString(byName["RUN Tests Build and test"].Attributes(), "gitea.job.id")
 	require.True(t, ok)
 	assert.Equal(t, "build", id)
+	assert.Equal(t, codes.Ok, byName["RUN Tests Build and test"].Status().Code, "success sets Ok status")
 }
 
 func attrString(attrs []attribute.KeyValue, key string) (string, bool) {
