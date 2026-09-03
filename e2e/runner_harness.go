@@ -29,7 +29,7 @@ type runnerOptions struct {
 	cacheV2   *bool
 }
 
-func startRunner(t *testing.T, repo, labelName string, options runnerOptions) *poll.Poller {
+func startRunner(t *testing.T, repo, labelName string, options runnerOptions) (*poll.Poller, *run.Runner) {
 	t.Helper()
 	ctx := t.Context()
 	token, err := fixture.RegistrationToken(ctx, repo)
@@ -116,5 +116,5 @@ func startRunner(t *testing.T, repo, labelName string, options runnerOptions) *p
 			t.Logf("runner shutdown: %v", err)
 		}
 	})
-	return poller
+	return poller, runner
 }

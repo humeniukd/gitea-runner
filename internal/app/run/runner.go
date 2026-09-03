@@ -304,8 +304,6 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 	var runErr error
 	r.telemetry.RecordJobStart(ctx, r.pipelineName(task))
 	defer func() {
-		r.runningCount.Add(-1)
-
 		lastWords := ""
 		if runErr != nil {
 			lastWords = runErr.Error()
@@ -324,6 +322,10 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 		elapsed := time.Since(start).Seconds()
 		r.telemetry.RecordPipelineRunDuration(ctx, r.pipelineName(task), jobResult, elapsed)
 		r.telemetry.RecordJobEnd(ctx, r.pipelineName(task), jobResult, connect.CodeOf(runErr).String())
+
+		// Last, so RunningCount reaching zero means the job is fully finalized
+		// (status reported, span ended, metrics recorded), not merely executed.
+		r.runningCount.Add(-1)
 	}()
 	reporter.RunDaemon()
 	runErr = r.run(ctx, task, reporter, pipelineSpan)

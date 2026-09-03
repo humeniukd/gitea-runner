@@ -16,7 +16,7 @@ func TestCompatibility(t *testing.T) {
 		t.Skip(skipReason)
 	}
 
-	sharedPoller := startRunner(t, "", "ubuntu-latest", runnerOptions{capacity: 16})
+	sharedPoller, _ := startRunner(t, "", "ubuntu-latest", runnerOptions{capacity: 16})
 	t.Cleanup(func() {
 		select {
 		case <-sharedPoller.Done():

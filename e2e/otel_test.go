@@ -115,10 +115,15 @@ func runOtelJob(t *testing.T, otelCfg config.Otel) string {
 		t.Fatalf("start runtime metrics: %v", err)
 	}
 
-	api, repo, _ := startIsolatedScenario(t, "tracing.yml", "ubuntu-latest", runnerOptions{})
+	api, repo, _, runner := startIsolatedScenario(t, "tracing.yml", "ubuntu-latest", runnerOptions{})
 	wfRun := waitForRun(t, api, repo)
 	requireSuccess(t, api, repo, wfRun.ID)
 	logs := runLogs(t, api, repo, wfRun.ID)
+
+	// requireSuccess returns when Gitea sees the result, which the runner reports
+	// before it finishes recording the run-duration metric; wait for the task to
+	// fully finalize so the flush below captures every metric.
+	waitForRunnerIdle(t, runner)
 
 	// Flush both pipelines before asserting: batch/periodic processors buffer
 	// until shutdown.
