@@ -123,8 +123,7 @@ func tracesEndpointConfigured(cfg config.Otel) bool {
 
 func metricsEndpointConfigured(cfg config.Otel) bool {
 	return firstNonEmpty(cfg.Metrics.Endpoint, cfg.Endpoint,
-		os.Getenv("OTEL_EXPORTER_OTLP_METRIC_ENDPOINT"), os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"),
-		os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != ""
+		os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"), os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != ""
 }
 
 func ymlEndpoint(signal, generic, protocol, signalPath string) (string, bool) {
@@ -152,6 +151,13 @@ func asIsHTTP(raw string) string {
 	return u.String()
 }
 
+func endpointPtr(endpoint string, fromYml bool) *string {
+	if !fromYml {
+		return nil
+	}
+	return &endpoint
+}
+
 func signalProtocol(signalYml, sharedYml, signalEnv, genericEnv string) string {
 	for _, v := range []string{signalYml, sharedYml} {
 		if v == protocolHTTP || v == protocolGRPC {
@@ -175,22 +181,13 @@ func traceProviderConfig(cfg config.Otel) *otelconf.TracerProvider {
 	headers := mergedHeaders(cfg.Traces.Headers, cfg.Headers, "OTEL_EXPORTER_OTLP_TRACES_HEADERS")
 	endpoint, fromYml := ymlEndpoint(cfg.Traces.Endpoint, cfg.Endpoint, protocol, tracesPath)
 
+	ep := endpointPtr(endpoint, fromYml)
 	exporter := otelconf.SpanExporter{}
 	switch protocol {
 	case protocolGRPC:
-		exp := &otelconf.OTLPGrpcExporter{Headers: headers}
-		if fromYml {
-			ep := endpoint
-			exp.Endpoint = &ep
-		}
-		exporter.OTLPGrpc = exp
+		exporter.OTLPGrpc = &otelconf.OTLPGrpcExporter{Headers: headers, Endpoint: ep}
 	default:
-		exp := &otelconf.OTLPHttpExporter{Headers: headers}
-		if fromYml {
-			ep := endpoint
-			exp.Endpoint = &ep
-		}
-		exporter.OTLPHttp = exp
+		exporter.OTLPHttp = &otelconf.OTLPHttpExporter{Headers: headers, Endpoint: ep}
 	}
 
 	sampler := envSampler()
@@ -219,22 +216,13 @@ func meterProviderConfig(cfg config.Otel) *otelconf.MeterProvider {
 	endpoint, fromYml := ymlEndpoint(cfg.Metrics.Endpoint, cfg.Endpoint, protocol, metricsPath)
 	headers := mergedHeaders(cfg.Metrics.Headers, cfg.Headers, "OTEL_EXPORTER_OTLP_METRICS_HEADERS")
 
+	ep := endpointPtr(endpoint, fromYml)
 	exporter := otelconf.PushMetricExporter{}
 	switch protocol {
 	case protocolGRPC:
-		exp := &otelconf.OTLPGrpcMetricExporter{Headers: headers}
-		if fromYml {
-			ep := endpoint
-			exp.Endpoint = &ep
-		}
-		exporter.OTLPGrpc = exp
+		exporter.OTLPGrpc = &otelconf.OTLPGrpcMetricExporter{Headers: headers, Endpoint: ep}
 	default:
-		exp := &otelconf.OTLPHttpMetricExporter{Headers: headers}
-		if fromYml {
-			ep := endpoint
-			exp.Endpoint = &ep
-		}
-		exporter.OTLPHttp = exp
+		exporter.OTLPHttp = &otelconf.OTLPHttpMetricExporter{Headers: headers, Endpoint: ep}
 	}
 
 	return &otelconf.MeterProvider{
@@ -261,9 +249,7 @@ func mergedHeaders(signal, shared map[string]string, signalEnv string) []otelcon
 	maps.Copy(merged, signal)
 	pairs := make([]otelconf.NameStringValuePair, 0, len(merged))
 	for k, v := range merged {
-		name := k
-		value := v
-		pairs = append(pairs, otelconf.NameStringValuePair{Name: name, Value: &value})
+		pairs = append(pairs, otelconf.NameStringValuePair{Name: k, Value: &v})
 	}
 	return pairs
 }
