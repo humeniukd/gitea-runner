@@ -1,18 +1,36 @@
 # OpenTelemetry
 
-The runner exports OpenTelemetry traces and metrics for the jobs it executes:
-one span per job (`RUN {workflow name}`) and one per workflow step, connected
-with [W3C Trace Context](https://www.w3.org/TR/trace-context/), plus its own
-runner metrics over OTLP. RPCs to the Gitea server and the job cache server are
-instrumented as well.
+The runner can export telemetry about the jobs it executes through
+[OpenTelemetry](https://opentelemetry.io) (OTel), a vendor-neutral standard
+with two parts:
+
+- **Traces** follow one job from start to finish as a tree of **spans** — each
+  span is one unit of work with a name, timing, and success/failure status.
+  One span covers the whole job, one each workflow step, and one each RPC or
+  HTTP call the runner makes, so a slow or failed job can be decomposed into
+  where the time went without reading logs.
+- **Metrics** are aggregate numbers over time — job durations, active jobs,
+  error counts — sent to the same destination.
+
+Both are delivered with OTLP (OpenTelemetry's wire protocol) to a **collector**,
+a small server you run that forwards to any backend (Jaeger, Tempo, Datadog,
+Grafana Cloud, ...). Attribute names follow the OTel **semantic conventions**
+("semconv") — standardized names such as `cicd.pipeline.run.id`, so backends
+and dashboards understand them without runner-specific mapping.
+
+**This feature is opt-in.** The runner exports nothing, and starts no OTel
+SDK at all, until you configure an OTLP endpoint — in the config file or
+through the standard `OTEL_*` environment variables. The Prometheus
+`/metrics` endpoint is independent and unaffected.
 
 ## Configuration
 
-A signal is off unless its OTLP endpoint is configured. Configuration comes
-from two sources, merged per setting: the runner's own config file wins, and
-the standard `OTEL_*` environment variables fill in everything it leaves empty.
-The top-level `otel.{enabled,endpoint,protocol,headers}` are shared defaults for
-both signals — mirroring the generic `OTEL_EXPORTER_OTLP_*` env vars — and each
+A "signal" is one of the two exports — traces or metrics; each is off until its
+OTLP endpoint is configured. Configuration comes from two sources, merged per
+setting: the runner's own config file wins, and the standard `OTEL_*`
+environment variables fill in everything it leaves empty. The top-level
+`otel.{enabled,endpoint,protocol,headers}` are shared defaults for both
+signals — mirroring the generic `OTEL_EXPORTER_OTLP_*` env vars — and each
 per-signal section overrides them.
 
 ```yaml
@@ -48,7 +66,7 @@ When OTel metrics export is on, the runner emits the CI/CD semconv metrics
 runtime metrics (`go.*`) from the contrib runtime instrumentation, and the
 connect RPC client metrics.
 
-Every other standard variable is honored, including
+Every other [standard `OTEL_*` variable](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/) is honored, including
 `OTEL_EXPORTER_OTLP_COMPRESSION`, `OTEL_EXPORTER_OTLP_TIMEOUT`,
 `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, and (as a spec escape hatch)
 `OTEL_CONFIG_FILE`, which hands the SDK a full OpenTelemetry configuration file

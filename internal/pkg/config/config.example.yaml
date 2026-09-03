@@ -299,38 +299,24 @@ metrics:
   #readiness_grace: 30s
 
 otel:
-  # Shared defaults for both signals. Each mirrors the generic OTEL_EXPORTER_OTLP_*
-  # env var and is overridden by the per-signal settings below.
-  # Enabled turns all OTel export off when false; true by default (also honors
-  # OTEL_SDK_DISABLED).
+  # OpenTelemetry export is opt-in: nothing is sent until an endpoint is set here
+  # or via OTEL_* env vars (https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/).
+  # Keys below are shared defaults; traces:/metrics: override them.
   #enabled: true
-  # Base OTLP endpoint; the signal path (/v1/traces, /v1/metrics) is appended.
-  #endpoint: "http://localhost:4318"
-  # OTLP wire protocol: "http/protobuf" (default) or "grpc".
-  #protocol: "http/protobuf"
-  # Headers merged over OTEL_EXPORTER_OTLP_HEADERS, per key.
-  #headers:
+  #endpoint: "http://localhost:4318" # signal path (/v1/traces, /v1/metrics) is appended
+  #protocol: "http/protobuf"        # or "grpc"
+  #headers:                         # merged over OTEL_EXPORTER_OTLP_HEADERS, per key
   #  authorization: "Bearer secret"
   traces:
-    # Enabled turns tracing off when false; defaults to otel.enabled. With no
-    # endpoint (here or shared), tracing stays off regardless.
     #enabled: true
-    # OTLP traces endpoint, used as-is (include the /v1/traces path).
-    #endpoint: "http://localhost:4318/v1/traces"
+    #endpoint: "http://localhost:4318/v1/traces" # used as-is
     #protocol: "http/protobuf"
-    # Headers merged over OTEL_EXPORTER_OTLP_HEADERS, per key.
     #headers:
     #  authorization: "Bearer secret"
-    # Sample this fraction of root traces (0-1). Unset honors OTEL_TRACES_SAMPLER.
-    #sampler_ratio: 1.0
+    #sampler_ratio: 1.0             # fraction of root traces sampled; unset honors OTEL_TRACES_SAMPLER
   metrics:
-    # Enabled turns OTel metrics export off when false; defaults to otel.enabled.
-    # The Prometheus endpoint is unaffected by this section.
-    #enabled: true
-    # OTLP metrics endpoint, used as-is (include the /v1/metrics path).
-    #endpoint: "http://localhost:4318/v1/metrics"
-    # OTLP wire protocol: "http/protobuf" (default) or "grpc".
+    #enabled: true                  # Prometheus endpoint unaffected by this section
+    #endpoint: "http://localhost:4318/v1/metrics" # used as-is
     #protocol: "http/protobuf"
-    # Headers merged over otel.headers and OTEL_EXPORTER_OTLP_METRICS_HEADERS, per key.
-    #headers:
+    #headers:                       # merged over otel.headers and OTEL_EXPORTER_OTLP_METRICS_HEADERS, per key
     #  authorization: "Bearer secret"

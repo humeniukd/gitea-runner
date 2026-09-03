@@ -196,36 +196,34 @@ type HealthCheck struct {
 	Timeout            time.Duration `yaml:"timeout"`                // Timeout caps one health-check script invocation.
 }
 
-// Otel configures OpenTelemetry. The top-level Enabled/Endpoint/Protocol/Headers
-// mirror the generic OTEL_EXPORTER_OTLP_* env vars and are the default for both
-// signals; the traces and metrics sections override them per signal. A value
-// set in the file always wins over its OTEL_* env counterpart.
+// Otel configures OpenTelemetry, opt-in via endpoint. File wins over env per
+// setting; per-signal sections override the shared defaults.
 type Otel struct {
-	Enabled  *bool             `yaml:"enabled"`  // Enabled is the default for both signals; true by default (also honors OTEL_SDK_DISABLED)
-	Endpoint string            `yaml:"endpoint"` // Endpoint is the default OTLP endpoint for both signals; mirrors OTEL_EXPORTER_OTLP_ENDPOINT (signal path appended)
-	Protocol string            `yaml:"protocol"` // Protocol is the default "http/protobuf" or "grpc"; mirrors OTEL_EXPORTER_OTLP_PROTOCOL
-	Headers  map[string]string `yaml:"headers"`  // Headers is the default header set for both signals; mirrors OTEL_EXPORTER_OTLP_HEADERS
-	Traces   OtelTraces        `yaml:"traces"`   // Traces configures distributed tracing.
-	Metrics  OtelMetrics       `yaml:"metrics"`  // Metrics configures OTel metrics export.
+	Enabled  *bool             `yaml:"enabled"`  // shared default; true also honors OTEL_SDK_DISABLED
+	Endpoint string            `yaml:"endpoint"` // shared OTLP endpoint for both signals; mirrors OTEL_EXPORTER_OTLP_ENDPOINT
+	Protocol string            `yaml:"protocol"` // shared "http/protobuf" or "grpc"; mirrors OTEL_EXPORTER_OTLP_PROTOCOL
+	Headers  map[string]string `yaml:"headers"`  // shared header set; mirrors OTEL_EXPORTER_OTLP_HEADERS
+	Traces   OtelTraces        `yaml:"traces"`
+	Metrics  OtelMetrics       `yaml:"metrics"`
 }
 
-// OtelTraces configures distributed tracing. Empty fields fall back to the
-// shared otel.* settings, then the OTEL_* env vars.
+// OtelTraces configures tracing. Empty fields fall back to the shared otel.*
+// settings, then env.
 type OtelTraces struct {
-	Enabled      *bool             `yaml:"enabled"`       // Enabled turns tracing off when false; defaults to otel.enabled
-	Endpoint     string            `yaml:"endpoint"`      // Endpoint is the OTLP traces endpoint, used as-is; wins over otel.endpoint and OTEL_EXPORTER_OTLP(_TRACES)_ENDPOINT
-	Protocol     string            `yaml:"protocol"`      // Protocol is "http/protobuf" or "grpc"; wins over otel.protocol and OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
-	Headers      map[string]string `yaml:"headers"`       // Headers is merged over otel.headers and OTEL_EXPORTER_OTLP_HEADERS, per key
-	SamplerRatio *float64          `yaml:"sampler_ratio"` // SamplerRatio enables traceidratio sampling when set; nil defers to OTEL_TRACES_SAMPLER
+	Enabled      *bool             `yaml:"enabled"`       // false turns tracing off; defaults to otel.enabled
+	Endpoint     string            `yaml:"endpoint"`      // used as-is; wins over otel.endpoint and OTEL_EXPORTER_OTLP(_TRACES)_ENDPOINT
+	Protocol     string            `yaml:"protocol"`      // "http/protobuf" or "grpc"; wins over otel.protocol
+	Headers      map[string]string `yaml:"headers"`       // merged over otel.headers and OTEL_EXPORTER_OTLP_HEADERS, per key
+	SamplerRatio *float64          `yaml:"sampler_ratio"` // samples this fraction of root traces; nil defers to OTEL_TRACES_SAMPLER
 }
 
-// OtelMetrics configures OTel metrics export, alongside the Prometheus
-// endpoint, which is unaffected by this section.
+// OtelMetrics configures OTel metrics export; the Prometheus endpoint is
+// unaffected.
 type OtelMetrics struct {
-	Enabled  *bool             `yaml:"enabled"`  // Enabled turns OTel metrics export off when false; true by default
-	Endpoint string            `yaml:"endpoint"` // Endpoint is the OTLP metrics endpoint; wins over OTEL_EXPORTER_OTLP_METRIC(S)_ENDPOINT
-	Protocol string            `yaml:"protocol"` // Protocol is "http/protobuf" or "grpc"; wins over OTEL_EXPORTER_OTLP_METRICS_PROTOCOL
-	Headers  map[string]string `yaml:"headers"`  // Headers is merged over OTEL_EXPORTER_OTLP_METRICS_HEADERS, per key
+	Enabled  *bool             `yaml:"enabled"`  // false turns export off; defaults to otel.enabled
+	Endpoint string            `yaml:"endpoint"` // used as-is; wins over OTEL_EXPORTER_OTLP_METRIC(S)_ENDPOINT
+	Protocol string            `yaml:"protocol"` // "http/protobuf" or "grpc"; wins over OTEL_EXPORTER_OTLP_METRICS_PROTOCOL
+	Headers  map[string]string `yaml:"headers"`  // merged over OTEL_EXPORTER_OTLP_METRICS_HEADERS, per key
 }
 
 // Config represents the overall configuration.

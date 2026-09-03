@@ -1,17 +1,11 @@
 // Copyright 2026 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-// Package tracing initializes the OpenTelemetry SDK for the runner: distributed
-// tracing and, through the same OTLP pipeline, metrics export. Configuration
-// merges the runner yml `otel:` section (higher precedence) with the standard
-// OTEL_* environment variables; a signal exports only when its enabled flag is
-// not false and an endpoint is configured.
-//
-// Endpoint resolution follows the OTLP spec: a signal-specific endpoint (yml
-// otel.traces/metrics.endpoint or OTEL_EXPORTER_OTLP_<signal>_ENDPOINT) is used
-// as-is, while a generic endpoint (yml otel.endpoint or
-// OTEL_EXPORTER_OTLP_ENDPOINT) has the signal path (/v1/traces, /v1/metrics)
-// appended.
+// Package tracing initializes the OpenTelemetry SDK for the runner. The yml
+// `otel:` section wins over the standard OTEL_* env vars per setting; a signal
+// exports only when an endpoint is configured. Endpoint paths follow the OTLP
+// spec: a signal-specific endpoint is used as-is, a generic one gets the
+// signal path appended.
 package tracing
 
 import (

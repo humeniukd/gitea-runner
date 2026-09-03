@@ -388,9 +388,9 @@ See **[docs/job-hooks.md](docs/job-hooks.md)** for the execution order, environm
 
 #### OpenTelemetry (`otel.*`, `OTEL_*`)
 
-The runner can export OpenTelemetry traces for the jobs it runs (a span per job and per step, `TRACEPARENT` and non-credential `OTEL_*` env given to the job containers) and its own metrics over OTLP: CI/CD semconv metrics, Go runtime metrics, and connect RPC metrics. Both signals are configured under the `otel:` config section (`otel.traces`/`otel.metrics`, each with an `enabled` flag defaulting to true) or the standard `OTEL_*` environment variables; the config file wins per setting. A signal exports only when its endpoint is set.
+Opt-in. When no OTLP endpoint is configured, nothing is exported and the SDK never starts. With one configured, the runner exports traces (one span per job and per step, so a job can be broken down by where its time went) and its own metrics over OTLP. The `otel:` config section or the standard `OTEL_*` environment variables configure it; the config file wins per setting. Job containers receive `TRACEPARENT` and the runner's non-credential `OTEL_*` env, so applications inside the job can continue the same trace.
 
-See **[docs/otel.md](docs/otel.md)** for the config keys, the merge rules, and the emitted spans and metrics.
+See **[docs/otel.md](docs/otel.md)** for what this does, the config keys, and the emitted spans and metrics.
 
 #### Local job logs (`log.job.dir`)
 
