@@ -4,9 +4,11 @@
 package client
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +16,10 @@ import (
 	pingv1 "gitea.dev/actionslib/ping/v1"
 	"gitea.dev/actionslib/pkg/protocol"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestGetHTTPClientUsesProxyFromEnvironment(t *testing.T) {
@@ -69,7 +75,7 @@ func TestNewSetsBaseURLAndHeaders(t *testing.T) {
 	defer server.Close()
 
 	// trailing slash must be trimmed before "/api/actions" is appended
-	c := New(server.URL+"/", false, "the-uuid", "the-token", time.Minute)
+	c := New(server.URL+"/", false, "the-uuid", "the-token", time.Minute, false)
 	// Address returns the endpoint as supplied (untrimmed)
 	require.Equal(t, server.URL+"/", c.Address())
 
@@ -89,9 +95,46 @@ func TestNewOmitsEmptyHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := New(server.URL, false, "", "", time.Minute)
+	c := New(server.URL, false, "", "", time.Minute, false)
 	_, _ = c.Ping(t.Context(), connect.NewRequest(&pingv1.PingRequest{Data: "hi"}))
 
 	require.Empty(t, gotHeaders.Get(protocol.UUIDHeader))
 	require.Empty(t, gotHeaders.Get(protocol.TokenHeader))
+}
+
+func TestNewRPCTracesToggle(t *testing.T) {
+	var mu sync.Mutex
+	var traceparents []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		traceparents = append(traceparents, r.Header.Get("Traceparent"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	prevTP, prevProp := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTracerProvider(prevTP); otel.SetTextMapPropagator(prevProp) })
+	sr := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	// An active parent span provides context that could be propagated.
+	ctx, span := tp.Tracer("test").Start(context.Background(), "parent")
+	defer span.End()
+
+	// Off (default): no client span and no traceparent sent to Gitea.
+	off := New(server.URL, false, "", "", time.Minute, false)
+	_, _ = off.Ping(ctx, connect.NewRequest(&pingv1.PingRequest{Data: "x"}))
+	require.Empty(t, sr.Ended(), "no RPC spans when rpcTraces is off")
+	require.Len(t, traceparents, 1)
+	require.Empty(t, traceparents[0], "no traceparent propagated when rpcTraces is off")
+
+	// On: the RPC produces a client span and propagates traceparent.
+	on := New(server.URL, false, "", "", time.Minute, true)
+	_, _ = on.Ping(ctx, connect.NewRequest(&pingv1.PingRequest{Data: "x"}))
+	require.NotEmpty(t, sr.Ended(), "RPC span recorded when rpcTraces is on")
+	require.Len(t, traceparents, 2)
+	require.NotEmpty(t, traceparents[1], "traceparent propagated when rpcTraces is on")
 }

@@ -216,6 +216,7 @@ type OtelTraces struct {
 	Protocol     string            `yaml:"protocol"`      // "http/protobuf" or "grpc"; wins over otel.protocol
 	Headers      map[string]string `yaml:"headers"`       // merged over otel.headers and OTEL_EXPORTER_OTLP_HEADERS, per key
 	SamplerRatio *float64          `yaml:"sampler_ratio"` // samples this fraction of root traces; nil defers to OTEL_TRACES_SAMPLER
+	RPC          bool              `yaml:"rpc"`           // record client RPC spans and trace-context propagation to Gitea (noisy control-plane chatter); off by default. RPC metrics are unaffected
 }
 
 // OtelMetrics configures OTel metrics export; the Prometheus endpoint is

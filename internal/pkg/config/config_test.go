@@ -118,6 +118,7 @@ otel:
     enabled: false
     endpoint: "http://collector:4318/v1/traces"
     sampler_ratio: 0.25
+    rpc: true
   metrics:
     protocol: http/protobuf
 `), 0o600))
@@ -135,6 +136,7 @@ otel:
 	assert.Equal(t, "http://collector:4318/v1/traces", cfg.Otel.Traces.Endpoint)
 	require.NotNil(t, cfg.Otel.Traces.SamplerRatio)
 	assert.InDelta(t, 0.25, *cfg.Otel.Traces.SamplerRatio, 0)
+	assert.True(t, cfg.Otel.Traces.RPC)
 	assert.Nil(t, cfg.Otel.Metrics.Enabled, "metrics enabled defaults to nil (inherits shared)")
 	assert.Equal(t, "http/protobuf", cfg.Otel.Metrics.Protocol)
 }

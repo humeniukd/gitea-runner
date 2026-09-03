@@ -6,9 +6,9 @@ with two parts:
 
 - **Traces** follow one job from start to finish as a tree of **spans** — each
   span is one unit of work with a name, timing, and success/failure status.
-  One span covers the whole job, one each workflow step, and one each RPC or
-  HTTP call the runner makes, so a slow or failed job can be decomposed into
-  where the time went without reading logs.
+  One span covers the whole job and one each workflow step (plus the HTTP calls
+  the runner makes, and optionally its Gitea RPCs), so a slow or failed job can
+  be decomposed into where the time went without reading logs.
 - **Metrics** are aggregate numbers over time — job durations, active jobs,
   error counts — sent to the same destination.
 
@@ -49,6 +49,7 @@ otel:
     headers:                          # merged over otel.headers, per key
       x-scope-orgid: "ci"
     sampler_ratio: 0.25               # parent-based traceidratio; wins over OTEL_TRACES_SAMPLER
+    rpc: false                        # record noisy client RPC spans + trace propagation to Gitea; off by default
   metrics:
     enabled: true                     # defaults to otel.enabled
     endpoint: "http://collector:4318/v1/metrics" # used as-is
@@ -228,11 +229,17 @@ recorded as an exception event on the span.
 
 ### Instrumented clients
 
-RPCs to Gitea (connect) and the job cache server plus job-summary uploads (HTTP)
-carry the standard `rpc.*` / `http.*` span attributes from the OpenTelemetry
-contrib instrumentation, and propagate W3C context to the peer. Spans emitted by
+The job cache server and job-summary uploads (HTTP) carry the standard `http.*`
+span attributes from the OpenTelemetry contrib instrumentation. Spans emitted by
 applications inside a job attach to the job span through the injected
 `TRACEPARENT`.
+
+Client RPCs to Gitea (connect) are **not** traced by default: the control-plane
+chatter (FetchTask long-polls, log and status updates) is very noisy and rarely
+useful. Set `otel.traces.rpc: true` to record these `rpc.*` client spans and
+propagate W3C trace context to Gitea when debugging. When off (the default) no
+RPC spans are created and no `traceparent` is sent to Gitea; RPC client metrics
+(`rpc.client.*`) are recorded either way.
 
 ## Logs
 

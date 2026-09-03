@@ -316,6 +316,7 @@ otel:
     #headers:
     #  authorization: "Bearer secret"
     #sampler_ratio: 1.0             # fraction of root traces sampled; unset honors OTEL_TRACES_SAMPLER
+    #rpc: false                     # record noisy client RPC spans + trace propagation to Gitea; off by default (RPC metrics unaffected)
   metrics:
     #enabled: true                  # Prometheus endpoint unaffected by this section
     #endpoint: "http://localhost:4318/v1/metrics" # used as-is
