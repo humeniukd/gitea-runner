@@ -16,9 +16,6 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
-// Telemetry owns the OTel instruments. Built once per daemon; with the noop
-// global meter provider (otel metrics off) every instrument is a no-op, so
-// call sites need no branching.
 type Telemetry struct {
 	meter metric.Meter
 
@@ -31,7 +28,6 @@ type Telemetry struct {
 	PollBackoff         metric.Float64Gauge       // gitea.runner.poll.backoff, unit s
 }
 
-// NewTelemetry builds the instruments on the global meter provider.
 func NewTelemetry() *Telemetry {
 	meter := otel.Meter("gitea.com/gitea/runner/internal/pkg/metrics")
 	// Boundaries span the runner.job timeout range, 5m default to hours.
@@ -91,15 +87,12 @@ func NewTelemetry() *Telemetry {
 	}
 }
 
-// handleErr records instrument-creation failures; they only mean the global
-// provider is broken, which Setup logs separately.
 func handleErr(err error) {
 	if err != nil {
 		log.WithError(err).Warn("otel metric instrument unavailable")
 	}
 }
 
-// RecordJobStart marks a job as active on this worker.
 func (t *Telemetry) RecordJobStart(ctx context.Context, pipeline string) {
 	attrs := metric.WithAttributes(
 		semconv.CICDPipelineName(pipeline),
@@ -109,7 +102,6 @@ func (t *Telemetry) RecordJobStart(ctx context.Context, pipeline string) {
 	t.WorkerCount.Add(ctx, 1, metric.WithAttributes(semconv.CICDWorkerStateBusy))
 }
 
-// RecordJobEnd records the outcome of a finished job.
 func (t *Telemetry) RecordJobEnd(ctx context.Context, pipeline, result, errType string) {
 	attrs := metric.WithAttributes(
 		semconv.CICDPipelineName(pipeline),
@@ -126,7 +118,6 @@ func (t *Telemetry) RecordJobEnd(ctx context.Context, pipeline, result, errType 
 	}
 }
 
-// RecordPipelineRunDuration records the duration of a finished job.
 func (t *Telemetry) RecordPipelineRunDuration(ctx context.Context, pipeline, result string, seconds float64) {
 	t.PipelineRunDuration.Record(ctx, seconds, metric.WithAttributes(
 		semconv.CICDPipelineName(pipeline),
@@ -135,19 +126,16 @@ func (t *Telemetry) RecordPipelineRunDuration(ctx context.Context, pipeline, res
 	))
 }
 
-// RecordPollFetch records one FetchTask outcome.
 func (t *Telemetry) RecordPollFetch(ctx context.Context, result string) {
 	t.PollFetch.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("gitea.poll.result", result),
 	))
 }
 
-// RecordPollFetchDuration records FetchTask latency in seconds.
 func (t *Telemetry) RecordPollFetchDuration(ctx context.Context, seconds float64) {
 	t.PollFetchDuration.Record(ctx, seconds)
 }
 
-// RecordPollBackoff records the current backoff interval.
 func (t *Telemetry) RecordPollBackoff(ctx context.Context, seconds float64) {
 	t.PollBackoff.Record(ctx, seconds)
 }

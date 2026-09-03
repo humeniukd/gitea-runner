@@ -18,13 +18,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// scopeName is the instrumentation scope for the runner's own spans. The
-// tracer is resolved per call, not cached, so it always follows the current
-// global provider (e.g. after a re-Setup in tests).
 const scopeName = "gitea.com/gitea/runner"
 
-// StartPipeline opens the top span for one task (kind SERVER). The workflow and
-// job names are unknown yet, so the caller refines the name via SetPipelineName.
 func StartPipeline(ctx context.Context, task *runnerv1.Task, uuid, name, instanceURL string) (context.Context, trace.Span) {
 	f := task.Context.Fields
 	attrs := []attribute.KeyValue{
@@ -45,9 +40,6 @@ func StartPipeline(ctx context.Context, task *runnerv1.Task, uuid, name, instanc
 	return otel.Tracer(scopeName).Start(ctx, "RUN", trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(attrs...))
 }
 
-// vcsAttributes describes the repository and ref the pipeline runs against, per
-// the OTel VCS semantic conventions. repository is "owner/name"; owner falls
-// back to its first segment.
 func vcsAttributes(repository, owner, refName, sha, refType, instanceURL string) []attribute.KeyValue {
 	name := repository
 	if i := strings.LastIndex(repository, "/"); i >= 0 {
@@ -81,9 +73,6 @@ func vcsAttributes(repository, owner, refName, sha, refType, instanceURL string)
 	return attrs
 }
 
-// SetPipelineName refines the top span once the workflow is parsed: it names it
-// "RUN {workflow} {job}" and adds the pipeline name and job attributes. The job
-// is a single task, so its steps stay children of this one span.
 func SetPipelineName(span trace.Span, workflowName, jobID, jobName string) {
 	job := jobName
 	if job == "" {
@@ -104,8 +93,6 @@ func SetPipelineName(span trace.Span, workflowName, jobID, jobName string) {
 	)
 }
 
-// StartStep opens the task-run span for one step's main stage, named as the
-// runner logs it (model.Step.String()), else "step N".
 func StartStep(ctx context.Context, step *model.Step, taskID int64) (context.Context, trace.Span) {
 	name := step.String()
 	if name == "" {
@@ -125,26 +112,20 @@ func StartStep(ctx context.Context, step *model.Step, taskID int64) (context.Con
 	return otel.Tracer(scopeName).Start(ctx, name, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
 }
 
-// SetPipelineResult marks the pipeline-run span with the run's outcome.
 func SetPipelineResult(span trace.Span, result string) {
 	setResult(span, semconv.CICDPipelineResultKey, result)
 }
 
-// SetTaskResult marks a task-run span with the step's outcome.
 func SetTaskResult(span trace.Span, result string) {
 	setResult(span, semconv.CICDPipelineTaskRunResultKey, result)
 }
 
-// SetTaskFailed marks a task-run span failed, recording the error and using the
-// last command output as the status when present (clearer than the exit error).
 func SetTaskFailed(span trace.Span, err error, lastOutput string) {
 	span.SetAttributes(semconv.CICDPipelineTaskRunResultKey.String("failure"))
 	span.RecordError(err)
 	span.SetStatus(codes.Error, stepFailureMessage(err, lastOutput))
 }
 
-// stepFailureMessage combines the step error with the last command output line,
-// falling back to the error alone when no output was captured.
 func stepFailureMessage(err error, lastOutput string) string {
 	out := strings.TrimSpace(lastOutput)
 	switch {
@@ -164,7 +145,6 @@ func setResult(span trace.Span, key attribute.Key, result string) {
 	}
 }
 
-// ResultToSemconv maps the runnerv1.Result enum onto the semconv result values.
 func ResultToSemconv(result runnerv1.Result) string {
 	switch result {
 	case runnerv1.Result_RESULT_SUCCESS:

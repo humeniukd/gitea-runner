@@ -36,16 +36,9 @@ const (
 	metricsPath = "/v1/metrics"
 )
 
-// Setup builds the tracing and metrics SDKs from the merged yml and env
-// configuration and installs them as the global providers. It returns the
-// shutdown function (always non-nil) and an error only when SDK creation
-// failed, so the caller can log and keep running untraced.
 func Setup(ctx context.Context, serviceName string, otelCfg config.Otel) (func(context.Context) error, error) {
 	noop := func(context.Context) error { return nil }
 
-	// The otel default propagator is a no-op composite, so the RPC and HTTP
-	// instrumentation would inject nothing; the runner always propagates W3C,
-	// operator-extendable through OTEL_PROPAGATORS.
 	otel.SetTextMapPropagator(autoprop.NewTextMapPropagator())
 
 	// OTEL_CONFIG_FILE is the spec escape hatch: otelconf reads the file and
@@ -91,10 +84,6 @@ func Setup(ctx context.Context, serviceName string, otelCfg config.Otel) (func(c
 	return sdk.Shutdown, nil
 }
 
-// resourceAttributes builds the OTel resource identifying the runner. Attributes
-// resolve as the built-in default, then OTEL_RESOURCE_ATTRIBUTES, then the yml
-// attributes — most specific winning per key; keys are sorted for determinism.
-// They are applied after otelconf's env detector so they take effect as resolved.
 func resourceAttributes(serviceName string, extra map[string]string) []otelconf.AttributeNameValue {
 	attrs := []otelconf.AttributeNameValue{
 		{Name: "service.name", Value: serviceName},
@@ -107,8 +96,6 @@ func resourceAttributes(serviceName string, extra map[string]string) []otelconf.
 	return attrs
 }
 
-// signalEnabled resolves a signal's enabled flag: signal, then the shared
-// otel.enabled, then the OTEL_SDK_DISABLED env, defaulting to true.
 func signalEnabled(signal, shared *bool) bool {
 	if signal != nil {
 		return *signal
@@ -129,8 +116,6 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// tracesEndpointConfigured reports whether any yml or env source provides a
-// traces endpoint, which is what gates the signal on.
 func tracesEndpointConfigured(cfg config.Otel) bool {
 	return firstNonEmpty(cfg.Traces.Endpoint, cfg.Endpoint,
 		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"), os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != ""
@@ -142,11 +127,6 @@ func metricsEndpointConfigured(cfg config.Otel) bool {
 		os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != ""
 }
 
-// ymlEndpoint resolves the endpoint URL to configure on the exporter from the
-// yml sources only, applying OTLP path semantics: a signal endpoint is used
-// as-is (a bare host posts to the root path), a generic endpoint has the
-// signal path appended. Returns ("", false) when only env provides the
-// endpoint, so the otlp exporter applies its own env handling.
 func ymlEndpoint(signal, generic, protocol, signalPath string) (string, bool) {
 	switch {
 	case signal != "":
@@ -163,9 +143,6 @@ func ymlEndpoint(signal, generic, protocol, signalPath string) (string, bool) {
 	return "", false
 }
 
-// asIsHTTP keeps a signal-specific HTTP endpoint verbatim; a bare host with no
-// path is given the root path so otelconf does not append a default signal
-// path to it.
 func asIsHTTP(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Path != "" {
@@ -175,8 +152,6 @@ func asIsHTTP(raw string) string {
 	return u.String()
 }
 
-// signalProtocol resolves the protocol: yml signal, yml shared, env signal, env
-// generic, then http/protobuf. An invalid yml value is ignored with a warning.
 func signalProtocol(signalYml, sharedYml, signalEnv, genericEnv string) string {
 	for _, v := range []string{signalYml, sharedYml} {
 		if v == protocolHTTP || v == protocolGRPC {
@@ -269,9 +244,6 @@ func meterProviderConfig(cfg config.Otel) *otelconf.MeterProvider {
 	}
 }
 
-// mergedHeaders merges the env OTLP headers with the shared and signal yml
-// ones, most specific winning per key. Needed whenever any yml header is set
-// because otlptrace's WithHeaders replaces the env-derived map wholesale.
 func mergedHeaders(signal, shared map[string]string, signalEnv string) []otelconf.NameStringValuePair {
 	if len(signal) == 0 && len(shared) == 0 {
 		return nil
@@ -296,11 +268,10 @@ func mergedHeaders(signal, shared map[string]string, signalEnv string) []otelcon
 	return pairs
 }
 
-// envSampler honors OTEL_TRACES_SAMPLER; unknown values keep the SDK default.
 func envSampler() *otelconf.Sampler {
 	switch strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER")) {
 	case "", "always_on", "parentbased_always_on":
-		return nil // SDK default is parent-based always-on
+		return nil
 	case "always_off", "parentbased_always_off":
 		return &otelconf.Sampler{AlwaysOff: otelconf.AlwaysOffSampler{}}
 	case "traceidratio":
@@ -327,21 +298,9 @@ func samplerArg() float64 {
 	return v
 }
 
-// JobEnv returns the env to inject into job containers: every process OTEL_*
-// variable, the yml otel.* settings translated to their OTEL_* env vars (so
-// file config reaches jobs too, since yml is never in the process env), and
-// TRACEPARENT/TRACESTATE continuing the trace of ctx's span. Applications in the
-// job then join the CI trace and export with the same settings. yml wins over
-// the process env, per setting.
-//
-// A disabled signal contributes no OTLP env vars and is turned off in-job with
-// OTEL_{TRACES,METRICS}_EXPORTER=none, so a shared endpoint does not re-enable it.
-//
-// Security limitation: OTEL_* vars are passed through unfiltered, so job code
-// (including untrusted pull requests) can read the collector credentials in
-// OTEL_EXPORTER_OTLP*_HEADERS and TLS client key/cert vars. Point the runner at
-// a local collector that accepts OTLP without auth and forwards to the real
-// backend, rather than putting backend credentials on the runner.
+// JobEnv translates the merged otel.* configuration back to OTEL_* env vars so
+// job processes export with the same settings, plus TRACEPARENT/TRACESTATE from
+// ctx. Job code can read the collector credentials it carries; see docs/otel.md.
 func JobEnv(ctx context.Context, otelCfg config.Otel) map[string]string {
 	envs := make(map[string]string)
 	for _, kv := range os.Environ() {
@@ -369,8 +328,6 @@ func JobEnv(ctx context.Context, otelCfg config.Otel) map[string]string {
 	return envs
 }
 
-// setJobOtelEnv overlays the yml otel.* settings onto the job env as their
-// OTEL_* env vars, gating each signal on its enabled flag. yml wins per setting.
 func setJobOtelEnv(envs map[string]string, cfg config.Otel) {
 	setEnvIf(envs, "OTEL_EXPORTER_OTLP_ENDPOINT", cfg.Endpoint)
 	setEnvIf(envs, "OTEL_EXPORTER_OTLP_PROTOCOL", cfg.Protocol)
@@ -415,14 +372,8 @@ func setEnvIf(envs map[string]string, key, value string) {
 	}
 }
 
-// defaultDeploymentEnvironment is the deployment.environment.name applied to the
-// runner and to job containers unless overridden by env or yml config.
 const defaultDeploymentEnvironment = "test"
 
-// mergedResourceAttributes resolves the resource attributes: the built-in
-// default, then OTEL_RESOURCE_ATTRIBUTES (envValue, comma-separated key=value),
-// then the yml attributes — most specific winning per key, so a caller-set
-// attribute never displaces the default of a different key.
 func mergedResourceAttributes(envValue string, yml map[string]string) map[string]string {
 	merged := map[string]string{"deployment.environment.name": defaultDeploymentEnvironment}
 	for pair := range strings.SplitSeq(envValue, ",") {
@@ -435,8 +386,6 @@ func mergedResourceAttributes(envValue string, yml map[string]string) map[string
 	return merged
 }
 
-// serializeKeyValues renders a map as a sorted comma-separated key=value list,
-// the format of OTEL_RESOURCE_ATTRIBUTES and OTEL_EXPORTER_OTLP_HEADERS.
 func serializeKeyValues(attrs map[string]string) string {
 	pairs := make([]string, 0, len(attrs))
 	for _, k := range slices.Sorted(maps.Keys(attrs)) {
