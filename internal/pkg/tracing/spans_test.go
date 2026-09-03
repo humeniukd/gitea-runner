@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -107,4 +108,36 @@ func TestStartStepName(t *testing.T) {
 	for _, tc := range cases {
 		assert.Truef(t, got[tc.want], "%s: expected a span named %q", tc.label, tc.want)
 	}
+}
+
+func TestStartJobName(t *testing.T) {
+	sr := tracetest.NewSpanRecorder()
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)))
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	_, named := StartJob(context.Background(), "build", "Build and test")
+	named.End()
+	_, unnamed := StartJob(context.Background(), "deploy", "")
+	unnamed.End()
+
+	byName := make(map[string]sdktrace.ReadOnlySpan)
+	for _, s := range sr.Ended() {
+		byName[s.Name()] = s
+	}
+	require.Contains(t, byName, "Build and test", "job span uses the job name")
+	require.Contains(t, byName, "deploy", "job span falls back to the job id")
+
+	id, ok := attrString(byName["Build and test"].Attributes(), "gitea.job.id")
+	require.True(t, ok)
+	assert.Equal(t, "build", id)
+}
+
+func attrString(attrs []attribute.KeyValue, key string) (string, bool) {
+	for _, kv := range attrs {
+		if string(kv.Key) == key {
+			return kv.Value.AsString(), true
+		}
+	}
+	return "", false
 }

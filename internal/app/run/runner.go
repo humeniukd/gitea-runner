@@ -296,10 +296,10 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Runner.Timeout)
 	defer cancel()
-	// The job span bounds the whole task, so the reporter RPCs made with this
-	// ctx (and every step span) nest under it.
-	ctx, jobSpan := tracing.StartJob(ctx, task, r.uuid, r.name)
-	defer jobSpan.End()
+	// The pipeline-run span bounds the whole task, so the reporter RPCs made with
+	// this ctx nest under it; the job span (added in run) nests the step spans.
+	ctx, pipelineSpan := tracing.StartPipeline(ctx, task, r.uuid, r.name)
+	defer pipelineSpan.End()
 	// A proxy URL may carry credentials, and every job is given it; keep them out of the log.
 	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg, proxyPasswords()...)
 	var runErr error
@@ -314,9 +314,9 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 		_ = reporter.Close(lastWords)
 
 		jobResult := tracing.ResultToSemconv(reporter.Result())
-		tracing.SetJobResult(jobSpan, jobResult)
+		tracing.SetPipelineResult(pipelineSpan, jobResult)
 		if runErr != nil {
-			jobSpan.RecordError(runErr)
+			pipelineSpan.RecordError(runErr)
 		}
 
 		metrics.JobDuration.Observe(time.Since(start).Seconds())
@@ -327,7 +327,7 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 		r.telemetry.RecordJobEnd(ctx, r.pipelineName(task), jobResult, connect.CodeOf(runErr).String())
 	}()
 	reporter.RunDaemon()
-	runErr = r.run(ctx, task, reporter, jobSpan)
+	runErr = r.run(ctx, task, reporter, pipelineSpan)
 
 	return nil
 }
@@ -382,7 +382,7 @@ func (r *Runner) fallbackPlatform(ctx context.Context) string {
 	return labels.SelfHostedPlatform
 }
 
-func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.Reporter, jobSpan trace.Span) (err error) {
+func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.Reporter, pipelineSpan trace.Span) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v", r)
@@ -404,9 +404,20 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	reporter.ResetSteps(len(job.Steps))
 
 	if workflow.Name != "" {
-		jobSpan.SetName("RUN " + workflow.Name)
-		jobSpan.SetAttributes(semconv.CICDPipelineName(workflow.Name))
+		pipelineSpan.SetName("RUN " + workflow.Name)
+		pipelineSpan.SetAttributes(semconv.CICDPipelineName(workflow.Name))
 	}
+
+	// Child span named after the job, so the job name shows in the trace and the
+	// step spans nest under it rather than directly under the pipeline run.
+	ctx, jobSpan := tracing.StartJob(ctx, jobID, job.Name)
+	defer func() {
+		tracing.SetJobResult(jobSpan, tracing.ResultToSemconv(reporter.Result()))
+		if err != nil {
+			jobSpan.RecordError(err)
+		}
+		jobSpan.End()
+	}()
 
 	taskContext := task.Context.Fields
 	envs := r.cloneEnvs()

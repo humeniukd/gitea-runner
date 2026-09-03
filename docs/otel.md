@@ -6,9 +6,9 @@ with two parts:
 
 - **Traces** follow one job from start to finish as a tree of **spans** — each
   span is one unit of work with a name, timing, and success/failure status.
-  One span covers the whole job and one each workflow step (plus the HTTP calls
-  the runner makes, and optionally its Gitea RPCs), so a slow or failed job can
-  be decomposed into where the time went without reading logs.
+  Spans nest — the workflow run, the job, then each workflow step (plus the HTTP
+  calls the runner makes, and optionally its Gitea RPCs) — so a slow or failed
+  job can be decomposed into where the time went without reading logs.
 - **Metrics** are aggregate numbers over time — job durations, active jobs,
   error counts — sent to the same destination.
 
@@ -186,14 +186,15 @@ described above.
 
 ## Spans
 
-Every task produces one job span with one child span per workflow step, using
+Each task produces a three-level tree: a **pipeline-run** span for the workflow,
+one **job** span beneath it, and one **step** span per workflow step — using
 [CI/CD semantic-convention](https://opentelemetry.io/docs/specs/semconv/cicd/cicd-spans/)
 attributes.
 
-### Job span
+### Pipeline-run span
 
 Kind `SERVER`, named `RUN` and refined to `RUN <workflow>` once the workflow is
-parsed. Reporter RPCs and step spans are children of it.
+parsed. Reporter RPCs and the job span are children of it.
 
 | Attribute | Value |
 | --- | --- |
@@ -207,6 +208,19 @@ parsed. Reporter RPCs and step spans are children of it.
 
 The span status is set to error for any non-success result, and a run error is
 recorded on the span.
+
+### Job span
+
+Kind `INTERNAL`, named after the job (`jobs.<id>.name`, falling back to the job
+id). Child of the pipeline-run span; the step spans nest under it.
+
+| Attribute | Value |
+| --- | --- |
+| `gitea.job.id` | job id (the `jobs.<id>` key) |
+| `gitea.job.name` | job `name:` (may be empty) |
+| `gitea.job.result` | `success`, `failure`, `cancellation`, `skip`, or `error` |
+
+The status is set to error for any non-success result.
 
 ### Step span
 
