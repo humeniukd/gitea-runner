@@ -54,7 +54,7 @@ func TestSetTaskFailedUsesLastOutput(t *testing.T) {
 	assert.Equal(t, "exception", got.Events()[0].Name)
 }
 
-func TestLogHookAddsTraceAndSpanID(t *testing.T) {
+func TestLogHook(t *testing.T) {
 	tp := sdktrace.NewTracerProvider()
 	ctx, span := tp.Tracer("test").Start(context.Background(), "op")
 	defer span.End()
@@ -64,17 +64,15 @@ func TestLogHookAddsTraceAndSpanID(t *testing.T) {
 	require.NoError(t, logHook{}.Fire(entry))
 	assert.Equal(t, sc.TraceID().String(), entry.Data["trace_id"])
 	assert.Equal(t, sc.SpanID().String(), entry.Data["span_id"])
-}
 
-func TestLogHookNoopWithoutSpan(t *testing.T) {
-	entry := logrus.NewEntry(logrus.New())
-	require.NoError(t, logHook{}.Fire(entry))
-	assert.NotContains(t, entry.Data, "trace_id")
-
-	entry = logrus.NewEntry(logrus.New()).WithContext(context.Background())
-	require.NoError(t, logHook{}.Fire(entry))
-	assert.NotContains(t, entry.Data, "trace_id")
-	assert.NotContains(t, entry.Data, "span_id")
+	for _, e := range []*logrus.Entry{
+		logrus.NewEntry(logrus.New()),
+		logrus.NewEntry(logrus.New()).WithContext(context.Background()),
+	} {
+		require.NoError(t, logHook{}.Fire(e))
+		assert.NotContains(t, e.Data, "trace_id")
+		assert.NotContains(t, e.Data, "span_id")
+	}
 }
 
 func TestStartStepName(t *testing.T) {

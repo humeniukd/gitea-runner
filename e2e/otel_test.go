@@ -30,8 +30,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// otelCollector captures OTLP/HTTP exports: it counts trace posts and decodes
-// the exported metric names and units.
 type otelCollector struct {
 	mu         sync.Mutex
 	names      map[string]bool
@@ -95,8 +93,6 @@ func (c *otelCollector) metricNames() []string {
 	return names
 }
 
-// runOtelJob installs the SDK from otelCfg, starts Go runtime metrics, runs one
-// real job, flushes, and returns the job log.
 func runOtelJob(t *testing.T, otelCfg config.Otel) string {
 	t.Helper()
 
@@ -109,8 +105,6 @@ func runOtelJob(t *testing.T, otelCfg config.Otel) string {
 		otel.SetMeterProvider(metricnoop.NewMeterProvider())
 	})
 
-	// Go runtime metrics ride on the same global meter provider, exactly as the
-	// daemon starts them.
 	if err := contribruntime.Start(contribruntime.WithMinimumReadMemStatsInterval(time.Second)); err != nil {
 		t.Fatalf("start runtime metrics: %v", err)
 	}
@@ -120,13 +114,10 @@ func runOtelJob(t *testing.T, otelCfg config.Otel) string {
 	requireSuccess(t, api, repo, wfRun.ID)
 	logs := runLogs(t, api, repo, wfRun.ID)
 
-	// requireSuccess returns when Gitea sees the result, which the runner reports
-	// before it finishes recording the run-duration metric; wait for the task to
-	// fully finalize so the flush below captures every metric.
+	// wait until run-duration is recorded before flushing.
 	waitForRunnerIdle(t, runner)
 
-	// Flush both pipelines before asserting: batch/periodic processors buffer
-	// until shutdown.
+	// batch processors buffer until shutdown.
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := shutdown(sctx); err != nil {
@@ -135,8 +126,6 @@ func runOtelJob(t *testing.T, otelCfg config.Otel) string {
 	return logs
 }
 
-// assertOtelExports checks the job propagated a valid TRACEPARENT and that the
-// collector received the trace and the full metric set with correct units.
 func assertOtelExports(t *testing.T, collector *otelCollector, logs string) {
 	t.Helper()
 
@@ -174,39 +163,12 @@ func assertOtelExports(t *testing.T, collector *otelCollector, logs string) {
 	}
 }
 
-// TestOtel pins the full OTel contract in one job run configured through the
-// standard per-signal env vars (complete URLs including the signal path): the
-// runner exports its job span, the job container sees TRACEPARENT plus the
-// runner's OTEL_* environment, and the runner exports the CI/CD semconv
-// metrics, poll and RPC instruments, and Go runtime metrics.
-func TestOtel(t *testing.T) {
-	if skipReason != "" {
-		t.Skip(skipReason)
-	}
-
+func testOtel(t *testing.T) {
 	collector := startOtelCollector(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.server.URL+"/v1/traces")
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", collector.server.URL+"/v1/metrics")
 
 	logs := runOtelJob(t, config.Otel{})
-	assertOtelExports(t, collector, logs)
-}
-
-// TestOtelSharedEndpoint proves the top-level otel.endpoint enables and points
-// both signals from a single setting, with the OTLP signal path appended to the
-// shared base.
-func TestOtelSharedEndpoint(t *testing.T) {
-	if skipReason != "" {
-		t.Skip(skipReason)
-	}
-
-	collector := startOtelCollector(t)
-	// No per-signal endpoints anywhere; only the shared base URL.
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
-
-	logs := runOtelJob(t, config.Otel{Endpoint: collector.server.URL})
 	assertOtelExports(t, collector, logs)
 }

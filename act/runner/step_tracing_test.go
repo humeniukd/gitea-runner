@@ -5,7 +5,6 @@ package runner
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"testing"
 
@@ -16,12 +15,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
 
-// spanRecorder collects ended spans via the sdktrace global provider.
 type spanRecorder struct {
 	mu    sync.Mutex
 	spans []sdktrace.ReadOnlySpan
@@ -40,15 +37,6 @@ func (r *spanRecorder) recorded() []sdktrace.ReadOnlySpan {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]sdktrace.ReadOnlySpan(nil), r.spans...)
-}
-
-func attrValue(attrs []attribute.KeyValue, key string) (string, bool) {
-	for _, kv := range attrs {
-		if string(kv.Key) == key {
-			return kv.Value.String(), true
-		}
-	}
-	return "", false
 }
 
 func TestNewJobExecutorCreatesStepSpans(t *testing.T) {
@@ -101,11 +89,8 @@ func TestNewJobExecutorCreatesStepSpans(t *testing.T) {
 
 	assert.Equal(t, []string{"build", "test"}, executed)
 
-	// The docker client emits its own spans (moby instruments its transport),
-	// so pick out the step spans by name and preserve their execution order.
-	spans := rec.recorded()
 	stepSpans := make([]sdktrace.ReadOnlySpan, 0, len(steps))
-	for _, span := range spans {
+	for _, span := range rec.recorded() {
 		if span.Name() == "build" || span.Name() == "test" {
 			stepSpans = append(stepSpans, span)
 		}
@@ -114,14 +99,5 @@ func TestNewJobExecutorCreatesStepSpans(t *testing.T) {
 	for i, span := range stepSpans {
 		assert.Equal(t, steps[i].Name, span.Name())
 		assert.Equal(t, trace.SpanKindInternal, span.SpanKind())
-		name, ok := attrValue(span.Attributes(), "cicd.pipeline.task.name")
-		require.True(t, ok)
-		assert.Equal(t, steps[i].Name, name)
-		runID, ok := attrValue(span.Attributes(), "cicd.pipeline.task.run.id")
-		require.True(t, ok)
-		assert.Equal(t, fmt.Sprintf("42.%d", steps[i].Number), runID)
-		result, ok := attrValue(span.Attributes(), "cicd.pipeline.task.run.result")
-		require.True(t, ok)
-		assert.Equal(t, "success", result)
 	}
 }

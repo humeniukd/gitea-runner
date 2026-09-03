@@ -266,40 +266,27 @@ func TestSetupSignalGating(t *testing.T) {
 	}
 }
 
-func TestSetupYmlEndpointWinsOverEnv(t *testing.T) {
+func TestSetupYmlWinsOverEnv(t *testing.T) {
 	resetGlobals(t)
 	unsetConfigFile(t)
 	clearEnv(t)
 	envSink := newSink(t)
 	ymlSink := newSink(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", envSink.URL)
-
-	shutdown, err := Setup(context.Background(), "runner", config.Otel{Endpoint: ymlSink.URL})
-	require.NoError(t, err)
-	emit(t, shutdown)
-
-	assert.Positive(t, ymlSink.count("/v1/traces"), "yml shared endpoint wins over env")
-	assert.Equal(t, 0, envSink.total(), "env endpoint must be ignored when yml is set")
-}
-
-func TestSetupYmlHeadersOverrideEnv(t *testing.T) {
-	resetGlobals(t)
-	unsetConfigFile(t)
-	clearEnv(t)
-	sink := newSink(t)
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", sink.URL)
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer env-token")
 
 	shutdown, err := Setup(context.Background(), "runner", config.Otel{
-		Headers: map[string]string{"authorization": "Bearer yml-token"},
+		Endpoint: ymlSink.URL,
+		Headers:  map[string]string{"authorization": "Bearer yml-token"},
 	})
 	require.NoError(t, err)
 	emit(t, shutdown)
 
-	require.Positive(t, sink.count("/v1/traces"))
-	require.Positive(t, sink.count("/v1/metrics"))
-	sink.mu.Lock()
-	defer sink.mu.Unlock()
-	assert.Equal(t, "Bearer yml-token", sink.auth["/v1/traces"], "yml header wins over env for traces")
-	assert.Equal(t, "Bearer yml-token", sink.auth["/v1/metrics"], "shared yml header reaches metrics")
+	assert.Equal(t, 0, envSink.total(), "env endpoint ignored when yml is set")
+	require.Positive(t, ymlSink.count("/v1/traces"))
+	require.Positive(t, ymlSink.count("/v1/metrics"))
+	ymlSink.mu.Lock()
+	defer ymlSink.mu.Unlock()
+	assert.Equal(t, "Bearer yml-token", ymlSink.auth["/v1/traces"], "yml header wins over env")
+	assert.Equal(t, "Bearer yml-token", ymlSink.auth["/v1/metrics"])
 }
