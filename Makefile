@@ -2,6 +2,7 @@ DIST := dist
 EXECUTABLE := gitea-runner
 DIST_DIRS := $(DIST)/binaries $(DIST)/release
 GO ?= go
+SHASUM ?= shasum -a 256
 HAS_GO = $(shell hash $(GO) > /dev/null 2>&1 && echo "GO" || echo "NOGO" )
 XGO_PACKAGE ?= src.techknowlogick.com/xgo@v1.9.0 # renovate: datasource=go
 XGO_VERSION := go-1.27.x
@@ -136,7 +137,7 @@ lint-pr-title: ## lint PR title against Conventional Commits (set PR_TITLE=...)
 
 .PHONY: security-check
 security-check:
-	GOEXPERIMENT= $(GO) run $(GOVULNCHECK_PACKAGE) -show color ./... || true
+	$(GO) run $(GOVULNCHECK_PACKAGE) -show color ./... || true
 
 .PHONY: tidy
 tidy: ## run go mod tidy
@@ -156,29 +157,25 @@ tidy-check: tidy
 		exit 1; \
 	fi
 
-.PHONY: changelog
-changelog: node_modules ## generate CHANGELOG.md from all releases
-	pnpm exec conventional-changelog --config changelog.config.ts --release-count 0
-
-node_modules: pnpm-lock.yaml
+.PHONY: node_modules
+node_modules:
 	pnpm install --frozen-lockfile
-	@touch node_modules
 
 .PHONY: publish-check
 publish-check:
 	@test "$$(git branch --show-current)" = main || { echo "Releases must be created from main"; exit 1; }
-	@git diff --quiet -- . ':!CHANGELOG.md' && git diff --cached --quiet && test -z "$$(git ls-files --others --exclude-standard)" || { echo "Releases only allow unstaged CHANGELOG.md changes"; exit 1; }
-	@git diff --quiet HEAD origin/main || { echo "main must match origin/main before releasing"; exit 1; }
+	@case "$$(git remote get-url origin)" in *gitea.com[:/]gitea/runner*) ;; *) echo "origin must point at gitea.com/gitea/runner"; exit 1 ;; esac
+	@git diff --quiet && git diff --cached --quiet && test -z "$$(git ls-files --others --exclude-standard)" || { echo "Releases require a clean working tree"; exit 1; }
+	@git fetch --quiet --tags --force origin main
+	@test "$$(git rev-parse HEAD)" = "$$(git rev-parse FETCH_HEAD)" || { echo "main must match origin/main before releasing"; exit 1; }
 
 .PHONY: patch minor major
 patch: publish-check node_modules ## create, tag, and publish a patch release
-	pnpm exec versions -R -p -a patch
-
 minor: publish-check node_modules ## create, tag, and publish a minor release
-	pnpm exec versions -R -p -a minor
-
 major: publish-check node_modules ## create, tag, and publish a major release
-	pnpm exec versions -R -p -a major
+
+patch minor major:
+	pnpm exec versions -R -p $@
 
 .PHONY: test
 test: ## test everything (integration tests self-skip without docker/network)
@@ -250,7 +247,7 @@ release-copy: | $(DIST_DIRS)
 
 .PHONY: release-check
 release-check: | $(DIST_DIRS)
-	cd $(DIST)/release/; for file in `find . -type f -name "*"`; do echo "checksumming $${file}" && shasum -a 256 `echo $${file} | sed 's/^..//'` > $${file}.sha256; done;
+	cd $(DIST)/release/; for file in `find . -type f -name "*"`; do echo "checksumming $${file}" && $(SHASUM) `echo $${file} | sed 's/^..//'` > $${file}.sha256; done;
 
 .PHONY: release-compress
 release-compress: | $(DIST_DIRS)
@@ -266,7 +263,7 @@ docker: ## build the docker image
 .PHONY: clean
 clean: ## delete binary and coverage files
 	$(GO) clean -x -i ./...
-	rm -rf coverage.txt .tmp $(EXECUTABLE) $(DIST)
+	rm -rf coverage.txt .tmp node_modules $(EXECUTABLE) $(DIST)
 
 .PHONY: version
 version: ## print the version

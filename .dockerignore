@@ -45,6 +45,7 @@ cpu.out
 
 /bin
 /dist
+/node_modules
 /.env
 /.runner
 /config.yaml

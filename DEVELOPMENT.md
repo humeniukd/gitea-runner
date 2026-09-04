@@ -39,3 +39,17 @@ parallel.
 
 The suite shares one Gitea and regular runner. Cache and ephemeral scenarios use isolated
 repository runners. A run path is `<workflow>@<ref>` and a log row is `<timestamp>Z <payload>`.
+
+## Releases
+
+Releasing needs pnpm, Node.js 22 or newer, push access to `gitea.com/gitea/runner`, and a Gitea
+token with push permission set as `VERSIONS_FORGE_TOKENS=gitea.com:<token>`, which keys the token
+to that host so it is never sent anywhere else.
+
+Run `make patch`, `make minor`, or `make major` from a clean local `main` that matches
+`origin/main`. Each target takes the version from the newest tag, adds an empty commit to `main`
+carrying the release notes, tags it, pushes both, and creates the Gitea release with a summary of
+the commits since the last tag as its body.
+
+`.gitea/workflows/release-tag.yml` then builds the artifacts and attaches them to that release
+without touching its body or title, so rewrite the body on gitea.com once the run has finished.
