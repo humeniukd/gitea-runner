@@ -133,7 +133,7 @@ gitea_urls:
   download: https://gitea.com
 
 release:
-  mode: keep-existing # the release and its notes come from `make patch`, not from here
+  mode: keep-existing
   extra_files:
     - glob: ./**.xz
     - glob: ./**.xz.sha256
