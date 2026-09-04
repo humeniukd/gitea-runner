@@ -109,7 +109,7 @@ func runOtelJob(t *testing.T, otelCfg config.Otel) string {
 		t.Fatalf("start runtime metrics: %v", err)
 	}
 
-	api, repo, _, runner := startIsolatedScenario(t, "tracing.yml", "ubuntu-latest", runnerOptions{})
+	api, repo, _, runner := startIsolatedScenario(t, "tracing.yml", "e2e-otel", runnerOptions{})
 	wfRun := waitForRun(t, api, repo)
 	requireSuccess(t, api, repo, wfRun.ID)
 	logs := runLogs(t, api, repo, wfRun.ID)

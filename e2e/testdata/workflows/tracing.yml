@@ -2,7 +2,7 @@ name: tracing
 on: push
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: e2e-otel
     steps:
       - run: |
           echo "traceparent-env=$TRACEPARENT"
