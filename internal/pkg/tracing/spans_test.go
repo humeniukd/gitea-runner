@@ -119,6 +119,7 @@ func TestSetPipelineName(t *testing.T) {
 
 	_, fallback := otel.Tracer("test").Start(context.Background(), "RUN")
 	SetPipelineName(fallback, "Tests", "deploy", "")
+	SetPipelineResult(fallback, "skip")
 	fallback.End()
 
 	byName := make(map[string]sdktrace.ReadOnlySpan)
@@ -132,6 +133,7 @@ func TestSetPipelineName(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "build", id)
 	assert.Equal(t, codes.Ok, byName["RUN Tests Build and test"].Status().Code, "success sets Ok status")
+	assert.Equal(t, codes.Unset, byName["RUN Tests deploy"].Status().Code, "skip leaves status unset")
 }
 
 func attrString(attrs []attribute.KeyValue, key string) (string, bool) {

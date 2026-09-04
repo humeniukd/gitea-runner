@@ -140,11 +140,14 @@ func stepFailureMessage(err error, lastOutput string) string {
 
 func setResult(span trace.Span, key attribute.Key, result string) {
 	span.SetAttributes(key.String(result))
-	if result != "success" {
+	switch result {
+	case "success":
+		span.SetStatus(codes.Ok, "")
+	case "skip":
+		span.SetStatus(codes.Unset, "skipped")
+	default:
 		span.SetStatus(codes.Error, result)
-		return
 	}
-	span.SetStatus(codes.Ok, "")
 }
 
 func ResultToSemconv(result runnerv1.Result) string {

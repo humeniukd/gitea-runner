@@ -211,6 +211,8 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			case ctx.Err() != nil:
 				reportStepError(ctx, rc, ctx.Err())
 				tracing.SetTaskResult(stepSpan, "cancellation")
+			case rc.StepResults[stepModel.ID] != nil && rc.StepResults[stepModel.ID].Conclusion == model.StepStatusSkipped:
+				tracing.SetTaskResult(stepSpan, "skip")
 			default:
 				tracing.SetTaskResult(stepSpan, "success")
 			}
