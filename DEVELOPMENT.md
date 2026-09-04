@@ -46,10 +46,11 @@ Releasing needs pnpm, Node.js 22 or newer, push access to `gitea.com/gitea/runne
 token with push permission set as `VERSIONS_FORGE_TOKENS=gitea.com:<token>`, which keys the token
 to that host so it is never sent anywhere else.
 
-Run `make patch`, `make minor`, or `make major` from a clean local `main` that matches
-`origin/main`. Each target takes the version from the newest tag, adds an empty commit to `main`
-carrying the release notes, tags it, pushes both, and creates the Gitea release with a summary of
-the commits since the last tag as its body.
+Write the new version's section in `CHANGELOG.md` by hand, headed `## <version> (YYYY-MM-DD)`, and
+land it on `main`. Then run `make patch`, `make minor`, or `make major` from a clean local `main`
+that matches `origin/main`. The version comes from the newest tag, the placeholder date becomes
+today's, and that section becomes the commit message, the tag annotation and the Gitea release
+body. A missing section aborts before anything is pushed.
 
 `.gitea/workflows/release-tag.yml` then builds the artifacts and attaches them to that release
-without touching its body or title, so rewrite the body on gitea.com once the run has finished.
+without touching its body or title, so the notes can still be edited on gitea.com afterwards.

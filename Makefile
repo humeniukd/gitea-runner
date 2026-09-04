@@ -175,7 +175,7 @@ minor: publish-check node_modules ## create, tag, and publish a minor release
 major: publish-check node_modules ## create, tag, and publish a major release
 
 patch minor major:
-	pnpm exec versions -R -p $@
+	pnpm exec versions -R -p $@ CHANGELOG.md
 
 .PHONY: test
 test: ## test everything (integration tests self-skip without docker/network)
