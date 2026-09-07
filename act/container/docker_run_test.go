@@ -558,6 +558,7 @@ func TestCheckVolumes(t *testing.T) {
 				"shared_volume:/shared_volume",
 				"/home/test/data:/test_data",
 				"/etc/conf.d/base.json:/config/base.json",
+				"/etc/conf.d/sub/nested.json:/config/nested.json",
 				"sql_data:/sql_data",
 				"/secrets/keys:/keys",
 			},
