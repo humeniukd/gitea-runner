@@ -657,6 +657,82 @@ func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
 	service.AssertExpectations(t)
 }
 
+// TestStartJobContainerKeepsDockerProxyForTheJob verifies that the cleanup before the job
+// container is created does not close the job's docker proxy.
+func TestStartJobContainerKeepsDockerProxyForTheJob(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
+
+	workflow, err := model.ReadWorkflow(strings.NewReader(`
+name: test
+on: push
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    container:
+      image: test:latest
+`))
+	require.NoError(t, err)
+
+	origNewContainer := newContainer
+	newContainer = func(*container.NewContainerInput) container.ExecutionsEnvironment { return fakeContainer{} }
+	t.Cleanup(func() { newContainer = origNewContainer })
+
+	rc := &RunContext{
+		Name: "test",
+		Config: &Config{
+			Workdir:              "/tmp",
+			ContainerNetworkMode: "host", // an explicit network mode creates no network
+			Env:                  map[string]string{},
+			Secrets:              map[string]string{},
+		},
+		Env: map[string]string{},
+		Run: &model.Run{JobID: "job", Workflow: workflow},
+	}
+	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
+	require.NoError(t, rc.resolvePlatformImage(t.Context()))
+
+	// create docker proxy for the rc
+	proxy, err := container.StartDockerProxy("/nonexistent.sock", t.TempDir(), rc.jobContainerName())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
+	rc.dockerProxy = proxy
+
+	// the cleanup runs before the volume removal fails
+	require.Error(t, rc.startJobContainer()(t.Context()))
+
+	require.Same(t, proxy, rc.dockerProxy, "the job still needs the proxy it is about to mount")
+	info, err := os.Stat(proxy.Socket)
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&os.ModeSocket, "the job container binds this path onto its docker socket")
+}
+
+func TestCleanupJobResourcesClosesDockerProxy(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
+
+	proxy, err := container.StartDockerProxy("/nonexistent.sock", t.TempDir(), "job")
+	require.NoError(t, err)
+
+	rc := &RunContext{Config: &Config{}, dockerProxy: proxy}
+	require.NoError(t, rc.cleanupJobResources("external-network", false)(context.Background()))
+
+	assert.Nil(t, rc.dockerProxy)
+	assert.NoFileExists(t, proxy.Socket)
+}
+
+func TestCleanupFailedStartClosesDockerProxy(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
+
+	proxy, err := container.StartDockerProxy("/nonexistent.sock", t.TempDir(), "job")
+	require.NoError(t, err)
+
+	rc := &RunContext{Config: &Config{}, dockerProxy: proxy}
+	require.Nil(t, rc.cleanUpJobContainer, "the teardown is wired only once the job container exists")
+	rc.cleanupFailedStart(context.Background())
+
+	assert.Nil(t, rc.dockerProxy)
+	assert.NoFileExists(t, proxy.Socket)
+}
+
 // TestInterpolateOutputsIsPerMatrixCombo guards the matrix-output fix: combinations share one
 // *model.Job, so each must interpolate from its own pristine snapshot. Otherwise the first
 // combo's resolved value freezes the shared template and later combos can't resolve their own.

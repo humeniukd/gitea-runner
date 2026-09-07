@@ -633,7 +633,8 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		return common.NewPipelineExecutor(
 			rc.pullServicesImages(rc.Config.ForcePull),
 			rc.JobContainer.Pull(rc.Config.ForcePull),
-			rc.stopJobContainer(),
+			// remove resources of an earlier run under the same names, never this job's own resources
+			rc.removeJobResourcesByName(networkName, createAndDeleteNetwork),
 			container.NewDockerNetworkCreateExecutor(networkName, rc.Config.ContainerNetworkCreateOptions).
 				IfBool(createAndDeleteNetwork),
 			rc.startServiceContainers(),
@@ -667,6 +668,16 @@ func (rc *RunContext) commandLogWriter(ctx context.Context) io.Writer {
 // Only job container and volume errors are returned, the rest are logged.
 func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNetwork bool) common.Executor {
 	return func(ctx context.Context) error {
+		// The proxy goes first, so the containers the job started through it release the named resources removed after them.
+		rc.closeDockerProxy(ctx)
+		return rc.removeJobResourcesByName(networkName, createAndDeleteNetwork)(ctx)
+	}
+}
+
+// removeJobResourcesByName removes the container, services, volumes and network carrying this job's names.
+// It touches nothing a running job still holds, so the job may also run it before its own container exists.
+func (rc *RunContext) removeJobResourcesByName(networkName string, createAndDeleteNetwork bool) common.Executor {
+	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
 		removeJobContainer := rc.JobContainer != nil
 
@@ -679,12 +690,6 @@ func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNet
 			if err := rc.stopServiceContainers()(ctx); err != nil {
 				logger.Errorf("Error while cleaning services: %v", err)
 			}
-		}
-		if rc.dockerProxy != nil {
-			if err := rc.dockerProxy.Close(ctx); err != nil {
-				logger.Errorf("Error while removing what the job created: %v", err)
-			}
-			rc.dockerProxy = nil
 		}
 		if removeJobContainer {
 			// after the containers using them, services can hold these via `--volumes-from`
@@ -702,6 +707,18 @@ func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNet
 		}
 		return errors.Join(errs...)
 	}
+}
+
+// closeDockerProxy stops serving the job's docker socket and removes what the job created through it.
+// Safe to call more than once, and on a job that never got a proxy.
+func (rc *RunContext) closeDockerProxy(ctx context.Context) {
+	if rc.dockerProxy == nil {
+		return
+	}
+	if err := rc.dockerProxy.Close(ctx); err != nil {
+		common.Logger(ctx).Errorf("Error while removing what the job created: %v", err)
+	}
+	rc.dockerProxy = nil
 }
 
 func (rc *RunContext) ApplyExtraPath(ctx context.Context, env *map[string]string) {
@@ -763,7 +780,8 @@ func (rc *RunContext) UpdateExtraPath(ctx context.Context, githubEnvPath string)
 	return nil
 }
 
-// stopJobContainer removes the job container (if it exists) and its volume (if it exists)
+// stopJobContainer runs the teardown the job wired as it started: the job container, plus the services, volumes, network and docker proxy.
+// Only valid once the job has started, an earlier run's leftovers are handled by removeJobResourcesByName.
 func (rc *RunContext) stopJobContainer() common.Executor {
 	return func(ctx context.Context) error {
 		if rc.cleanUpJobContainer != nil {
@@ -1033,15 +1051,16 @@ func (rc *RunContext) startContainer() common.Executor {
 }
 
 func (rc *RunContext) cleanupFailedStart(ctx context.Context) {
-	if rc.cleanUpJobContainer == nil {
-		return
-	}
 	cleanCtx := ctx
 	if ctx.Err() != nil {
 		// the start likely failed because ctx was cancelled, detach so teardown still runs
 		var cancel context.CancelFunc
 		cleanCtx, cancel = context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), time.Minute)
 		defer cancel()
+	}
+	if rc.cleanUpJobContainer == nil {
+		rc.closeDockerProxy(cleanCtx)
+		return
 	}
 	if err := rc.cleanUpJobContainer(cleanCtx); err != nil {
 		common.Logger(ctx).Errorf("Error while cleaning up after failed container start for job %s: %v", rc.JobName, err)
