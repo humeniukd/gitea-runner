@@ -11,9 +11,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +23,7 @@ import (
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/api/types/volume"
 	mobyclient "github.com/moby/moby/client"
@@ -168,7 +171,7 @@ func TestDockerProxyWithDaemon(t *testing.T) {
 	require.NoError(t, err)
 	defer direct.Close()
 	dir := shortTempDir(t)
-	seen, err := daemonSeesDir(ctx, dir)
+	seen, err := daemonSeesDir(ctx, direct, dir)
 	require.NoError(t, err)
 	t.Logf("daemon sees the runner's filesystem: %v", seen)
 
@@ -265,6 +268,95 @@ func BenchmarkDockerProxy(b *testing.B) {
 					b.Fatal(err)
 				}
 			}
+		})
+	}
+}
+
+// probeClient answers the probe the way a daemon holding the other side of the mount would.
+type probeClient struct {
+	mobyclient.APIClient
+	archive func() (io.ReadCloser, error)
+	removed bool
+}
+
+func (c *probeClient) ImageList(context.Context, mobyclient.ImageListOptions) (mobyclient.ImageListResult, error) {
+	return mobyclient.ImageListResult{Items: []image.Summary{{ID: "probe-image"}}}, nil
+}
+
+func (c *probeClient) ContainerCreate(context.Context, mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {
+	return mobyclient.ContainerCreateResult{ID: "probe"}, nil
+}
+
+func (c *probeClient) CopyFromContainer(_ context.Context, _ string, opts mobyclient.CopyFromContainerOptions) (mobyclient.CopyFromContainerResult, error) {
+	if opts.SourcePath != probePath {
+		return mobyclient.CopyFromContainerResult{}, fmt.Errorf("the probe read %q, not the file it wrote", opts.SourcePath)
+	}
+	content, err := c.archive()
+	if err != nil {
+		return mobyclient.CopyFromContainerResult{}, err
+	}
+	return mobyclient.CopyFromContainerResult{Content: content}, nil
+}
+
+func (c *probeClient) ContainerRemove(context.Context, string, mobyclient.ContainerRemoveOptions) (mobyclient.ContainerRemoveResult, error) {
+	c.removed = true
+	return mobyclient.ContainerRemoveResult{}, nil
+}
+
+func TestDaemonSeesDir(t *testing.T) {
+	dir := t.TempDir()
+	archiveOf := func(header tar.Header, body string) func() (io.ReadCloser, error) {
+		return func() (io.ReadCloser, error) {
+			var buf bytes.Buffer
+			writer := tar.NewWriter(&buf)
+			header.Size = int64(len(body))
+			require.NoError(t, writer.WriteHeader(&header))
+			if body != "" {
+				_, err := writer.Write([]byte(body))
+				require.NoError(t, err)
+			}
+			require.NoError(t, writer.Close())
+			return io.NopCloser(&buf), nil
+		}
+	}
+	file := tar.Header{Name: "probe", Typeflag: tar.TypeReg, Mode: 0o600}
+
+	for _, testCase := range []struct {
+		name    string
+		archive func() (io.ReadCloser, error)
+		want    bool
+	}{
+		{
+			name: "the daemon reads back what the runner wrote",
+			archive: func() (io.ReadCloser, error) {
+				written, err := os.ReadFile(filepath.Join(dir, probeDir, probeFile))
+				require.NoError(t, err)
+				return archiveOf(file, string(written))()
+			},
+			want: true,
+		},
+		{
+			name:    "the daemon has no file of the runner's there",
+			archive: func() (io.ReadCloser, error) { return nil, cerrdefs.ErrNotFound },
+			want:    false,
+		},
+		{
+			name:    "the daemon has its own empty directory there",
+			archive: archiveOf(tar.Header{Name: "probe/", Typeflag: tar.TypeDir, Mode: 0o755}, ""),
+			want:    false,
+		},
+		{
+			name:    "a file another runner left at the same path",
+			archive: archiveOf(file, "a nonce this probe did not write"),
+			want:    false,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cli := &probeClient{archive: testCase.archive}
+			seen, err := daemonSeesDir(t.Context(), cli, dir)
+			require.NoError(t, err)
+			assert.Equal(t, testCase.want, seen)
+			assert.True(t, cli.removed, "the probe container must not be left behind")
 		})
 	}
 }

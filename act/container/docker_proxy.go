@@ -6,8 +6,10 @@
 package container
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -35,6 +37,11 @@ import (
 const (
 	jobLabel      = "com.gitea.runner.job"
 	maxCreateBody = 8 << 20
+
+	probeDir   = "probe.d"
+	probeFile  = "probe"
+	probeMount = "/gitea-runner-probe"
+	probePath  = probeMount + "/" + probeFile
 )
 
 var (
@@ -55,7 +62,13 @@ func DockerProxyDir(ctx context.Context) string {
 		return proxyProbe.dir
 	}
 	dir := filepath.Join(os.TempDir(), "gitea-runner-docker")
-	ok, err := daemonSeesDir(ctx, dir)
+	cli, err := GetDockerClient(ctx)
+	if err != nil {
+		common.Logger(ctx).Debugf("docker proxy probe postponed: %v", err)
+		return ""
+	}
+	defer cli.Close()
+	ok, err := daemonSeesDir(ctx, cli, dir)
 	if err != nil {
 		common.Logger(ctx).Debugf("docker proxy probe postponed: %v", err)
 		return ""
@@ -69,19 +82,17 @@ func DockerProxyDir(ctx context.Context) string {
 	return proxyProbe.dir
 }
 
-func daemonSeesDir(ctx context.Context, dir string) (bool, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+// daemonSeesDir reports whether the daemon opens the files the runner writes in dir,
+// which is what a job's proxy socket mounted from there needs.
+func daemonSeesDir(ctx context.Context, cli client.APIClient, dir string) (bool, error) {
+	source := filepath.Join(dir, probeDir)
+	if err := os.MkdirAll(source, 0o700); err != nil {
 		return false, err
 	}
-	probe := filepath.Join(dir, "probe")
-	if err := os.WriteFile(probe, nil, 0o600); err != nil {
+	want := rand.Text() // fresh per probe
+	if err := os.WriteFile(filepath.Join(source, probeFile), []byte(want), 0o600); err != nil {
 		return false, err
 	}
-	cli, err := GetDockerClient(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer cli.Close()
 	images, err := cli.ImageList(ctx, client.ImageListOptions{})
 	if err != nil {
 		return false, err
@@ -89,19 +100,47 @@ func daemonSeesDir(ctx context.Context, dir string) (bool, error) {
 	if len(images.Items) == 0 {
 		return false, errors.New("no image to probe with yet")
 	}
-	// creating validates that a bind source exists on the daemon's side, nothing is started
+	// nothing is started, the daemon reads the file out of the mount for us
 	created, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
-		Config:     &container.Config{Image: images.Items[0].ID, Cmd: []string{"true"}},
-		HostConfig: &container.HostConfig{Mounts: []mount.Mount{{Type: mount.TypeBind, Source: probe, Target: "/gitea-runner-probe"}}},
+		Config: &container.Config{Image: images.Items[0].ID, Cmd: []string{"true"}},
+		HostConfig: &container.HostConfig{Mounts: []mount.Mount{
+			{Type: mount.TypeBind, Source: source, Target: probeMount, ReadOnly: true},
+		}},
 	})
-	if cerrdefs.IsInvalidArgument(err) {
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		if _, err := cli.ContainerRemove(ctx, created.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
+			common.Logger(ctx).Debugf("removing the docker proxy probe container failed: %v", err)
+		}
+	}()
+	// a daemon that cannot reach dir creates an empty one of its own instead of refusing the mount,
+	// so only the content coming back says whose file the job would get
+	res, err := cli.CopyFromContainer(ctx, created.ID, client.CopyFromContainerOptions{SourcePath: probePath})
+	if cerrdefs.IsNotFound(err) {
+		return false, nil // the daemon mounted an empty probe.d it created itself, not the runner's
+	}
+	if err != nil {
+		return false, err
+	}
+	defer res.Content.Close()
+	archive := tar.NewReader(res.Content)
+	header, err := archive.Next()
+	if errors.Is(err, io.EOF) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	_, err = cli.ContainerRemove(ctx, created.ID, client.ContainerRemoveOptions{Force: true})
-	return true, err
+	if header.Typeflag != tar.TypeReg {
+		return false, nil // something other than the file the runner wrote is at that path
+	}
+	got, err := io.ReadAll(io.LimitReader(archive, int64(len(want))+1))
+	if err != nil {
+		return false, err
+	}
+	return string(got) == want, nil
 }
 
 // StartDockerProxy serves a job's docker socket in dir, labelling what the job creates through it.
