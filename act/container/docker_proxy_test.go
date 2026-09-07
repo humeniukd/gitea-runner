@@ -275,8 +275,9 @@ func BenchmarkDockerProxy(b *testing.B) {
 // probeClient answers the probe the way a daemon holding the other side of the mount would.
 type probeClient struct {
 	mobyclient.APIClient
-	archive func() (io.ReadCloser, error)
-	removed bool
+	archive   func() (io.ReadCloser, error)
+	createErr error
+	removed   bool
 }
 
 func (c *probeClient) ImageList(context.Context, mobyclient.ImageListOptions) (mobyclient.ImageListResult, error) {
@@ -284,6 +285,9 @@ func (c *probeClient) ImageList(context.Context, mobyclient.ImageListOptions) (m
 }
 
 func (c *probeClient) ContainerCreate(context.Context, mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {
+	if c.createErr != nil {
+		return mobyclient.ContainerCreateResult{}, c.createErr
+	}
 	return mobyclient.ContainerCreateResult{ID: "probe"}, nil
 }
 
@@ -359,4 +363,13 @@ func TestDaemonSeesDir(t *testing.T) {
 			assert.True(t, cli.removed, "the probe container must not be left behind")
 		})
 	}
+}
+
+func TestDaemonSeesDirWhenTheMountIsRefused(t *testing.T) {
+	cli := &probeClient{createErr: cerrdefs.ErrInvalidArgument}
+
+	seen, err := daemonSeesDir(t.Context(), cli, t.TempDir())
+
+	require.NoError(t, err)
+	assert.False(t, seen)
 }

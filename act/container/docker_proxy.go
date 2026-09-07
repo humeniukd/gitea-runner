@@ -107,6 +107,9 @@ func daemonSeesDir(ctx context.Context, cli client.APIClient, dir string) (bool,
 			{Type: mount.TypeBind, Source: source, Target: probeMount, ReadOnly: true},
 		}},
 	})
+	if cerrdefs.IsInvalidArgument(err) {
+		return false, nil // a daemon that validates the mount refuses a source it cannot see
+	}
 	if err != nil {
 		return false, err
 	}
