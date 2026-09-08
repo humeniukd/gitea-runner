@@ -137,6 +137,10 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		runHealthCheck: executeHealthCheck,
 		telemetry:      metrics.NewTelemetry(),
 	}
+	runner.telemetry.ObserveWorkers(func() (int64, int64) {
+		busy := runner.runningCount.Load()
+		return busy, int64(cfg.Runner.Capacity) - busy
+	})
 	return runner
 }
 

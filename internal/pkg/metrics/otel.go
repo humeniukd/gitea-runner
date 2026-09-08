@@ -19,13 +19,13 @@ import (
 type Telemetry struct {
 	meter metric.Meter
 
-	PipelineRunDuration metric.Float64Histogram   // cicd.pipeline.run.duration, unit s
-	PipelineRunActive   metric.Int64UpDownCounter // cicd.pipeline.run.active, {run}
-	WorkerCount         metric.Int64UpDownCounter // cicd.worker.count, {worker}
-	SystemErrors        metric.Int64Counter       // cicd.system.errors, {error}
-	PollFetch           metric.Int64Counter       // gitea.runner.poll.fetch, {fetch}
-	PollFetchDuration   metric.Float64Histogram   // gitea.runner.poll.fetch.duration, unit s
-	PollBackoff         metric.Float64Gauge       // gitea.runner.poll.backoff, unit s
+	PipelineRunDuration metric.Float64Histogram     // cicd.pipeline.run.duration, unit s
+	PipelineRunActive   metric.Int64UpDownCounter   // cicd.pipeline.run.active, {run}
+	WorkerCount         metric.Int64ObservableGauge // cicd.worker.count, {worker}
+	SystemErrors        metric.Int64Counter         // cicd.system.errors, {error}
+	PollFetch           metric.Int64Counter         // gitea.runner.poll.fetch, {fetch}
+	PollFetchDuration   metric.Float64Histogram     // gitea.runner.poll.fetch.duration, unit s
+	PollBackoff         metric.Float64Gauge         // gitea.runner.poll.backoff, unit s
 }
 
 func NewTelemetry() *Telemetry {
@@ -44,7 +44,7 @@ func NewTelemetry() *Telemetry {
 	)
 	handleErr(err)
 
-	workerCount, err := meter.Int64UpDownCounter(
+	workerCount, err := meter.Int64ObservableGauge(
 		"cicd.worker.count", metric.WithUnit("{worker}"),
 		metric.WithDescription("The number of workers on the CI/CD system by state."),
 	)
@@ -94,28 +94,33 @@ func handleErr(err error) {
 }
 
 func (t *Telemetry) RecordJobStart(ctx context.Context, pipeline string) {
-	attrs := metric.WithAttributes(
+	t.PipelineRunActive.Add(ctx, 1, metric.WithAttributes(
 		semconv.CICDPipelineName(pipeline),
 		semconv.CICDPipelineRunStateExecuting,
-	)
-	t.PipelineRunActive.Add(ctx, 1, attrs)
-	t.WorkerCount.Add(ctx, 1, metric.WithAttributes(semconv.CICDWorkerStateBusy))
+	))
 }
 
 func (t *Telemetry) RecordJobEnd(ctx context.Context, pipeline, result, errType string) {
-	attrs := metric.WithAttributes(
+	t.PipelineRunActive.Add(ctx, -1, metric.WithAttributes(
 		semconv.CICDPipelineName(pipeline),
 		semconv.CICDPipelineRunStateExecuting,
-		semconv.CICDPipelineResultKey.String(result),
-	)
-	t.PipelineRunActive.Add(ctx, -1, attrs)
-	t.WorkerCount.Add(ctx, -1, metric.WithAttributes(semconv.CICDWorkerStateAvailable))
+	))
 	if result != "success" && errType != "" {
 		t.SystemErrors.Add(ctx, 1, metric.WithAttributes(
 			semconv.CICDSystemComponent("runner"),
 			attribute.String("error.type", errType),
 		))
 	}
+}
+
+func (t *Telemetry) ObserveWorkers(observe func() (busy, available int64)) {
+	_, err := t.meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		busy, available := observe()
+		o.ObserveInt64(t.WorkerCount, busy, metric.WithAttributes(semconv.CICDWorkerStateBusy))
+		o.ObserveInt64(t.WorkerCount, available, metric.WithAttributes(semconv.CICDWorkerStateAvailable))
+		return nil
+	}, t.WorkerCount)
+	handleErr(err)
 }
 
 func (t *Telemetry) RecordPipelineRunDuration(ctx context.Context, pipeline, result string, seconds float64) {
