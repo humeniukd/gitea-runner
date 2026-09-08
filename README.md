@@ -291,7 +291,7 @@ The runner uses them for its own requests and gives them to every job, in lower 
 
 These hosts are added to `no_proxy` for jobs, so they are always reached directly:
 
-- the built-in cache server, whose address is assigned at startup; a `cache.external_server` is yours to add if it needs bypassing
+- the built-in cache server, whose address is assigned at startup
 - `localhost`, `127.0.0.1` and `::1`
 - the job's service containers
 - the Docker daemon, when it is reached over `tcp://`
