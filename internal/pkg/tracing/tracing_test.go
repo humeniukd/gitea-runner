@@ -46,6 +46,7 @@ func clearEnv(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_METRIC_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_HEADERS",
 		"OTEL_SDK_DISABLED",
+		"OTEL_SERVICE_NAME",
 	} {
 		t.Setenv(name, "")
 	}
@@ -138,13 +139,13 @@ func TestJobEnvPassthroughAndTraceparent(t *testing.T) {
 func TestJobEnvConfigToEnv(t *testing.T) {
 	unsetConfigFile(t)
 	clearEnv(t)
-	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "team=ci")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "team=ci,service.name=runner")
 	ratio := 0.25
 	cfg := config.Otel{
 		Endpoint:           "http://collector:4318",
 		Protocol:           "grpc",
 		Headers:            map[string]string{"authorization": "Bearer shared"},
-		ResourceAttributes: map[string]string{"deployment.environment.name": "production"},
+		ResourceAttributes: map[string]string{"deployment.environment.name": "production", "service.version": "1.2.3"},
 		Traces:             config.OtelTraces{Endpoint: "http://collector:4318/v1/traces", SamplerRatio: &ratio},
 		Metrics:            config.OtelMetrics{Headers: map[string]string{"x-scope-orgid": "ci"}},
 	}
@@ -156,7 +157,7 @@ func TestJobEnvConfigToEnv(t *testing.T) {
 	assert.Equal(t, "parentbased_traceidratio", envs["OTEL_TRACES_SAMPLER"])
 	assert.Equal(t, "0.25", envs["OTEL_TRACES_SAMPLER_ARG"])
 	assert.Equal(t, "x-scope-orgid=ci", envs["OTEL_EXPORTER_OTLP_METRICS_HEADERS"])
-	assert.Equal(t, "deployment.environment.name=production,team=ci", envs["OTEL_RESOURCE_ATTRIBUTES"])
+	assert.Equal(t, "deployment.environment.name=production,team=ci", envs["OTEL_RESOURCE_ATTRIBUTES"], "service.* not passed to the job")
 }
 
 func TestJobEnvDisabledSignal(t *testing.T) {
@@ -170,6 +171,17 @@ func TestJobEnvDisabledSignal(t *testing.T) {
 	assert.NotContains(t, envs, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "disabled signal's env dropped")
 	assert.Equal(t, "http://collector:4318", envs["OTEL_EXPORTER_OTLP_ENDPOINT"], "enabled metrics keep the shared endpoint")
 	assert.NotContains(t, envs, "OTEL_METRICS_EXPORTER")
+}
+
+func TestJobEnvDropsServiceName(t *testing.T) {
+	unsetConfigFile(t)
+	clearEnv(t)
+	t.Setenv("OTEL_SERVICE_NAME", "gitea-runner")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=gitea-runner,team=ci")
+
+	envs := JobEnv(context.Background(), config.Otel{})
+	assert.NotContains(t, envs, "OTEL_SERVICE_NAME", "runner service name not passed to the job")
+	assert.Equal(t, "deployment.environment.name=test,team=ci", envs["OTEL_RESOURCE_ATTRIBUTES"], "service.* stripped from job attributes")
 }
 
 func TestResourceAttributeResolution(t *testing.T) {

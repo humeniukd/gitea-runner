@@ -45,6 +45,9 @@ So tools inside a job can add to the same trace, each job container gets:
 - `TRACEPARENT`/`TRACESTATE` pointing at the job's span, so spans created inside
   the job attach to it.
 
+`service.*` resource attributes are not forwarded, so each job is its own
+service rather than inheriting the runner's identity.
+
 Disabling traces or metrics (`otel.traces.enabled: false` /
 `otel.metrics.enabled: false`) drops that section's variables and sets
 `OTEL_TRACES_EXPORTER=none` / `OTEL_METRICS_EXPORTER=none`, so a shared endpoint

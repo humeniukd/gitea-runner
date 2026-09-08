@@ -296,8 +296,10 @@ func JobEnv(ctx context.Context, otelCfg config.Otel) map[string]string {
 		}
 	}
 	setJobOtelEnv(envs, otelCfg)
-	envs["OTEL_RESOURCE_ATTRIBUTES"] = serializeKeyValues(
-		mergedResourceAttributes(envs["OTEL_RESOURCE_ATTRIBUTES"], otelCfg.ResourceAttributes))
+	delete(envs, "OTEL_SERVICE_NAME")
+	merged := mergedResourceAttributes(envs["OTEL_RESOURCE_ATTRIBUTES"], otelCfg.ResourceAttributes)
+	maps.DeleteFunc(merged, func(k, _ string) bool { return strings.HasPrefix(k, "service.") })
+	envs["OTEL_RESOURCE_ATTRIBUTES"] = serializeKeyValues(merged)
 
 	sc := trace.SpanContextFromContext(ctx)
 	if !sc.IsValid() {
