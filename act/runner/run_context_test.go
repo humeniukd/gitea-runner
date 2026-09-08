@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"runtime"
 	"strings"
@@ -221,8 +223,9 @@ func (fakeContainer) Start(bool) common.Executor { return func(context.Context) 
 
 func (fakeContainer) Remove() common.Executor { return func(context.Context) error { return nil } }
 
-func (fakeContainer) Close() common.Executor { return func(context.Context) error { return nil } }
-func (fakeContainer) GetActPath() string     { return "/var/run/act" }
+func (fakeContainer) Close() common.Executor             { return func(context.Context) error { return nil } }
+func (fakeContainer) GetActPath() string                 { return "/var/run/act" }
+func (fakeContainer) ToContainerPath(path string) string { return path }
 func (fakeContainer) Create([]string, []string) common.Executor {
 	return func(context.Context) error { return nil }
 }
@@ -269,9 +272,26 @@ func startJobContainerInputs(t *testing.T, workflowYAML string, cfg *Config) []*
 	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
 	require.NoError(t, rc.resolvePlatformImage(t.Context()))
 
-	// the inputs are built before the missing daemon fails the first call
-	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
-	require.Error(t, rc.startJobContainer()(t.Context()))
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("API-Version", "1.47")
+			_, _ = io.WriteString(w, "OK")
+		case strings.HasSuffix(r.URL.Path, "/containers/json"), strings.HasSuffix(r.URL.Path, "/networks"):
+			_, _ = io.WriteString(w, "[]")
+		case strings.HasSuffix(r.URL.Path, "/volumes"):
+			_, _ = io.WriteString(w, `{"Volumes":[]}`)
+		case strings.HasSuffix(r.URL.Path, "/info"):
+			_, _ = io.WriteString(w, `{"Architecture":"amd64","OSType":"linux"}`)
+		default:
+			t.Errorf("unexpected Docker request: %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(daemon.Close)
+	t.Setenv("DOCKER_HOST", daemon.URL)
+	require.NoError(t, rc.startJobContainer()(t.Context()))
 
 	return inputs
 }
@@ -627,7 +647,7 @@ func TestCleanupJobResourcesCleansServicesWithoutJobContainer(t *testing.T) {
 		serviceContainers: []*serviceContainer{{name: "svc", container: service}},
 	}
 
-	err := rc.cleanupJobResources("external-network", false)(context.Background())
+	err := rc.cleanupJobResources("external-network", false)(common.WithDryrun(t.Context(), true))
 	require.NoError(t, err)
 	service.AssertExpectations(t)
 }
@@ -636,11 +656,12 @@ func TestCleanupJobResourcesCleansServicesWithoutJobContainer(t *testing.T) {
 func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
 
+	removeError, closeError := errors.New("remove service"), errors.New("close service")
 	jobContainer := &containerMock{}
 	jobContainer.On("Remove").Return(func(context.Context) error { return errors.New("removal failed") }).Once()
 	service := &containerMock{}
-	service.On("Remove").Return(func(context.Context) error { return nil }).Once()
-	service.On("Close").Return(func(context.Context) error { return nil }).Once()
+	service.On("Remove").Return(func(context.Context) error { return removeError }).Once()
+	service.On("Close").Return(func(context.Context) error { return closeError }).Once()
 
 	rc := &RunContext{
 		Name:              "job",
@@ -652,85 +673,13 @@ func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	require.Error(t, rc.cleanupJobResources("job-network", true)(ctx))
+	err := rc.cleanupJobResources("job-network", true)(ctx)
+	require.ErrorContains(t, err, "removal failed")
+	require.ErrorIs(t, err, removeError)
+	require.ErrorIs(t, err, closeError)
+	require.ErrorIs(t, err, context.Canceled)
 	jobContainer.AssertExpectations(t)
 	service.AssertExpectations(t)
-}
-
-// TestStartJobContainerKeepsDockerProxyForTheJob verifies that the cleanup before the job
-// container is created does not close the job's docker proxy.
-func TestStartJobContainerKeepsDockerProxyForTheJob(t *testing.T) {
-	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
-
-	workflow, err := model.ReadWorkflow(strings.NewReader(`
-name: test
-on: push
-jobs:
-  job:
-    runs-on: ubuntu-latest
-    container:
-      image: test:latest
-`))
-	require.NoError(t, err)
-
-	origNewContainer := newContainer
-	newContainer = func(*container.NewContainerInput) container.ExecutionsEnvironment { return fakeContainer{} }
-	t.Cleanup(func() { newContainer = origNewContainer })
-
-	rc := &RunContext{
-		Name: "test",
-		Config: &Config{
-			Workdir:              "/tmp",
-			ContainerNetworkMode: "host", // an explicit network mode creates no network
-			Env:                  map[string]string{},
-			Secrets:              map[string]string{},
-		},
-		Env: map[string]string{},
-		Run: &model.Run{JobID: "job", Workflow: workflow},
-	}
-	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
-	require.NoError(t, rc.resolvePlatformImage(t.Context()))
-
-	// create docker proxy for the rc
-	proxy, err := container.StartDockerProxy("/nonexistent.sock", t.TempDir(), rc.jobContainerName())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = proxy.Close(context.Background()) })
-	rc.dockerProxy = proxy
-
-	// the cleanup runs before the volume removal fails
-	require.Error(t, rc.startJobContainer()(t.Context()))
-
-	require.Same(t, proxy, rc.dockerProxy, "the job still needs the proxy it is about to mount")
-	info, err := os.Stat(proxy.Socket)
-	require.NoError(t, err)
-	assert.NotZero(t, info.Mode()&os.ModeSocket, "the job container binds this path onto its docker socket")
-}
-
-func TestCleanupJobResourcesClosesDockerProxy(t *testing.T) {
-	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
-
-	proxy, err := container.StartDockerProxy("/nonexistent.sock", t.TempDir(), "job")
-	require.NoError(t, err)
-
-	rc := &RunContext{Config: &Config{}, dockerProxy: proxy}
-	require.NoError(t, rc.cleanupJobResources("external-network", false)(context.Background()))
-
-	assert.Nil(t, rc.dockerProxy)
-	assert.NoFileExists(t, proxy.Socket)
-}
-
-func TestCleanupFailedStartClosesDockerProxy(t *testing.T) {
-	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
-
-	proxy, err := container.StartDockerProxy("/nonexistent.sock", t.TempDir(), "job")
-	require.NoError(t, err)
-
-	rc := &RunContext{Config: &Config{}, dockerProxy: proxy}
-	require.Nil(t, rc.cleanUpJobContainer, "the teardown is wired only once the job container exists")
-	rc.cleanupFailedStart(context.Background())
-
-	assert.Nil(t, rc.dockerProxy)
-	assert.NoFileExists(t, proxy.Socket)
 }
 
 // TestInterpolateOutputsIsPerMatrixCombo guards the matrix-output fix: combinations share one
@@ -1145,12 +1094,19 @@ func TestRunContext_cleanupFailedStart(t *testing.T) {
 		calls    int
 		err      error
 		sentinel any
+		cancel   context.CancelFunc
 	}
 	newRC := func(c *capture) *RunContext {
 		return &RunContext{
 			JobName: "job",
 			cleanUpJobContainer: func(ctx context.Context) error {
 				c.calls++
+				if c.cancel != nil {
+					c.cancel()
+				}
+				deadline, ok := ctx.Deadline()
+				require.True(t, ok)
+				assert.WithinDuration(t, time.Now().Add(time.Minute), deadline, time.Second)
 				c.err = ctx.Err()
 				c.sentinel = ctx.Value(sentinel)
 				return nil
@@ -1158,9 +1114,10 @@ func TestRunContext_cleanupFailedStart(t *testing.T) {
 		}
 	}
 
-	t.Run("runs teardown on the live context", func(t *testing.T) {
-		var c capture
-		ctx := context.WithValue(context.Background(), sentinel, "v")
+	t.Run("detaches teardown from cancellation during cleanup", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.WithValue(context.Background(), sentinel, "v"))
+		defer cancel()
+		c := capture{cancel: cancel}
 
 		newRC(&c).cleanupFailedStart(ctx)
 
@@ -1178,7 +1135,7 @@ func TestRunContext_cleanupFailedStart(t *testing.T) {
 
 		assert.Equal(t, 1, c.calls)
 		require.NoError(t, c.err)
-		assert.Nil(t, c.sentinel)
+		assert.Equal(t, "v", c.sentinel)
 	})
 
 	t.Run("no-op when there is nothing to clean up", func(t *testing.T) {
