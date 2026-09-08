@@ -291,7 +291,7 @@ The runner uses them for its own requests and gives them to every job, in lower 
 
 These hosts are added to `no_proxy` for jobs, so they are always reached directly:
 
-- the cache server
+- the built-in cache server, whose address is assigned at startup; a `cache.external_server` is yours to add if it needs bypassing
 - `localhost`, `127.0.0.1` and `::1`
 - the job's service containers
 - the Docker daemon, when it is reached over `tcp://`
@@ -325,7 +325,9 @@ cache:
   v2: false
 ```
 
-Those actions refuse any host they do not take for GitHub. Rather than misreport the server URL, the runner edits that check out of the action's own bundle on its way into the job, undone whenever the action is downloaded again. A bundle it does not recognise is left alone and keeps to v1. The same edit lets the stock `actions/upload-artifact` and `actions/download-artifact` work from `v4.4.0` on, without the `gitea-upload-artifact` fork, so it is made whatever `v2` says: that setting only governs the API the runner advertises. Set `runner.patch_actions: false` to leave every bundle exactly as shipped, an escape hatch for an action the edit breaks. The artifact actions then refuse again and the cache client keeps to v1.
+Those actions refuse any host they do not take for GitHub. Rather than misreport the server URL, the runner edits that check out of the action's own bundle on its way into the job, and puts the shared copy back afterwards. A bundle it does not recognise is left alone and keeps to v1. The same edit lets the stock `actions/upload-artifact` and `actions/download-artifact` work from `v4.4.0` on, without the `gitea-upload-artifact` fork, so it is made whatever `v2` says: that setting only governs the API the runner advertises. Set `runner.patch_actions: false` to leave every bundle exactly as shipped, an escape hatch for an action the edit breaks. The artifact actions then refuse again and the cache client keeps to v1.
+
+Serving v2 also makes the cache server the results origin, since that is the only address those clients read, so a job's artifact calls arrive there too and are answered with a redirect to Gitea. Jobs therefore need to reach the cache server to upload artifacts, not just to cache. The cache server itself connects out to Gitea only where the job's own client could not follow that redirect: a scheme change between the two, or `runner.insecure` against a certificate only the cache server accepts. `v2: false` points artifact calls straight at Gitea instead, unless the job's client could not use that address itself: an instance under a sub-path, whose prefix those clients discard, or one reached with `runner.insecure`.
 
 **Shared cache across multiple runners**
 
