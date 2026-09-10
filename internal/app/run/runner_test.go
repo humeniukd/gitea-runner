@@ -139,6 +139,10 @@ func TestRunnerReclaimsVolumesAfterReporting(t *testing.T) {
 				case path == "/volumes/create":
 					volumesCreated.Store(true)
 					_, _ = io.WriteString(writer, "{}")
+				case strings.HasSuffix(path, "/exec"):
+					_, _ = io.WriteString(writer, `{"Id":"exec-id"}`)
+				case strings.HasPrefix(path, "/exec/"):
+					_, _ = io.WriteString(writer, `{"Running":false,"ExitCode":0}`)
 				case request.Method == http.MethodDelete || strings.HasSuffix(path, "/start") || strings.HasSuffix(path, "/kill") || strings.HasSuffix(path, "/archive"):
 					if request.Method == http.MethodDelete && strings.HasPrefix(path, "/volumes/") && volumesCreated.Load() {
 						assert.Equal(t, mode != "post-task script", reported.Load())

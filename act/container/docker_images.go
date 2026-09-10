@@ -8,11 +8,10 @@ package container
 
 import (
 	"context"
-	"strings"
+	"fmt"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/client"
-	specs "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // ImageExistsLocally returns a boolean indicating if an image with the
@@ -31,23 +30,11 @@ func ImageExistsLocally(ctx context.Context, imageName, platform string) (bool, 
 		return false, err
 	}
 
-	if platform == "" || platform == "any" {
+	if platform == "" || platform == "any" || fmt.Sprintf("%s/%s", inspectImage.Os, inspectImage.Architecture) == platform {
 		return true, nil
 	}
 
-	want, err := parsePlatform(platform)
-	if err != nil {
-		return false, err
-	}
-	return platformMatches(want, inspectImage.Os, inspectImage.Architecture, inspectImage.Variant), nil
-}
-
-// platformMatches reports whether an image satisfies a requested platform. An unrequested
-// variant matches any, so `linux/arm64` still accepts a v8 image.
-func platformMatches(want *specs.Platform, os, arch, variant string) bool {
-	return strings.EqualFold(want.OS, os) &&
-		strings.EqualFold(want.Architecture, arch) &&
-		(want.Variant == "" || strings.EqualFold(want.Variant, variant))
+	return false, nil
 }
 
 // RemoveImage removes image from local store, the function is used to run different
