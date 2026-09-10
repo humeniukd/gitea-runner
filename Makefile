@@ -18,7 +18,7 @@ DOCKER_TAG ?= nightly
 DOCKER_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)
 DOCKER_ROOTLESS_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)-dind-rootless
 
-GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1 # renovate: datasource=go
+GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 # renovate: datasource=go
 GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.7.0 # renovate: datasource=go
 
 GOTEST_FLAGS ?= -race -timeout 20m -parallel 8
@@ -96,13 +96,8 @@ go-check:
 	fi
 
 .PHONY: fmt-check
-fmt-check: fmt
-	@diff=$$(git diff --color=always -- '*.go'); \
-	if [ -n "$$diff" ]; then \
-		echo "Please run 'make fmt' and commit the result:"; \
-		printf "%s" "$${diff}"; \
-		exit 1; \
-	fi
+fmt-check: ## check the Go code formatting
+	$(GO) run $(GOLANGCI_LINT_PACKAGE) fmt --diff-colored
 
 .PHONY: deps-tools
 deps-tools: ## install tool dependencies
@@ -149,13 +144,8 @@ tidy: ## run go mod tidy
 	fi
 
 .PHONY: tidy-check
-tidy-check: tidy
-	@diff=$$(git diff --color=always -- go.mod go.sum); \
-	if [ -n "$$diff" ]; then \
-		echo "Please run 'make tidy' and commit the result:"; \
-		printf "%s" "$${diff}"; \
-		exit 1; \
-	fi
+tidy-check: ## check that go.mod and go.sum are tidy
+	$(GO) mod tidy -diff
 
 .PHONY: test
 test: ## test everything (integration tests self-skip without docker/network)
@@ -171,7 +161,7 @@ coverage-report: ## turn coverage.txt from `make test` into .tmp/coverage.md
 test-dind: ## run the daemon-facing tests against the built dind image (TARGET=dind|dind-rootless)
 	@./scripts/test-dind.sh $(TARGET)
 
-E2E_JOB_IMAGE ?= node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584 # renovate: datasource=docker
+E2E_JOB_IMAGE ?= node:24-bookworm@sha256:be23f54a88d34e8824c741b19b91064094f92c1c97b194144bfc8b50d67258e2 # renovate: datasource=docker
 SERVICE_IMAGE ?= nginx:1.31.4-alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913 # renovate: datasource=docker
 E2E_GITEA_IMAGE ?= gitea/gitea:main-nightly
 E2E_CONCURRENCY ?= 8

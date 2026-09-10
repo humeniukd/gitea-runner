@@ -7,12 +7,21 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
@@ -21,6 +30,7 @@ import (
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
 	"github.com/docker/cli/cli/compose/loader"
+	"github.com/moby/moby/api/types/volume"
 	log "github.com/sirupsen/logrus"
 	assert "github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -220,8 +230,9 @@ func (fakeContainer) Start(bool) common.Executor { return func(context.Context) 
 
 func (fakeContainer) Remove() common.Executor { return func(context.Context) error { return nil } }
 
-func (fakeContainer) Close() common.Executor { return func(context.Context) error { return nil } }
-func (fakeContainer) GetActPath() string     { return "/var/run/act" }
+func (fakeContainer) Close() common.Executor             { return func(context.Context) error { return nil } }
+func (fakeContainer) GetActPath() string                 { return "/var/run/act" }
+func (fakeContainer) ToContainerPath(path string) string { return path }
 func (fakeContainer) Create([]string, []string) common.Executor {
 	return func(context.Context) error { return nil }
 }
@@ -236,10 +247,80 @@ func (fakeContainer) Inspect(context.Context) (*container.Info, error) {
 
 func (fakeContainer) DumpLogs(context.Context) error { return nil }
 
+func fakeDockerDaemon(t *testing.T, handler http.HandlerFunc) {
+	t.Helper()
+	daemon := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(request.URL.Path, "/_ping") {
+			writer.Header().Set("API-Version", "1.47")
+		} else {
+			handler(writer, request)
+		}
+	}))
+	t.Cleanup(daemon.Close)
+	t.Setenv("DOCKER_HOST", daemon.URL)
+}
+
+func startJobContainerInputs(t *testing.T, workflowYAML string, cfg *Config) []*container.NewContainerInput {
+	t.Helper()
+	workflow, err := model.ReadWorkflow(strings.NewReader(workflowYAML))
+	require.NoError(t, err)
+
+	var inputs []*container.NewContainerInput
+	origNewContainer := newContainer
+	newContainer = func(input *container.NewContainerInput) container.ExecutionsEnvironment {
+		inputs = append(inputs, input)
+		return fakeContainer{}
+	}
+	t.Cleanup(func() { newContainer = origNewContainer })
+
+	cfg.Workdir = "/tmp"
+	cfg.ContainerNetworkMode = "host" // an explicit network mode creates no network
+	cfg.Env = map[string]string{}
+	cfg.Secrets = map[string]string{}
+
+	rc := &RunContext{
+		Name:   "test",
+		Config: cfg,
+		Env:    map[string]string{},
+		Run: &model.Run{
+			JobID:    "job",
+			Workflow: workflow,
+		},
+	}
+	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
+	require.NoError(t, rc.resolvePlatformImage(t.Context()))
+
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("API-Version", "1.47")
+			_, _ = io.WriteString(w, "OK")
+		case strings.HasSuffix(r.URL.Path, "/containers/json"), strings.HasSuffix(r.URL.Path, "/networks"):
+			_, _ = io.WriteString(w, "[]")
+		case strings.HasSuffix(r.URL.Path, "/volumes"):
+			_, _ = io.WriteString(w, `{"Volumes":[]}`)
+		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/volumes/"):
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/info"):
+			_, _ = io.WriteString(w, `{"Architecture":"amd64","OSType":"linux"}`)
+		default:
+			t.Errorf("unexpected Docker request: %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(daemon.Close)
+	t.Setenv("DOCKER_HOST", daemon.URL)
+	require.NoError(t, rc.startJobContainer()(t.Context()))
+
+	return inputs
+}
+
 // Regression test: a service without a `credentials:` block resolves to empty
 // credentials, which used to overwrite the job container's own credentials.
 func TestStartJobContainerKeepsJobCredentialsWithServices(t *testing.T) {
-	workflow, err := model.ReadWorkflow(strings.NewReader(`
+	inputs := startJobContainerInputs(t, `
 name: test
 on: push
 jobs:
@@ -259,35 +340,7 @@ jobs:
           username: db-user
           password: db-password
     steps: []
-`))
-	require.NoError(t, err)
-
-	var inputs []*container.NewContainerInput
-	origNewContainer := newContainer
-	newContainer = func(input *container.NewContainerInput) container.ExecutionsEnvironment {
-		inputs = append(inputs, input)
-		return fakeContainer{}
-	}
-	t.Cleanup(func() { newContainer = origNewContainer })
-
-	rc := &RunContext{
-		Name: "test",
-		Config: &Config{
-			Workdir:              "/tmp",
-			ContainerNetworkMode: "host",
-			Env:                  map[string]string{},
-			Secrets:              map[string]string{},
-		},
-		Env: map[string]string{},
-		Run: &model.Run{
-			JobID:    "job",
-			Workflow: workflow,
-		},
-	}
-	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
-
-	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
-	require.Error(t, rc.startJobContainer()(t.Context()))
+`, &Config{})
 
 	credentials := map[string][2]string{}
 	for _, in := range inputs {
@@ -301,10 +354,57 @@ jobs:
 	require.Equal(t, [2]string{"", ""}, credentials["redis:latest"])
 }
 
+func TestStartJobContainerGivesServicesTheirVolumes(t *testing.T) {
+	redis := startJobContainerInputs(t, `
+jobs:
+  job:
+    services:
+      redis:
+        image: redis:latest
+        volumes:
+          - data:/data
+`, &Config{ValidVolumes: []string{"data"}})[0]
+
+	require.Equal(t, "redis:latest", redis.Image) // services are built before the job container
+	require.Equal(t, []string{"data"}, redis.ValidVolumes)
+	require.Equal(t, map[string]string{"data": "/data"}, redis.Mounts)
+	require.Empty(t, redis.Binds) // the docker socket is the job container's alone
+	require.Empty(t, redis.WorkingDir)
+}
+
+// Only the workflow's options may be stripped later, so the two sources have to reach the
+// container apart from each other.
+func TestStartJobContainerKeepsRunnerOptionsApartFromWorkflowOptions(t *testing.T) {
+	inputs := startJobContainerInputs(t, `
+name: test
+on: push
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    container:
+      image: registry.example/job:latest
+      options: --cap-add SYS_PTRACE
+    services:
+      redis:
+        image: redis:latest
+        options: --shm-size 1g
+    steps: []
+`, &Config{ContainerOptions: "--device /dev/fuse"})
+
+	options := map[string][2]string{}
+	for _, in := range inputs {
+		options[in.Image] = [2]string{in.RunnerOptions, in.WorkflowOptions}
+	}
+
+	require.Equal(t, [2]string{"--device /dev/fuse", "--cap-add SYS_PTRACE"}, options["registry.example/job:latest"])
+	// a service container gets no options from the runner's config today
+	require.Equal(t, [2]string{"", "--shm-size 1g"}, options["redis:latest"])
+}
+
 // A service container reaches the internet the same way the job does, so it inherits the
 // job's proxy; a service that sets the variable itself keeps its own value.
 func TestStartJobContainerGivesServicesTheJobProxy(t *testing.T) {
-	workflow, err := model.ReadWorkflow(strings.NewReader(`
+	inputs := startJobContainerInputs(t, `
 name: test
 on: push
 jobs:
@@ -320,36 +420,7 @@ jobs:
         env:
           no_proxy: db-only.example
     steps: []
-`))
-	require.NoError(t, err)
-
-	var inputs []*container.NewContainerInput
-	origNewContainer := newContainer
-	newContainer = func(input *container.NewContainerInput) container.ExecutionsEnvironment {
-		inputs = append(inputs, input)
-		return fakeContainer{}
-	}
-	t.Cleanup(func() { newContainer = origNewContainer })
-
-	rc := &RunContext{
-		Name: "test",
-		Config: &Config{
-			Workdir:              "/tmp",
-			ContainerNetworkMode: "host",
-			Env:                  map[string]string{},
-			ProxyEnv:             map[string]string{"http_proxy": "http://proxy:3128", "no_proxy": "internal.example"},
-			Secrets:              map[string]string{},
-		},
-		Env: map[string]string{},
-		Run: &model.Run{
-			JobID:    "job",
-			Workflow: workflow,
-		},
-	}
-	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
-
-	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
-	require.Error(t, rc.startJobContainer()(t.Context()))
+`, &Config{ProxyEnv: map[string]string{"http_proxy": "http://proxy:3128", "no_proxy": "internal.example"}})
 
 	env := map[string][]string{}
 	for _, in := range inputs {
@@ -422,7 +493,8 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 					config := testcase.rc.Config
 					config.Workdir = testcase.name
 					config.BindWorkdir = bindWorkDir
-					gotbind, gotmount := rctemplate.GetBindsAndMounts()
+					gotbind, gotmount, err := rctemplate.GetBindsAndMounts()
+					require.NoError(t, err)
 
 					// Name binds/mounts are either/or
 					if config.BindWorkdir {
@@ -481,7 +553,8 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 			rc.Run.Workflow.Jobs = map[string]*model.Job{"job1": job}
 			rc.ExprEval = rc.NewExpressionEvaluator(context.Background())
 
-			gotbind, gotmount := rc.GetBindsAndMounts()
+			gotbind, gotmount, err := rc.GetBindsAndMounts()
+			require.NoError(t, err)
 			assert.Contains(t, gotbind, "/host/mame/roms:/root/.mame/roms:ro")
 			assert.NotContains(t, gotbind, "${{ secrets.MAME }}")
 			assert.NotContains(t, gotmount, "${{ secrets.MAME }}")
@@ -510,37 +583,30 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 				rc.Run.JobID = "job1"
 				rc.Run.Workflow.Jobs = map[string]*model.Job{"job1": job}
 
-				jobBinds, jobMounts := rc.GetBindsAndMounts()
-				svcBinds, svcMounts := rc.GetServiceBindsAndMounts(testcase.volumes)
-				// job and service containers classify volumes alike, only their own mounts differ
-				for _, got := range []struct {
-					binds  []string
-					mounts map[string]string
-				}{{jobBinds, jobMounts}, {svcBinds, svcMounts}} {
-					gotbind, gotmount := got.binds, got.mounts
+				gotbind, gotmount, err := rc.GetBindsAndMounts()
+				require.NoError(t, err)
 
-					if len(testcase.wantbind) > 0 {
-						assert.Contains(t, gotbind, testcase.wantbind)
-					}
+				if len(testcase.wantbind) > 0 {
+					assert.Contains(t, gotbind, testcase.wantbind)
+				}
 
-					for k, v := range testcase.wantmount {
-						assert.Contains(t, gotmount, k)
-						assert.Equal(t, gotmount[k], v)
-					}
+				for k, v := range testcase.wantmount {
+					assert.Contains(t, gotmount, k)
+					assert.Equal(t, gotmount[k], v)
+				}
 
-					// Docker rejects a container with two mounts on one target, so the job's own
-					// volumes must displace the runner's rather than pile up next to them.
-					targets := map[string]bool{}
-					for _, bind := range gotbind {
-						parsed, err := loader.ParseVolume(bind)
-						require.NoError(t, err)
-						assert.NotContains(t, targets, parsed.Target, "%s mounts an already mounted target", bind)
-						targets[parsed.Target] = true
-					}
-					for source, target := range gotmount {
-						assert.NotContains(t, targets, target, "%s mounts an already mounted target", source)
-						targets[target] = true
-					}
+				// Docker rejects a container with two mounts on one target, so the job's own
+				// volumes must displace the runner's rather than pile up next to them.
+				targets := map[string]bool{}
+				for _, bind := range gotbind {
+					parsed, err := loader.ParseVolume(bind)
+					require.NoError(t, err)
+					assert.NotContains(t, targets, parsed.Target, "%s mounts an already mounted target", bind)
+					targets[parsed.Target] = true
+				}
+				for source, target := range gotmount {
+					assert.NotContains(t, targets, target, "%s mounts an already mounted target", source)
+					targets[target] = true
 				}
 			})
 		}
@@ -553,11 +619,13 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 			Config: &Config{},
 		}
 
-		_, gotmount := rc.GetBindsAndMounts()
+		_, gotmount, err := rc.GetBindsAndMounts()
+		require.NoError(t, err)
 		assert.NotContains(t, gotmount, sharedToolCacheVolume)
 
 		rc.Config.SharedToolCache = true
-		_, gotmount = rc.GetBindsAndMounts()
+		_, gotmount, err = rc.GetBindsAndMounts()
+		require.NoError(t, err)
 		assert.Equal(t, container.DefaultToolCache, gotmount[sharedToolCacheVolume])
 	})
 }
@@ -583,6 +651,11 @@ func TestRunContextValidVolumes(t *testing.T) {
 	// a job may mount it only while the runner does
 	rc.Config.SharedToolCache = false
 	assert.NotContains(t, rc.validVolumes(), sharedToolCacheVolume)
+
+	rc.Config.Workdir = "/workspace/1/owner/repo"
+	assert.NotContains(t, rc.validVolumes(), rc.Config.Workdir)
+	rc.Config.BindWorkdir = true
+	assert.Contains(t, rc.validVolumes(), rc.Config.Workdir)
 }
 
 func TestCleanupJobResourcesCleansServicesWithoutJobContainer(t *testing.T) {
@@ -595,34 +668,142 @@ func TestCleanupJobResourcesCleansServicesWithoutJobContainer(t *testing.T) {
 		serviceContainers: []*serviceContainer{{name: "svc", container: service}},
 	}
 
-	err := rc.cleanupJobResources("external-network", false)(context.Background())
+	err := rc.cleanupJobResources("external-network", false, true)(common.WithDryrun(t.Context(), true))
 	require.NoError(t, err)
 	service.AssertExpectations(t)
 }
 
-// cleanup used to bail out on a previous step's error and on a cancelled context
-func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
-	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
-
-	jobContainer := &containerMock{}
-	jobContainer.On("Remove").Return(func(context.Context) error { return errors.New("removal failed") }).Once()
-	service := &containerMock{}
-	service.On("Remove").Return(func(context.Context) error { return nil }).Once()
-	service.On("Close").Return(func(context.Context) error { return nil }).Once()
-
+func TestCleanupJobVolumesReapsAbandonedDeferredCleanup(t *testing.T) {
+	now := time.Date(2026, time.September, 10, 12, 0, 0, 0, time.UTC)
 	rc := &RunContext{
-		Name:              "job",
-		Config:            &Config{},
-		Run:               &model.Run{Workflow: &model.Workflow{Name: "wf"}, JobID: "job"},
-		JobContainer:      jobContainer,
-		serviceContainers: []*serviceContainer{{name: "svc", container: service}},
+		Config:       &Config{ContainerNetworkCreateOptions: container.NewDockerNetworkCreateExecutorInput{RunnerUUID: "runner-1"}},
+		Run:          &model.Run{Workflow: &model.Workflow{Name: "workflow"}, JobID: "job"},
+		JobContainer: fakeContainer{},
 	}
+	volumes := map[string]volume.Volume{}
+	fakeDockerDaemon(t, func(writer http.ResponseWriter, request *http.Request) {
+		path := strings.TrimPrefix(request.URL.Path, "/v1.47")
+		switch {
+		case path == "/volumes/create":
+			options := volume.Volume{CreatedAt: now.Format(time.RFC3339)}
+			assert.NoError(t, json.UnmarshalRead(request.Body, &options))
+			volumes[options.Name] = options
+			assert.NoError(t, json.MarshalWrite(writer, volumes[options.Name]))
+		case path == "/volumes":
+			assert.JSONEq(t, `{"label":{"com.gitea.runner.uuid=runner-1":true},"dangling":{"true":true}}`, request.URL.Query().Get("filters"))
+			assert.NoError(t, json.MarshalWrite(writer, map[string]any{"Volumes": slices.Collect(maps.Values(volumes))}))
+		case request.Method == http.MethodDelete:
+			name := strings.TrimPrefix(path, "/volumes/")
+			assert.NotContains(t, []string{"1", "true"}, request.URL.Query().Get("force"))
+			if name == "became-active" || name == "remove-failed" {
+				writer.WriteHeader(http.StatusConflict)
+				_, _ = fmt.Fprintf(writer, `{"message":%q}`, name)
+				return
+			}
+			delete(volumes, name)
+			writer.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected Docker request: %s %s", request.Method, request.URL)
+		}
+	})
+	name := rc.jobContainerName()
+	require.NoError(t, rc.createJobVolumes(t.Context(), map[string]string{name: "/workspace", name + "-env": "/var/run/act", "shared-cache": "/cache"}))
+	assert.ElementsMatch(t, []string{name, name + "-env"}, slices.Collect(maps.Keys(volumes)))
+	rc.deferVolumeCleanup = func(common.Executor) {}
+	require.NoError(t, rc.cleanupJobResources("", false, false)(t.Context()))
+	require.Len(t, volumes, 2)
+	for _, name := range []string{"became-active", "remove-failed"} {
+		volumes[name] = volume.Volume{Name: name, Labels: volumes[rc.jobContainerName()].Labels, CreatedAt: now.Format(time.RFC3339)}
+	}
+	volumes["foreign"] = volume.Volume{Name: "foreign", Labels: map[string]string{"com.gitea.runner.uuid": "runner-2"}, CreatedAt: now.Format(time.RFC3339)}
+	volumes["fresh"] = volume.Volume{Name: "fresh", Labels: volumes[name].Labels, CreatedAt: now.Add(48 * time.Hour).Format(time.RFC3339)}
+	volumes["unknown-age"] = volume.Volume{Name: "unknown-age", Labels: volumes[name].Labels}
+	err := container.RemoveOrphanJobVolumes(t.Context(), "runner-1", now.Add(24*time.Hour))
+	require.ErrorContains(t, err, "became-active")
+	require.ErrorContains(t, err, "remove-failed")
+	assert.ElementsMatch(t, []string{"became-active", "remove-failed", "foreign", "fresh", "unknown-age"}, slices.Collect(maps.Keys(volumes)))
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	require.Error(t, rc.cleanupJobResources("job-network", true)(ctx))
-	jobContainer.AssertExpectations(t)
-	service.AssertExpectations(t)
+func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
+	t.Setenv("TMPDIR", "/tmp")
+	proxyDir := t.TempDir()
+	for _, name := range []string{"synchronous", "proxy", "closed proxy", "deferred", "preclean deferred", "canceled"} {
+		t.Run(name, func(t *testing.T) {
+			proxy, preclean, deferred := strings.HasSuffix(name, "proxy"), strings.HasPrefix(name, "preclean"), strings.HasSuffix(name, "deferred")
+			if proxy && runtime.GOOS == "windows" {
+				t.Skip("Unix socket ownership is unavailable on Windows")
+			}
+			jobError, removeError, closeError := errors.New("remove job"), errors.New("remove service"), errors.New("close service")
+			job, service := &containerMock{}, &containerMock{}
+			job.On("Remove").Return(func(context.Context) error { return jobError }).Once()
+			service.On("Remove").Return(func(context.Context) error { return removeError }).Once()
+			service.On("Close").Return(func(context.Context) error { return closeError }).Once()
+			rc := &RunContext{
+				Config:            &Config{},
+				Run:               &model.Run{Workflow: &model.Workflow{Name: "wf"}, JobID: "job"},
+				JobContainer:      job,
+				serviceContainers: []*serviceContainer{{name: "svc", container: service}},
+			}
+			var volumeCleanup []common.Executor
+			if deferred {
+				rc.deferVolumeCleanup = func(cleanup common.Executor) { volumeCleanup = append(volumeCleanup, cleanup) }
+			}
+			volumeRemovals := 0
+			fakeDockerDaemon(t, func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method == http.MethodDelete {
+					volumeRemovals++
+				}
+				operation := request.Method + " " + strings.TrimPrefix(request.URL.Path, "/v1.47")
+				if request.URL.Query().Has("filters") {
+					operation = "labelled " + operation
+				}
+				writer.WriteHeader(http.StatusInternalServerError)
+				_, _ = fmt.Fprintf(writer, `{"message":%q}`, operation)
+			})
+			if proxy {
+				listener, err := net.Listen("unix", filepath.Join(proxyDir, "d.sock"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, listener.Close()) })
+				rc.dockerProxy, err = container.StartDockerProxy(listener.Addr().String(), proxyDir, rc.jobContainerName())
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, rc.closeDockerProxy(context.Background())) })
+				if name == "closed proxy" {
+					require.NoError(t, rc.closeDockerProxy(t.Context()))
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if name == "canceled" {
+				cancel()
+			}
+			err := rc.cleanupJobResources("job-network", true, preclean)(ctx)
+			if deferred && !preclean {
+				require.Len(t, volumeCleanup, 1)
+				assert.Zero(t, volumeRemovals)
+				err = errors.Join(err, volumeCleanup[0](ctx))
+			} else {
+				assert.Empty(t, volumeCleanup)
+			}
+			for _, failure := range []error{jobError, removeError, closeError} {
+				require.ErrorIs(t, err, failure)
+			}
+			if name == "canceled" {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				for _, operation := range []string{"DELETE /volumes/" + rc.jobContainerName(), "DELETE /volumes/" + rc.jobContainerName() + "-env", "GET /networks"} {
+					require.ErrorContains(t, err, operation)
+				}
+				assert.Equal(t, 2, volumeRemovals)
+			}
+			assert.Equal(t, proxy || preclean, strings.Contains(err.Error(), "labelled GET /containers/json"))
+			if proxy || preclean {
+				require.ErrorContains(t, err, "labelled GET /networks")
+				require.ErrorContains(t, err, "labelled GET /volumes")
+			}
+			assert.Nil(t, rc.dockerProxy)
+			assert.Equal(t, proxy, rc.hadDockerProxy)
+		})
+	}
 }
 
 // TestInterpolateOutputsIsPerMatrixCombo guards the matrix-output fix: combinations share one
@@ -634,8 +815,10 @@ func TestInterpolateOutputsIsPerMatrixCombo(t *testing.T) {
 	r := &runnerImpl{config: &Config{}}
 	ctx := context.Background()
 
-	rcA := r.newRunContext(ctx, run, map[string]any{"v": "a"})
-	rcB := r.newRunContext(ctx, run, map[string]any{"v": "b"})
+	rcA, err := r.newRunContext(ctx, run, map[string]any{"v": "a"})
+	require.NoError(t, err)
+	rcB, err := r.newRunContext(ctx, run, map[string]any{"v": "b"})
+	require.NoError(t, err)
 
 	require.NoError(t, rcA.interpolateOutputs()(ctx))
 	require.NoError(t, rcB.interpolateOutputs()(ctx))
@@ -982,6 +1165,14 @@ func TestRunContextGetEnv(t *testing.T) {
 	}
 }
 
+// a remote composite action re-evaluates its env per stage, so inputs must follow it
+func TestSetActionEnvRefreshesInputs(t *testing.T) {
+	rc := &RunContext{}
+	rc.setActionEnv(map[string]string{"INPUT_MSG": "pre"})
+	rc.setActionEnv(map[string]string{"INPUT_MSG": "main"})
+	assert.Equal(t, map[string]any{"msg": "main"}, rc.actionInputs)
+}
+
 func TestCreateContainerNameBoundedForLongMatrixInput(t *testing.T) {
 	longMatrixValue := strings.Repeat("os=ubuntu-latest-go=1.24-node=22-", 20)
 	name := createContainerName(
@@ -1022,57 +1213,96 @@ func TestRunContext_cleanupFailedStart(t *testing.T) {
 	type ctxKey string
 	const sentinel = ctxKey("sentinel")
 
-	// the fresh context is cancelled via defer on return, so capture state inside the stub
-	type capture struct {
-		calls    int
-		err      error
-		sentinel any
-	}
-	newRC := func(c *capture) *RunContext {
-		return &RunContext{
-			JobName: "job",
-			cleanUpJobContainer: func(ctx context.Context) error {
-				c.calls++
-				c.err = ctx.Err()
-				c.sentinel = ctx.Value(sentinel)
+	for name, canceled := range map[string]bool{"cancellation during cleanup": false, "already canceled": true} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.WithValue(t.Context(), sentinel, "v"))
+			defer cancel()
+			if canceled {
+				cancel()
+			}
+			calls := 0
+			(&RunContext{cleanUpJobContainer: func(ctx context.Context) error {
+				calls++
+				cancel()
+				deadline, ok := ctx.Deadline()
+				require.True(t, ok)
+				assert.WithinDuration(t, time.Now().Add(time.Minute), deadline, time.Second)
+				require.NoError(t, ctx.Err())
+				assert.Equal(t, "v", ctx.Value(sentinel))
 				return nil
-			},
-		}
+			}}).cleanupFailedStart(ctx)
+			assert.Equal(t, 1, calls)
+		})
 	}
 
-	t.Run("runs teardown on the live context", func(t *testing.T) {
-		var c capture
-		ctx := context.WithValue(context.Background(), sentinel, "v")
+	for _, testcase := range []struct {
+		name, health string
+		pullError    error
+	}{
+		{name: "healthy", health: container.HealthHealthy},
+		{name: "unhealthy", health: container.HealthUnhealthy},
+		{name: "pull failure", pullError: errors.New("pull failed")},
+	} {
+		t.Run(testcase.name, func(t *testing.T) {
+			var operations []string
+			record := func(operation string, failure error) func(context.Context) error {
+				return func(context.Context) error {
+					operations = append(operations, operation)
+					return failure
+				}
+			}
+			job, service := &containerMock{}, &containerMock{}
+			for name, instance := range map[string]*containerMock{"job": job, "service": service} {
+				instance.On("Pull", true).Return(record(name+".Pull", map[string]error{"job": testcase.pullError}[name]))
+				instance.On("Create", mock.Anything, mock.Anything).Return(record(name+".Create", nil))
+				instance.On("Start", false).Return(record(name+".Start", nil))
+				instance.On("Remove").Return(record(name+".Remove", nil))
+				instance.On("Close").Return(record(name+".Close", nil))
+			}
+			job.On("Copy", mock.Anything, mock.Anything).Return(record("job.Copy", nil))
+			job.On("Inspect", mock.Anything).Return(&container.Info{ID: "job-id"}, nil).
+				Run(func(mock.Arguments) { operations = append(operations, "job.Inspect") })
+			for _, health := range []string{container.HealthStarting, testcase.health} {
+				service.On("Inspect", mock.Anything).Return(&container.Info{State: "running", Health: health}, nil).
+					Run(func(mock.Arguments) { operations = append(operations, "service.Inspect") }).Once()
+			}
+			service.On("DumpLogs", mock.Anything).Return(nil).
+				Run(func(mock.Arguments) { operations = append(operations, "service.DumpLogs") })
+			origNewContainer := newContainer
+			newContainer = func(input *container.NewContainerInput) container.ExecutionsEnvironment {
+				return map[string]*containerMock{"postgres:latest": service, "node:20": job}[input.Image]
+			}
+			t.Cleanup(func() { newContainer = origNewContainer })
+			workflow, err := model.ReadWorkflow(strings.NewReader("jobs: {job: {services: {postgres: {image: postgres:latest}}}}"))
+			require.NoError(t, err)
+			rc := &RunContext{
+				Config:        &Config{ForcePull: true, ContainerNetworkMode: "host", Workdir: "/workspace"},
+				Run:           &model.Run{JobID: "job", Workflow: workflow},
+				platformImage: "node:20",
+			}
+			ctx := common.WithDryrun(t.Context(), true)
+			rc.ExprEval = rc.NewExpressionEvaluator(ctx)
+			err = rc.startContainer().Then(rc.stopContainer()).Finally(rc.closeContainer())(ctx)
+			want := "job.Remove service.Remove service.Close service.Pull job.Pull"
+			if testcase.pullError != nil {
+				require.ErrorIs(t, err, testcase.pullError)
+			} else {
+				want += " service.Create service.Start service.Inspect job.Create job.Start job.Inspect job.Copy service.Inspect"
+				if testcase.health == container.HealthUnhealthy {
+					require.ErrorContains(t, err, "the service 'postgres' is unhealthy")
+					want += " service.DumpLogs"
+				} else {
+					require.NoError(t, err)
+				}
+			}
+			assert.Equal(t, strings.Fields(want+" job.Remove service.Remove service.Close job.Close"), operations)
+		})
+	}
 
-		newRC(&c).cleanupFailedStart(ctx)
-
-		assert.Equal(t, 1, c.calls)
-		require.NoError(t, c.err)
-		assert.Equal(t, "v", c.sentinel)
-	})
-
-	t.Run("falls back to a fresh context when the input is done", func(t *testing.T) {
-		var c capture
-		ctx, cancel := context.WithCancel(context.WithValue(context.Background(), sentinel, "v"))
-		cancel()
-
-		newRC(&c).cleanupFailedStart(ctx)
-
-		assert.Equal(t, 1, c.calls)
-		require.NoError(t, c.err)
-		assert.Nil(t, c.sentinel)
-	})
-
-	t.Run("no-op when there is nothing to clean up", func(t *testing.T) {
-		assert.NotPanics(t, func() { (&RunContext{}).cleanupFailedStart(context.Background()) })
-	})
+	(&RunContext{}).cleanupFailedStart(t.Context())
 }
 
 func TestWaitForServiceContainers(t *testing.T) {
-	origInterval := serviceReadyPollInterval
-	serviceReadyPollInterval = time.Millisecond
-	defer func() { serviceReadyPollInterval = origInterval }()
-
 	newRunContext := func(timeout time.Duration, services ...*serviceContainer) *RunContext {
 		return &RunContext{
 			Config:            &Config{ServiceReadyTimeout: timeout},
@@ -1090,16 +1320,26 @@ func TestWaitForServiceContainers(t *testing.T) {
 		service.AssertExpectations(t)
 	})
 
-	t.Run("waits while a service is still starting", func(t *testing.T) {
-		service := &containerMock{}
-		service.On("Inspect", mock.Anything).
-			Return(&container.Info{ID: "id", State: "running", Health: container.HealthStarting}, nil).Twice()
-		service.On("Inspect", mock.Anything).
-			Return(&container.Info{ID: "id", State: "running", Health: container.HealthHealthy}, nil).Once()
+	t.Run("polls at a fixed interval and logs starting only once", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var pollTimes []time.Duration
+			started := time.Now()
+			service := &containerMock{}
+			service.On("Inspect", mock.Anything).
+				Run(func(_ mock.Arguments) { pollTimes = append(pollTimes, time.Since(started)) }).
+				Return(&container.Info{ID: "id", State: "running", Health: container.HealthStarting}, nil).Twice()
+			service.On("Inspect", mock.Anything).
+				Run(func(_ mock.Arguments) { pollTimes = append(pollTimes, time.Since(started)) }).
+				Return(&container.Info{ID: "id", State: "running", Health: container.HealthHealthy}, nil).Once()
 
-		rc := newRunContext(0, &serviceContainer{name: "postgres", container: service})
-		require.NoError(t, rc.waitForServiceContainers()(context.Background()))
-		service.AssertExpectations(t)
+			var output bytes.Buffer
+			logger := log.New()
+			logger.SetOutput(&output)
+			require.NoError(t, newRunContext(0, &serviceContainer{name: "postgres", container: service}).waitForServiceContainers()(common.WithLogger(t.Context(), logger.WithFields(nil))))
+			assert.Equal(t, []time.Duration{0, time.Second, 2 * time.Second}, pollTimes)
+			assert.Equal(t, 1, strings.Count(output.String(), "postgres service is starting."))
+			assert.Contains(t, output.String(), "postgres service is healthy.")
+		})
 	})
 
 	t.Run("fails with the probe output when a service is unhealthy", func(t *testing.T) {
@@ -1252,6 +1492,29 @@ func TestGetJobContextReportsContainers(t *testing.T) {
 	}, jobContext.Services)
 }
 
+func TestCaptureJobContainerInfoExportsDockerWorkspace(t *testing.T) {
+	job := &containerMock{}
+	job.On("Inspect", mock.Anything).Return(&container.Info{
+		ID:     "job-container-id",
+		Mounts: map[string]string{"/workspace/owner/repo": "/var/lib/docker/volumes/job/_data"},
+	}, nil)
+	rc := &RunContext{
+		Config:       &Config{Workdir: "/workspace/owner/repo/"},
+		Env:          map[string]string{},
+		JobContainer: job,
+	}
+
+	require.NoError(t, rc.captureJobContainerInfo()(context.Background()))
+
+	assert.Equal(t, "job-container-id", rc.jobContainerID)
+	assert.Equal(t, "/var/lib/docker/volumes/job/_data", rc.Env["GITEA_DOCKER_WORKSPACE"])
+
+	rc.Config.Workdir = "/elsewhere"
+	rc.Env = map[string]string{}
+	require.NoError(t, rc.captureJobContainerInfo()(context.Background()))
+	assert.NotContains(t, rc.Env, "GITEA_DOCKER_WORKSPACE")
+}
+
 // A job that never started a container reports an empty context, not a placeholder.
 func TestGetJobContextWithoutContainer(t *testing.T) {
 	jobContext := (&RunContext{}).getJobContext()
@@ -1300,12 +1563,14 @@ func TestRunContextImageOS(t *testing.T) {
 	t.Run("prefers the release in the resolved image tag", func(t *testing.T) {
 		rc := createRunsOnRunContext(t, "ubuntu-latest")
 		rc.Config.PlatformPicker = func([]string) string { return "docker.gitea.com/runner-images:ubuntu-24.04" }
+		require.NoError(t, rc.resolvePlatformImage(ctx))
 		assert.Equal(t, "ubuntu24", rc.imageOS(ctx))
 	})
 
 	t.Run("falls back to the runs-on label", func(t *testing.T) {
 		rc := createRunsOnRunContext(t, "ubuntu-22.04")
 		rc.Config.PlatformPicker = func([]string) string { return "some-image" }
+		require.NoError(t, rc.resolvePlatformImage(ctx))
 		assert.Equal(t, "ubuntu22", rc.imageOS(ctx))
 	})
 
@@ -1325,10 +1590,15 @@ func TestRunContextGetRunnerContext(t *testing.T) {
 	t.Run("adds the runner values the container cannot know", func(t *testing.T) {
 		rc := createRunsOnRunContext(t, "ubuntu-latest")
 		rc.Config.RunnerName = "runner-1"
+		rc.Config.Workdir = "/workspace/owner/repo"
 
 		runnerContext := rc.getRunnerContext(ctx)
 		assert.Equal(t, "runner-1", runnerContext["name"])
 		assert.Equal(t, "self-hosted", runnerContext["environment"])
+		assert.Equal(t, "/workspace/owner", runnerContext["workspace"])
+		assert.Equal(t, "/workspace/owner/repo", rc.getGithubContext(ctx).Workspace)
+		rc.Config.Env = map[string]string{"GITHUB_WORKSPACE": "/configured/work"}
+		assert.Equal(t, "/configured/work", rc.getGithubContext(ctx).Workspace)
 		assert.NotContains(t, runnerContext, "debug")
 	})
 
@@ -1341,13 +1611,50 @@ func TestRunContextGetRunnerContext(t *testing.T) {
 
 	t.Run("keeps the execution environment values", func(t *testing.T) {
 		rc := createRunsOnRunContext(t, "ubuntu-latest")
-		rc.JobContainer = &container.HostEnvironment{TmpDir: "/tmp/act", ToolCache: "/tmp/tool_cache"}
+		rc.Config.Workdir = "/host/work/owner/repo"
+		rc.JobContainer = &container.HostEnvironment{Workdir: rc.Config.Workdir, Path: "/container/work/owner/repo", TmpDir: "/tmp/act", ToolCache: "/tmp/tool_cache"}
 
 		runnerContext := rc.getRunnerContext(ctx)
 		assert.Equal(t, "/tmp/act", runnerContext["temp"])
 		assert.Equal(t, "/tmp/tool_cache", runnerContext["tool_cache"])
+		assert.Equal(t, "/container/work/owner", runnerContext["workspace"])
+		assert.Equal(t, "/container/work/owner/repo", rc.getGithubContext(ctx).Workspace)
 		assert.NotEmpty(t, runnerContext["os"])
 	})
+}
+
+func TestRunContextUpdateExtraPath(t *testing.T) {
+	longPath := strings.Repeat("x", 64*1024+1)
+	for _, testcase := range []struct {
+		name    string
+		content []byte
+		want    string
+		wantErr bool
+	}{
+		{name: "UTF-8 BOM", content: []byte("\xef\xbb\xbf/utf8/tools\n"), want: "/utf8/tools"},
+		{name: "UTF-16 BOM", content: []byte{0xff, 0xfe, 'C', 0, ':', 0, '\\', 0, 't', 0, 'o', 0, 'o', 0, 'l', 0, 's', 0, '\n', 0}, want: `C:\tools`},
+		{name: "over 64 KiB", content: []byte(longPath + "\n"), want: longPath},
+		{name: "over 16 MiB", content: []byte(strings.Repeat("x", 16*1024*1024+1)), wantErr: true},
+	} {
+		t.Run(testcase.name, func(t *testing.T) {
+			logger := log.New()
+			logger.SetOutput(io.Discard)
+			ctx := common.WithLogger(t.Context(), logger)
+			jobContainer := &containerMock{}
+			jobContainer.On("GetContainerArchive", mock.Anything, "/github/path").
+				Return(io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{name: "path", body: string(testcase.content)}))), nil).Once()
+			defer jobContainer.AssertExpectations(t)
+			rc := &RunContext{JobContainer: jobContainer}
+
+			err := rc.UpdateExtraPath(ctx, "/github/path")
+			if testcase.wantErr {
+				require.ErrorContains(t, err, "reading path file")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, []string{testcase.want}, rc.ExtraPath)
+		})
+	}
 }
 
 func TestParentDir(t *testing.T) {
@@ -1363,6 +1670,10 @@ func TestRunContextWithGithubEnvRunnerValues(t *testing.T) {
 	rc := createRunsOnRunContext(t, "ubuntu-latest")
 	rc.Config.RunnerName = "runner-1"
 	rc.Config.Secrets = map[string]string{"ACTIONS_STEP_DEBUG": "true"}
+	t.Setenv("ACTIONS_RUNTIME_URL", "")
+	rc.Config.ArtifactServerPath = "artifacts"
+	rc.Config.ArtifactServerAddr = "2001:db8::1"
+	rc.Config.ArtifactServerPort = "8080"
 
 	env := map[string]string{}
 	rc.withGithubEnv(ctx, &model.GithubContext{Workspace: "/workspace/owner/repo"}, env)
@@ -1371,4 +1682,5 @@ func TestRunContextWithGithubEnvRunnerValues(t *testing.T) {
 	assert.Equal(t, "self-hosted", env["RUNNER_ENVIRONMENT"])
 	assert.Equal(t, "/workspace/owner", env["RUNNER_WORKSPACE"])
 	assert.Equal(t, "1", env["RUNNER_DEBUG"])
+	assert.Equal(t, "http://[2001:db8::1]:8080/", env["ACTIONS_RUNTIME_URL"])
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"gitea.com/gitea/runner/act/common"
 
@@ -25,26 +26,27 @@ func (e ExitCodeError) Error() string {
 
 // NewContainerInput the input for the New function
 type NewContainerInput struct {
-	Image          string
-	Username       string
-	Password       string
-	Entrypoint     []string
-	Cmd            []string
-	WorkingDir     string
-	Env            []string
-	Binds          []string
-	Mounts         map[string]string
-	Name           string
-	Stdout         io.Writer
-	Stderr         io.Writer
-	NetworkMode    string
-	Privileged     bool
-	UsernsMode     string
-	Platform       string
-	Options        string
-	NetworkAliases []string
-	ExposedPorts   nat.PortSet
-	PortBindings   nat.PortMap
+	Image           string
+	Username        string
+	Password        string
+	Entrypoint      []string
+	Cmd             []string
+	WorkingDir      string
+	Env             []string
+	Binds           []string
+	Mounts          map[string]string
+	Name            string
+	Stdout          io.Writer
+	Stderr          io.Writer
+	NetworkMode     string
+	Privileged      bool
+	UsernsMode      string
+	Platform        string
+	RunnerOptions   string // container options the runner was configured with, trusted
+	WorkflowOptions string // container options the workflow asked for, untrusted
+	NetworkAliases  []string
+	ExposedPorts    nat.PortSet
+	PortBindings    nat.PortMap
 
 	// Gitea specific
 	AutoRemove   bool
@@ -74,6 +76,19 @@ const (
 // fragment, missingContainerError composes it into the message every operation shares.
 var ErrContainerNotFound = errors.New("does not exist")
 
+// DockerProxy is a job's docker socket, fronting the daemon's for the job's lifetime.
+type DockerProxy struct {
+	Socket    string
+	close     func(context.Context) error
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (p *DockerProxy) Close(ctx context.Context) error {
+	p.closeOnce.Do(func() { p.closeErr = p.close(ctx) })
+	return p.closeErr
+}
+
 // Info is a snapshot of a container, as of one inspect.
 type Info struct {
 	ID       string
@@ -83,13 +98,14 @@ type Info struct {
 	// HealthOutput is the last healthcheck probe's output.
 	HealthOutput string
 	Ports        map[string]string // container port ("5432") to the host port it is published on
+	Mounts       map[string]string // container path to its source on the daemon
 }
 
 // Container for managing docker run containers
 type Container interface {
 	Create(capAdd, capDrop []string) common.Executor
 	Copy(destPath string, files ...*FileEntry) common.Executor
-	CopyDir(destPath, srcPath string, useGitIgnore bool) common.Executor
+	CopyDir(destPath, srcPath string, useGitIgnore, skipGitDir bool) common.Executor
 	GetContainerArchive(ctx context.Context, srcPath string) (io.ReadCloser, error)
 	Inspect(ctx context.Context) (*Info, error)
 	DumpLogs(ctx context.Context) error

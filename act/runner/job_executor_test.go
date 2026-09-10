@@ -299,6 +299,9 @@ func TestNewJobExecutor(t *testing.T) {
 		executedSteps []string
 		result        string
 		hasError      bool
+		output        string
+		startError    error
+		cancelOnStart bool
 	}{
 		{
 			name:          "zeroSteps",
@@ -319,8 +322,8 @@ func TestNewJobExecutor(t *testing.T) {
 			executedSteps: []string{
 				"startContainer",
 				"step1",
-				"stopContainer",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "success",
@@ -336,8 +339,8 @@ func TestNewJobExecutor(t *testing.T) {
 			executedSteps: []string{
 				"startContainer",
 				"step1",
-				"stopContainer",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "failure",
@@ -354,8 +357,8 @@ func TestNewJobExecutor(t *testing.T) {
 				"startContainer",
 				"pre1",
 				"step1",
-				"stopContainer",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "success",
@@ -372,8 +375,8 @@ func TestNewJobExecutor(t *testing.T) {
 				"startContainer",
 				"step1",
 				"post1",
-				"stopContainer",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "success",
@@ -391,8 +394,8 @@ func TestNewJobExecutor(t *testing.T) {
 				"pre1",
 				"step1",
 				"post1",
-				"stopContainer",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "success",
@@ -418,12 +421,36 @@ func TestNewJobExecutor(t *testing.T) {
 				"step3",
 				"post3",
 				"post2",
-				"stopContainer",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "success",
 			hasError: false,
+		},
+		{
+			name:          "jobOutputExpressionFailure",
+			steps:         []*model.Step{{ID: "1"}},
+			preSteps:      []bool{false},
+			postSteps:     []bool{false},
+			executedSteps: []string{"startContainer", "step1", "interpolateOutputs", "stopContainer", "closeContainer"},
+			result:        "failure",
+			output:        "${{ 'test' != test }}",
+		},
+		{
+			name:          "start failure",
+			steps:         []*model.Step{{ID: "1"}},
+			executedSteps: []string{"startContainer", "closeContainer"},
+			startError:    errors.New("start failed"),
+		},
+		{
+			name:          "cancelled at startup boundary",
+			steps:         []*model.Step{{ID: "1"}},
+			preSteps:      []bool{false},
+			postSteps:     []bool{true},
+			executedSteps: []string{"startContainer", "step1", "post1", "interpolateOutputs", "stopContainer", "closeContainer"},
+			result:        "cancelled",
+			cancelOnStart: true,
 		},
 	}
 
@@ -435,7 +462,8 @@ func TestNewJobExecutor(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fmt.Printf("::group::%s\n", tt.name) //nolint:forbidigo // pre-existing issue from nektos/act
 
-			ctx := common.WithJobErrorContainer(context.Background())
+			ctx, cancel := context.WithCancel(common.WithJobErrorContainer(context.Background()))
+			defer cancel()
 			jim := &jobInfoMock{}
 			sfm := &stepFactoryMock{}
 			rc := &RunContext{
@@ -450,15 +478,22 @@ func TestNewJobExecutor(t *testing.T) {
 				},
 				Config: &Config{},
 			}
+			if tt.output != "" {
+				rc.Run.Job().Outputs = map[string]string{"bad": tt.output}
+				rc.outputTemplate = map[string]string{"bad": tt.output}
+			}
 			rc.ExprEval = rc.NewExpressionEvaluator(ctx)
 			executorOrder := make([]string, 0)
 
 			jim.On("steps").Return(tt.steps)
 
 			if len(tt.steps) > 0 {
-				jim.On("startContainer").Return(func(ctx context.Context) error {
+				jim.On("startContainer").Return(func(_ context.Context) error {
 					executorOrder = append(executorOrder, "startContainer")
-					return nil
+					if tt.cancelOnStart {
+						cancel()
+					}
+					return tt.startError
 				})
 			}
 
@@ -492,23 +527,31 @@ func TestNewJobExecutor(t *testing.T) {
 				defer sm.AssertExpectations(t)
 			}
 
-			if len(tt.steps) > 0 {
+			if len(tt.steps) > 0 && tt.startError == nil {
 				jim.On("matrix").Return(map[string]any{})
 
 				jim.On("interpolateOutputs").Return(func(ctx context.Context) error {
 					executorOrder = append(executorOrder, "interpolateOutputs")
+					if tt.output != "" {
+						return rc.interpolateOutputs()(ctx)
+					}
 					return nil
 				})
 
 				if contains("stopContainer", tt.executedSteps) {
 					jim.On("stopContainer").Return(func(ctx context.Context) error {
 						executorOrder = append(executorOrder, "stopContainer")
+						require.NoError(t, ctx.Err())
+						_, bounded := ctx.Deadline()
+						require.True(t, bounded)
 						return nil
 					})
 				}
 
 				jim.On("result", tt.result)
+			}
 
+			if len(tt.steps) > 0 {
 				jim.On("closeContainer").Return(func(ctx context.Context) error {
 					executorOrder = append(executorOrder, "closeContainer")
 					return nil
@@ -517,7 +560,15 @@ func TestNewJobExecutor(t *testing.T) {
 
 			executor := newJobExecutor(jim, sfm, rc)
 			err := executor(ctx)
-			assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+			switch {
+			case tt.startError != nil:
+				require.ErrorIs(t, err, tt.startError)
+			case tt.cancelOnStart:
+				require.ErrorIs(t, err, context.Canceled)
+			default:
+				require.NoError(t, err)
+			}
+			assert.Empty(t, rc.Run.Job().Outputs["bad"])
 			assert.Equal(t, tt.executedSteps, executorOrder)
 
 			jim.AssertExpectations(t)
@@ -1095,4 +1146,38 @@ func TestJobSetContinueOnError(t *testing.T) {
 		j.SetContinueOnError(true)
 		assert.True(t, j.ContinueOnError)
 	})
+}
+
+func TestTryUploadJobSummaryMasksSecrets(t *testing.T) {
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		got = string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	cm := &containerMock{}
+	cm.On("GetContainerArchive", mock.Anything, "/var/run/act/workflow/step-summary-0.md").Return(
+		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{
+			name: "step-summary-0.md", body: "deployed true with s3cr3t and runtime-added via pr0xypw",
+		}))),
+		nil,
+	).Once()
+
+	rc := newJobSummaryRC(map[string]string{
+		"GITEA_ACTIONS_CAPABILITIES": "job-summary",
+		"ACTIONS_RUNTIME_URL":        server.URL,
+		"ACTIONS_RUNTIME_TOKEN":      fakeRuntimeToken(34),
+		"GITEA_RUN_ID":               "12",
+	}, cm, 1)
+	rc.Config.Secrets = map[string]string{"TOK": "s3cr3t", "ACTIONS_STEP_DEBUG": "true"}
+	rc.Config.ExtraMasks = []string{"pr0xypw"}
+	rc.Masks = []string{"runtime-added"}
+
+	tryUploadJobSummary(context.Background(), rc)
+
+	assert.Equal(t, "deployed true with *** and *** via ***", got)
+	cm.AssertExpectations(t)
 }

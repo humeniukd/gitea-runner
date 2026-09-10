@@ -111,16 +111,17 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 	if v := task.Context.Fields["gitea_runtime_token"].GetStringValue(); v != "" {
 		oldnew = runner.AppendSecretMasker(oldnew, v)
 	}
-	for _, v := range task.Secrets {
+	if v := task.Context.Fields["actions_id_token_request_token"].GetStringValue(); v != "" {
 		oldnew = runner.AppendSecretMasker(oldnew, v)
 	}
+	oldnew = runner.AppendSecretMaskers(oldnew, task.Secrets)
 
 	rv := &Reporter{
 		ctx:                 ctx,
 		cancel:              cancel,
 		client:              client,
 		oldnew:              oldnew,
-		logReplacer:         strings.NewReplacer(oldnew...),
+		logReplacer:         runner.NewSecretReplacer(oldnew),
 		logReportInterval:   cfg.Runner.LogReportInterval,
 		logReportMaxLatency: cfg.Runner.LogReportMaxLatency,
 		logBatchSize:        cfg.Runner.LogReportBatchSize,
@@ -138,6 +139,8 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 	}
 
 	rv.daemonWait = 6 * rv.effectiveCloseTimeout()
+
+	registerGlobalMasks(rv)
 
 	if task.Secrets["ACTIONS_STEP_DEBUG"] == "true" {
 		rv.debugOutputEnabled = true
@@ -167,12 +170,13 @@ func (r *Reporter) Levels() []log.Level {
 	return log.AllLevels
 }
 
-// appendLogRow buffers a row for the uploader and mirrors it into job.log. A nil row is one
-// the command handler dropped, such as ::add-mask::. Caller holds stateMu.
+// appendLogRow masks a row before buffering it for Gitea and the local job.log, the one point
+// feeding both. A nil row is one the command handler dropped. Caller holds stateMu.
 func (r *Reporter) appendLogRow(row *runnerv1.LogRow) {
 	if row == nil {
 		return
 	}
+	row.Content = r.mask(row.Content)
 	r.logRows = append(r.logRows, row)
 	r.jobLog.write(row.Time.AsTime(), row.Content)
 }
@@ -223,7 +227,7 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 	r.stateChanged = true
 
 	if log.IsLevelEnabled(log.TraceLevel) {
-		log.WithFields(entry.Data).Trace(entry.Message)
+		log.WithFields(entry.Data).Trace(r.mask(entry.Message)) // the process masker has no ::add-mask:: value
 	}
 
 	timestamp := entry.Time
@@ -373,7 +377,7 @@ func (r *Reporter) runDaemonLoop() {
 	for {
 		select {
 		case <-logTicker.C:
-			r.noteReport(metrics.LabelMethodUpdateLog, r.ReportLog(false))
+			r.reportLogWithState()
 			r.stopLatencyTimer(&maxLatencyActive, maxLatencyTimer)
 
 		case <-stateTicker.C:
@@ -385,7 +389,7 @@ func (r *Reporter) runDaemonLoop() {
 			r.stateMu.RUnlock()
 
 			if n >= r.logBatchSize {
-				r.noteReport(metrics.LabelMethodUpdateLog, r.ReportLog(false))
+				r.reportLogWithState()
 				r.stopLatencyTimer(&maxLatencyActive, maxLatencyTimer)
 			} else if !maxLatencyActive && n > 0 {
 				maxLatencyTimer.Reset(r.logReportMaxLatency)
@@ -400,7 +404,7 @@ func (r *Reporter) runDaemonLoop() {
 
 		case <-maxLatencyTimer.C:
 			maxLatencyActive = false
-			r.noteReport(metrics.LabelMethodUpdateLog, r.ReportLog(false))
+			r.reportLogWithState()
 
 		case <-r.ctx.Done():
 			// Stop heartbeating on cancel so Gitea sees the runner as offline
@@ -423,6 +427,17 @@ func (r *Reporter) runDaemonLoop() {
 	}
 }
 
+// Gitea slices the single log stream into steps by the LogIndex/LogLength the state
+// carries, so rows acked without a state report behind them stay unattributed, and stay
+// that way for good if the runner never reports again.
+func (r *Reporter) reportLogWithState() {
+	took, err := r.reportLog(false)
+	r.noteReport(metrics.LabelMethodUpdateLog, err)
+	if took {
+		r.noteReport(metrics.LabelMethodUpdateTask, r.ReportState(false))
+	}
+}
+
 func (r *Reporter) Logf(format string, a ...any) {
 	r.stateMu.Lock()
 	defer r.stateMu.Unlock()
@@ -434,7 +449,7 @@ func (r *Reporter) logf(format string, a ...any) {
 	if !r.duringSteps() {
 		// Masked like any other row: these bypass parseLogRow, but a caller can still
 		// interpolate a secret, such as a configured URL carrying credentials.
-		r.appendLogRow(r.newLogRow(timestamppb.Now(), fmt.Sprintf(format, a...)))
+		r.appendLogRow(&runnerv1.LogRow{Time: timestamppb.Now(), Content: fmt.Sprintf(format, a...)})
 	}
 }
 
@@ -458,6 +473,11 @@ func (r *Reporter) SetOutputs(outputs map[string]string) {
 			r.logf("ignore output %q because the value is too long: %d > %d", k, l, maxOutputValueLen)
 			continue
 		}
+		if r.logReplacer.Replace(v) != v { // GitHub skips an output that may carry a secret rather than masking it
+			log.Warnf("ignore output %q because it may contain a secret", k)
+			r.logf("ignore output %q because it may contain a secret", k)
+			continue
+		}
 		if _, ok := r.outputs[k]; !ok {
 			r.outputs[k] = jobOutput{value: v}
 		}
@@ -465,6 +485,7 @@ func (r *Reporter) SetOutputs(outputs map[string]string) {
 }
 
 func (r *Reporter) Close(lastWords string) error {
+	defer deregisterGlobalMasks(r) // deferred so a panic below cannot strand this task's masks
 	r.stateMu.Lock()
 	r.closed = true
 	if r.state.Result == runnerv1.Result_RESULT_UNSPECIFIED {
@@ -573,6 +594,12 @@ func (r *Reporter) rpcCtx() (context.Context, context.CancelFunc) {
 }
 
 func (r *Reporter) ReportLog(noMore bool) error {
+	_, err := r.reportLog(noMore)
+	return err
+}
+
+// reportLog also reports whether the server took rows it had not taken before.
+func (r *Reporter) reportLog(noMore bool) (bool, error) {
 	r.clientM.Lock()
 	defer r.clientM.Unlock()
 
@@ -581,7 +608,7 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	r.stateMu.RUnlock()
 
 	if !noMore && len(rows) == 0 {
-		return nil
+		return false, nil
 	}
 
 	rpcCtx, rpcCancel := r.rpcCtx()
@@ -598,19 +625,20 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	if err != nil {
 		metrics.ReportLogTotal.WithLabelValues(metrics.LabelResultError).Inc()
 		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodUpdateLog).Inc()
-		return err
+		return false, err
 	}
 	metrics.ReportLogTotal.WithLabelValues(metrics.LabelResultSuccess).Inc()
 
 	ack := int(resp.Msg.AckIndex)
 	if ack < r.logOffset {
-		return errors.New("submitted logs are lost")
+		return false, errors.New("submitted logs are lost")
 	}
 
 	r.stateMu.Lock()
 	submitted := r.logOffset + len(rows)
 	// A server can ack beyond what it was sent; clamp to stay within the buffer.
 	ack = min(ack, submitted)
+	took := ack > r.logOffset
 	r.logRows = r.logRows[ack-r.logOffset:]
 	r.logOffset = ack
 	remaining := len(r.logRows)
@@ -621,10 +649,10 @@ func (r *Reporter) ReportLog(noMore bool) error {
 	}
 
 	if noMore && ack < submitted {
-		return errors.New("not all logs are submitted")
+		return took, errors.New("not all logs are submitted")
 	}
 
-	return nil
+	return took, nil
 }
 
 // ReportState only reports the job result if reportResult is true
@@ -755,8 +783,9 @@ var cmdRegex = regexp.MustCompile(`^::([^ :]+)( [^:]*)?::(.*)$`)
 // handleCommand takes value still escaped, so that the web UI decodes it exactly once. Only
 // the branches that consume the payload here decode it.
 func (r *Reporter) handleCommand(originalContent, command, properties, value string) *string {
+	command = strings.ToLower(command) // GitHub matches command names case-insensitively
 	if r.stopCommandEndToken != "" {
-		if command != r.stopCommandEndToken {
+		if !strings.EqualFold(command, r.stopCommandEndToken) {
 			return &originalContent
 		}
 		// Resumed here rather than from the switch, because the end token is arbitrary and a
@@ -843,13 +872,20 @@ func parseCommandProperties(properties string) map[string]string {
 	return props
 }
 
+func cutPrefixFold(s, prefix string) (string, bool) {
+	if len(s) < len(prefix) || !strings.EqualFold(s[:len(prefix)], prefix) {
+		return s, false
+	}
+	return s[len(prefix):], true
+}
+
 func (r *Reporter) parseLogRow(entry *log.Entry) *runnerv1.LogRow {
 	content := strings.TrimRight(entry.Message, "\r\n")
 
 	// cmdRegex only covers the ::cmd:: form, so the ##[add-mask] one would otherwise reach
 	// the log carrying its own secret. Registered and dropped like its ::add-mask:: twin.
-	if arg, ok := strings.CutPrefix(content, "##[add-mask]"); ok {
-		r.addMask(runner.UnescapeCommandData(arg))
+	if arg, ok := cutPrefixFold(content, "##[add-mask]"); ok {
+		r.addMask(runner.UnescapeLegacyCommand(arg))
 		return nil
 	}
 
@@ -862,22 +898,18 @@ func (r *Reporter) parseLogRow(entry *log.Entry) *runnerv1.LogRow {
 		}
 	}
 
-	return r.newLogRow(timestamppb.New(entry.Time), content)
+	return &runnerv1.LogRow{Time: timestamppb.New(entry.Time), Content: content}
 }
 
-// newLogRow applies the masking and validation every row must carry, whatever built it.
-func (r *Reporter) newLogRow(t *timestamppb.Timestamp, content string) *runnerv1.LogRow {
-	return &runnerv1.LogRow{
-		Time:    t,
-		Content: r.mask(content),
-	}
-}
-
+// mask repairs the content first, so a secret the repair itself spells out is still caught.
 func (r *Reporter) mask(content string) string {
-	return strings.ToValidUTF8(r.logReplacer.Replace(content), "?")
+	return r.logReplacer.Replace(strings.ToValidUTF8(content, "?"))
 }
 
+// addMask deliberately leaves the process-wide masker alone. Its entries come from every live
+// task at once, so a workflow could otherwise mask "error" there and rewrite the runner's own
+// log, and every other task's, for the rest of the job.
 func (r *Reporter) addMask(msg string) {
 	r.oldnew = runner.AppendSecretMasker(r.oldnew, msg)
-	r.logReplacer = strings.NewReplacer(r.oldnew...)
+	r.logReplacer = runner.NewSecretReplacer(r.oldnew)
 }

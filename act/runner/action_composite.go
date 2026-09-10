@@ -7,6 +7,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"slices"
 	"strconv"
@@ -17,7 +18,7 @@ import (
 	"gitea.dev/actionslib/pkg/model"
 )
 
-func evaluateCompositeInputAndEnv(ctx context.Context, parent *RunContext, step actionStep) map[string]string {
+func evaluateCompositeInputAndEnv(ctx context.Context, parent *RunContext, step actionStep) (map[string]string, error) {
 	env := make(map[string]string)
 	stepEnv := *step.getEnv()
 	for k, v := range stepEnv {
@@ -28,7 +29,7 @@ func evaluateCompositeInputAndEnv(ctx context.Context, parent *RunContext, step 
 		}
 	}
 
-	ee := parent.NewStepExpressionEvaluator(ctx, step)
+	ee := parent.NewActionInputsExpressionEvaluator(ctx, step)
 
 	for inputID, input := range step.getActionModel().Inputs {
 		envKey := regexp.MustCompile("[^A-Z0-9-]").ReplaceAllString(strings.ToUpper(inputID), "_")
@@ -36,23 +37,44 @@ func evaluateCompositeInputAndEnv(ctx context.Context, parent *RunContext, step 
 
 		// lookup if key is defined in the step but the already
 		// evaluated value from the environment
-		_, defined := step.getStepModel().With[inputID]
+		defined := false
+		for key := range step.getStepModel().With {
+			if strings.EqualFold(key, inputID) {
+				defined = true
+				break
+			}
+		}
 		if value, ok := stepEnv[envKey]; defined && ok {
 			env[envKey] = value
 		} else {
 			// defaults could contain expressions
-			env[envKey] = ee.Interpolate(ctx, input.Default)
+			var err error
+			if env[envKey], err = ee.Interpolate(ctx, input.Default); err != nil {
+				return nil, fmt.Errorf("unable to interpolate the default of input %s: %w", inputID, err)
+			}
 		}
 	}
 	gh := step.getGithubContext(ctx)
 	env["GITHUB_ACTION_REPOSITORY"] = gh.ActionRepository
 	env["GITHUB_ACTION_REF"] = gh.ActionRef
 
-	return env
+	return env, nil
 }
 
-func newCompositeRunContext(ctx context.Context, parent *RunContext, step actionStep, actionPath string) *RunContext {
-	env := evaluateCompositeInputAndEnv(ctx, parent, step)
+func (rc *RunContext) setCompositeActionEnv(env map[string]string) {
+	rc.setActionEnv(env)
+	for key := range rc.Env {
+		if strings.HasPrefix(key, "INPUT_") {
+			delete(rc.Env, key)
+		}
+	}
+}
+
+func newCompositeRunContext(ctx context.Context, parent *RunContext, step actionStep, actionPath string) (*RunContext, error) {
+	env, err := evaluateCompositeInputAndEnv(ctx, parent, step)
+	if err != nil {
+		return nil, err
+	}
 
 	// run with the global config but without secrets
 	configCopy := *parent.Config
@@ -62,29 +84,31 @@ func newCompositeRunContext(ctx context.Context, parent *RunContext, step action
 	compositerc := &RunContext{
 		Name:    parent.Name,
 		JobName: parent.JobName,
+		Matrix:  parent.Matrix,
 		Run: &model.Run{
 			JobID: parent.Run.JobID,
 			Workflow: &model.Workflow{
 				Name: parent.Run.Workflow.Name,
 				Jobs: map[string]*model.Job{
-					parent.Run.JobID: {},
+					parent.Run.JobID: {Strategy: parent.Run.Job().Strategy},
 				},
 			},
 		},
-		Config:       &configCopy,
-		StepResults:  map[string]*model.StepResult{},
-		JobContainer: parent.JobContainer,
-		ActionPath:   actionPath,
-		Env:          env,
-		GlobalEnv:    parent.GlobalEnv,
-		Masks:        parent.Masks,
-		ExtraPath:    parent.ExtraPath,
-		Parent:       parent,
-		EventJSON:    parent.EventJSON,
+		Config:        &configCopy,
+		StepResults:   map[string]*model.StepResult{},
+		JobContainer:  parent.JobContainer,
+		ActionPath:    actionPath,
+		GlobalEnv:     parent.GlobalEnv,
+		Masks:         parent.Masks,
+		ExtraPath:     parent.ExtraPath,
+		Parent:        parent,
+		EventJSON:     parent.EventJSON,
+		platformImage: parent.platformImage,
 	}
+	compositerc.setCompositeActionEnv(env)
 	compositerc.ExprEval = compositerc.NewExpressionEvaluator(ctx)
 
-	return compositerc
+	return compositerc, nil
 }
 
 // appendUniqueMasks appends the masks from src to dst, skipping any mask that
@@ -105,7 +129,10 @@ func execAsComposite(step actionStep) common.Executor {
 	action := step.getActionModel()
 
 	return func(ctx context.Context) error {
-		compositeRC := step.getCompositeRunContext(ctx)
+		compositeRC, err := step.getCompositeRunContext(ctx)
+		if err != nil {
+			return err
+		}
 
 		steps := step.getCompositeSteps()
 
@@ -115,14 +142,17 @@ func execAsComposite(step actionStep) common.Executor {
 
 		ctx = WithCompositeLogger(ctx, &compositeRC.Masks)
 
-		err := steps.main(ctx)
+		err = steps.main(ctx)
 
 		// Map outputs from composite RunContext to job RunContext
 		eval := compositeRC.NewExpressionEvaluator(ctx)
 		for outputName, output := range action.Outputs {
-			rc.setOutput(ctx, map[string]string{
-				"name": outputName,
-			}, eval.Interpolate(ctx, output.Value))
+			value, outputErr := eval.Interpolate(ctx, output.Value)
+			if outputErr != nil {
+				err = errors.Join(err, fmt.Errorf("unable to interpolate output %s: %w", outputName, outputErr))
+				continue
+			}
+			rc.setOutput(ctx, map[string]string{"name": outputName}, value)
 		}
 
 		// compositeRC.Masks is seeded with rc.Masks (see newCompositeRunContext)
@@ -131,7 +161,7 @@ func execAsComposite(step actionStep) common.Executor {
 		// repeated composite actions grow rc.Masks exponentially.
 		rc.Masks = appendUniqueMasks(rc.Masks, compositeRC.Masks)
 		rc.ExtraPath = compositeRC.ExtraPath
-		// compositeRC.Env is dirty, contains INPUT_ and merged step env, only rely on compositeRC.GlobalEnv
+		// Propagate GlobalEnv only, so composite inputs and step-local values do not escape.
 		mergeIntoMap := mergeIntoMapCaseSensitive
 		if rc.JobContainer.IsEnvironmentCaseInsensitive() {
 			mergeIntoMap = mergeIntoMapCaseInsensitive
@@ -194,6 +224,7 @@ func (rc *RunContext) compositeExecutor(action *model.Action) *compositeSteps {
 	}
 
 	steps = append(steps, common.JobError)
+	preSteps = append(preSteps, common.JobError)
 	return &compositeSteps{
 		pre: func(ctx context.Context) error {
 			return common.NewPipelineExecutor(preSteps...)(common.WithJobErrorContainer(ctx))

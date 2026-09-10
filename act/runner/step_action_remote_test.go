@@ -242,6 +242,24 @@ func TestStepActionRemote(t *testing.T) {
 			cm.AssertExpectations(t)
 		})
 	}
+
+	t.Run("refreshes composite inputs without leaking environment", func(t *testing.T) {
+		step := &stepActionRemote{
+			Step:         &model.Step{Uses: "org/composite@v1", With: map[string]string{"SHARED": "first"}},
+			RunContext:   &RunContext{Config: &Config{ActionCacheDir: t.TempDir()}, Run: &model.Run{JobID: "job", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"job": {}}}}, JobContainer: &jobContainerMock{}},
+			action:       &model.Action{Inputs: map[string]model.Input{"shared": {}}},
+			env:          map[string]string{},
+			remoteAction: newRemoteAction("org/composite@v1"),
+		}
+
+		for _, value := range []string{"first", "second"} {
+			step.env["INPUT_SHARED"] = value
+			composite, err := step.getCompositeRunContext(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, map[string]any{"shared": value}, composite.actionInputs)
+			assert.NotContains(t, composite.Env, "INPUT_SHARED")
+		}
+	})
 }
 
 func TestStepActionRemotePrepare(t *testing.T) {
@@ -453,10 +471,10 @@ func TestStepActionRemotePost(t *testing.T) {
 			if tt.mocks.exec {
 				// Use mock.MatchedBy to match the exec command with hash-based path
 				execMatcher := mock.MatchedBy(func(args []string) bool {
-					if len(args) != 2 {
+					if len(args) != 3 {
 						return false
 					}
-					return args[0] == "node" && strings.Contains(args[1], "post.js")
+					return args[0] == "node" && args[1] == "--preserve-symlinks-main" && strings.Contains(args[2], "post.js")
 				})
 
 				cm.On("Exec", execMatcher, sar.env, "", "").Return(func(ctx context.Context) error { return tt.err })

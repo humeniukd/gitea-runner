@@ -95,9 +95,12 @@ func newRemoteReusableWorkflowExecutor(rc *RunContext) common.Executor {
 // remoteReusableWorkflow.URL = rc.getGithubContext(ctx).ServerURL
 func cloneRemoteReusableWorkflow(rc *RunContext, cloneURL, ref, targetDirectory, token string) common.Executor {
 	return func(ctx context.Context) error {
-		cloneURL = rc.NewExpressionEvaluator(ctx).Interpolate(ctx, cloneURL)
+		interpolatedURL, err := rc.NewExpressionEvaluator(ctx).Interpolate(ctx, cloneURL)
+		if err != nil {
+			return fmt.Errorf("unable to interpolate the workflow clone URL: %w", err)
+		}
 		return git.NewGitCloneExecutor(git.NewGitCloneExecutorInput{
-			URL:         cloneURL,
+			URL:         interpolatedURL,
 			Ref:         ref,
 			Dir:         targetDirectory,
 			Token:       token,
@@ -236,7 +239,7 @@ func setReusedWorkflowCallerResult(rc *RunContext, runner *runnerImpl) common.Ex
 			}
 
 			if rc.caller != nil {
-				rc.caller.setReusedWorkflowJobResult(rc.JobName, reusedWorkflowJobResult)
+				rc.caller.setReusedWorkflowJobResult(rc.Run.JobID, reusedWorkflowJobResult)
 			} else {
 				// Serialize this shared Job.Result write against the other matrix combos
 				// and setJobResult (same lockJob key).

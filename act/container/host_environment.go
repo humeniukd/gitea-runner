@@ -92,7 +92,7 @@ func (e *HostEnvironment) Copy(destPath string, files ...*FileEntry) common.Exec
 	}
 }
 
-func (e *HostEnvironment) CopyDir(destPath, srcPath string, useGitIgnore bool) common.Executor {
+func (e *HostEnvironment) CopyDir(destPath, srcPath string, useGitIgnore, skipGitDir bool) common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
 		srcPrefix := filepath.Dir(srcPath)
@@ -110,9 +110,10 @@ func (e *HostEnvironment) CopyDir(destPath, srcPath string, useGitIgnore bool) c
 			ignorer = gitignore.NewMatcher(ps)
 		}
 		fc := &filecollector.FileCollector{
-			Ignorer:   ignorer,
-			SrcPath:   srcPath,
-			SrcPrefix: srcPrefix,
+			Ignorer:    ignorer,
+			SrcPath:    srcPath,
+			SrcPrefix:  srcPrefix,
+			SkipGitDir: skipGitDir,
 			Handler: &filecollector.CopyCollector{
 				DstDir: destPath,
 			},
@@ -629,8 +630,11 @@ func (*HostEnvironment) JoinPathVariable(paths ...string) string {
 func goArchToActionArch(arch string) string {
 	archMapper := map[string]string{
 		"x86_64":  "X64",
+		"amd64":   "X64",
 		"386":     "X86",
+		"arm":     "ARM",
 		"aarch64": "ARM64",
+		"arm64":   "ARM64",
 	}
 	if arch, ok := archMapper[arch]; ok {
 		return arch
@@ -640,7 +644,9 @@ func goArchToActionArch(arch string) string {
 
 func goOsToActionOs(os string) string {
 	osMapper := map[string]string{
-		"darwin": "macOS",
+		"linux":   "Linux",
+		"darwin":  "macOS",
+		"windows": "Windows",
 	}
 	if os, ok := osMapper[os]; ok {
 		return os

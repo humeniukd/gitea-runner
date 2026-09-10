@@ -156,8 +156,10 @@ func TestEvaluateRunContext(t *testing.T) {
 
 func TestEvaluateStep(t *testing.T) {
 	rc := createRunContext(t)
+	rc.Env["INPUT_FORGED"] = "leaked"
 	step := &stepRun{
 		RunContext: rc,
+		env:        map[string]string{"INPUT_FORGED": "leaked"},
 	}
 
 	ee := rc.NewStepExpressionEvaluator(context.Background(), step)
@@ -176,6 +178,7 @@ func TestEvaluateStep(t *testing.T) {
 		{"steps.id_with_underscores.conclusion", model.StepStatusSuccess.String(), ""},
 		{"steps.id_with_underscores.outcome", model.StepStatusFailure.String(), ""},
 		{"steps.id_with_underscores.outputs.foo_with_underscores", "bar_with_underscores", ""},
+		{"inputs.forged", nil, ""}, // INPUT_* env is not an input
 	}
 
 	for _, table := range tables {
@@ -263,18 +266,20 @@ func TestInterpolate(t *testing.T) {
 		{"${{ null }}", ""},
 		{"${{ fromJSON('[1,2]') }}", "Array"},
 		{"${{ fromJSON('{\"a\":1}') }}", "Object"},
-		// a malformed part must not restructure its neighbours, and it interpolates to nothing
-		{"${{ 1) && (2 }}", ""},
-		{"run ${{ 1) && (2 }} now", ""},
 		{"${{ 1", "${{ 1"},
 	}
 
 	for _, table := range tables {
 		t.Run("interpolate", func(t *testing.T) {
-			assertObject := assert.New(t)
-			out := ee.Interpolate(context.Background(), table.in)
-			assertObject.Equal(table.out, out, table.in)
+			out, err := ee.Interpolate(context.Background(), table.in)
+			require.NoError(t, err, table.in)
+			assert.Equal(t, table.out, out, table.in)
 		})
+	}
+
+	for _, in := range []string{"${{ 1) && (2 }}", "run ${{ 1) && (2 }} now"} {
+		_, err := ee.Interpolate(context.Background(), in)
+		assert.Error(t, err, in)
 	}
 }
 
@@ -349,10 +354,33 @@ on:
 				}
 				ghc := &model.GithubContext{EventName: eventName, Event: table.event}
 
-				inputs := getEvaluatorInputs(context.Background(), rc, nil, ghc)
+				inputs := getEvaluatorInputs(rc, nil, ghc)
 				assert.Equal(t, table.flag, inputs["flag"])
 				assert.Equal(t, "gitea", inputs["name"])
 			})
 		}
 	}
+}
+
+func TestJobNameMasksSecrets(t *testing.T) {
+	workflow, err := model.ReadWorkflow(strings.NewReader(`
+jobs:
+  a:
+    name: deploy ${{ secrets.A }}
+  b:
+    name: deploy ${{ secrets.B }}
+`))
+	require.NoError(t, err)
+
+	runner := &runnerImpl{config: &Config{Secrets: map[string]string{"A": "s3cr3t-a", "B": "s3cr3t-b"}}}
+	containerName := func(jobID string) string {
+		rc, err := runner.newRunContext(t.Context(), &model.Run{JobID: jobID, Workflow: workflow}, nil)
+		require.NoError(t, err)
+		assert.NotContains(t, rc.Name, "s3cr3t")
+		return rc.jobContainerName()
+	}
+
+	a, b := containerName("a"), containerName("b")
+	assert.NotContains(t, a, "s3cr3t") // it reaches the container name, which no log masker covers
+	assert.NotEqual(t, a, b)           // masking the name must not collapse two jobs onto one container
 }
