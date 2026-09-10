@@ -68,6 +68,7 @@ type RunContext struct {
 	actionInputs        map[string]any // inputs of the composite action this runs, nil for a job
 	Masks               []string
 	cleanUpJobContainer common.Executor
+	deferVolumeCleanup  func(common.Executor)
 	caller              *caller           // job calling this RunContext (reusable workflows)
 	workflowCallInputs  map[string]any    // the caller's with:, resolved once by resolveWorkflowCall
 	workflowCallSecrets map[string]string // the caller's secrets:, resolved once by resolveWorkflowCall
@@ -460,8 +461,15 @@ func printStartJobContainerGroup(ctx context.Context, image, name, network strin
 // newContainer is a variable so tests can substitute a container that needs no Docker daemon.
 var newContainer = container.NewContainer
 
+type jobVolumeCleanupKey struct{}
+
+func WithJobVolumeCleanup(ctx context.Context, deferCleanup func(common.Executor)) context.Context {
+	return context.WithValue(ctx, jobVolumeCleanupKey{}, deferCleanup)
+}
+
 func (rc *RunContext) startJobContainer() common.Executor {
 	return func(ctx context.Context) error {
+		rc.deferVolumeCleanup, _ = ctx.Value(jobVolumeCleanupKey{}).(func(common.Executor))
 		logger := common.Logger(ctx)
 		image := rc.platformImage
 		logWriter := rc.commandLogWriter(ctx)
@@ -630,6 +638,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 				IfBool(createAndDeleteNetwork),
 			rc.startServiceContainers(),
 			rc.reportUnstartedServices(),
+			func(ctx context.Context) error { return rc.createJobVolumes(ctx, containerInput.Mounts) },
 			rc.JobContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 			rc.JobContainer.Start(false),
 			rc.captureJobContainerInfo(),
@@ -669,13 +678,30 @@ func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNet
 		if !common.Dryrun(ctx) && (preclean || rc.hadDockerProxy) {
 			errs = append(errs, container.RemoveDockerJobResources(ctx, rc.jobContainerName()))
 		}
-		errs = append(errs, rc.cleanupJobVolumes(ctx))
+		if preclean || rc.deferVolumeCleanup == nil {
+			errs = append(errs, rc.cleanupJobVolumes(ctx))
+		} else {
+			rc.deferVolumeCleanup(rc.cleanupJobVolumes)
+		}
 		if createAndDeleteNetwork {
 			logger.Infof("Cleaning up network for job %s, and network name is: %s", rc.JobName, networkName)
 			errs = append(errs, container.NewDockerNetworkRemoveExecutor(networkName)(ctx))
 		}
 		return errors.Join(errs...)
 	}
+}
+
+func (rc *RunContext) createJobVolumes(ctx context.Context, mounts map[string]string) error {
+	runnerUUID := rc.Config.ContainerNetworkCreateOptions.RunnerUUID
+	if runnerUUID == "" || common.Dryrun(ctx) {
+		return nil
+	}
+	name := rc.jobContainerName()
+	volumeNames := []string{name, name + "-env"}
+	if _, ok := mounts[name]; !ok { // the workspace is a bind mount, the env volume is always ours
+		volumeNames = volumeNames[1:]
+	}
+	return container.CreateJobVolumes(ctx, runnerUUID, volumeNames)
 }
 
 func (rc *RunContext) cleanupJobVolumes(ctx context.Context) error {

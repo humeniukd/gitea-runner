@@ -7,6 +7,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,8 @@ import (
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
 	"github.com/docker/cli/cli/compose/loader"
+	"github.com/moby/moby/api/types/volume"
+	"github.com/moby/moby/client"
 	log "github.com/sirupsen/logrus"
 	assert "github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -663,6 +666,78 @@ func TestCleanupJobResourcesCleansServicesWithoutJobContainer(t *testing.T) {
 	service.AssertExpectations(t)
 }
 
+func TestCleanupJobVolumesReapsAbandonedDeferredCleanup(t *testing.T) {
+	now := time.Date(2026, time.September, 10, 12, 0, 0, 0, time.UTC)
+	rc := &RunContext{
+		Config:       &Config{ContainerNetworkCreateOptions: container.NewDockerNetworkCreateExecutorInput{RunnerUUID: "runner-1"}},
+		Run:          &model.Run{Workflow: &model.Workflow{Name: "workflow"}, JobID: "job"},
+		JobContainer: fakeContainer{},
+	}
+	volumes := map[string]volume.Volume{}
+	daemon := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		path := strings.TrimPrefix(request.URL.Path, "/v1.47")
+		switch {
+		case path == "/_ping":
+			writer.Header().Set("API-Version", "1.47")
+			_, _ = io.WriteString(writer, "OK")
+		case path == "/volumes/create":
+			var options client.VolumeCreateOptions
+			assert.NoError(t, json.UnmarshalRead(request.Body, &options))
+			volumes[options.Name] = volume.Volume{Name: options.Name, Labels: options.Labels, CreatedAt: now.Format(time.RFC3339)}
+			assert.NoError(t, json.MarshalWrite(writer, volumes[options.Name]))
+		case path == "/volumes":
+			var filters map[string]map[string]bool
+			assert.NoError(t, json.Unmarshal([]byte(request.URL.Query().Get("filters")), &filters))
+			assert.Equal(t, map[string]map[string]bool{"label": {"com.gitea.runner.uuid=runner-1": true}, "dangling": {"true": true}}, filters)
+			listed := make([]volume.Volume, 0, len(volumes))
+			for _, item := range volumes {
+				listed = append(listed, item)
+			}
+			assert.NoError(t, json.MarshalWrite(writer, map[string]any{"Volumes": listed}))
+		case request.Method == http.MethodDelete:
+			name := strings.TrimPrefix(path, "/volumes/")
+			assert.NotEqual(t, "1", request.URL.Query().Get("force"))
+			assert.NotEqual(t, "true", request.URL.Query().Get("force"))
+			if name == "became-active" || name == "remove-failed" {
+				writer.WriteHeader(http.StatusConflict)
+				_, _ = fmt.Fprintf(writer, `{"message":%q}`, name)
+				return
+			}
+			delete(volumes, name)
+			writer.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected Docker request: %s %s", request.Method, request.URL)
+			http.NotFound(writer, request)
+		}
+	}))
+	t.Cleanup(daemon.Close)
+	t.Setenv("DOCKER_HOST", daemon.URL)
+	name := rc.jobContainerName()
+	require.NoError(t, rc.createJobVolumes(t.Context(), map[string]string{name: "/workspace", name + "-env": "/var/run/act", "shared-cache": "/cache"}))
+	require.Len(t, volumes, 2)
+	assert.Equal(t, "runner-1", volumes[name].Labels["com.gitea.runner.uuid"])
+	var deferred []common.Executor
+	rc.deferVolumeCleanup = func(cleanup common.Executor) { deferred = append(deferred, cleanup) }
+	require.NoError(t, rc.cleanupJobResources("", false, false)(t.Context()))
+	require.Len(t, deferred, 1)
+	require.Len(t, volumes, 2)
+	now = now.Add(48 * time.Hour)
+	for _, name := range []string{"became-active", "remove-failed", "foreign", "unlabelled", "fresh", "unknown-age"} {
+		volumes[name] = volume.Volume{Name: name, Labels: map[string]string{"com.gitea.runner.uuid": "runner-1"}, CreatedAt: now.Add(-48 * time.Hour).Format(time.RFC3339)}
+	}
+	volumes["foreign"] = volume.Volume{Name: "foreign", Labels: map[string]string{"com.gitea.runner.uuid": "runner-2"}, CreatedAt: volumes[name].CreatedAt}
+	volumes["unlabelled"] = volume.Volume{Name: "unlabelled", CreatedAt: volumes[name].CreatedAt}
+	volumes["fresh"] = volume.Volume{Name: "fresh", Labels: volumes[name].Labels, CreatedAt: now.Format(time.RFC3339)}
+	volumes["unknown-age"] = volume.Volume{Name: "unknown-age", Labels: volumes[name].Labels}
+	err := container.RemoveOrphanJobVolumes(t.Context(), "runner-1", now.Add(-24*time.Hour))
+	require.ErrorContains(t, err, "became-active")
+	require.ErrorContains(t, err, "remove-failed")
+	assert.NotContains(t, volumes, name)
+	assert.NotContains(t, volumes, name+"-env")
+	assert.Len(t, volumes, 6)
+}
+
 func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
 	t.Setenv("TMPDIR", "/tmp")
 	proxyDir := t.TempDir()
@@ -671,11 +746,14 @@ func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
 		proxy      bool
 		closeProxy bool
 		preclean   bool
+		deferred   bool
 	}{
 		{name: "no proxy"},
 		{name: "proxy", proxy: true},
 		{name: "closed proxy", proxy: true, closeProxy: true},
 		{name: "preclean", preclean: true},
+		{name: "deferred", deferred: true},
+		{name: "preclean stays synchronous", preclean: true, deferred: true},
 	} {
 		t.Run(testcase.name, func(t *testing.T) {
 			if testcase.proxy && runtime.GOOS == "windows" {
@@ -705,6 +783,10 @@ func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
 				serviceContainers: []*serviceContainer{{name: "svc", container: service}},
 			}
 			name := rc.jobContainerName()
+			var volumeCleanup []common.Executor
+			if testcase.deferred {
+				rc.deferVolumeCleanup = func(cleanup common.Executor) { volumeCleanup = append(volumeCleanup, cleanup) }
+			}
 			daemon := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				writer.Header().Set("Content-Type", "application/json")
 				switch {
@@ -742,6 +824,13 @@ func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
 			}
 
 			err := rc.cleanupJobResources("job-network", true, testcase.preclean)(t.Context())
+			if testcase.deferred && !testcase.preclean {
+				require.Len(t, volumeCleanup, 1)
+				assert.Len(t, attempts, 4)
+				err = errors.Join(err, volumeCleanup[0](t.Context()))
+			} else {
+				assert.Empty(t, volumeCleanup)
+			}
 			require.ErrorIs(t, err, jobError)
 			require.ErrorIs(t, err, removeError)
 			require.ErrorIs(t, err, closeError)
@@ -749,7 +838,11 @@ func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
 			if testcase.proxy || testcase.preclean {
 				want = append(want, "GET /containers/json", "GET /networks", "GET /volumes")
 			}
-			want = append(want, "DELETE /volumes/"+name, "DELETE /volumes/"+name+"-env", "DELETE /networks/network-id")
+			if testcase.deferred && !testcase.preclean {
+				want = append(want, "DELETE /networks/network-id", "DELETE /volumes/"+name, "DELETE /volumes/"+name+"-env")
+			} else {
+				want = append(want, "DELETE /volumes/"+name, "DELETE /volumes/"+name+"-env", "DELETE /networks/network-id")
+			}
 			var got []string
 			for len(attempts) > 0 {
 				got = append(got, <-attempts)

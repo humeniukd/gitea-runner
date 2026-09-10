@@ -5,11 +5,24 @@ package run
 
 import (
 	"context"
+	"encoding/json/v2"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/runner"
+	"gitea.com/gitea/runner/internal/app/poll"
 	clientmocks "gitea.com/gitea/runner/internal/pkg/client/mocks"
 	"gitea.com/gitea/runner/internal/pkg/config"
 	"gitea.com/gitea/runner/internal/pkg/labels"
@@ -71,6 +84,198 @@ func TestRunnerRunningCountAndNullLogger(t *testing.T) {
 	logger := NullLogger{}.WithJobLogger()
 	require.NotNil(t, logger)
 	require.NotNil(t, logger.Out)
+}
+
+func TestRunnerReclaimsVolumesAfterReporting(t *testing.T) {
+	for _, mode := range []string{"regular", "ephemeral", "post-task script"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg, err := config.LoadDefault("")
+			require.NoError(t, err)
+			cfg.Cache.Enabled = new(false)
+			cfg.HealthCheck.Enabled = false
+			cfg.Runner.Capacity = 1
+			cfg.Container.Network = "host"
+			cfg.Container.DockerHost = "-"
+			cfg.Container.ForcePull = false
+			cfg.Host.WorkdirParent = t.TempDir()
+			if mode == "post-task script" {
+				if runtime.GOOS == "windows" {
+					t.Skip("uses a POSIX script")
+				}
+				cfg.Runner.PostTaskScript = filepath.Join(t.TempDir(), "post-task.sh")
+				require.NoError(t, os.WriteFile(cfg.Runner.PostTaskScript, []byte("#!/bin/sh\n: > \"$0.done\"\n"), 0o700))
+			}
+			cli := clientmocks.NewClient(t)
+			cli.AddressValue = "https://gitea.example/"
+			r := NewRunner(cfg, &config.Registration{UUID: "runner-1", Labels: []string{"ubuntu:docker://node:20"}}, cli)
+			t.Cleanup(func() { require.NoError(t, r.Close()) })
+			task := &runnerv1.Task{
+				Id: 123,
+				Context: &structpb.Struct{Fields: map[string]*structpb.Value{
+					"repository": structpb.NewStringValue("owner/repo"),
+				}},
+				WorkflowPayload: []byte("name: test\njobs:\n  job:\n    runs-on: ubuntu\n    steps:\n      - run: exit 0\n        if: false\n"),
+				Secrets:         map[string]string{},
+			}
+			var reported atomic.Bool
+			var removed atomic.Int64
+			cli.On("UpdateLog", mock.Anything, mock.Anything).Return(func(_ context.Context, req *connect.Request[runnerv1.UpdateLogRequest]) (*connect.Response[runnerv1.UpdateLogResponse], error) {
+				assert.False(t, reported.Load())
+				return connect.NewResponse(&runnerv1.UpdateLogResponse{AckIndex: req.Msg.Index + int64(len(req.Msg.Rows))}), nil
+			})
+			cli.On("UpdateTask", mock.Anything, mock.Anything).Return(func(_ context.Context, req *connect.Request[runnerv1.UpdateTaskRequest]) (*connect.Response[runnerv1.UpdateTaskResponse], error) {
+				if req.Msg.State.Result != runnerv1.Result_RESULT_UNSPECIFIED {
+					assert.Equal(t, runnerv1.Result_RESULT_SUCCESS, req.Msg.State.Result)
+					assert.Equal(t, int64(1), r.RunningCount())
+					if mode == "post-task script" {
+						assert.Equal(t, int64(2), removed.Load())
+						assert.FileExists(t, cfg.Runner.PostTaskScript+".done")
+					} else {
+						assert.Zero(t, removed.Load())
+					}
+					reported.Store(true)
+				}
+				return connect.NewResponse(&runnerv1.UpdateTaskResponse{State: req.Msg.State}), nil
+			})
+			removalStarted := make(chan struct{})
+			releaseRemoval := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseRemoval) }) }
+			t.Cleanup(release)
+			var volumeNames sync.Map
+			daemon := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				path := strings.TrimPrefix(request.URL.Path, "/v1.47")
+				switch {
+				case path == "/_ping":
+					writer.Header().Set("API-Version", "1.47")
+					_, _ = io.WriteString(writer, "OK")
+				case path == "/info":
+					_, _ = io.WriteString(writer, `{"Architecture":"amd64","OSType":"linux"}`)
+				case path == "/containers/json", path == "/networks":
+					_, _ = io.WriteString(writer, "[]")
+				case strings.HasPrefix(path, "/images/"):
+					_, _ = io.WriteString(writer, `{"Id":"image-id","Config":{},"Os":"linux","Architecture":"amd64"}`)
+				case path == "/volumes":
+					_, _ = io.WriteString(writer, `{"Volumes":[]}`)
+				case path == "/volumes/create":
+					var volume struct {
+						Name   string
+						Labels map[string]string
+					}
+					assert.NoError(t, json.UnmarshalRead(request.Body, &volume))
+					assert.Equal(t, map[string]string{"com.gitea.runner.uuid": "runner-1"}, volume.Labels)
+					volumeNames.Store(volume.Name, struct{}{})
+					_, _ = fmt.Fprintf(writer, `{"Name":%q}`, volume.Name)
+				case request.Method == http.MethodDelete && strings.HasPrefix(path, "/volumes/"):
+					if _, exists := volumeNames.LoadAndDelete(strings.TrimPrefix(path, "/volumes/")); exists {
+						assert.Equal(t, mode != "post-task script", reported.Load())
+						if mode == "post-task script" {
+							assert.NoFileExists(t, cfg.Runner.PostTaskScript+".done")
+						}
+						assert.Equal(t, int64(1), r.RunningCount())
+						if removed.Add(1) == 1 {
+							close(removalStarted)
+							<-releaseRemoval
+						}
+					}
+					writer.WriteHeader(http.StatusNoContent)
+				case path == "/containers/create":
+					_, _ = io.WriteString(writer, `{"Id":"job-id"}`)
+				case path == "/containers/job-id/json":
+					_, _ = io.WriteString(writer, `{"Id":"job-id","Config":{},"State":{"Status":"running"}}`)
+				case request.Method == http.MethodDelete || strings.HasSuffix(path, "/start") || strings.HasSuffix(path, "/kill") || strings.HasSuffix(path, "/archive"):
+					writer.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected Docker request: %s %s", request.Method, request.URL)
+					http.NotFound(writer, request)
+				}
+			}))
+			t.Cleanup(func() { release(); daemon.Close() })
+			t.Setenv("DOCKER_HOST", daemon.URL)
+			var fetched atomic.Bool
+			cli.On("FetchTask", mock.Anything, mock.Anything).Return(func(ctx context.Context, _ *connect.Request[runnerv1.FetchTaskRequest]) (*connect.Response[runnerv1.FetchTaskResponse], error) {
+				if !fetched.Swap(true) {
+					return connect.NewResponse(&runnerv1.FetchTaskResponse{Task: task}), nil
+				}
+				assert.Equal(t, int64(2), removed.Load())
+				<-ctx.Done()
+				return nil, ctx.Err()
+			})
+			poller := poll.New(cfg, cli, r)
+			t.Cleanup(func() {
+				release()
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				_ = poller.Shutdown(ctx)
+			})
+			if mode == "ephemeral" {
+				go poller.PollOnce()
+			} else {
+				go poller.Poll()
+			}
+			select {
+			case <-removalStarted:
+			case <-time.After(10 * time.Second):
+				t.Fatal("volume removal was never reached")
+			}
+			assert.Equal(t, int64(1), r.RunningCount())
+			select {
+			case <-poller.Done():
+				t.Fatal("poller finished before volume reclamation")
+			default:
+			}
+			shutdownCtx, cancel := context.WithCancel(t.Context())
+			cancel()
+			shutdownEntered := make(chan struct{})
+			shutdownDone := make(chan error, 1)
+			go func() {
+				shutdownDone <- poller.Shutdown(&shutdownWaitContext{Context: shutdownCtx, entered: shutdownEntered})
+			}()
+			<-shutdownEntered
+			select {
+			case err := <-shutdownDone:
+				t.Fatalf("shutdown returned before volume reclamation: %v", err)
+			default:
+			}
+			release()
+			if err := <-shutdownDone; err != nil {
+				require.ErrorIs(t, err, context.Canceled)
+			}
+			assert.True(t, reported.Load())
+			assert.Equal(t, int64(2), removed.Load())
+			assert.Zero(t, r.RunningCount())
+		})
+	}
+}
+
+type shutdownWaitContext struct {
+	context.Context
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (ctx *shutdownWaitContext) Done() <-chan struct{} {
+	ctx.once.Do(func() { close(ctx.entered) })
+	return ctx.Context.Done()
+}
+
+func TestCleanupJobVolumesJoinsErrorsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	firstError, secondError := errors.New("workspace removal"), errors.New("environment removal")
+	err := cleanupJobVolumes(ctx, []common.Executor{
+		func(ctx context.Context) error {
+			require.NoError(t, ctx.Err())
+			deadline, ok := ctx.Deadline()
+			assert.True(t, ok)
+			assert.InDelta(t, time.Minute.Seconds(), time.Until(deadline).Seconds(), 1)
+			return firstError
+		},
+		func(context.Context) error { return secondError },
+	})
+	require.ErrorIs(t, err, firstError)
+	require.ErrorIs(t, err, secondError)
 }
 
 func TestNewRunnerInitializesLabelsAndEnvironment(t *testing.T) {
