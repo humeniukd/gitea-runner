@@ -11,37 +11,13 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/client"
 )
 
 func NewDockerVolumeRemoveExecutor(volumeName string, force bool) common.Executor {
 	return func(ctx context.Context) error {
-		cli, err := GetDockerClient(ctx)
-		if err != nil {
-			return err
-		}
-		defer cli.Close()
-
-		list, err := cli.VolumeList(ctx, client.VolumeListOptions{})
-		if err != nil {
-			return err
-		}
-
-		for _, vol := range list.Items {
-			if vol.Name == volumeName {
-				return removeExecutor(volumeName, force)(ctx)
-			}
-		}
-
-		// Volume not found - do nothing
-		return nil
-	}
-}
-
-func removeExecutor(volume string, force bool) common.Executor {
-	return func(ctx context.Context) error {
-		logger := common.Logger(ctx)
-		logger.Debugf("docker volume rm %s", volume)
+		common.Logger(ctx).Debugf("docker volume rm %s", volumeName)
 
 		if common.Dryrun(ctx) {
 			return nil
@@ -53,7 +29,10 @@ func removeExecutor(volume string, force bool) common.Executor {
 		}
 		defer cli.Close()
 
-		_, err = cli.VolumeRemove(ctx, volume, client.VolumeRemoveOptions{Force: force})
+		_, err = cli.VolumeRemove(ctx, volumeName, client.VolumeRemoveOptions{Force: force})
+		if cerrdefs.IsNotFound(err) { // already gone is the outcome we wanted
+			return nil
+		}
 		return err
 	}
 }

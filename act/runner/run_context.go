@@ -98,6 +98,7 @@ type RunContext struct {
 	hasBash        *bool // memoized implicit-shell probe, only set on the top-level RunContext
 	jobNetworkName string
 	dockerProxy    *container.DockerProxy
+	hadDockerProxy bool
 	// stepEnv is a copy of the running step's environment, so that workflow commands parsed out
 	// of the container's output can be judged against it. Written by runStepExecutor and read on
 	// the log-writer goroutine, hence unsecureCommandMu, which also guards unsecureCommandErr.
@@ -484,7 +485,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		// if using service containers, will create a new network for the containers.
 		// and it will be removed after at last.
 		networkName, createAndDeleteNetwork := rc.networkNameForGitea()
-		rc.cleanUpJobContainer = rc.cleanupJobResources(networkName, createAndDeleteNetwork)
+		rc.cleanUpJobContainer = rc.cleanupJobResources(networkName, createAndDeleteNetwork, false)
 
 		// add service containers
 		for serviceID, spec := range rc.Run.Job().Services {
@@ -610,10 +611,10 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		}
 		defer printStartJobContainerGroup(ctx, image, name, networkName)()
 		if err := common.NewPipelineExecutor(
-			rc.stopJobContainer(),
+			rc.cleanupJobResources(networkName, createAndDeleteNetwork, true),
 			rc.pullServicesImages(rc.Config.ForcePull),
 			rc.JobContainer.Pull(rc.Config.ForcePull),
-		).Finally(rc.closeContainer())(ctx); err != nil {
+		)(ctx); err != nil {
 			return err
 		}
 		rc.startDockerProxy(ctx)
@@ -654,7 +655,7 @@ func (rc *RunContext) commandLogWriter(ctx context.Context) io.Writer {
 	})
 }
 
-func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNetwork bool) common.Executor {
+func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNetwork, preclean bool) common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
 		errs := []error{rc.closeDockerProxy(ctx)}
@@ -665,15 +666,10 @@ func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNet
 			logger.Infof("Cleaning up services for job %s", rc.JobName)
 			errs = append(errs, rc.stopServiceContainers()(ctx))
 		}
-		if !common.Dryrun(ctx) {
+		if !common.Dryrun(ctx) && (preclean || rc.hadDockerProxy) {
 			errs = append(errs, container.RemoveDockerJobResources(ctx, rc.jobContainerName()))
 		}
-		if rc.JobContainer != nil {
-			name := rc.jobContainerName()
-			errs = append(errs,
-				container.NewDockerVolumeRemoveExecutor(name, false)(ctx),
-				container.NewDockerVolumeRemoveExecutor(name+"-env", false)(ctx))
-		}
+		errs = append(errs, rc.cleanupJobVolumes(ctx))
 		if createAndDeleteNetwork {
 			logger.Infof("Cleaning up network for job %s, and network name is: %s", rc.JobName, networkName)
 			errs = append(errs, container.NewDockerNetworkRemoveExecutor(networkName)(ctx))
@@ -682,10 +678,21 @@ func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNet
 	}
 }
 
+func (rc *RunContext) cleanupJobVolumes(ctx context.Context) error {
+	if rc.JobContainer == nil {
+		return nil
+	}
+	name := rc.jobContainerName()
+	return errors.Join(
+		container.NewDockerVolumeRemoveExecutor(name, false)(ctx),
+		container.NewDockerVolumeRemoveExecutor(name+"-env", false)(ctx))
+}
+
 func (rc *RunContext) closeDockerProxy(ctx context.Context) error {
 	if rc.dockerProxy == nil {
 		return nil
 	}
+	rc.hadDockerProxy = true
 	err := rc.dockerProxy.Close(ctx)
 	rc.dockerProxy = nil
 	if err != nil {

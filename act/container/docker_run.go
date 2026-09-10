@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
@@ -95,8 +96,7 @@ func (cr *containerReference) Start(attach bool) common.Executor {
 			common.NewPipelineExecutor(
 				cr.connect(),
 				cr.find(),
-				cr.attach().IfBool(attach),
-				cr.start(),
+				cr.withContainer("start it", cr.attach().IfBool(attach).Then(cr.start())),
 				cr.wait().IfBool(attach),
 				cr.tryReadUIDGID(),
 				func(ctx context.Context) error {
@@ -133,7 +133,7 @@ func (cr *containerReference) Copy(destPath string, files ...*FileEntry) common.
 	return common.NewPipelineExecutor(
 		cr.connect(),
 		cr.find(),
-		cr.copyContent(destPath, files...),
+		cr.withContainer("copy to "+destPath, cr.copyContent(destPath, files...)),
 	).IfNot(common.Dryrun)
 }
 
@@ -142,7 +142,7 @@ func (cr *containerReference) CopyDir(destPath, srcPath string, useGitIgnore, sk
 		common.NewInfoExecutor("docker cp src=%s dst=%s", srcPath, destPath),
 		cr.connect(),
 		cr.find(),
-		cr.copyDir(destPath, srcPath, useGitIgnore, skipGitDir),
+		cr.withContainer("copy directory to "+destPath, cr.copyDir(destPath, srcPath, useGitIgnore, skipGitDir)),
 		func(ctx context.Context) error {
 			// If this fails, then folders have wrong permissions on non root container
 			if cr.UID != 0 || cr.GID != 0 {
@@ -157,17 +157,18 @@ func (cr *containerReference) GetContainerArchive(ctx context.Context, srcPath s
 	if common.Dryrun(ctx) {
 		return nil, errors.New("DRYRUN is not supported in GetContainerArchive")
 	}
-	// Direct entry point (no pipeline) — revalidate cr.id ourselves.
 	if err := cr.connect()(ctx); err != nil {
 		return nil, err
 	}
 	if err := cr.find()(ctx); err != nil {
 		return nil, err
 	}
-	if cr.id == "" {
-		return nil, cr.missingContainerError("get archive %s", srcPath)
-	}
-	result, err := cr.cli.CopyFromContainer(ctx, cr.id, client.CopyFromContainerOptions{SourcePath: srcPath})
+	var result client.CopyFromContainerResult
+	err := cr.withContainer("get archive "+srcPath, func(ctx context.Context) error {
+		var err error
+		result, err = cr.cli.CopyFromContainer(ctx, cr.id, client.CopyFromContainerOptions{SourcePath: srcPath})
+		return err
+	})(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -183,10 +184,8 @@ func (cr *containerReference) Inspect(ctx context.Context) (*Info, error) {
 	if err := cr.connect()(ctx); err != nil {
 		return nil, err
 	}
-	if cr.id == "" { // a known id is trusted, find() would spend a call validating it
-		if err := cr.find()(ctx); err != nil {
-			return nil, err
-		}
+	if err := cr.find()(ctx); err != nil {
+		return nil, err
 	}
 	if cr.id == "" {
 		return nil, cr.missingContainerError("inspect it")
@@ -377,12 +376,25 @@ func GetHostInfo(ctx context.Context) (info system.Info, err error) {
 	return result.Info, nil
 }
 
-// Arch fetches values from docker info and translates architecture to
-// GitHub actions compatible runner.arch values
-// https://github.com/github/docs/blob/main/data/reusables/actions/runner-arch-description.md
+var runnerArchitectures = struct {
+	sync.Mutex
+	byHost map[string]string
+}{byHost: make(map[string]string)}
+
+// RunnerArch translates the daemon architecture to runner.arch values.
 func RunnerArch(ctx context.Context) string {
+	dockerHost := os.Getenv("DOCKER_HOST")
+	if dockerHost == "" {
+		dockerHost = client.DefaultDockerHost
+	}
+	runnerArchitectures.Lock()
+	defer runnerArchitectures.Unlock()
+	if arch := runnerArchitectures.byHost[dockerHost]; arch != "" {
+		return arch
+	}
+
 	info, err := GetHostInfo(ctx)
-	if err != nil {
+	if err != nil || info.Architecture == "" {
 		return ""
 	}
 
@@ -394,8 +406,9 @@ func RunnerArch(ctx context.Context) string {
 		"arm64":   "ARM64",
 	}
 	if arch, ok := archMapper[info.Architecture]; ok {
-		return arch
+		info.Architecture = arch
 	}
+	runnerArchitectures.byHost[dockerHost] = info.Architecture
 	return info.Architecture
 }
 
@@ -435,13 +448,7 @@ func (cr *containerReference) missingContainerError(format string, args ...any) 
 func (cr *containerReference) find() common.Executor {
 	return func(ctx context.Context) error {
 		if cr.id != "" {
-			// Validate cached id; clear only on definitive NotFound so a
-			// transient daemon error doesn't abort cleanup pipelines.
-			_, err := cr.cli.ContainerInspect(ctx, cr.id, client.ContainerInspectOptions{})
-			if !cerrdefs.IsNotFound(err) {
-				return nil
-			}
-			cr.id = ""
+			return nil
 		}
 		containers, err := cr.cli.ContainerList(ctx, client.ContainerListOptions{
 			All: true,
@@ -460,6 +467,39 @@ func (cr *containerReference) find() common.Executor {
 		}
 
 		return nil
+	}
+}
+
+func isMissingContainer(err error) bool {
+	if !cerrdefs.IsNotFound(err) {
+		return false
+	}
+	for err != nil {
+		if strings.HasPrefix(strings.TrimPrefix(strings.TrimPrefix(err.Error(), "Error response from daemon: "), "Error: "), "No such container:") {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
+}
+
+func (cr *containerReference) withContainer(operation string, run common.Executor) common.Executor {
+	return func(ctx context.Context) error {
+		for attempt := range 2 {
+			if cr.id == "" {
+				break
+			}
+			if err := run(ctx); !isMissingContainer(err) {
+				return err
+			}
+			cr.id = ""
+			if attempt == 0 {
+				if err := cr.find()(ctx); err != nil {
+					return err
+				}
+			}
+		}
+		return cr.missingContainerError("%s", operation)
 	}
 }
 
@@ -487,6 +527,11 @@ func (cr *containerReference) remove() common.Executor {
 			RemoveVolumes: true,
 			Force:         true,
 		})
+		if cerrdefs.IsNotFound(err) && cr.id != "" && cr.input != nil && cr.input.Name != "" {
+			cr.id = ""
+			idOrName = cr.input.Name
+			_, err = cr.cli.ContainerRemove(ctx, idOrName, client.ContainerRemoveOptions{RemoveVolumes: true, Force: true})
+		}
 		if cerrdefs.IsConflict(err) {
 			err = cr.waitForRemoval(ctx, idOrName)
 		}
@@ -632,7 +677,17 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 func (cr *containerReference) create(capAdd, capDrop []string) common.Executor {
 	return func(ctx context.Context) error {
 		if cr.id != "" {
-			return nil
+			_, err := cr.cli.ContainerInspect(ctx, cr.id, client.ContainerInspectOptions{}) // Reuse has no operation that could detect a stale id.
+			if !cerrdefs.IsNotFound(err) {
+				return nil
+			}
+			cr.id = ""
+			if err := cr.find()(ctx); err != nil {
+				return err
+			}
+			if cr.id != "" {
+				return nil
+			}
 		}
 		logger := common.Logger(ctx)
 		input := cr.input
@@ -815,17 +870,25 @@ func (cr *containerReference) exec(cmd []string, env map[string]string, user, wo
 		}
 		logger.Debugf("Working directory '%s'", wd)
 
-		idResp, err := cr.cli.ExecCreate(ctx, cr.id, client.ExecCreateOptions{
-			User:         user,
-			Cmd:          cmd,
-			WorkingDir:   wd,
-			Env:          envList,
-			TTY:          isTerminal,
-			AttachStderr: true,
-			AttachStdout: true,
-		})
+		var idResp client.ExecCreateResult
+		err := cr.withContainer(fmt.Sprintf("exec %v", cmd), func(ctx context.Context) error {
+			var err error
+			idResp, err = cr.cli.ExecCreate(ctx, cr.id, client.ExecCreateOptions{
+				User:         user,
+				Cmd:          cmd,
+				WorkingDir:   wd,
+				Env:          envList,
+				TTY:          isTerminal,
+				AttachStderr: true,
+				AttachStdout: true,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create exec: %w", err)
+			}
+			return nil
+		})(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to create exec: %w", err)
+			return err
 		}
 
 		resp, err := cr.cli.ExecAttach(ctx, idResp.ID, client.ExecAttachOptions{
@@ -858,6 +921,21 @@ var idPattern = regexp.MustCompile(`^(\d+)\n(\d+)\n`)
 
 func (cr *containerReference) tryReadUIDGID() common.Executor {
 	return func(ctx context.Context) error {
+		inspect, err := cr.cli.ContainerInspect(ctx, cr.id, client.ContainerInspectOptions{})
+		if err == nil && inspect.Container.Config != nil {
+			if inspect.Container.Config.User == "" {
+				cr.UID, cr.GID = 0, 0
+				return nil
+			}
+			if uidText, gidText, ok := strings.Cut(inspect.Container.Config.User, ":"); ok {
+				uid, uidErr := strconv.ParseUint(uidText, 10, strconv.IntSize-1)
+				gid, gidErr := strconv.ParseUint(gidText, 10, strconv.IntSize-1)
+				if uidErr == nil && gidErr == nil {
+					cr.UID, cr.GID = int(uid), int(gid)
+					return nil
+				}
+			}
+		}
 		idResp, err := cr.cli.ExecCreate(ctx, cr.id, client.ExecCreateOptions{
 			Cmd:          []string{"sh", "-c", "id -u; id -g"}, // numeric, so no NSS lookup can stall this read
 			AttachStdout: true,
@@ -1081,6 +1159,10 @@ func (cr *containerReference) start() common.Executor {
 		logger.Debugf("Starting container: %v", cr.id)
 
 		if _, err := cr.cli.ContainerStart(ctx, cr.id, client.ContainerStartOptions{}); err != nil {
+			if cr.attachDone != nil && isMissingContainer(err) {
+				cr.id = ""
+				return cr.missingContainerError("start it")
+			}
 			return fmt.Errorf("failed to start container: %w", err)
 		}
 

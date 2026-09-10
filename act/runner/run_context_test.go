@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -256,6 +258,8 @@ func fakeDockerDaemon(t *testing.T) {
 			_, _ = io.WriteString(w, "[]")
 		case strings.HasSuffix(r.URL.Path, "/volumes"):
 			_, _ = io.WriteString(w, `{"Volumes":[]}`)
+		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/volumes/"):
+			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/info"):
 			_, _ = io.WriteString(w, `{"Architecture":"amd64","OSType":"linux"}`)
 		default:
@@ -654,39 +658,141 @@ func TestCleanupJobResourcesCleansServicesWithoutJobContainer(t *testing.T) {
 		serviceContainers: []*serviceContainer{{name: "svc", container: service}},
 	}
 
-	err := rc.cleanupJobResources("external-network", false)(common.WithDryrun(t.Context(), true))
+	err := rc.cleanupJobResources("external-network", false, true)(common.WithDryrun(t.Context(), true))
 	require.NoError(t, err)
 	service.AssertExpectations(t)
 }
 
-// cleanup used to bail out on a previous step's error and on a cancelled context
 func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
-	t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
+	t.Setenv("TMPDIR", "/tmp")
+	proxyDir := t.TempDir()
+	for _, testcase := range []struct {
+		name       string
+		proxy      bool
+		closeProxy bool
+		preclean   bool
+	}{
+		{name: "no proxy"},
+		{name: "proxy", proxy: true},
+		{name: "closed proxy", proxy: true, closeProxy: true},
+		{name: "preclean", preclean: true},
+	} {
+		t.Run(testcase.name, func(t *testing.T) {
+			if testcase.proxy && runtime.GOOS == "windows" {
+				t.Skip("Unix socket ownership is unavailable on Windows")
+			}
+			attempts := make(chan string, 10)
+			jobError, removeError, closeError := errors.New("remove job"), errors.New("remove service"), errors.New("close service")
+			job := &containerMock{}
+			job.On("Remove").Return(func(context.Context) error {
+				attempts <- jobError.Error()
+				return jobError
+			}).Once()
+			service := &containerMock{}
+			service.On("Remove").Return(func(context.Context) error {
+				attempts <- removeError.Error()
+				return removeError
+			}).Once()
+			service.On("Close").Return(func(context.Context) error {
+				attempts <- closeError.Error()
+				return closeError
+			}).Once()
+			rc := &RunContext{
+				Name:              "job",
+				Config:            &Config{},
+				Run:               &model.Run{Workflow: &model.Workflow{Name: "wf"}, JobID: "job"},
+				JobContainer:      job,
+				serviceContainers: []*serviceContainer{{name: "svc", container: service}},
+			}
+			name := rc.jobContainerName()
+			daemon := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.HasSuffix(request.URL.Path, "/_ping"):
+					writer.Header().Set("API-Version", "1.47")
+					_, _ = io.WriteString(writer, "OK")
+				case request.Method == http.MethodDelete || request.URL.Query().Has("filters"):
+					operation := request.Method + " " + strings.TrimPrefix(request.URL.Path, "/v1.47")
+					attempts <- operation
+					writer.WriteHeader(http.StatusInternalServerError)
+					_, _ = fmt.Fprintf(writer, `{"message":%q}`, operation)
+				case strings.HasSuffix(request.URL.Path, "/volumes"):
+					_, _ = fmt.Fprintf(writer, `{"Volumes":[{"Name":%q},{"Name":%q}]}`, name, name+"-env")
+				case strings.HasSuffix(request.URL.Path, "/networks"):
+					_, _ = io.WriteString(writer, `[{"Id":"network-id","Name":"job-network"}]`)
+				case strings.HasSuffix(request.URL.Path, "/networks/network-id"):
+					_, _ = io.WriteString(writer, `{}`)
+				default:
+					t.Errorf("unexpected Docker request: %s %s", request.Method, request.URL)
+					http.NotFound(writer, request)
+				}
+			}))
+			t.Cleanup(daemon.Close)
+			t.Setenv("DOCKER_HOST", daemon.URL)
+			if testcase.proxy {
+				listener, err := net.Listen("unix", filepath.Join(proxyDir, "d.sock"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, listener.Close()) })
+				rc.dockerProxy, err = container.StartDockerProxy(listener.Addr().String(), proxyDir, name)
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, rc.closeDockerProxy(context.Background())) })
+				if testcase.closeProxy {
+					require.NoError(t, rc.closeDockerProxy(t.Context()))
+				}
+			}
 
-	removeError, closeError := errors.New("remove service"), errors.New("close service")
-	jobContainer := &containerMock{}
-	jobContainer.On("Remove").Return(func(context.Context) error { return errors.New("removal failed") }).Once()
-	service := &containerMock{}
-	service.On("Remove").Return(func(context.Context) error { return removeError }).Once()
-	service.On("Close").Return(func(context.Context) error { return closeError }).Once()
-
-	rc := &RunContext{
-		Name:              "job",
-		Config:            &Config{},
-		Run:               &model.Run{Workflow: &model.Workflow{Name: "wf"}, JobID: "job"},
-		JobContainer:      jobContainer,
-		serviceContainers: []*serviceContainer{{name: "svc", container: service}},
+			err := rc.cleanupJobResources("job-network", true, testcase.preclean)(t.Context())
+			require.ErrorIs(t, err, jobError)
+			require.ErrorIs(t, err, removeError)
+			require.ErrorIs(t, err, closeError)
+			want := []string{jobError.Error(), removeError.Error(), closeError.Error()}
+			if testcase.proxy || testcase.preclean {
+				want = append(want, "GET /containers/json", "GET /networks", "GET /volumes")
+			}
+			want = append(want, "DELETE /volumes/"+name, "DELETE /volumes/"+name+"-env", "DELETE /networks/network-id")
+			var got []string
+			for len(attempts) > 0 {
+				got = append(got, <-attempts)
+			}
+			assert.Equal(t, want, got)
+			for _, operation := range want {
+				require.ErrorContains(t, err, operation)
+			}
+			assert.Nil(t, rc.dockerProxy)
+			assert.Equal(t, testcase.proxy, rc.hadDockerProxy)
+			job.AssertExpectations(t)
+			service.AssertExpectations(t)
+		})
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err := rc.cleanupJobResources("job-network", true)(ctx)
-	require.ErrorContains(t, err, "removal failed")
-	require.ErrorIs(t, err, removeError)
-	require.ErrorIs(t, err, closeError)
-	require.ErrorIs(t, err, context.Canceled)
-	jobContainer.AssertExpectations(t)
-	service.AssertExpectations(t)
+	t.Run("canceled", func(t *testing.T) {
+		t.Setenv("DOCKER_HOST", "unix:///nonexistent.sock")
+
+		removeError, closeError := errors.New("remove service"), errors.New("close service")
+		jobContainer := &containerMock{}
+		jobContainer.On("Remove").Return(func(context.Context) error { return errors.New("removal failed") }).Once()
+		service := &containerMock{}
+		service.On("Remove").Return(func(context.Context) error { return removeError }).Once()
+		service.On("Close").Return(func(context.Context) error { return closeError }).Once()
+
+		rc := &RunContext{
+			Name:              "job",
+			Config:            &Config{},
+			Run:               &model.Run{Workflow: &model.Workflow{Name: "wf"}, JobID: "job"},
+			JobContainer:      jobContainer,
+			serviceContainers: []*serviceContainer{{name: "svc", container: service}},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := rc.cleanupJobResources("job-network", true, false)(ctx)
+		require.ErrorContains(t, err, "removal failed")
+		require.ErrorIs(t, err, removeError)
+		require.ErrorIs(t, err, closeError)
+		require.ErrorIs(t, err, context.Canceled)
+		jobContainer.AssertExpectations(t)
+		service.AssertExpectations(t)
+	})
 }
 
 // TestInterpolateOutputsIsPerMatrixCombo guards the matrix-output fix: combinations share one
@@ -1096,7 +1202,6 @@ func TestRunContext_cleanupFailedStart(t *testing.T) {
 	type ctxKey string
 	const sentinel = ctxKey("sentinel")
 
-	// the fresh context is cancelled via defer on return, so capture state inside the stub
 	type capture struct {
 		calls    int
 		err      error
@@ -1145,82 +1250,122 @@ func TestRunContext_cleanupFailedStart(t *testing.T) {
 		assert.Equal(t, "v", c.sentinel)
 	})
 
-	t.Run("pulls services once and prepares the job before an unhealthy service cleans it up", func(t *testing.T) {
-		workflow, err := model.ReadWorkflow(strings.NewReader(`
+	for _, testcase := range []struct {
+		name      string
+		pullFails bool
+		healthy   bool
+	}{
+		{name: "successful job closes its client once", healthy: true},
+		{name: "unhealthy service cleans up the prepared job and closes its client once"},
+		{name: "failed pull closes its client once", pullFails: true},
+	} {
+		t.Run(testcase.name, func(t *testing.T) {
+			workflow, err := model.ReadWorkflow(strings.NewReader(`
 jobs:
   job:
     services:
       postgres:
         image: postgres:latest
 `))
-		require.NoError(t, err)
-		job := &containerMock{}
-		service := &containerMock{}
-		servicePulls := 0
-		service.On("Pull", true).Return(func(context.Context) error {
-			servicePulls++
-			return nil
-		}).Once()
-		job.On("Pull", true).Return(noopExecutor).Once()
-		job.On("Start", false).Return(noopExecutor).Once()
-		service.On("Start", false).Return(noopExecutor).Once()
-		jobExists, jobPrepared := false, false
-		job.On("Create", mock.Anything, mock.Anything).Return(func(context.Context) error {
-			jobExists = true
-			return nil
-		}).Once()
-		job.On("Inspect", mock.Anything).Return(&container.Info{ID: "job-id"}, nil).Once()
-		job.On("Copy", mock.Anything, mock.Anything).Return(func(context.Context) error {
-			assert.True(t, jobExists)
-			jobPrepared = true
-			return nil
-		}).Once()
-		job.On("Remove").Return(func(context.Context) error {
-			jobExists = false
-			return nil
-		}).Twice()
-		job.On("Close").Return(noopExecutor).Once()
-		service.On("Create", mock.Anything, mock.Anything).Return(noopExecutor).Once()
-		service.On("Remove").Return(noopExecutor).Twice()
-		service.On("Close").Return(noopExecutor).Twice()
-		service.On("Inspect", mock.Anything).
-			Run(func(_ mock.Arguments) { assert.False(t, jobPrepared) }).
-			Return(&container.Info{State: "running", Health: container.HealthStarting}, nil).Once()
-		service.On("Inspect", mock.Anything).
-			Run(func(_ mock.Arguments) { assert.True(t, jobPrepared) }).
-			Return(&container.Info{State: "running", Health: container.HealthUnhealthy}, nil).Once()
-		service.On("DumpLogs", mock.Anything).Return(nil).Once()
-
-		origNewContainer := newContainer
-		newContainer = func(input *container.NewContainerInput) container.ExecutionsEnvironment {
-			if input.Image == "postgres:latest" {
-				return service
-			} else {
-				return job
+			require.NoError(t, err)
+			job := &containerMock{}
+			service := &containerMock{}
+			servicePulls := 0
+			service.On("Pull", true).Return(func(context.Context) error {
+				servicePulls++
+				return nil
+			}).Once()
+			jobCloses := 0
+			pullError := errors.New("pull failed")
+			job.On("Pull", true).Return(func(context.Context) error {
+				assert.Zero(t, jobCloses)
+				if testcase.pullFails {
+					return pullError
+				}
+				return nil
+			}).Once()
+			jobExists, jobPrepared := false, false
+			if !testcase.pullFails {
+				job.On("Start", false).Return(noopExecutor).Once()
+				service.On("Start", false).Return(noopExecutor).Once()
+				job.On("Create", mock.Anything, mock.Anything).Return(func(context.Context) error {
+					assert.Zero(t, jobCloses)
+					jobExists = true
+					return nil
+				}).Once()
+				job.On("Inspect", mock.Anything).Return(&container.Info{ID: "job-id"}, nil).Once()
+				job.On("Copy", mock.Anything, mock.Anything).Return(func(context.Context) error {
+					assert.True(t, jobExists)
+					jobPrepared = true
+					return nil
+				}).Once()
+				service.On("Create", mock.Anything, mock.Anything).Return(noopExecutor).Once()
+				service.On("Inspect", mock.Anything).
+					Run(func(_ mock.Arguments) { assert.False(t, jobPrepared) }).
+					Return(&container.Info{State: "running", Health: container.HealthStarting}, nil).Once()
+				health := container.HealthUnhealthy
+				if testcase.healthy {
+					health = container.HealthHealthy
+				} else {
+					service.On("DumpLogs", mock.Anything).Return(nil).Once()
+				}
+				service.On("Inspect", mock.Anything).
+					Run(func(_ mock.Arguments) { assert.True(t, jobPrepared) }).
+					Return(&container.Info{State: "running", Health: health}, nil).Once()
 			}
-		}
-		t.Cleanup(func() { newContainer = origNewContainer })
-		fakeDockerDaemon(t)
-		rc := &RunContext{
-			Config: &Config{
-				ForcePull:            true,
-				ContainerNetworkMode: "host",
-				Workdir:              "/workspace",
-			},
-			Env:           map[string]string{},
-			Run:           &model.Run{JobID: "job", Workflow: workflow},
-			platformImage: "node:20",
-		}
-		ctx := common.WithDryrun(t.Context(), true)
-		rc.ExprEval = rc.NewExpressionEvaluator(ctx)
+			job.On("Remove").Return(func(context.Context) error {
+				assert.Zero(t, jobCloses)
+				jobExists = false
+				return nil
+			}).Twice()
+			job.On("Close").Return(func(context.Context) error {
+				assert.False(t, jobExists)
+				jobCloses++
+				return nil
+			}).Once()
+			service.On("Remove").Return(noopExecutor).Twice()
+			service.On("Close").Return(noopExecutor).Twice()
 
-		require.ErrorContains(t, rc.startContainer()(ctx), "the service 'postgres' is unhealthy")
-		assert.True(t, jobPrepared)
-		assert.False(t, jobExists)
-		assert.Equal(t, 1, servicePulls)
-		job.AssertExpectations(t)
-		service.AssertExpectations(t)
-	})
+			origNewContainer := newContainer
+			newContainer = func(input *container.NewContainerInput) container.ExecutionsEnvironment {
+				if input.Image == "postgres:latest" {
+					return service
+				} else {
+					return job
+				}
+			}
+			t.Cleanup(func() { newContainer = origNewContainer })
+			fakeDockerDaemon(t)
+			rc := &RunContext{
+				Config: &Config{
+					ForcePull:            true,
+					ContainerNetworkMode: "host",
+					Workdir:              "/workspace",
+				},
+				Env:           map[string]string{},
+				Run:           &model.Run{JobID: "job", Workflow: workflow},
+				platformImage: "node:20",
+			}
+			ctx := common.WithDryrun(t.Context(), true)
+			rc.ExprEval = rc.NewExpressionEvaluator(ctx)
+
+			err = rc.startContainer().Then(rc.stopContainer()).Finally(rc.closeContainer())(ctx)
+			switch {
+			case testcase.pullFails:
+				require.ErrorIs(t, err, pullError)
+			case testcase.healthy:
+				require.NoError(t, err)
+			default:
+				require.ErrorContains(t, err, "the service 'postgres' is unhealthy")
+			}
+			assert.Equal(t, !testcase.pullFails, jobPrepared)
+			assert.Equal(t, 1, jobCloses)
+			assert.False(t, jobExists)
+			assert.Equal(t, 1, servicePulls)
+			job.AssertExpectations(t)
+			service.AssertExpectations(t)
+		})
+	}
 
 	t.Run("no-op when there is nothing to clean up", func(t *testing.T) {
 		assert.NotPanics(t, func() { (&RunContext{}).cleanupFailedStart(context.Background()) })
