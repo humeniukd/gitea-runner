@@ -298,36 +298,54 @@ func TestRunnerOnIdleSkipsWhenAlreadyCancelled(t *testing.T) {
 	assert.DirExists(t, stale)
 }
 
-func TestRunnerOnIdleRemovesOrphanNetworksAndVolumesWhenDockerIsRequiredOrReachable(t *testing.T) {
+// The idle sweep reclaims the docker networks of jobs this runner did not live to tear down,
+// and stays out of the way of runners that share the daemon but not the registration.
+func TestRunnerOnIdleRemovesOrphanNetworks(t *testing.T) {
 	now := time.Date(2026, time.April, 29, 20, 0, 0, 0, time.UTC)
-	cfg := &config.Config{Runner: config.Runner{WorkdirCleanupAge: 24 * time.Hour, IdleCleanupInterval: time.Minute}}
-	origNetworks, origVolumes, origReachable := removeOrphanNetworks, removeOrphanJobVolumes, dockerReachable
-	t.Cleanup(func() {
-		removeOrphanNetworks, removeOrphanJobVolumes, dockerReachable = origNetworks, origVolumes, origReachable
-	})
+	cfg := &config.Config{
+		Container: config.Container{RequireDocker: true},
+		Runner: config.Runner{
+			WorkdirCleanupAge:   24 * time.Hour,
+			IdleCleanupInterval: time.Minute,
+		},
+	}
+
 	var swept []string
-	for name, cleanup := range map[string]*func(context.Context, string, time.Time) error{
-		"networks": &removeOrphanNetworks,
-		"volumes":  &removeOrphanJobVolumes,
-	} {
-		*cleanup = func(_ context.Context, runnerUUID string, createdBefore time.Time) error {
-			swept = append(swept, name+":"+runnerUUID)
-			assert.Equal(t, now.Add(-24*time.Hour), createdBefore)
-			return os.ErrPermission
-		}
+	var sweptVolumes []string
+	var sweptCutoff time.Time
+	origRemoveOrphanNetworks := removeOrphanNetworks
+	removeOrphanNetworks = func(_ context.Context, runnerUUID string, createdBefore time.Time) error {
+		swept = append(swept, runnerUUID)
+		sweptCutoff = createdBefore
+		return nil
 	}
-	for _, mode := range []string{"required", "unreachable", "reachable"} {
-		t.Run(mode, func(t *testing.T) {
-			swept = nil
-			cfg.Container.RequireDocker = mode == "required"
-			dockerReachable = func(context.Context) bool { return mode == "reachable" }
-			r := &Runner{uuid: "runner-" + mode, cfg: cfg, now: func() time.Time { return now }}
-			r.OnIdle(t.Context())
-			if mode == "unreachable" {
-				assert.Empty(t, swept)
-			} else {
-				assert.ElementsMatch(t, []string{"networks:" + r.uuid, "volumes:" + r.uuid}, swept)
-			}
-		})
+	t.Cleanup(func() { removeOrphanNetworks = origRemoveOrphanNetworks })
+	origRemoveOrphanJobVolumes := removeOrphanJobVolumes
+	removeOrphanJobVolumes = func(_ context.Context, runnerUUID string, createdBefore time.Time) error {
+		sweptVolumes = append(sweptVolumes, runnerUUID)
+		assert.Equal(t, now.Add(-24*time.Hour), createdBefore)
+		return nil
 	}
+	t.Cleanup(func() { removeOrphanJobVolumes = origRemoveOrphanJobVolumes })
+
+	r := &Runner{uuid: "runner-1", cfg: cfg, now: func() time.Time { return now }}
+	r.OnIdle(context.Background())
+	assert.Equal(t, []string{"runner-1"}, swept)
+	assert.Equal(t, swept, sweptVolumes)
+	// a network of a job starting during the pass is younger than this and so out of scope
+	assert.Equal(t, now.Add(-24*time.Hour), sweptCutoff)
+
+	// a host-only runner has no daemon to sweep
+	origDockerReachable := dockerReachable
+	dockerReachable = func(context.Context) bool { return false }
+	t.Cleanup(func() { dockerReachable = origDockerReachable })
+	hostOnly := &Runner{uuid: "runner-2", cfg: &config.Config{Runner: cfg.Runner}, now: func() time.Time { return now }}
+	hostOnly.OnIdle(context.Background())
+	assert.Equal(t, []string{"runner-1"}, swept)
+	assert.Equal(t, swept, sweptVolumes)
+
+	dockerReachable = func(context.Context) bool { return true }
+	now = now.Add(time.Minute)
+	hostOnly.OnIdle(context.Background())
+	assert.Equal(t, []string{"runner-1", "runner-2"}, sweptVolumes)
 }
