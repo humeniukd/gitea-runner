@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
@@ -242,6 +243,30 @@ func (fakeContainer) DumpLogs(context.Context) error { return nil }
 
 // startJobContainerInputs runs startJobContainer against fakeContainer and returns the
 // inputs it built, one per container.
+func fakeDockerDaemon(t *testing.T) {
+	t.Helper()
+
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.Header().Set("API-Version", "1.47")
+			_, _ = io.WriteString(w, "OK")
+		case strings.HasSuffix(r.URL.Path, "/containers/json"), strings.HasSuffix(r.URL.Path, "/networks"):
+			_, _ = io.WriteString(w, "[]")
+		case strings.HasSuffix(r.URL.Path, "/volumes"):
+			_, _ = io.WriteString(w, `{"Volumes":[]}`)
+		case strings.HasSuffix(r.URL.Path, "/info"):
+			_, _ = io.WriteString(w, `{"Architecture":"amd64","OSType":"linux"}`)
+		default:
+			t.Errorf("unexpected Docker request: %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(daemon.Close)
+	t.Setenv("DOCKER_HOST", daemon.URL)
+}
+
 func startJobContainerInputs(t *testing.T, workflowYAML string, cfg *Config) []*container.NewContainerInput {
 	t.Helper()
 	workflow, err := model.ReadWorkflow(strings.NewReader(workflowYAML))
@@ -272,25 +297,7 @@ func startJobContainerInputs(t *testing.T, workflowYAML string, cfg *Config) []*
 	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
 	require.NoError(t, rc.resolvePlatformImage(t.Context()))
 
-	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/_ping"):
-			w.Header().Set("API-Version", "1.47")
-			_, _ = io.WriteString(w, "OK")
-		case strings.HasSuffix(r.URL.Path, "/containers/json"), strings.HasSuffix(r.URL.Path, "/networks"):
-			_, _ = io.WriteString(w, "[]")
-		case strings.HasSuffix(r.URL.Path, "/volumes"):
-			_, _ = io.WriteString(w, `{"Volumes":[]}`)
-		case strings.HasSuffix(r.URL.Path, "/info"):
-			_, _ = io.WriteString(w, `{"Architecture":"amd64","OSType":"linux"}`)
-		default:
-			t.Errorf("unexpected Docker request: %s %s", r.Method, r.URL)
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(daemon.Close)
-	t.Setenv("DOCKER_HOST", daemon.URL)
+	fakeDockerDaemon(t)
 	require.NoError(t, rc.startJobContainer()(t.Context()))
 
 	return inputs
@@ -1138,16 +1145,89 @@ func TestRunContext_cleanupFailedStart(t *testing.T) {
 		assert.Equal(t, "v", c.sentinel)
 	})
 
+	t.Run("pulls services once and prepares the job before an unhealthy service cleans it up", func(t *testing.T) {
+		workflow, err := model.ReadWorkflow(strings.NewReader(`
+jobs:
+  job:
+    services:
+      postgres:
+        image: postgres:latest
+`))
+		require.NoError(t, err)
+		job := &containerMock{}
+		service := &containerMock{}
+		servicePulls := 0
+		service.On("Pull", true).Return(func(context.Context) error {
+			servicePulls++
+			return nil
+		}).Once()
+		job.On("Pull", true).Return(noopExecutor).Once()
+		job.On("Start", false).Return(noopExecutor).Once()
+		service.On("Start", false).Return(noopExecutor).Once()
+		jobExists, jobPrepared := false, false
+		job.On("Create", mock.Anything, mock.Anything).Return(func(context.Context) error {
+			jobExists = true
+			return nil
+		}).Once()
+		job.On("Inspect", mock.Anything).Return(&container.Info{ID: "job-id"}, nil).Once()
+		job.On("Copy", mock.Anything, mock.Anything).Return(func(context.Context) error {
+			assert.True(t, jobExists)
+			jobPrepared = true
+			return nil
+		}).Once()
+		job.On("Remove").Return(func(context.Context) error {
+			jobExists = false
+			return nil
+		}).Twice()
+		job.On("Close").Return(noopExecutor).Once()
+		service.On("Create", mock.Anything, mock.Anything).Return(noopExecutor).Once()
+		service.On("Remove").Return(noopExecutor).Twice()
+		service.On("Close").Return(noopExecutor).Twice()
+		service.On("Inspect", mock.Anything).
+			Run(func(_ mock.Arguments) { assert.False(t, jobPrepared) }).
+			Return(&container.Info{State: "running", Health: container.HealthStarting}, nil).Once()
+		service.On("Inspect", mock.Anything).
+			Run(func(_ mock.Arguments) { assert.True(t, jobPrepared) }).
+			Return(&container.Info{State: "running", Health: container.HealthUnhealthy}, nil).Once()
+		service.On("DumpLogs", mock.Anything).Return(nil).Once()
+
+		origNewContainer := newContainer
+		newContainer = func(input *container.NewContainerInput) container.ExecutionsEnvironment {
+			if input.Image == "postgres:latest" {
+				return service
+			} else {
+				return job
+			}
+		}
+		t.Cleanup(func() { newContainer = origNewContainer })
+		fakeDockerDaemon(t)
+		rc := &RunContext{
+			Config: &Config{
+				ForcePull:            true,
+				ContainerNetworkMode: "host",
+				Workdir:              "/workspace",
+			},
+			Env:           map[string]string{},
+			Run:           &model.Run{JobID: "job", Workflow: workflow},
+			platformImage: "node:20",
+		}
+		ctx := common.WithDryrun(t.Context(), true)
+		rc.ExprEval = rc.NewExpressionEvaluator(ctx)
+
+		require.ErrorContains(t, rc.startContainer()(ctx), "the service 'postgres' is unhealthy")
+		assert.True(t, jobPrepared)
+		assert.False(t, jobExists)
+		assert.Equal(t, 1, servicePulls)
+		job.AssertExpectations(t)
+		service.AssertExpectations(t)
+	})
+
 	t.Run("no-op when there is nothing to clean up", func(t *testing.T) {
 		assert.NotPanics(t, func() { (&RunContext{}).cleanupFailedStart(context.Background()) })
 	})
 }
 
 func TestWaitForServiceContainers(t *testing.T) {
-	origInterval := serviceReadyPollInterval
-	serviceReadyPollInterval = time.Millisecond
-	defer func() { serviceReadyPollInterval = origInterval }()
-
 	newRunContext := func(timeout time.Duration, services ...*serviceContainer) *RunContext {
 		return &RunContext{
 			Config:            &Config{ServiceReadyTimeout: timeout},
@@ -1165,16 +1245,28 @@ func TestWaitForServiceContainers(t *testing.T) {
 		service.AssertExpectations(t)
 	})
 
-	t.Run("waits while a service is still starting", func(t *testing.T) {
-		service := &containerMock{}
-		service.On("Inspect", mock.Anything).
-			Return(&container.Info{ID: "id", State: "running", Health: container.HealthStarting}, nil).Twice()
-		service.On("Inspect", mock.Anything).
-			Return(&container.Info{ID: "id", State: "running", Health: container.HealthHealthy}, nil).Once()
+	t.Run("polls at a fixed interval and logs starting only once", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var pollTimes []time.Duration
+			started := time.Now()
+			service := &containerMock{}
+			service.On("Inspect", mock.Anything).
+				Run(func(_ mock.Arguments) { pollTimes = append(pollTimes, time.Since(started)) }).
+				Return(&container.Info{ID: "id", State: "running", Health: container.HealthStarting}, nil).Twice()
+			service.On("Inspect", mock.Anything).
+				Run(func(_ mock.Arguments) { pollTimes = append(pollTimes, time.Since(started)) }).
+				Return(&container.Info{ID: "id", State: "running", Health: container.HealthHealthy}, nil).Once()
 
-		rc := newRunContext(0, &serviceContainer{name: "postgres", container: service})
-		require.NoError(t, rc.waitForServiceContainers()(context.Background()))
-		service.AssertExpectations(t)
+			var output bytes.Buffer
+			logger := log.New()
+			logger.SetOutput(&output)
+			rc := newRunContext(0, &serviceContainer{name: "postgres", container: service})
+			require.NoError(t, rc.waitForServiceContainers()(common.WithLogger(t.Context(), logger.WithFields(nil))))
+			service.AssertExpectations(t)
+			assert.Equal(t, []time.Duration{0, time.Second, 2 * time.Second}, pollTimes)
+			assert.Equal(t, 1, strings.Count(output.String(), "postgres service is starting."))
+			assert.Contains(t, output.String(), "postgres service is healthy.")
+		})
 	})
 
 	t.Run("fails with the probe output when a service is unhealthy", func(t *testing.T) {

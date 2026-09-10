@@ -98,8 +98,7 @@ func (cr *containerReference) Start(attach bool) common.Executor {
 				cr.attach().IfBool(attach),
 				cr.start(),
 				cr.wait().IfBool(attach),
-				cr.tryReadUID(),
-				cr.tryReadGID(),
+				cr.tryReadUIDGID(),
 				func(ctx context.Context) error {
 					// If this fails, then folders have wrong permissions on non root container
 					if cr.UID != 0 || cr.GID != 0 {
@@ -854,10 +853,13 @@ func (cr *containerReference) exec(cmd []string, env map[string]string, user, wo
 	}
 }
 
-func (cr *containerReference) tryReadID(opt string, cbk func(id int)) common.Executor {
+// Matches the uid and gid lines of `id -u; id -g`, both terminated so a truncated stream cannot parse short.
+var idPattern = regexp.MustCompile(`^(\d+)\n(\d+)\n`)
+
+func (cr *containerReference) tryReadUIDGID() common.Executor {
 	return func(ctx context.Context) error {
 		idResp, err := cr.cli.ExecCreate(ctx, cr.id, client.ExecCreateOptions{
-			Cmd:          []string{"id", opt},
+			Cmd:          []string{"sh", "-c", "id -u; id -g"}, // numeric, so no NSS lookup can stall this read
 			AttachStdout: true,
 			AttachStderr: true,
 		})
@@ -871,28 +873,26 @@ func (cr *containerReference) tryReadID(opt string, cbk func(id int)) common.Exe
 		}
 		defer resp.Close()
 
-		sid, err := resp.Reader.ReadString('\n')
+		var output bytes.Buffer
+		if _, err := stdcopy.StdCopy(&output, io.Discard, resp.Reader); err != nil {
+			return nil
+		}
+		match := idPattern.FindSubmatch(output.Bytes())
+		if match == nil {
+			return nil
+		}
+		uid, err := strconv.ParseInt(string(match[1]), 10, 32)
 		if err != nil {
 			return nil
 		}
-		exp := regexp.MustCompile(`\d+\n`)
-		found := exp.FindString(sid)
-		id, err := strconv.ParseInt(strings.TrimSpace(found), 10, 32)
+		gid, err := strconv.ParseInt(string(match[2]), 10, 32)
 		if err != nil {
 			return nil
 		}
-		cbk(int(id))
+		cr.UID, cr.GID = int(uid), int(gid)
 
 		return nil
 	}
-}
-
-func (cr *containerReference) tryReadUID() common.Executor {
-	return cr.tryReadID("-u", func(id int) { cr.UID = id })
-}
-
-func (cr *containerReference) tryReadGID() common.Executor {
-	return cr.tryReadID("-g", func(id int) { cr.GID = id })
 }
 
 func (cr *containerReference) waitForCommand(ctx context.Context, resp client.HijackedResponse, _ client.ExecCreateResult, _, _ string) error {

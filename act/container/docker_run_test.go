@@ -174,6 +174,59 @@ func (m *mockConn) Close() (err error) {
 	return nil
 }
 
+func TestDockerReadUIDGID(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		stdout string
+		stderr string
+		uid    int
+		gid    int
+	}{
+		{name: "non-root", stdout: "1000\n1001\n", uid: 1000, gid: 1001},
+		{name: "stderr is not parsed", stdout: "1000\n1001\n", stderr: "9999\n9999\n", uid: 1000, gid: 1001},
+		{name: "stream truncated mid-number keeps the previous ids", stdout: "1000\n100", uid: 7, gid: 8},
+		{name: "no shell in the image keeps the previous ids", stdout: "sh: id: not found\n", uid: 7, gid: 8},
+		{name: "overflowing uid keeps the previous ids", stdout: "2147483648\n1001\n", uid: 7, gid: 8},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			client := &mockDockerClient{}
+			client.On("ExecCreate", ctx, "123", mobyclient.ExecCreateOptions{
+				Cmd:          []string{"sh", "-c", "id -u; id -g"},
+				AttachStdout: true,
+				AttachStderr: true,
+			}).Return(mobyclient.ExecCreateResult{ID: "id"}, nil).Once()
+			stream := stdcopyFrame(stdcopy.Stdout, tt.stdout)
+			if tt.stderr != "" {
+				stream = append(stdcopyFrame(stdcopy.Stderr, tt.stderr), stream...)
+			}
+			client.On("ExecAttach", ctx, "id", mobyclient.ExecAttachOptions{}).Return(mobyclient.ExecAttachResult{
+				Conn:   &mockConn{},
+				Reader: bufio.NewReader(bytes.NewReader(stream)),
+			}, nil).Once()
+			cr := &containerReference{id: "123", cli: client, UID: 7, GID: 8}
+
+			require.NoError(t, cr.tryReadUIDGID()(ctx))
+			assert.Equal(t, tt.uid, cr.UID)
+			assert.Equal(t, tt.gid, cr.GID)
+			client.AssertExpectations(t)
+		})
+	}
+}
+
+func TestDockerReadUIDGIDIgnoresExecFailure(t *testing.T) {
+	ctx := t.Context()
+	client := &mockDockerClient{}
+	client.On("ExecCreate", ctx, "123", mock.Anything).
+		Return(mobyclient.ExecCreateResult{}, errors.New("exec failed")).Once()
+	cr := &containerReference{id: "123", cli: client, UID: 7, GID: 8}
+
+	require.NoError(t, cr.tryReadUIDGID()(ctx))
+	assert.Equal(t, 7, cr.UID)
+	assert.Equal(t, 8, cr.GID)
+	client.AssertExpectations(t)
+}
+
 func TestDockerExecAbort(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 

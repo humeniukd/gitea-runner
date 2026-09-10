@@ -629,7 +629,6 @@ func (rc *RunContext) startJobContainer() common.Executor {
 				IfBool(createAndDeleteNetwork),
 			rc.startServiceContainers(),
 			rc.reportUnstartedServices(),
-			rc.waitForServiceContainers(),
 			rc.JobContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 			rc.JobContainer.Start(false),
 			rc.captureJobContainerInfo(),
@@ -642,6 +641,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 				Mode: 0o666,
 				Body: "",
 			}),
+			rc.waitForServiceContainers(),
 		)(ctx)
 	}
 }
@@ -777,7 +777,6 @@ func (rc *RunContext) startServiceContainers() common.Executor {
 		execs := []common.Executor{}
 		for _, svc := range rc.serviceContainers {
 			execs = append(execs, common.NewPipelineExecutor(
-				svc.container.Pull(false),
 				svc.container.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 				svc.container.Start(false),
 			))
@@ -803,12 +802,9 @@ func (rc *RunContext) stopServiceContainers() common.Executor {
 	}
 }
 
-const (
-	defaultServiceReadyTimeout = 5 * time.Minute
-	serviceReadyPollMax        = 32 * time.Second
-)
+const defaultServiceReadyTimeout = 5 * time.Minute
 
-var serviceReadyPollInterval = 2 * time.Second // a variable so tests need not wait
+const serviceReadyPollInterval = time.Second
 
 // reportUnstartedServices logs a service that did not start. The steps that need it
 // report it better than the runner can, so the job carries on.
@@ -868,7 +864,7 @@ func (rc *RunContext) waitForServiceContainers() common.Executor {
 // ready at once and one that exited is left to the steps that need it.
 func (svc *serviceContainer) waitUntilHealthy(ctx context.Context, timeout time.Duration) error {
 	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
-	interval := serviceReadyPollInterval
+	loggedStarting := false
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -898,12 +894,14 @@ func (svc *serviceContainer) waitUntilHealthy(ctx context.Context, timeout time.
 			return nil
 		}
 
-		rawLogger.Infof("%s service is starting, waiting %d seconds before checking again.", svc.name, int(interval.Seconds()))
+		if !loggedStarting {
+			rawLogger.Infof("%s service is starting.", svc.name)
+			loggedStarting = true
+		}
 		select {
 		case <-ctx.Done(): // reported at the top of the loop
-		case <-time.After(interval):
+		case <-time.After(serviceReadyPollInterval):
 		}
-		interval = min(interval*2, serviceReadyPollMax)
 	}
 }
 
