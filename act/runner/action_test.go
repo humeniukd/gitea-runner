@@ -227,7 +227,7 @@ func TestActionRunner(t *testing.T) {
 			ctx := context.Background()
 
 			cm := &containerMock{}
-			cm.On("CopyDir", "/var/run/act/actions/dir/", "dir/", false).Return(func(ctx context.Context) error { return nil })
+			cm.On("CopyDir", "/var/run/act/actions/dir/", "dir/", false, true).Return(func(ctx context.Context) error { return nil })
 
 			envMatcher := mock.MatchedBy(func(env map[string]string) bool {
 				for k, v := range tt.expectedEnv {
@@ -316,7 +316,7 @@ func TestNewStepContainerDoesNotUseDockerSecrets(t *testing.T) {
 	step.On("getStepModel").Return(&model.Step{ID: "action"})
 	step.On("getEnv").Return(&env)
 
-	_ = newStepContainer(ctx, step, "registry.example.com/action:tag", nil, nil, "")
+	_, _ = newStepContainer(ctx, step, "registry.example.com/action:tag", nil, nil, "")
 
 	// DOCKER_USERNAME/DOCKER_PASSWORD should not be injected as pull credentials for docker action containers.
 	assert.Empty(t, captured.Username)
@@ -337,7 +337,7 @@ func TestMaybeCopyToActionDirHoldsCloneLock(t *testing.T) {
 	copyEntered := make(chan struct{})
 
 	cm := &containerMock{}
-	cm.On("CopyDir", "/var/run/act/actions/", actionDir+"/", false).Return(func(ctx context.Context) error {
+	cm.On("CopyDir", "/var/run/act/actions/", actionDir+"/", false, true).Return(func(ctx context.Context) error {
 		close(copyEntered)
 		<-releaseCopy
 		return nil
