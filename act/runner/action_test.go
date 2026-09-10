@@ -8,6 +8,10 @@ import (
 	"context"
 	"io"
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -223,7 +227,7 @@ func TestActionRunner(t *testing.T) {
 			ctx := context.Background()
 
 			cm := &containerMock{}
-			cm.On("CopyDir", "/var/run/act/actions/dir/", "dir/", false).Return(func(ctx context.Context) error { return nil })
+			cm.On("CopyDir", "/var/run/act/actions/dir/", "dir/", false, true).Return(func(ctx context.Context) error { return nil })
 
 			envMatcher := mock.MatchedBy(func(env map[string]string) bool {
 				for k, v := range tt.expectedEnv {
@@ -234,7 +238,7 @@ func TestActionRunner(t *testing.T) {
 				return true
 			})
 
-			cm.On("Exec", []string{"node", "/var/run/act/actions/dir/path"}, envMatcher, "", "").Return(func(ctx context.Context) error { return nil })
+			cm.On("Exec", []string{"node", "--preserve-symlinks-main", "/var/run/act/actions/dir/path"}, envMatcher, "", "").Return(func(ctx context.Context) error { return nil })
 
 			tt.step.getRunContext().JobContainer = cm
 
@@ -244,6 +248,32 @@ func TestActionRunner(t *testing.T) {
 			cm.AssertExpectations(t)
 		})
 	}
+}
+
+func TestNodeActionCommandPreservesSymlinkedEntrypoint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on Windows")
+	}
+	requireHostTools(t, "node")
+
+	actionDir := t.TempDir()
+	entrypoint := filepath.Join(actionDir, "index.mjs")
+	require.NoError(t, os.WriteFile(entrypoint, []byte(`
+import {fileURLToPath} from "node:url";
+const self = fileURLToPath(import.meta.url);
+if (process.argv[1] !== self) {
+	console.log("argv[1]:", process.argv[1], "import.meta.url:", self);
+	process.exitCode = 1;
+}
+`), 0o600))
+
+	symlinkedActionDir := filepath.Join(t.TempDir(), "action")
+	require.NoError(t, os.Symlink(actionDir, symlinkedActionDir))
+	symlinkedEntrypoint := filepath.Join(symlinkedActionDir, "index.mjs")
+
+	args := nodeActionCommand(symlinkedEntrypoint)
+	output, err := exec.CommandContext(t.Context(), args[0], args[1:]...).CombinedOutput()
+	require.NoError(t, err, "%s", output)
 }
 
 func TestNewStepContainerDoesNotUseDockerSecrets(t *testing.T) {
@@ -286,7 +316,7 @@ func TestNewStepContainerDoesNotUseDockerSecrets(t *testing.T) {
 	step.On("getStepModel").Return(&model.Step{ID: "action"})
 	step.On("getEnv").Return(&env)
 
-	_ = newStepContainer(ctx, step, "registry.example.com/action:tag", nil, nil, "")
+	_, _ = newStepContainer(ctx, step, "registry.example.com/action:tag", nil, nil, "")
 
 	// DOCKER_USERNAME/DOCKER_PASSWORD should not be injected as pull credentials for docker action containers.
 	assert.Empty(t, captured.Username)
@@ -307,7 +337,7 @@ func TestMaybeCopyToActionDirHoldsCloneLock(t *testing.T) {
 	copyEntered := make(chan struct{})
 
 	cm := &containerMock{}
-	cm.On("CopyDir", "/var/run/act/actions/", actionDir+"/", false).Return(func(ctx context.Context) error {
+	cm.On("CopyDir", "/var/run/act/actions/", actionDir+"/", false, true).Return(func(ctx context.Context) error {
 		close(copyEntered)
 		<-releaseCopy
 		return nil

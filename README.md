@@ -266,6 +266,17 @@ A job in a container reaches a service by its id on the job network, on the port
 
 Unlike GitHub, a job whose steps run on the host (a `host` label without `container:`) starts no service containers, so `job.services` and `job.container` stay empty. Give such a job a `container:` when it needs services.
 
+#### Docker from a job (`GITEA_DOCKER_WORKSPACE`)
+
+A container a job starts through the Docker socket cannot bind-mount the workspace by the job's own path, the daemon does not have it. `GITEA_DOCKER_WORKSPACE` holds the path the daemon sees. Use it as the prefix of workspace binds, with `.` as the fallback for local use, here in a `docker-compose.yaml`:
+
+```yaml
+volumes:
+  - ${GITEA_DOCKER_WORKSPACE:-.}/data:/app/data
+```
+
+Linux container jobs use a Docker proxy when socket sharing and permissions allow it. Other setups use the daemon socket directly. The proxy removes containers, networks and volumes after post steps and the completed hook. Named volumes created through it are job-scoped. To retain resources, mount the daemon socket explicitly in `container.options`. Host jobs use their existing Docker access, where `.` works.
+
 #### Proxy
 
 Set these variables in the runner's environment, with systemd `Environment=`, `docker run -e`, or Kubernetes `env:`:
@@ -280,7 +291,7 @@ The runner uses them for its own requests and gives them to every job, in lower 
 
 These hosts are added to `no_proxy` for jobs, so they are always reached directly:
 
-- the cache server
+- the built-in cache server, whose address is assigned at startup
 - `localhost`, `127.0.0.1` and `::1`
 - the job's service containers
 - the Docker daemon, when it is reached over `tcp://`
@@ -314,7 +325,9 @@ cache:
   v2: false
 ```
 
-Those actions refuse any host they do not take for GitHub. Rather than misreport the server URL, the runner edits that check out of the action's own bundle on its way into the job, undone whenever the action is downloaded again. A bundle it does not recognise is left alone and keeps to v1. The same edit lets the stock `actions/upload-artifact` and `actions/download-artifact` work from `v4.4.0` on, without the `gitea-upload-artifact` fork, so it is made whatever `v2` says: that setting only governs the API the runner advertises. Set `runner.patch_actions: false` to leave every bundle exactly as shipped, an escape hatch for an action the edit breaks. The artifact actions then refuse again and the cache client keeps to v1.
+Those actions refuse any host they do not take for GitHub, so the runner edits that check out of the bundle on its way into the job and puts the shared copy back afterwards. A bundle it does not recognise is left alone. The same edit lets the stock `actions/upload-artifact` and `actions/download-artifact` work from `v4.4.0` on, without the `gitea-upload-artifact` fork, so it is made whatever `v2` says. Set `runner.patch_actions: false` to leave bundles as shipped; the artifact actions then refuse and the cache client keeps to v1.
+
+With v2 the job's artifact calls go via the cache server, so jobs need to reach it to upload artifacts, not just to cache. `v2: false` sends them to Gitea directly.
 
 **Shared cache across multiple runners**
 

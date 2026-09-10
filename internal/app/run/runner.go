@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -89,7 +90,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 	envs := make(map[string]string, len(cfg.Runner.Envs))
 	maps.Copy(envs, cfg.Runner.Envs)
 	var cacheHandler *artifactcache.Handler
-	if cfg.Cache.Enabled == nil || *cfg.Cache.Enabled {
+	if cacheEnabled(cfg) {
 		if cfg.Cache.ExternalServer != "" {
 			warnIgnoredCachePolicy(cfg)
 			// The v1 client appends its path to this without a separator, so the slash is required.
@@ -109,6 +110,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 			} else {
 				cacheHandler = handler
 				envs["ACTIONS_CACHE_URL"] = handler.ExternalURL() + "/"
+				warnIfCacheUnreachable(cfg, handler.ExternalURL())
 			}
 		}
 	}
@@ -144,6 +146,8 @@ func (r *Runner) Close() error {
 // removeOrphanNetworks is a variable so tests can substitute one that needs no Docker daemon.
 var removeOrphanNetworks = container.RemoveOrphanNetworks
 
+var removeOrphanJobVolumes = container.RemoveOrphanJobVolumes
+
 // OnIdle performs lightweight maintenance during polling idle windows.
 // It runs synchronously on the poller goroutine; shouldRunIdleCleanup
 // throttles invocations to runner.idle_cleanup_interval so the impact on
@@ -165,20 +169,19 @@ func (r *Runner) OnIdle(ctx context.Context) {
 	if hostRoot := filepath.FromSlash(r.cfg.Host.WorkdirParent); hostRoot != "" {
 		r.cleanupStaleDirs(ctx, hostRoot, isHostScratchDir)
 	}
-	r.cleanupOrphanNetworks(ctx)
+	r.cleanupOrphanDockerResources(ctx)
 }
 
-// cleanupOrphanNetworks reclaims the per-job networks of jobs this runner did not live to
-// tear down. A labelled network with no containers on it is finished with, and as for the
-// directories above, a task beginning during the pass is safe because the cutoff keeps a
-// network it has created but not yet attached a container to out of scope.
-func (r *Runner) cleanupOrphanNetworks(ctx context.Context) {
-	if r.uuid == "" || !r.requiresDocker() {
+func (r *Runner) cleanupOrphanDockerResources(ctx context.Context) {
+	if r.uuid == "" || (!r.requiresDocker() && !dockerReachable(ctx)) {
 		return
 	}
 	cutoff := r.now().Add(-r.cfg.Runner.WorkdirCleanupAge)
 	if err := removeOrphanNetworks(ctx, r.uuid, cutoff); err != nil {
 		log.Warnf("failed to clean up networks left behind by earlier jobs: %v", err)
+	}
+	if err := removeOrphanJobVolumes(ctx, r.uuid, cutoff); err != nil {
+		log.Warnf("failed to clean up volumes left behind by earlier jobs: %v", err)
 	}
 }
 
@@ -279,13 +282,13 @@ func (r *Runner) SetCapabilitiesFromDeclare(resp *connect.Response[runnerv1.Decl
 }
 
 func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
-	if _, ok := r.runningTasks.Load(task.Id); ok {
+	if _, ok := r.runningTasks.LoadOrStore(task.Id, struct{}{}); ok {
 		return fmt.Errorf("task %d is already running", task.Id)
 	}
-	r.runningTasks.Store(task.Id, struct{}{})
 	defer r.runningTasks.Delete(task.Id)
 
 	r.runningCount.Add(1)
+	defer r.runningCount.Add(-1)
 
 	start := time.Now()
 
@@ -293,15 +296,25 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 	defer cancel()
 	// A proxy URL may carry credentials, and every job is given it; keep them out of the log.
 	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg, proxyPasswords()...)
+	var volumeCleanup []common.Executor
+	var volumeCleanupMu sync.Mutex
+	if r.cfg.Runner.PostTaskScript == "" {
+		ctx = runner.WithJobVolumeCleanup(ctx, func(cleanup common.Executor) {
+			volumeCleanupMu.Lock()
+			defer volumeCleanupMu.Unlock()
+			volumeCleanup = append(volumeCleanup, cleanup)
+		})
+	}
 	var runErr error
 	defer func() {
-		r.runningCount.Add(-1)
-
 		lastWords := ""
 		if runErr != nil {
 			lastWords = runErr.Error()
 		}
 		_ = reporter.Close(lastWords)
+		if err := cleanupJobVolumes(ctx, volumeCleanup); err != nil {
+			log.Warnf("task %d volume cleanup after reporting: %v", task.Id, err)
+		}
 
 		metrics.JobDuration.Observe(time.Since(start).Seconds())
 		metrics.JobsTotal.WithLabelValues(metrics.ResultToStatusLabel(reporter.Result())).Inc()
@@ -310,6 +323,16 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 	runErr = r.run(ctx, task, reporter)
 
 	return nil
+}
+
+func cleanupJobVolumes(ctx context.Context, cleanups []common.Executor) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	var errs []error
+	for _, cleanup := range cleanups {
+		errs = append(errs, cleanup(ctx))
+	}
+	return errors.Join(errs...)
 }
 
 func (r *Runner) cloneEnvs() map[string]string {
@@ -388,7 +411,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 
 	// Added per task because this job's service containers must be reached directly, and
 	// act reaches them by their workflow key.
-	proxyEnv := JobProxyEnv(envs, envs["ACTIONS_CACHE_URL"], slices.Sorted(maps.Keys(job.Services)))
+	proxyEnv := JobProxyEnv(envs, r.builtInCacheURL(), slices.Sorted(maps.Keys(job.Services)))
 	maps.Copy(envs, proxyEnv)
 
 	if r.capabilities != "" {
@@ -454,14 +477,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// is that server's responsibility to authenticate requests.
 	revokeCache, resultsURL := r.registerCacheForTask(giteaRuntimeToken, preset.Repository, reporter)
 	defer revokeCache()
-	// A cache server that agreed to forward the artifact half is the whole results service, so the
-	// job is pointed at it.
-	if resultsURL != "" {
-		envs["ACTIONS_RESULTS_URL"] = resultsURL
-		if r.cacheServiceV2() {
-			envs[runner.CacheServiceV2Env] = "true"
-		}
-	}
+	r.setResultsService(envs, resultsURL)
 
 	eventJSON, err := json.Marshal(preset.Event)
 	if err != nil {
@@ -584,10 +600,41 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	return execErr
 }
 
+func (r *Runner) builtInCacheURL() string {
+	if r.cacheHandler == nil {
+		return ""
+	}
+	return r.envs["ACTIONS_CACHE_URL"]
+}
+
+func cacheEnabled(cfg *config.Config) bool {
+	return cfg.Cache.Enabled == nil || *cfg.Cache.Enabled
+}
+
 // cacheServiceV2 reports whether jobs are told the cache service speaks v2. It is all cache.v2
 // turns off: the bundle edit that reaches it is what the artifact actions need too.
 func (r *Runner) cacheServiceV2() bool {
 	return r.cfg.Cache.V2 == nil || *r.cfg.Cache.V2
+}
+
+func (r *Runner) setResultsService(envs map[string]string, resultsURL string) {
+	v2 := resultsURL != "" && r.cacheServiceV2()
+	if v2 {
+		envs[runner.CacheServiceV2Env] = "true"
+	} else {
+		delete(envs, runner.CacheServiceV2Env)
+	}
+	// Cache v2 clients read no other variable for it, and some cannot use the instance address.
+	if v2 || (resultsURL != "" && r.instanceOutOfReach(envs["ACTIONS_RESULTS_URL"])) {
+		envs["ACTIONS_RESULTS_URL"] = resultsURL
+	}
+}
+
+// These clients keep only the origin they are handed, and reach it on the job's own trust.
+func (r *Runner) instanceOutOfReach(instance string) bool {
+	parsed, err := url.Parse(instance)
+	return err != nil || strings.Trim(parsed.Path, "/") != "" ||
+		(r.cfg.Runner.Insecure && parsed.Scheme == "https")
 }
 
 // registerCacheForTask tells the cache server to accept requests authenticated
@@ -616,7 +663,7 @@ func (r *Runner) registerCacheForTask(token, repo string, reporter *report.Repor
 	if r.cacheHandler != nil {
 		return r.cacheHandler.RegisterJob(token, cred), r.cacheHandler.ResultsURL(cred)
 	}
-	if r.cfg.Cache.ExternalServer != "" && r.cfg.Cache.ExternalSecret != "" {
+	if cacheEnabled(r.cfg) && r.cfg.Cache.ExternalServer != "" && r.cfg.Cache.ExternalSecret != "" {
 		return r.registerExternalCacheJob(token, cred, reporter)
 	}
 	// No cache server to register against: caching is disabled, or the built-in server failed to start.
@@ -798,4 +845,14 @@ func warnIgnoredCacheSecret(cfg *config.Config) {
 		key = "cache.external_secret_file"
 	}
 	log.Warnf("%s is set but cache.external_server is not; the built-in cache server does not use a shared secret, so the value is ignored", key)
+}
+
+func warnIfCacheUnreachable(cfg *config.Config, cacheURL string) {
+	if cfg.Cache.Host != "" || cfg.Container.Network != "" {
+		return
+	}
+	if _, err := os.Stat("/.dockerenv"); err != nil {
+		return
+	}
+	log.Warnf("jobs are given %s for the cache server; if they cannot reach it, set container.network to a network this runner is on, or cache.host", cacheURL)
 }
