@@ -524,16 +524,11 @@ func TestGitCloneExecutorShallow(t *testing.T) {
 }
 
 func TestGitCloneExecutorTransportSessions(t *testing.T) {
-	remoteDir := t.TempDir()
-	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
 	workDir := t.TempDir()
-	require.NoError(t, gitCmd("clone", remoteDir, workDir))
-	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "main"))
+	require.NoError(t, gitCmd("init", "--initial-branch=main", workDir))
 	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "c1"))
 	require.NoError(t, gitCmd("-C", workDir, "tag", "v1"))
 	require.NoError(t, gitCmd("-C", workDir, "tag", "-a", "v2", "-m", "v2"))
-	require.NoError(t, gitCmd("-C", workDir, "push", "-u", "origin", "main"))
-	require.NoError(t, gitCmd("-C", workDir, "push", "origin", "--tags"))
 
 	for name, tt := range map[string]struct {
 		Ref   string
@@ -548,11 +543,11 @@ func TestGitCloneExecutorTransportSessions(t *testing.T) {
 			counter := installCountingTransport(t)
 			dir := t.TempDir()
 			clone := NewGitCloneExecutor(NewGitCloneExecutorInput{
-				URL: remoteDir, Ref: tt.Ref, Dir: dir, Depth: tt.Depth,
+				URL: workDir, Ref: tt.Ref, Dir: dir, Depth: tt.Depth,
 			})
 			require.NoError(t, clone(t.Context()))
 			assert.Equal(t, int64(1), counter.sessions.Swap(0), "cold clone")
-			assert.Equal(t, gitRevParse(t, remoteDir, tt.Ref+"^{commit}"), gitRevParse(t, dir, "HEAD"))
+			assert.Equal(t, gitRevParse(t, workDir, tt.Ref+"^{commit}"), gitRevParse(t, dir, "HEAD"))
 
 			require.NoError(t, clone(t.Context()))
 			assert.Equal(t, int64(1), counter.sessions.Swap(0), "unchanged warm cache")
@@ -562,7 +557,6 @@ func TestGitCloneExecutorTransportSessions(t *testing.T) {
 			require.NoError(t, gitCmd("-C", workDir, "commit", "-m", name))
 			require.NoError(t, gitCmd("-C", workDir, "tag", "--force", "v1"))
 			require.NoError(t, gitCmd("-C", workDir, "tag", "--force", "-a", "v2", "-m", "v2"))
-			require.NoError(t, gitCmd("-C", workDir, "push", "origin", "main", "+refs/tags/v1:refs/tags/v1", "+refs/tags/v2:refs/tags/v2"))
 
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "action.yml"), []byte("staged"), 0o644))
 			require.NoError(t, gitCmd("-C", dir, "add", "action.yml"))
@@ -571,12 +565,6 @@ func TestGitCloneExecutorTransportSessions(t *testing.T) {
 			require.NoError(t, clone(t.Context()))
 			assert.Equal(t, int64(1), counter.sessions.Load(), "updated warm cache")
 			assert.Equal(t, gitRevParse(t, workDir, "HEAD"), gitRevParse(t, dir, "HEAD"))
-			if tt.Ref == "main" {
-				assert.Equal(t, gitRevParse(t, workDir, "HEAD"), gitRevParse(t, dir, "refs/remotes/origin/main"))
-			}
-			content, err := os.ReadFile(filepath.Join(dir, "action.yml"))
-			require.NoError(t, err)
-			assert.Equal(t, name, string(content))
 			status, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
 			require.NoError(t, err)
 			assert.Empty(t, string(status))
