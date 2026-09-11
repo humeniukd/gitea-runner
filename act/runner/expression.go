@@ -27,6 +27,14 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
+// setStrategyContext leaves `max-parallel` unset when the job declares none, as GitHub does.
+func setStrategyContext(strategy map[string]any, jobStrategy *model.Strategy) {
+	strategy["fail-fast"] = jobStrategy.GetFailFast()
+	if limit, declared, err := jobStrategy.ParseMaxParallel(); declared && err == nil {
+		strategy["max-parallel"] = limit
+	}
+}
+
 // NewExpressionEvaluator creates a new evaluator
 func (rc *RunContext) NewExpressionEvaluator(ctx context.Context) *ExpressionEvaluator {
 	return rc.NewExpressionEvaluatorWithEnv(ctx, rc.GetEnv())
@@ -41,8 +49,7 @@ func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map
 	if rc.Run != nil {
 		job := rc.Run.Job()
 		if job != nil && job.Strategy != nil {
-			strategy["fail-fast"] = job.Strategy.FailFast
-			strategy["max-parallel"] = job.Strategy.MaxParallel
+			setStrategyContext(strategy, job.Strategy)
 		}
 
 		jobs := rc.Run.Workflow.Jobs
@@ -118,8 +125,7 @@ func (rc *RunContext) newStepExpressionEvaluator(ctx context.Context, step step,
 	job := rc.Run.Job()
 	strategy := make(map[string]any)
 	if job.Strategy != nil {
-		strategy["fail-fast"] = job.Strategy.FailFast
-		strategy["max-parallel"] = job.Strategy.MaxParallel
+		setStrategyContext(strategy, job.Strategy)
 	}
 
 	jobs := rc.Run.Workflow.Jobs
@@ -333,12 +339,23 @@ func (rc *RunContext) resolveWorkflowCall(ctx context.Context) error {
 	}
 	callerJob := rc.caller.runContext.Run.Job()
 	callerEval := rc.caller.runContext.ExprEval
+	callerWith := callerJob.With
+	if callerJob.RawWith.Kind == yaml.ScalarNode {
+		decoded := &model.Job{RawWith: model.CloneYamlNode(callerJob.RawWith)}
+		if err := callerEval.EvaluateYamlNode(ctx, &decoded.RawWith); err != nil {
+			return fmt.Errorf("unable to evaluate workflow inputs: %w", err)
+		}
+		if err := decoded.DecodeRaw(); err != nil {
+			return err
+		}
+		callerWith = decoded.With
+	}
 	calleeEval := sync.OnceValue(func() *expressionEvaluator { return rc.NewExpressionEvaluator(ctx) })
 	config := rc.Run.Workflow.WorkflowCallConfig()
 
 	rc.workflowCallInputs = make(map[string]any, len(config.Inputs))
 	for name, input := range config.Inputs {
-		value, eval, label := callerJob.With[name], callerEval, "input"
+		value, eval, label := callerWith[name], callerEval, "input"
 		if value == nil {
 			value, eval, label = input.Default, calleeEval(), "the default of input"
 		}

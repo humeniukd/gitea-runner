@@ -19,6 +19,7 @@ import (
 
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
+	"go.yaml.in/yaml/v4"
 )
 
 type step interface {
@@ -260,6 +261,17 @@ func setupEnv(ctx context.Context, step step) error {
 				return fmt.Errorf("unable to interpolate env %s: %w", k, err)
 			}
 		}
+	}
+	if step.getStepModel().RawWith.Kind == yaml.ScalarNode {
+		decoded := &model.Step{RawWith: model.CloneYamlNode(step.getStepModel().RawWith)}
+		if err := inputEval().EvaluateYamlNode(ctx, &decoded.RawWith); err != nil {
+			return fmt.Errorf("unable to evaluate step inputs: %w", err)
+		}
+		if err := decoded.DecodeRaw(); err != nil {
+			return err
+		}
+		step.getStepModel().With = decoded.With
+		mergeIntoMap(step, step.getEnv(), decoded.GetEnv())
 	}
 	return nil
 }

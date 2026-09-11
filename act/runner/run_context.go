@@ -37,6 +37,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/opencontainers/selinux/go-selinux"
+	"go.yaml.in/yaml/v4"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
@@ -495,8 +496,18 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		networkName, createAndDeleteNetwork := rc.networkNameForGitea()
 		rc.cleanUpJobContainer = rc.cleanupJobResources(networkName, createAndDeleteNetwork, false)
 
-		// add service containers
-		for serviceID, spec := range rc.Run.Job().Services {
+		services := rc.Run.Job().Services
+		if rc.Run.Job().RawServices.Kind == yaml.ScalarNode {
+			decoded := &model.Job{RawServices: model.CloneYamlNode(rc.Run.Job().RawServices)}
+			if err := rc.ExprEval.EvaluateYamlNode(ctx, &decoded.RawServices); err != nil {
+				return fmt.Errorf("unable to evaluate job services: %w", err)
+			}
+			if err := decoded.DecodeRaw(); err != nil {
+				return err
+			}
+			services = decoded.Services
+		}
+		for serviceID, spec := range services {
 			// GitHub compatibility: skip services whose image evaluates to an
 			// empty string, enabling conditional services via expressions
 			serviceImage, err := rc.ExprEval.Interpolate(ctx, spec.Image)
@@ -1022,6 +1033,18 @@ func (rc *RunContext) interpolateOutputs() common.Executor {
 		// with its own resolved values (last wins, as on GitHub) instead of the first combo's
 		// resolved values freezing the shared template against later combos.
 		// Resolved up front so one failure publishes none of them, as GitHub does.
+		if job.RawOutputs.Kind == yaml.ScalarNode {
+			decoded := &model.Job{RawOutputs: model.CloneYamlNode(job.RawOutputs)}
+			if err := ee.EvaluateYamlNode(ctx, &decoded.RawOutputs); err != nil {
+				return fmt.Errorf("unable to evaluate job outputs: %w", err)
+			}
+			if err := decoded.DecodeRaw(); err != nil {
+				return err
+			}
+			defer lockJob(job)()
+			job.Outputs = decoded.Outputs
+			return nil
+		}
 		outputs := make(map[string]string, len(rc.outputTemplate))
 		var err error
 		for k, v := range rc.outputTemplate {

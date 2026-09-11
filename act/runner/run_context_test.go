@@ -355,21 +355,19 @@ jobs:
 }
 
 func TestStartJobContainerGivesServicesTheirVolumes(t *testing.T) {
-	redis := startJobContainerInputs(t, `
-jobs:
-  job:
-    services:
-      redis:
-        image: redis:latest
-        volumes:
-          - data:/data
-`, &Config{ValidVolumes: []string{"data"}})[0]
-
-	require.Equal(t, "redis:latest", redis.Image) // services are built before the job container
-	require.Equal(t, []string{"data"}, redis.ValidVolumes)
-	require.Equal(t, map[string]string{"data": "/data"}, redis.Mounts)
-	require.Empty(t, redis.Binds) // the docker socket is the job container's alone
-	require.Empty(t, redis.WorkingDir)
+	for _, services := range []string{
+		`{redis: {image: 'redis:latest', volumes: ['data:/data']}}`,
+		`${{ fromJSON('{"redis":{"image":"redis:latest","volumes":["data:/data"]}}') }}`,
+	} {
+		t.Run(services, func(t *testing.T) {
+			redis := startJobContainerInputs(t, "jobs:\n  job:\n    services: "+services, &Config{ValidVolumes: []string{"data"}})[0]
+			require.Equal(t, "redis:latest", redis.Image)
+			require.Equal(t, []string{"data"}, redis.ValidVolumes)
+			require.Equal(t, map[string]string{"data": "/data"}, redis.Mounts)
+			require.Empty(t, redis.Binds)
+			require.Empty(t, redis.WorkingDir)
+		})
+	}
 }
 
 // Only the workflow's options may be stripped later, so the two sources have to reach the
@@ -806,25 +804,29 @@ func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
 	}
 }
 
-// TestInterpolateOutputsIsPerMatrixCombo guards the matrix-output fix: combinations share one
-// *model.Job, so each must interpolate from its own pristine snapshot. Otherwise the first
-// combo's resolved value freezes the shared template and later combos can't resolve their own.
 func TestInterpolateOutputsIsPerMatrixCombo(t *testing.T) {
-	job := &model.Job{Outputs: map[string]string{"o": "${{ matrix.v }}"}}
-	run := &model.Run{JobID: "j", Workflow: &model.Workflow{Name: "w", Jobs: map[string]*model.Job{"j": job}}}
-	r := &runnerImpl{config: &Config{}}
-	ctx := context.Background()
-
-	rcA, err := r.newRunContext(ctx, run, map[string]any{"v": "a"})
-	require.NoError(t, err)
-	rcB, err := r.newRunContext(ctx, run, map[string]any{"v": "b"})
-	require.NoError(t, err)
-
-	require.NoError(t, rcA.interpolateOutputs()(ctx))
-	require.NoError(t, rcB.interpolateOutputs()(ctx))
-
-	// Last combo wins (matching GitHub) instead of being frozen to combo A's "a".
-	require.Equal(t, "b", job.Outputs["o"])
+	for _, outputs := range []string{
+		`{o: '${{ matrix.v }}'}`,
+		`${{ fromJSON(format('{{"o":"{0}"}}', matrix.v)) }}`,
+	} {
+		t.Run(outputs, func(t *testing.T) {
+			workflow, err := model.ReadWorkflow(strings.NewReader("jobs:\n  j:\n    outputs: " + outputs))
+			require.NoError(t, err)
+			job := workflow.GetJob("j")
+			rawOutputs := model.CloneYamlNode(job.RawOutputs)
+			run := &model.Run{JobID: "j", Workflow: workflow}
+			runner := &runnerImpl{config: &Config{}}
+			rcA, err := runner.newRunContext(t.Context(), run, map[string]any{"v": "a"})
+			require.NoError(t, err)
+			rcB, err := runner.newRunContext(t.Context(), run, map[string]any{"v": "b"})
+			require.NoError(t, err)
+			require.NoError(t, rcA.interpolateOutputs()(t.Context()))
+			require.Equal(t, "a", job.Outputs["o"])
+			require.NoError(t, rcB.interpolateOutputs()(t.Context()))
+			require.Equal(t, "b", job.Outputs["o"])
+			require.Equal(t, rawOutputs, job.RawOutputs)
+		})
+	}
 }
 
 func TestGetGitHubContext(t *testing.T) {
