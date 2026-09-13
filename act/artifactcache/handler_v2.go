@@ -64,28 +64,24 @@ func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ h
 		return
 	}
 
-	db, err := h.openDB()
-	if err != nil {
-		h.twirpError(w, r, twirpInternal, err)
-		return
-	}
-	defer db.Close()
+	h.metadataMu.Lock()
+	defer h.metadataMu.Unlock()
 
 	// An exact (key, version) match means the entry is already cached; the client then skips
 	// the upload. A prefix match must not count here, or a shorter key would be reported as
 	// existing and silently never saved.
-	if existing, err := findExactCache(db, cred.Repo, req.Key, req.Version, true); err != nil {
+	if existing, err := findExactCache(h.db, cred.Repo, req.Key, req.Version, true); err != nil {
 		h.twirpError(w, r, twirpInternal, err)
 		return
 	} else if existing != nil {
-		h.touch(db, existing) // the client skips the upload, so this is the only sign the entry is still in use
+		h.touch(h.db, existing) // the client skips the upload, so this is the only sign the entry is still in use
 		h.twirpNotOK(w, r)
 		return
 	}
 
 	// A second live reservation is finalized by whichever job calls last, against the other's upload.
 	owner := hashedToken(bearerToken(r))
-	if pending, err := findExactCache(db, cred.Repo, req.Key, req.Version, false); err != nil {
+	if pending, err := findExactCache(h.db, cred.Repo, req.Key, req.Version, false); err != nil {
 		h.twirpError(w, r, twirpInternal, err)
 		return
 	} else if pending != nil && pending.UsedAt > time.Now().Add(-uploadStallTimeout).Unix() {
@@ -93,7 +89,7 @@ func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ h
 			h.twirpNotOK(w, r)
 			return
 		}
-		h.touch(db, pending)                                // still uploading, so it must not go stale under the sweep
+		h.touch(h.db, pending)                              // still uploading, so it must not go stale under the sweep
 		h.responseJSON(w, r, http.StatusOK, map[string]any{ // this job retrying its own reservation
 			"ok":                true,
 			"signed_upload_url": h.signedURL(cred, blobPath, blobUploadPurpose, pending.ID, time.Now().Add(blobUploadURLTTL)),
@@ -111,7 +107,7 @@ func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ h
 		CreatedAt: now,
 		UsedAt:    now,
 	}
-	if err := insertCache(db, cache); err != nil {
+	if err := insertCache(h.db, cache); err != nil {
 		h.twirpError(w, r, twirpInternal, err)
 		return
 	}
@@ -130,20 +126,13 @@ func (h *Handler) v2FinalizeCacheEntryUpload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	db, err := h.openDB()
-	if err != nil {
-		h.twirpError(w, r, twirpInternal, err)
-		return
-	}
-	defer db.Close()
-
-	cache, err := findExactCache(db, cred.Repo, req.Key, req.Version, false)
+	cache, err := findExactCache(h.db, cred.Repo, req.Key, req.Version, false)
 	if err == nil && cache != nil && cache.Owner != hashedToken(bearerToken(r)) {
 		cache = nil // not the reservation this job made, so not this job's to commit
 	}
 	if err == nil && cache == nil {
 		// A retry whose first response was lost finds the entry already committed.
-		cache, err = findExactCache(db, cred.Repo, req.Key, req.Version, true)
+		cache, err = findExactCache(h.db, cred.Repo, req.Key, req.Version, true)
 	}
 	if err != nil {
 		h.twirpError(w, r, twirpInternal, err)
@@ -155,7 +144,6 @@ func (h *Handler) v2FinalizeCacheEntryUpload(w http.ResponseWriter, r *http.Requ
 	}
 
 	if !cache.Complete {
-		db.Close() // commitCache needs the store closed
 		cache.Size = int64(cmp.Or(req.SizeBytes, req.SizeBytesCamel))
 		if err := h.commitCache(cache); err != nil {
 			h.logger.Errorf("finalize cache %d (%s): %v", cache.ID, cache.Key, err)
@@ -179,14 +167,7 @@ func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	db, err := h.openDB()
-	if err != nil {
-		h.twirpError(w, r, twirpInternal, err)
-		return
-	}
-	defer db.Close()
-
-	cache, err := h.lookupCache(db, cred.Repo, req.keys(), req.Version)
+	cache, err := h.lookupCache(h.db, cred.Repo, req.keys(), req.Version)
 	if err != nil {
 		h.twirpError(w, r, twirpInternal, err)
 		return

@@ -66,9 +66,7 @@ func TestHandler(t *testing.T) {
 
 	defer func() {
 		t.Run("inpect db", func(t *testing.T) {
-			db, err := handler.openDB()
-			require.NoError(t, err)
-			defer db.Close()
+			db := handler.db
 			require.NoError(t, db.Bolt().View(func(tx *bbolt.Tx) error {
 				return tx.Bucket([]byte("Cache")).ForEach(func(k, v []byte) error {
 					t.Logf("%s: %s", k, v)
@@ -653,9 +651,7 @@ func TestHandler(t *testing.T) {
 // backdateCache rewrites a cache's CreatedAt. It has one-second resolution, so age-ordering
 // tests set it directly instead of sleeping a second between uploads.
 func backdateCache(t *testing.T, handler *Handler, key string, age time.Duration) {
-	db, err := handler.openDB()
-	require.NoError(t, err)
-	defer db.Close()
+	db := handler.db
 
 	var caches []*Cache
 	require.NoError(t, db.Find(&caches, bolthold.Where("Key").Eq(key)))
@@ -811,18 +807,14 @@ func TestHandler_gcCache(t *testing.T) {
 		},
 	}
 
-	db, err := handler.openDB()
-	require.NoError(t, err)
+	db := handler.db
 	for _, c := range cases {
 		require.NoError(t, insertCache(db, c.Cache))
 	}
-	require.NoError(t, db.Close())
 
 	handler.gcAt = time.Time{} // ensure gcCache will not skip
 	handler.gcCache()
 
-	db, err = handler.openDB()
-	require.NoError(t, err)
 	for i, v := range cases {
 		t.Run(fmt.Sprintf("%d_%s", i, v.Cache.Key), func(t *testing.T) {
 			cache := &Cache{}
@@ -834,7 +826,6 @@ func TestHandler_gcCache(t *testing.T) {
 			}
 		})
 	}
-	require.NoError(t, db.Close())
 }
 
 // TestHandler_evictPolicy covers the non-default policies; TestHandler_gcCache covers the
@@ -969,10 +960,8 @@ func TestHandler_evictForFreeSpace(t *testing.T) {
 			handler := newTestHandler(t, Policy{}, entries...)
 			handler.freeDisk = tc.freeDisk
 
-			db, err := handler.openDB()
-			require.NoError(t, err)
+			db := handler.db
 			handler.evictForFreeSpace(db)
-			require.NoError(t, db.Close())
 
 			assert.ElementsMatch(t, tc.kept, keptKeys(t, handler, entries))
 		})
@@ -1014,9 +1003,7 @@ func TestHandler_FindProtectsFromEviction(t *testing.T) {
 
 	// Evict directly: the request above kicked off an async gcCache, and writing gcAt here
 	// to drive gcCache would race its read.
-	db, err := handler.openDB()
-	require.NoError(t, err)
-	defer func() { require.NoError(t, db.Close()) }()
+	db := handler.db
 	handler.evictOversized(db)
 
 	require.NoError(t, db.Get(wanted.ID, &Cache{}), "the entry just promised to a job must survive")
@@ -1058,21 +1045,17 @@ func newTestHandler(t *testing.T, policy Policy, entries ...*Cache) *Handler {
 	t.Cleanup(func() { require.NoError(t, handler.Close()) })
 	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
 
-	db, err := handler.openDB()
-	require.NoError(t, err)
+	db := handler.db
 	for _, e := range entries {
 		require.NoError(t, insertCache(db, e))
 	}
-	require.NoError(t, db.Close())
 	return handler
 }
 
 // keptKeys reports which of entries are still in the store.
 func keptKeys(t *testing.T, handler *Handler, entries []*Cache) []string {
 	t.Helper()
-	db, err := handler.openDB()
-	require.NoError(t, err)
-	defer func() { require.NoError(t, db.Close()) }()
+	db := handler.db
 
 	var kept []string
 	for _, e := range entries {
@@ -1401,8 +1384,7 @@ func TestHandler_GC_PerRepoDedup(t *testing.T) {
 
 	// Seed one completed cache per repo directly via the DB, bypassing the
 	// HTTP round trip so we can precisely control UsedAt.
-	db, err := handler.openDB()
-	require.NoError(t, err)
+	db := handler.db
 	now := time.Now().Unix()
 	stale := time.Now().Add(-inUseGrace - time.Minute).Unix()
 	a := &Cache{Repo: "owner/repoA", Key: key, Version: version, Complete: true, CreatedAt: stale, UsedAt: stale, Size: 1}
@@ -1416,15 +1398,11 @@ func TestHandler_GC_PerRepoDedup(t *testing.T) {
 	require.NoError(t, handler.storage.Write(b.ID, 0, strings.NewReader("b")))
 	_, err = handler.storage.Commit(b.ID, 1)
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
 
 	// Force GC to run regardless of the cooldown.
 	handler.gcAt = time.Time{}
 	handler.gcCache()
 
-	db, err = handler.openDB()
-	require.NoError(t, err)
-	defer db.Close()
 	var after []Cache
 	require.NoError(t, db.Find(&after, bolthold.Where("Key").Eq(key).And("Version").Eq(version)))
 

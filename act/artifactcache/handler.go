@@ -80,11 +80,17 @@ type credEntry struct {
 type Handler struct {
 	dir      string
 	storage  *Storage
+	db       *bolthold.Store
 	router   *httprouter.Router
 	listener net.Listener
 	port     int
 	server   *http.Server
 	logger   logrus.FieldLogger
+
+	lifecycle  sync.RWMutex
+	closed     bool
+	closeMu    sync.Mutex
+	metadataMu sync.Mutex // protects metadata read-modify-write sequences and eviction
 
 	gcing atomic.Bool
 	gcAt  time.Time
@@ -167,6 +173,18 @@ func StartHandler(opts Options) (*Handler, error) {
 	}
 	h.storage = storage
 
+	db, err := openDB(dir)
+	if err != nil {
+		return nil, fmt.Errorf("open cache store in %s: %w", dir, err)
+	}
+	h.db = db
+	started := false
+	defer func() {
+		if !started {
+			db.Close()
+		}
+	}()
+
 	if opts.OutboundIP != "" {
 		h.outboundIP = opts.OutboundIP
 	} else if ip := common.GetOutboundIP(); ip == nil {
@@ -219,7 +237,7 @@ func StartHandler(opts Options) (*Handler, error) {
 	h.port = addr.Port
 	server := &http.Server{
 		ReadHeaderTimeout: 2 * time.Second,
-		Handler:           router,
+		Handler:           http.HandlerFunc(h.serveHTTP),
 	}
 	go func() {
 		if err := server.Serve(listener); err != nil && errors.Is(err, net.ErrClosed) {
@@ -228,8 +246,19 @@ func StartHandler(opts Options) (*Handler, error) {
 	}()
 	h.listener = listener
 	h.server = server
+	started = true
 
 	return h, nil
+}
+
+func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	h.lifecycle.RLock()
+	defer h.lifecycle.RUnlock()
+	if h.closed {
+		http.Error(w, "cache server closed", http.StatusServiceUnavailable)
+		return
+	}
+	h.router.ServeHTTP(w, r)
 }
 
 func (h *Handler) ExternalURL() string {
@@ -334,6 +363,8 @@ func (h *Handler) Close() error {
 	if h == nil {
 		return nil
 	}
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
 	var retErr error
 	if h.server != nil {
 		err := h.server.Close()
@@ -352,11 +383,21 @@ func (h *Handler) Close() error {
 		}
 		h.listener = nil
 	}
+	h.lifecycle.Lock()
+	defer h.lifecycle.Unlock()
+	h.closed = true
+	if h.db != nil {
+		if err := h.db.Close(); err != nil && retErr == nil {
+			retErr = err
+		}
+		h.db = nil
+	}
 	return retErr
 }
 
-func (h *Handler) openDB() (*bolthold.Store, error) {
-	return bolthold.Open(filepath.Join(h.dir, "bolt.db"), 0o644, &bolthold.Options{
+// Keep one store open to avoid per-request contention on bolt's exclusive file lock.
+func openDB(dir string) (*bolthold.Store, error) {
+	return bolthold.Open(filepath.Join(dir, "bolt.db"), 0o644, &bolthold.Options{
 		Encoder: func(value any) ([]byte, error) { return json.Marshal(value) },
 		Decoder: func(data []byte, value any) error { return json.Unmarshal(data, value) },
 		Options: &bbolt.Options{
@@ -373,14 +414,7 @@ func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Para
 	keys := strings.Split(r.URL.Query().Get("keys"), ",")
 	version := r.URL.Query().Get("version")
 
-	db, err := h.openDB()
-	if err != nil {
-		h.responseJSON(w, r, 500, err)
-		return
-	}
-	defer db.Close()
-
-	cache, err := h.lookupCache(db, cred.Repo, keys, version)
+	cache, err := h.lookupCache(h.db, cred.Repo, keys, version)
 	if err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
@@ -400,6 +434,8 @@ func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Para
 // either nothing matched, or the match had lost its blob to a prune, in which case the dangling
 // entry is dropped on the way out.
 func (h *Handler) lookupCache(db *bolthold.Store, repo string, keys []string, version string) (*Cache, error) {
+	h.metadataMu.Lock()
+	defer h.metadataMu.Unlock()
 	cache, err := findCache(db, repo, keys, version)
 	if err != nil || cache == nil {
 		return nil, err
@@ -431,17 +467,11 @@ func (h *Handler) reserve(w http.ResponseWriter, r *http.Request, _ httprouter.P
 	if cache.Size == 0 {
 		cache.Size = -1
 	}
-	db, err := h.openDB()
-	if err != nil {
-		h.responseJSON(w, r, 500, err)
-		return
-	}
-	defer db.Close()
 
 	now := time.Now().Unix()
 	cache.CreatedAt = now
 	cache.UsedAt = now
-	if err := insertCache(db, cache); err != nil {
+	if err := insertCache(h.db, cache); err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
 	}
@@ -460,13 +490,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, params httprout
 	}
 
 	cache := &Cache{}
-	db, err := h.openDB()
-	if err != nil {
-		h.responseJSON(w, r, 500, err)
-		return
-	}
-	defer db.Close()
-	if err := db.Get(id, cache); err != nil {
+	if err := h.db.Get(id, cache); err != nil {
 		if errors.Is(err, bolthold.ErrNotFound) {
 			h.responseJSON(w, r, 400, fmt.Errorf("cache %d: not reserved", id))
 			return
@@ -484,7 +508,6 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, params httprout
 		h.responseJSON(w, r, 400, fmt.Errorf("cache %v %q: already complete", cache.ID, cache.Key))
 		return
 	}
-	db.Close()
 	start, _, err := parseContentRange(r.Header.Get("Content-Range"))
 	if err != nil {
 		h.responseJSON(w, r, 400, err)
@@ -508,13 +531,7 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 	}
 
 	cache := &Cache{}
-	db, err := h.openDB()
-	if err != nil {
-		h.responseJSON(w, r, 500, err)
-		return
-	}
-	defer db.Close()
-	if err := db.Get(id, cache); err != nil {
+	if err := h.db.Get(id, cache); err != nil {
 		if errors.Is(err, bolthold.ErrNotFound) {
 			h.responseJSON(w, r, 400, fmt.Errorf("cache %d: not reserved", id))
 			return
@@ -533,8 +550,6 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 		return
 	}
 
-	db.Close()
-
 	if err := h.commitCache(cache); err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
@@ -543,32 +558,27 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 	h.responseJSON(w, r, 200)
 }
 
-// commitCache assembles the uploaded parts and marks the entry complete. The caller must
-// have closed its store first: Commit concatenates the whole archive and would otherwise
-// hold bolt's exclusive file lock for the duration.
+// commitCache assembles the uploaded parts and marks the entry complete.
 func (h *Handler) commitCache(cache *Cache) error {
 	written, err := h.storage.Commit(cache.ID, cache.Size)
 	if err != nil {
 		return err
 	}
 	// write real size back to cache, it may be different from the current value when the request doesn't specify it.
+	h.metadataMu.Lock()
+	defer h.metadataMu.Unlock()
 	cache.Size = written
 	cache.Complete = true
 	cache.UsedAt = time.Now().Unix() // a just-written entry counts as accessed, so it cannot be its own eviction victim
 
-	db, err := h.openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	if err := db.Update(cache.ID, cache); err != nil {
+	if err := h.db.Update(cache.ID, cache); err != nil {
 		return err
 	}
 	// A commit is the only thing that grows the store, so the only thing that can push the
 	// volume under the floor.
-	h.evictRepo(db, cache.Repo)
-	h.evictTotal(db)
-	h.evictForFreeSpace(db)
+	h.evictRepo(h.db, cache.Repo)
+	h.evictTotal(h.db)
+	h.evictForFreeSpace(h.db)
 	return nil
 }
 
@@ -789,8 +799,10 @@ func findCache(db *bolthold.Store, repo string, keys []string, version string) (
 		if err != nil {
 			continue
 		}
+		// Indexed on Repo: the regexp cannot seek, so without it this walks every entry in
+		// the store on a path most workflows hit through restore-keys.
 		if err := db.FindOne(cache,
-			bolthold.Where("Repo").Eq(repo).
+			bolthold.Where("Repo").Eq(repo).Index("Repo").
 				And("Key").RegExp(re).
 				And("Version").Eq(version).
 				And("Complete").Eq(true).
@@ -850,14 +862,10 @@ func insertCache(db *bolthold.Store, cache *Cache) error {
 // other jobs restore no longer matching its recorded size. An entry missing from the store is
 // accepted, since the signature proves the id was handed out.
 func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
-	db, err := h.openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
+	h.metadataMu.Lock()
+	defer h.metadataMu.Unlock()
 	cache := &Cache{}
-	if err := db.Get(id, cache); err != nil {
+	if err := h.db.Get(id, cache); err != nil {
 		if errors.Is(err, bolthold.ErrNotFound) {
 			return nil
 		}
@@ -866,8 +874,8 @@ func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
 	if requireIncomplete && cache.Complete {
 		return fmt.Errorf("cache %d: already complete", id)
 	}
-	cache.UsedAt = time.Now().Unix()
-	return db.Update(cache.ID, cache)
+	h.touch(h.db, cache)
+	return nil
 }
 
 const (
@@ -875,9 +883,14 @@ const (
 
 	defaultSweepInterval = time.Hour
 
-	// inUseGrace matches artifactURLTTL so an entry outlives every signed URL still usable
-	// for it, and no sweep cuts off a download in progress.
-	inUseGrace = artifactURLTTL
+	// touchStale is how far behind a UsedAt stamp may fall before a read rewrites it. Every
+	// window read off UsedAt is minutes wide, so trading this much accuracy keeps the restore
+	// path — by far the most frequent request — off bolt's single writer and its fsync.
+	touchStale = time.Minute
+
+	// inUseGrace covers artifactURLTTL plus the slack touchStale allows, so an entry outlives
+	// every signed URL still usable for it and no sweep cuts off a download in progress.
+	inUseGrace = artifactURLTTL + touchStale
 
 	// uploadStallTimeout is how long a reservation may sit without a chunk before it counts
 	// as abandoned. Widening it also widens the window for findExactCache to hand a finalize
@@ -909,6 +922,11 @@ func (p Policy) withDefaults() Policy {
 }
 
 func (h *Handler) gcCache() {
+	h.lifecycle.RLock()
+	defer h.lifecycle.RUnlock()
+	if h.closed {
+		return
+	}
 	if h.gcing.Load() {
 		return
 	}
@@ -924,17 +942,13 @@ func (h *Handler) gcCache() {
 	h.gcAt = time.Now()
 	h.logger.Debugf("gc: %v", h.gcAt.String())
 
-	db, err := h.openDB()
-	if err != nil {
-		return
-	}
-	defer db.Close()
-
-	h.evictIncomplete(db)
-	h.evictExpired(db)
-	h.evictSuperseded(db)
-	h.evictOversized(db)
-	h.evictForFreeSpace(db)
+	h.metadataMu.Lock()
+	defer h.metadataMu.Unlock()
+	h.evictIncomplete(h.db)
+	h.evictExpired(h.db)
+	h.evictSuperseded(h.db)
+	h.evictOversized(h.db)
+	h.evictForFreeSpace(h.db)
 }
 
 // evictForFreeSpace bounds the volume itself, so it also covers bytes the cache never
@@ -1072,11 +1086,13 @@ func inUse(cache *Cache) bool {
 	return time.Since(time.Unix(cache.UsedAt, 0)) < inUseGrace
 }
 
-// touch stamps UsedAt through the caller's store, a bolt write on the read path. It cannot
-// go through touchCache, which opens its own store and would block on the exclusive lock
-// for as long as the caller holds one.
+// touch stamps UsedAt, skipping the write while the stamp is fresher than touchStale.
 func (h *Handler) touch(db *bolthold.Store, cache *Cache) {
-	cache.UsedAt = time.Now().Unix()
+	now := time.Now()
+	if now.Sub(time.Unix(cache.UsedAt, 0)) < touchStale {
+		return
+	}
+	cache.UsedAt = now.Unix()
 	if err := db.Update(cache.ID, cache); err != nil {
 		h.logger.Warnf("touch cache: %v", err)
 	}
