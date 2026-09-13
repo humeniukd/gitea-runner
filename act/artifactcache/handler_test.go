@@ -1069,9 +1069,14 @@ func keptKeys(t *testing.T, handler *Handler, entries []*Cache) []string {
 // writeBlob gives an entry the on-disk bytes that find and get require.
 func writeBlob(t *testing.T, handler *Handler, id uint64) {
 	t.Helper()
+	cache := &Cache{}
+	require.NoError(t, handler.db.Get(id, cache))
 	require.NoError(t, handler.storage.Write(id, 0, strings.NewReader("a")))
 	_, err := handler.storage.Commit(id, 1)
 	require.NoError(t, err)
+	if cache.Size > 1 {
+		require.NoError(t, os.Truncate(handler.storage.filename(id), cache.Size))
+	}
 }
 
 // TestHandler_RejectsMissingBearer covers the advisory's root cause:

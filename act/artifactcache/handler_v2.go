@@ -126,30 +126,21 @@ func (h *Handler) v2FinalizeCacheEntryUpload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	cache, err := findExactCache(h.db, cred.Repo, req.Key, req.Version, false)
-	if err == nil && cache != nil && cache.Owner != hashedToken(bearerToken(r)) {
-		cache = nil // not the reservation this job made, so not this job's to commit
-	}
-	if err == nil && cache == nil {
-		// A retry whose first response was lost finds the entry already committed.
-		cache, err = findExactCache(h.db, cred.Repo, req.Key, req.Version, true)
-	}
+	cache, committed, err := h.finalizeV2(cred.Repo, hashedToken(bearerToken(r)), req)
 	if err != nil {
-		h.twirpError(w, r, twirpInternal, err)
+		if cache == nil {
+			h.twirpError(w, r, twirpInternal, err)
+			return
+		}
+		h.twirpNotOK(w, r)
 		return
 	}
 	if cache == nil {
 		h.twirpNotOK(w, r)
 		return
 	}
-
-	if !cache.Complete {
-		cache.Size = int64(cmp.Or(req.SizeBytes, req.SizeBytesCamel))
-		if err := h.commitCache(cache); err != nil {
-			h.logger.Errorf("finalize cache %d (%s): %v", cache.ID, cache.Key, err)
-			h.twirpNotOK(w, r)
-			return
-		}
+	if committed {
+		h.evictAfterCommit(cred.Repo)
 	}
 
 	h.responseJSON(w, r, http.StatusOK, map[string]any{
@@ -157,6 +148,37 @@ func (h *Handler) v2FinalizeCacheEntryUpload(w http.ResponseWriter, r *http.Requ
 		// int64 fields travel as strings in the proto JSON mapping.
 		"entry_id": strconv.FormatUint(cache.ID, 10),
 	})
+}
+
+func (h *Handler) finalizeV2(repo, owner string, req v2FinalizeRequest) (*Cache, bool, error) {
+	// Serialize finalize of this identity so two retries cannot both assemble
+	// an incomplete entry before either commit updates its metadata. Eviction
+	// can still run: commitCache refreshes UsedAt before it assembles.
+	defer h.lockIdent(repo, req.Key, req.Version)()
+
+	cache, err := findExactCache(h.db, repo, req.Key, req.Version, false)
+	if err != nil {
+		return nil, false, err
+	}
+	if cache != nil && cache.Owner != owner {
+		cache = nil // not the reservation this job made, so not this job's to commit
+	}
+	if cache == nil {
+		// A retry whose first response was lost finds the entry already committed.
+		cache, err = findExactCache(h.db, repo, req.Key, req.Version, true)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	if cache == nil || cache.Complete {
+		return cache, false, nil
+	}
+	cache.Size = int64(cmp.Or(req.SizeBytes, req.SizeBytesCamel))
+	if err := h.commitCache(cache); err != nil {
+		h.logger.Errorf("finalize cache %d (%s): %v", cache.ID, cache.Key, err)
+		return cache, false, err
+	}
+	return cache, true, nil
 }
 
 func (h *Handler) v2GetCacheEntryDownloadURL(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {

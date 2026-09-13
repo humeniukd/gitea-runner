@@ -32,13 +32,19 @@ func NewStorage(rootDir string) (*Storage, error) {
 }
 
 func (s *Storage) Exist(id uint64) (bool, error) {
-	name := s.filename(id)
-	if _, err := os.Stat(name); os.IsNotExist(err) {
-		return false, nil
-	} else if err != nil {
-		return false, err
+	_, ok, err := s.Stat(id)
+	return ok, err
+}
+
+func (s *Storage) Stat(id uint64) (int64, bool, error) {
+	info, err := os.Stat(s.filename(id))
+	if os.IsNotExist(err) {
+		return 0, false, nil
 	}
-	return true, nil
+	if err != nil {
+		return 0, false, err
+	}
+	return info.Size(), true, nil
 }
 
 func (s *Storage) Write(id uint64, offset int64, reader io.Reader) error {
