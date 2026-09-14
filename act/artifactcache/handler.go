@@ -79,18 +79,11 @@ type credEntry struct {
 type Handler struct {
 	dir      string
 	storage  *Storage
-	db       *bolthold.Store
 	router   *httprouter.Router
 	listener net.Listener
 	port     int
 	server   *http.Server
 	logger   logrus.FieldLogger
-
-	lifecycle  sync.RWMutex
-	closed     bool
-	closeMu    sync.Mutex
-	metadataMu sync.RWMutex // shared for hits; exclusive for eviction and v2 reserve
-	entries    keyedMutex   // touch, finalize, and upload of one entry or identity
 
 	gcing atomic.Bool
 	gcAt  time.Time
@@ -173,18 +166,6 @@ func StartHandler(opts Options) (*Handler, error) {
 	}
 	h.storage = storage
 
-	db, err := openDB(dir)
-	if err != nil {
-		return nil, fmt.Errorf("open cache store in %s: %w", dir, err)
-	}
-	h.db = db
-	started := false
-	defer func() {
-		if !started {
-			db.Close()
-		}
-	}()
-
 	if opts.OutboundIP != "" {
 		h.outboundIP = opts.OutboundIP
 	} else if ip := common.GetOutboundIP(); ip == nil {
@@ -237,8 +218,7 @@ func StartHandler(opts Options) (*Handler, error) {
 	h.port = addr.Port
 	server := &http.Server{
 		ReadHeaderTimeout: 2 * time.Second,
-		IdleTimeout:       2 * time.Minute, // hung keep-alives; WriteTimeout is unset so a large download can finish
-		Handler:           http.HandlerFunc(h.serveHTTP),
+		Handler:           router,
 	}
 	go func() {
 		if err := server.Serve(listener); err != nil && errors.Is(err, net.ErrClosed) {
@@ -247,19 +227,8 @@ func StartHandler(opts Options) (*Handler, error) {
 	}()
 	h.listener = listener
 	h.server = server
-	started = true
 
 	return h, nil
-}
-
-func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	h.lifecycle.RLock()
-	defer h.lifecycle.RUnlock()
-	if h.closed {
-		http.Error(w, "cache server closed", http.StatusServiceUnavailable)
-		return
-	}
-	h.router.ServeHTTP(w, r)
 }
 
 func (h *Handler) ExternalURL() string {
@@ -364,8 +333,6 @@ func (h *Handler) Close() error {
 	if h == nil {
 		return nil
 	}
-	h.closeMu.Lock()
-	defer h.closeMu.Unlock()
 	var retErr error
 	if h.server != nil {
 		err := h.server.Close()
@@ -384,21 +351,11 @@ func (h *Handler) Close() error {
 		}
 		h.listener = nil
 	}
-	h.lifecycle.Lock()
-	defer h.lifecycle.Unlock()
-	h.closed = true
-	if h.db != nil {
-		if err := h.db.Close(); err != nil && retErr == nil {
-			retErr = err
-		}
-		h.db = nil
-	}
 	return retErr
 }
 
-// Keep one store open to avoid per-request contention on bolt's exclusive file lock.
-func openDB(dir string) (*bolthold.Store, error) {
-	return bolthold.Open(filepath.Join(dir, "bolt.db"), 0o644, &bolthold.Options{
+func (h *Handler) openDB() (*bolthold.Store, error) {
+	return bolthold.Open(filepath.Join(h.dir, "bolt.db"), 0o644, &bolthold.Options{
 		Encoder: func(value any) ([]byte, error) { return json.Marshal(value) },
 		Decoder: func(data []byte, value any) error { return json.Unmarshal(data, value) },
 		Options: &bbolt.Options{
@@ -409,56 +366,20 @@ func openDB(dir string) (*bolthold.Store, error) {
 	})
 }
 
-// keyedMutex is a refcounted lock map so different cache entries do not share a mutex.
-type keyedMutex struct {
-	mu    sync.Mutex
-	locks map[string]*keyedWaiter
-}
-
-type keyedWaiter struct {
-	mu   sync.Mutex
-	refs int
-}
-
-func (k *keyedMutex) lock(key string) func() {
-	k.mu.Lock()
-	if k.locks == nil {
-		k.locks = make(map[string]*keyedWaiter)
-	}
-	w := k.locks[key]
-	if w == nil {
-		w = &keyedWaiter{}
-		k.locks[key] = w
-	}
-	w.refs++
-	k.mu.Unlock()
-	w.mu.Lock()
-	return func() {
-		w.mu.Unlock()
-		k.mu.Lock()
-		w.refs--
-		if w.refs == 0 {
-			delete(k.locks, key)
-		}
-		k.mu.Unlock()
-	}
-}
-
-func (h *Handler) lockEntry(id uint64) func() {
-	return h.entries.lock("e:" + strconv.FormatUint(id, 10))
-}
-
-func (h *Handler) lockIdent(repo, key, version string) func() {
-	return h.entries.lock("k:" + repo + "\x00" + key + "\x00" + version)
-}
-
 // GET /_apis/artifactcache/cache
 func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	cred := credFromContext(r.Context())
 	keys := strings.Split(r.URL.Query().Get("keys"), ",")
 	version := r.URL.Query().Get("version")
 
-	cache, err := h.lookupCache(h.db, cred.Repo, keys, version)
+	db, err := h.openDB()
+	if err != nil {
+		h.responseJSON(w, r, 500, err)
+		return
+	}
+	defer db.Close()
+
+	cache, err := h.lookupCache(db, cred.Repo, keys, version)
 	if err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
@@ -478,30 +399,21 @@ func (h *Handler) find(w http.ResponseWriter, r *http.Request, _ httprouter.Para
 // either nothing matched, or the match had lost its blob to a prune, in which case the dangling
 // entry is dropped on the way out.
 func (h *Handler) lookupCache(db *bolthold.Store, repo string, keys []string, version string) (*Cache, error) {
-	h.metadataMu.RLock()
-	defer h.metadataMu.RUnlock()
 	cache, err := findCache(db, repo, keys, version)
 	if err != nil || cache == nil {
 		return nil, err
 	}
-	size, ok, err := h.storage.Stat(cache.ID)
+	ok, err := h.storage.Exist(cache.ID)
 	if err != nil {
 		return nil, err
 	}
-	if !ok || (cache.Size >= 0 && size != cache.Size) {
-		unlock := h.lockEntry(cache.ID)
+	if !ok {
 		_ = db.Delete(cache.ID, cache)
-		unlock()
 		return nil, nil //nolint:nilnil // absence is not an error here
 	}
 	// Handing out a download URL counts as access, or eviction could drop the entry between
-	// this call and the GET that follows it. A fresh UsedAt needs no write, so skip the keyed lock.
-	if !touchNeeded(cache) {
-		return cache, nil
-	}
-	unlock := h.lockEntry(cache.ID)
+	// this call and the GET that follows it.
 	h.touch(db, cache)
-	unlock()
 	return cache, nil
 }
 
@@ -518,15 +430,17 @@ func (h *Handler) reserve(w http.ResponseWriter, r *http.Request, _ httprouter.P
 	if cache.Size == 0 {
 		cache.Size = -1
 	}
+	db, err := h.openDB()
+	if err != nil {
+		h.responseJSON(w, r, 500, err)
+		return
+	}
+	defer db.Close()
 
 	now := time.Now().Unix()
 	cache.CreatedAt = now
 	cache.UsedAt = now
-	// v1 allows another reservation of the same key; serialize only the insert.
-	unlock := h.lockIdent(cred.Repo, cache.Key, cache.Version)
-	err := insertCache(h.db, cache)
-	unlock()
-	if err != nil {
+	if err := insertCache(db, cache); err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
 	}
@@ -545,7 +459,13 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, params httprout
 	}
 
 	cache := &Cache{}
-	if err := h.db.Get(id, cache); err != nil {
+	db, err := h.openDB()
+	if err != nil {
+		h.responseJSON(w, r, 500, err)
+		return
+	}
+	defer db.Close()
+	if err := db.Get(id, cache); err != nil {
 		if errors.Is(err, bolthold.ErrNotFound) {
 			h.responseJSON(w, r, 400, fmt.Errorf("cache %d: not reserved", id))
 			return
@@ -563,6 +483,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, params httprout
 		h.responseJSON(w, r, 400, fmt.Errorf("cache %v %q: already complete", cache.ID, cache.Key))
 		return
 	}
+	db.Close()
 	start, _, err := parseContentRange(r.Header.Get("Content-Range"))
 	if err != nil {
 		h.responseJSON(w, r, 400, err)
@@ -586,7 +507,13 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 	}
 
 	cache := &Cache{}
-	if err := h.db.Get(id, cache); err != nil {
+	db, err := h.openDB()
+	if err != nil {
+		h.responseJSON(w, r, 500, err)
+		return
+	}
+	defer db.Close()
+	if err := db.Get(id, cache); err != nil {
 		if errors.Is(err, bolthold.ErrNotFound) {
 			h.responseJSON(w, r, 400, fmt.Errorf("cache %d: not reserved", id))
 			return
@@ -600,37 +527,25 @@ func (h *Handler) commit(w http.ResponseWriter, r *http.Request, params httprout
 		return
 	}
 
-	unlock := h.lockEntry(cache.ID)
-	latest := &Cache{}
-	if err := h.db.Get(cache.ID, latest); err != nil {
-		unlock()
-		if errors.Is(err, bolthold.ErrNotFound) {
-			h.responseJSON(w, r, 400, fmt.Errorf("cache %d: not reserved", id))
-			return
-		}
+	if cache.Complete {
+		h.responseJSON(w, r, 400, fmt.Errorf("cache %v %q: already complete", cache.ID, cache.Key))
+		return
+	}
+
+	db.Close()
+
+	if err := h.commitCache(cache); err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
 	}
-	if latest.Complete {
-		unlock()
-		h.responseJSON(w, r, 400, fmt.Errorf("cache %v %q: already complete", latest.ID, latest.Key))
-		return
-	}
-	err = h.commitCache(latest)
-	unlock()
-	if err != nil {
-		h.responseJSON(w, r, 500, err)
-		return
-	}
-	h.evictAfterCommit(latest.Repo)
+
 	h.responseJSON(w, r, 200)
 }
 
-// commitCache assembles the uploaded parts and marks the entry complete.
-// The caller holds the entry's keyed lock, not the eviction barrier, so a long
-// assemble does not block lookups.
+// commitCache assembles the uploaded parts and marks the entry complete. The caller must
+// have closed its store first: Commit concatenates the whole archive and would otherwise
+// hold bolt's exclusive file lock for the duration.
 func (h *Handler) commitCache(cache *Cache) error {
-	h.touch(h.db, cache) // keep the reservation off the incomplete sweep while parts are assembled
 	written, err := h.storage.Commit(cache.ID, cache.Size)
 	if err != nil {
 		return err
@@ -640,17 +555,20 @@ func (h *Handler) commitCache(cache *Cache) error {
 	cache.Complete = true
 	cache.UsedAt = time.Now().Unix() // a just-written entry counts as accessed, so it cannot be its own eviction victim
 
-	return h.db.Update(cache.ID, cache)
-}
-
-func (h *Handler) evictAfterCommit(repo string) {
-	h.metadataMu.Lock()
-	defer h.metadataMu.Unlock()
+	db, err := h.openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.Update(cache.ID, cache); err != nil {
+		return err
+	}
 	// A commit is the only thing that grows the store, so the only thing that can push the
 	// volume under the floor.
-	h.evictRepo(h.db, repo)
-	h.evictTotal(h.db)
-	h.evictForFreeSpace(h.db)
+	h.evictRepo(db, cache.Repo)
+	h.evictTotal(db)
+	h.evictForFreeSpace(db)
+	return nil
 }
 
 // GET /_apis/artifactcache/artifacts/:id
@@ -694,7 +612,7 @@ func (h *Handler) bearerAuth(handler httprouter.Handle) httprouter.Handle {
 		}
 		ctx := context.WithValue(r.Context(), credKey{}, cred)
 		handler(w, r.WithContext(ctx), params)
-		h.scheduleGC()
+		go h.gcCache()
 	}
 }
 
@@ -737,7 +655,7 @@ func (h *Handler) signedAuth(purpose string, handler httprouter.Handle) httprout
 			return
 		}
 		handler(w, r, params)
-		h.scheduleGC()
+		go h.gcCache()
 	}
 }
 
@@ -865,8 +783,6 @@ func findCache(db *bolthold.Store, repo string, keys []string, version string) (
 		if exact != nil {
 			return exact, nil
 		}
-		// Indexed on Repo: a prefix cannot seek, so without it this walks every entry in
-		// the store on a path most workflows hit through restore-keys.
 		if err := db.FindOne(cache,
 			bolthold.Where("Repo").Eq(repo).Index("Repo").
 				And("Key").MatchFunc(func(key string) (bool, error) { return strings.HasPrefix(key, prefix), nil }).
@@ -886,7 +802,6 @@ func findCache(db *bolthold.Store, repo string, keys []string, version string) (
 // findExactCache returns the entry for exactly this key and version, or (nil, nil) if there is
 // none. Unlike findCache it never falls back to a prefix (restore-key) match, which is what both
 // its callers need: a new key that is only a prefix of an existing key is not the same entry.
-// Indexed on Repo so a shared server does not start from every repository that reused the key.
 //
 // A completed entry is the one to restore, sorted by when it was written. An incomplete one is a
 // reservation being uploaded to, sorted by when it was last written to, because the upload route
@@ -898,8 +813,8 @@ func findExactCache(db *bolthold.Store, repo, key, version string, complete bool
 	}
 	cache := &Cache{}
 	err := db.FindOne(cache,
-		bolthold.Where("Repo").Eq(repo).Index("Repo").
-			And("Key").Eq(key).
+		bolthold.Where("Key").Eq(key).Index("Key").
+			And("Repo").Eq(repo).
 			And("Version").Eq(version).
 			And("Complete").Eq(complete).
 			SortBy(sortBy).Reverse())
@@ -917,6 +832,7 @@ func insertCache(db *bolthold.Store, cache *Cache) error {
 		if err := db.TxInsert(tx, bolthold.NextSequence(), cache); err != nil {
 			return fmt.Errorf("insert cache: %w", err)
 		}
+		// write back id to db
 		if err := db.TxUpdate(tx, cache.ID, cache); err != nil {
 			return fmt.Errorf("write back id to db: %w", err)
 		}
@@ -930,10 +846,14 @@ func insertCache(db *bolthold.Store, cache *Cache) error {
 // other jobs restore no longer matching its recorded size. An entry missing from the store is
 // accepted, since the signature proves the id was handed out.
 func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
-	h.metadataMu.RLock()
-	defer h.metadataMu.RUnlock()
+	db, err := h.openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
 	cache := &Cache{}
-	if err := h.db.Get(id, cache); err != nil {
+	if err := db.Get(id, cache); err != nil {
 		if errors.Is(err, bolthold.ErrNotFound) {
 			return nil
 		}
@@ -942,22 +862,11 @@ func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
 	if requireIncomplete && cache.Complete {
 		return fmt.Errorf("cache %d: already complete", id)
 	}
-	if !requireIncomplete && !touchNeeded(cache) {
+	if !touchNeeded(cache) {
 		return nil
 	}
-	unlock := h.lockEntry(id)
-	defer unlock()
-	if err := h.db.Get(id, cache); err != nil {
-		if errors.Is(err, bolthold.ErrNotFound) {
-			return nil
-		}
-		return err
-	}
-	if requireIncomplete && cache.Complete {
-		return fmt.Errorf("cache %d: already complete", id)
-	}
-	h.touch(h.db, cache)
-	return nil
+	cache.UsedAt = time.Now().Unix()
+	return db.Update(cache.ID, cache)
 }
 
 const (
@@ -965,13 +874,10 @@ const (
 
 	defaultSweepInterval = time.Hour
 
-	// touchStale is how far behind a UsedAt stamp may fall before a read rewrites it. Every
-	// window read off UsedAt is minutes wide, so trading this much accuracy keeps the restore
-	// path — by far the most frequent request — off bolt's single writer and its fsync.
-	touchStale = time.Minute
+	touchStale = time.Minute // how stale a completed entry's UsedAt may get before an access rewrites it, sparing hits the fsync
 
-	// inUseGrace covers artifactURLTTL plus the slack touchStale allows, so an entry outlives
-	// every signed URL still usable for it and no sweep cuts off a download in progress.
+	// inUseGrace covers artifactURLTTL plus the touchStale lag so an entry outlives every signed URL
+	// still usable for it, and no sweep cuts off a download in progress.
 	inUseGrace = artifactURLTTL + touchStale
 
 	// uploadStallTimeout is how long a reservation may sit without a chunk before it counts
@@ -1003,19 +909,7 @@ func (p Policy) withDefaults() Policy {
 	return p
 }
 
-func (h *Handler) scheduleGC() {
-	if h.gcing.Load() || time.Since(h.gcAt) < h.policy.SweepInterval {
-		return
-	}
-	go h.gcCache()
-}
-
 func (h *Handler) gcCache() {
-	h.lifecycle.RLock()
-	defer h.lifecycle.RUnlock()
-	if h.closed {
-		return
-	}
 	if h.gcing.Load() {
 		return
 	}
@@ -1031,13 +925,17 @@ func (h *Handler) gcCache() {
 	h.gcAt = time.Now()
 	h.logger.Debugf("gc: %v", h.gcAt.String())
 
-	h.metadataMu.Lock()
-	defer h.metadataMu.Unlock()
-	h.evictIncomplete(h.db)
-	h.evictExpired(h.db)
-	h.evictSuperseded(h.db)
-	h.evictOversized(h.db)
-	h.evictForFreeSpace(h.db)
+	db, err := h.openDB()
+	if err != nil {
+		return
+	}
+	defer db.Close()
+
+	h.evictIncomplete(db)
+	h.evictExpired(db)
+	h.evictSuperseded(db)
+	h.evictOversized(db)
+	h.evictForFreeSpace(db)
 }
 
 // evictForFreeSpace bounds the volume itself, so it also covers bytes the cache never
@@ -1074,7 +972,7 @@ func (h *Handler) evictExpired(db *bolthold.Store) {
 		return
 	}
 	// Never below inUseGrace, or a short retention would outrun a signed URL already issued.
-	window := max(h.policy.Retention, inUseGrace)
+	window := max(h.policy.Retention+touchStale, inUseGrace)
 	h.sweep(db, bolthold.Where("UsedAt").Lt(time.Now().Add(-window).Unix()).Index("UsedAt"))
 }
 
@@ -1175,11 +1073,14 @@ func inUse(cache *Cache) bool {
 	return time.Since(time.Unix(cache.UsedAt, 0)) < inUseGrace
 }
 
+// touchNeeded skips a write that would not change the second, and completed entries fresher than touchStale.
 func touchNeeded(cache *Cache) bool {
-	return time.Since(time.Unix(cache.UsedAt, 0)) >= touchStale
+	return cache.UsedAt < time.Now().Unix() && (!cache.Complete || time.Since(time.Unix(cache.UsedAt, 0)) >= touchStale)
 }
 
-// touch stamps UsedAt, skipping the write while the stamp is fresher than touchStale.
+// touch stamps UsedAt through the caller's store, a bolt write on the read path. It cannot
+// go through touchCache, which opens its own store and would block on the exclusive lock
+// for as long as the caller holds one.
 func (h *Handler) touch(db *bolthold.Store, cache *Cache) {
 	if !touchNeeded(cache) {
 		return
