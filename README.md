@@ -327,7 +327,7 @@ cache:
 
 Those actions refuse any host they do not take for GitHub, so the runner edits that check out of the bundle on its way into the job and puts the shared copy back afterwards. A bundle it does not recognise is left alone. The same edit lets the stock `actions/upload-artifact` and `actions/download-artifact` work from `v4.4.0` on, without the `gitea-upload-artifact` fork, so it is made whatever `v2` says. Set `runner.patch_actions: false` to leave bundles as shipped; the artifact actions then refuse and the cache client keeps to v1.
 
-With v2 the job's artifact calls go via the cache server, so jobs need to reach it to upload artifacts, not just to cache. `v2: false` sends them to Gitea directly.
+With v2 the job's artifact calls go via the cache server. `v2: false` sends them to Gitea directly. So does a runner whose cache server sits on another Docker network than its container jobs, which cannot reach it there, and the job log says how to fix that.
 
 **Shared cache across multiple runners**
 
