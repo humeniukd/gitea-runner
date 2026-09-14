@@ -18,6 +18,7 @@ import (
 	maps0 "maps"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -255,7 +256,7 @@ func (rc *RunContext) validVolumes() []string {
 		volumes = append(volumes, sharedToolCacheVolume)
 	}
 	if rc.Config.BindWorkdir {
-		volumes = append(volumes, rc.Config.Workdir)
+		volumes = append(volumes, rc.Config.Workdir, rc.workdirMountRoot())
 	}
 	if rc.dockerProxy != nil {
 		volumes = append(volumes, rc.dockerProxy.Socket)
@@ -263,6 +264,13 @@ func (rc *RunContext) validVolumes() []string {
 	// TODO: add a new configuration to control whether the docker daemon can be mounted
 	return append(volumes, name, name+"-env",
 		getDockerDaemonSocketMountPath(rc.containerDaemonSocket()))
+}
+
+func (rc *RunContext) workdirMountRoot() string {
+	if rc.Config.PresetGitHubContext != nil {
+		return filepath.Dir(filepath.Dir(rc.Config.Workdir)) // only the daemon presets, its workdir is <parent>/<owner>/<repo>
+	}
+	return rc.Config.Workdir
 }
 
 func (rc *RunContext) jobDockerSocket() string {
@@ -359,6 +367,11 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string, error) {
 	mounts[name+"-env"] = ext.GetActPath() // runner-internal, never overridable
 
 	if workdir := ext.ToContainerPath(rc.Config.Workdir); !claimed[workdir] {
+		source := rc.workdirMountRoot()
+		target := ext.ToContainerPath(source)
+		if claimed[target] {
+			source, target = rc.Config.Workdir, workdir
+		}
 		if rc.Config.BindWorkdir {
 			bindModifiers := ""
 			if runtime.GOOS == "darwin" {
@@ -367,9 +380,9 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string, error) {
 			if selinux.GetEnabled() {
 				bindModifiers = ":z"
 			}
-			binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, workdir, bindModifiers))
+			binds = append(binds, fmt.Sprintf("%s:%s%s", source, target, bindModifiers))
 		} else {
-			mounts[name] = workdir
+			mounts[name] = target
 		}
 	}
 
@@ -495,8 +508,11 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		networkName, createAndDeleteNetwork := rc.networkNameForGitea()
 		rc.cleanUpJobContainer = rc.cleanupJobResources(networkName, createAndDeleteNetwork, false)
 
-		// add service containers
-		for serviceID, spec := range rc.Run.Job().Services {
+		services := rc.Run.Job().Services
+		if err := decodeDeferred(ctx, rc.ExprEval, "job services", rc.Run.Job().RawServices, &services); err != nil {
+			return err
+		}
+		for serviceID, spec := range services {
 			// GitHub compatibility: skip services whose image evaluates to an
 			// empty string, enabling conditional services via expressions
 			serviceImage, err := rc.ExprEval.Interpolate(ctx, spec.Image)
@@ -976,8 +992,12 @@ func (rc *RunContext) captureJobContainerInfo() common.Executor {
 			return nil
 		}
 		rc.jobContainerID = info.ID
-		if source := info.Mounts[rc.githubWorkspace()]; source != "" {
-			rc.Env["GITEA_DOCKER_WORKSPACE"] = source
+		workspace := rc.githubWorkspace()
+		for dir := workspace; dir != "/" && dir != "."; dir = path.Dir(dir) {
+			if source := info.Mounts[dir]; source != "" {
+				rc.Env["GITEA_DOCKER_WORKSPACE"] = path.Join(source, strings.TrimPrefix(workspace, dir))
+				break
+			}
 		}
 		return nil
 	}
@@ -1022,6 +1042,15 @@ func (rc *RunContext) interpolateOutputs() common.Executor {
 		// with its own resolved values (last wins, as on GitHub) instead of the first combo's
 		// resolved values freezing the shared template against later combos.
 		// Resolved up front so one failure publishes none of them, as GitHub does.
+		var deferredOutputs map[string]string
+		if err := decodeDeferred(ctx, ee, "job outputs", job.RawOutputs, &deferredOutputs); err != nil {
+			return err
+		}
+		if deferredOutputs != nil {
+			defer lockJob(job)()
+			job.Outputs = deferredOutputs
+			return nil
+		}
 		outputs := make(map[string]string, len(rc.outputTemplate))
 		var err error
 		for k, v := range rc.outputTemplate {
