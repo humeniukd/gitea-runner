@@ -268,14 +268,18 @@ Unlike GitHub, a job whose steps run on the host (a `host` label without `contai
 
 #### Docker from a job (`GITEA_DOCKER_WORKSPACE`)
 
-A container a job starts through the Docker socket cannot bind-mount the workspace by the job's own path, the daemon does not have it. `GITEA_DOCKER_WORKSPACE` holds the path the daemon sees. Use it as the prefix of workspace binds, with `.` as the fallback for local use, here in a `docker-compose.yaml`:
+Linux container jobs use a Docker proxy when socket sharing and permissions allow it. Other setups use the daemon socket directly. Host jobs use their existing Docker access, where `.` works.
+
+With the proxy, containers a job starts can bind-mount the workspace and the other paths the job has mounted, as on a host, for example `docker run -v "$PWD:/src"`, `./data:/app/data` in a `docker-compose.yaml`, or a `local` volume with `o: bind`. Files that exist only inside the job container, like its `/tmp`, cannot be shared this way.
+
+The proxy removes containers, networks and volumes after post steps and the completed hook, including those created by containers the job passes `/var/run/docker.sock` to. Swarm services are left running, along with the networks they use. Named volumes created through it are job-scoped. To retain resources, mount the daemon socket explicitly in `container.options`, which works like having no proxy.
+
+Without the proxy, for example with a remote `DOCKER_HOST`, a non-root runner using a rootful daemon, or the daemon socket mounted in `container.options`, a container the job starts cannot bind-mount the workspace by the job's own path unless `container.bind_workdir` is enabled. `GITEA_DOCKER_WORKSPACE` holds the path the daemon sees. Use it as the prefix of workspace binds, with `.` as the fallback for local use:
 
 ```yaml
 volumes:
   - ${GITEA_DOCKER_WORKSPACE:-.}/data:/app/data
 ```
-
-Linux container jobs use a Docker proxy when socket sharing and permissions allow it. Other setups use the daemon socket directly. The proxy removes containers, networks and volumes after post steps and the completed hook. Named volumes created through it are job-scoped. To retain resources, mount the daemon socket explicitly in `container.options`. Host jobs use their existing Docker access, where `.` works.
 
 #### Proxy
 
