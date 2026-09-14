@@ -156,16 +156,12 @@ func (runner *runnerImpl) configure() (*runnerImpl, error) {
 	return runner, nil
 }
 
-const defaultMaxParallel = 4 // the library reports an undeclared max-parallel rather than defaulting
-
 func maxParallelFor(strategy *model.Strategy, combinations int) int {
-	maxParallel := defaultMaxParallel
+	maxParallel := 4 // actionslib has no default for an undeclared max-parallel
 	if strategy != nil {
-		limit, declared, err := strategy.ParseMaxParallel()
-		switch {
-		case err != nil:
+		if limit, declared, err := strategy.ParseMaxParallel(); err != nil {
 			log.Errorf("Ignoring invalid max-parallel: %v", err)
-		case declared:
+		} else if declared {
 			maxParallel = limit
 		}
 	}
@@ -214,14 +210,9 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 						return err
 					}
 					if job.RawStrategy.Kind == yaml.ScalarNode {
-						decoded := &model.Job{RawStrategy: model.CloneYamlNode(job.RawStrategy)}
-						if err := strategyRc.ExprEval.EvaluateYamlNode(ctx, &decoded.RawStrategy); err != nil {
-							return fmt.Errorf("could not evaluate job strategy: %w", err)
-						}
-						if err := decoded.DecodeRaw(); err != nil {
+						if err := decodeDeferred(ctx, strategyRc.ExprEval, "job strategy", job.RawStrategy, &job.Strategy); err != nil {
 							return err
 						}
-						job.Strategy = decoded.Strategy
 					} else {
 						log.Debugf("Job.Strategy.FailFast: %v", job.Strategy.GetFailFast())
 						log.Debugf("Job.Strategy.FailFastString: %v", job.Strategy.FailFastString)

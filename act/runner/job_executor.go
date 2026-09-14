@@ -27,7 +27,6 @@ import (
 
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
-	"go.yaml.in/yaml/v4"
 )
 
 const maxJobSummaryBytes = 1024 * 1024
@@ -418,15 +417,12 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 // evaluateJobEnvAndDefaults resolves the job's env and defaults.run once, as GitHub does at job setup.
 func evaluateJobEnvAndDefaults(ctx context.Context, rc *RunContext) error {
 	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
-	if rc.Run.Workflow.RawEnv.Kind == yaml.ScalarNode {
-		decoded := &model.Workflow{RawEnv: model.CloneYamlNode(rc.Run.Workflow.RawEnv)}
-		if err := rc.ExprEval.EvaluateYamlNode(ctx, &decoded.RawEnv); err != nil {
-			return fmt.Errorf("unable to evaluate workflow env: %w", err)
-		}
-		if err := decoded.DecodeRaw(); err != nil {
-			return err
-		}
-		rc.Env = mergeMaps(decoded.Env, rc.GetEnv())
+	var workflowEnv map[string]string
+	if err := decodeDeferred(ctx, rc.ExprEval, "workflow env", rc.Run.Workflow.RawEnv, &workflowEnv); err != nil {
+		return err
+	}
+	if workflowEnv != nil {
+		rc.Env = mergeMaps(workflowEnv, rc.GetEnv())
 		rc.ExprEval = rc.NewExpressionEvaluator(ctx)
 	}
 	var err error

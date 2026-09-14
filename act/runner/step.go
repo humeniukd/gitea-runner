@@ -263,11 +263,8 @@ func setupEnv(ctx context.Context, step step) error {
 		}
 	}
 	if step.getStepModel().RawWith.Kind == yaml.ScalarNode {
-		decoded := &model.Step{RawWith: model.CloneYamlNode(step.getStepModel().RawWith)}
-		if err := inputEval().EvaluateYamlNode(ctx, &decoded.RawWith); err != nil {
-			return fmt.Errorf("unable to evaluate step inputs: %w", err)
-		}
-		if err := decoded.DecodeRaw(); err != nil {
+		decoded := &model.Step{}
+		if err := decodeDeferred(ctx, inputEval(), "with", step.getStepModel().RawWith, &decoded.With); err != nil {
 			return err
 		}
 		step.getStepModel().With = decoded.With

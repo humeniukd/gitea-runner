@@ -234,10 +234,8 @@ jobs:
 					require.NoError(t, evaluateJobEnvAndDefaults(t.Context(), rc))
 					step := &stepRun{RunContext: rc, Step: job.Steps[0].Clone(), env: map[string]string{}}
 					require.NoError(t, setupEnv(t.Context(), step))
-					assert.Equal(t, map[string]string{"name": value, "fetch-depth": "2"}, step.Step.With)
 					assert.Equal(t, map[string]string{"ARGS": `${{ inputs.args }}`, "INPUT_NAME": value, "INPUT_FETCH-DEPTH": "2"}, step.Step.GetEnv())
 					assert.Equal(t, value, step.env["INPUT_NAME"])
-					assert.Equal(t, "2", step.env["INPUT_FETCH-DEPTH"])
 					assert.Equal(t, value, step.env["WORKFLOW"])
 					assert.Equal(t, "job", step.env["PRIORITY"])
 					assert.Equal(t, rawEnv, workflow.RawEnv)

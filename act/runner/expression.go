@@ -35,6 +35,21 @@ func setStrategyContext(strategy map[string]any, jobStrategy *model.Strategy) {
 	}
 }
 
+// decodeDeferred decodes a whole-value `${{ }}` parked in a Raw* field, evaluating a clone since the node is shared across matrix combinations.
+func decodeDeferred[T any](ctx context.Context, eval *expressionEvaluator, name string, raw yaml.Node, out *T) error {
+	if raw.Kind != yaml.ScalarNode {
+		return nil
+	}
+	node := model.CloneYamlNode(raw)
+	if err := eval.EvaluateYamlNode(ctx, &node); err != nil {
+		return fmt.Errorf("unable to evaluate %s: %w", name, err)
+	}
+	if err := node.Decode(out); err != nil {
+		return fmt.Errorf("unable to decode %s: %w", name, err)
+	}
+	return nil
+}
+
 // NewExpressionEvaluator creates a new evaluator
 func (rc *RunContext) NewExpressionEvaluator(ctx context.Context) *ExpressionEvaluator {
 	return rc.NewExpressionEvaluatorWithEnv(ctx, rc.GetEnv())
@@ -340,15 +355,8 @@ func (rc *RunContext) resolveWorkflowCall(ctx context.Context) error {
 	callerJob := rc.caller.runContext.Run.Job()
 	callerEval := rc.caller.runContext.ExprEval
 	callerWith := callerJob.With
-	if callerJob.RawWith.Kind == yaml.ScalarNode {
-		decoded := &model.Job{RawWith: model.CloneYamlNode(callerJob.RawWith)}
-		if err := callerEval.EvaluateYamlNode(ctx, &decoded.RawWith); err != nil {
-			return fmt.Errorf("unable to evaluate workflow inputs: %w", err)
-		}
-		if err := decoded.DecodeRaw(); err != nil {
-			return err
-		}
-		callerWith = decoded.With
+	if err := decodeDeferred(ctx, callerEval, "workflow inputs", callerJob.RawWith, &callerWith); err != nil {
+		return err
 	}
 	calleeEval := sync.OnceValue(func() *expressionEvaluator { return rc.NewExpressionEvaluator(ctx) })
 	config := rc.Run.Workflow.WorkflowCallConfig()
