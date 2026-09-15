@@ -98,4 +98,4 @@ func mergeQuery(target, request string) string {
 }
 
 // insecureTransport is shared, because a transport per request would pool no connections.
-var insecureTransport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // the runner reaches its instance on the operator's say-so
+var insecureTransport = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // the runner reaches its instance on the operator's say-so

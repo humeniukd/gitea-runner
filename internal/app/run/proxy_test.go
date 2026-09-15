@@ -92,25 +92,25 @@ func TestJobProxyEnv(t *testing.T) {
 		{
 			// A runner.envs no_proxy adds to the hosts that must stay direct rather than
 			// replacing them, which would send cache traffic through the proxy.
-			name:     "runner.envs no_proxy is merged, not substituted",
+			name:     "runner.envs no_proxy is merged, not substituted, and cache and results servers in its ranges are spelled out",
 			runner:   map[string]string{"http_proxy": proxy},
-			envs:     map[string]string{"no_proxy": "operator.example"},
+			envs:     map[string]string{"no_proxy": "operator.example,10.0.0.0/8", "ACTIONS_CACHE_URL": "http://10.1.2.3:8088/", "ACTIONS_RESULTS_URL": "http://10.1.2.4:3000"},
 			cacheURL: "http://192.168.1.10:34567/",
 			want: map[string]string{
 				"http_proxy": proxy, "HTTP_PROXY": proxy,
-				"no_proxy": "operator.example," + loopback + ",192.168.1.10",
-				"NO_PROXY": "operator.example," + loopback + ",192.168.1.10",
+				"no_proxy": "operator.example,10.0.0.0/8," + loopback + ",192.168.1.10,10.1.2.3,10.1.2.4",
+				"NO_PROXY": "operator.example,10.0.0.0/8," + loopback + ",192.168.1.10,10.1.2.3,10.1.2.4",
 			},
 		},
 		{
-			name:     "runner.envs NO_PROXY is merged through the upper case spelling too",
+			name:     "runner.envs NO_PROXY is merged through the upper case spelling too, and a cache server outside its ranges is not spelled out",
 			runner:   map[string]string{"http_proxy": proxy},
-			envs:     map[string]string{"NO_PROXY": "operator.example"},
+			envs:     map[string]string{"NO_PROXY": "operator.example,192.168.0.0/16", "ACTIONS_CACHE_URL": "http://10.1.2.3:8088/"},
 			cacheURL: "http://192.168.1.10:34567/",
 			want: map[string]string{
 				"http_proxy": proxy, "HTTP_PROXY": proxy,
-				"no_proxy": "operator.example," + loopback + ",192.168.1.10",
-				"NO_PROXY": "operator.example," + loopback + ",192.168.1.10",
+				"no_proxy": "operator.example,192.168.0.0/16," + loopback + ",192.168.1.10",
+				"NO_PROXY": "operator.example,192.168.0.0/16," + loopback + ",192.168.1.10",
 			},
 		},
 	} {

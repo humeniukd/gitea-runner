@@ -5,6 +5,7 @@ package run
 
 import (
 	"context"
+	"net/netip"
 	"net/url"
 	"os"
 	"slices"
@@ -61,6 +62,15 @@ func JobProxyEnv(jobEnvs map[string]string, cacheURL string, serviceNames []stri
 		if existing, ok := jobEnvs[name]; ok {
 			noProxy = appendNoProxy(existing, strings.Split(noProxy, ",")...)
 			break
+		}
+	}
+	// Clients that only match literal hosts must also reach a cache or results server the job's no_proxy exempts by CIDR.
+	for _, name := range []string{"ACTIONS_CACHE_URL", "ACTIONS_RESULTS_URL"} {
+		if addr, err := netip.ParseAddr(hostOf(jobEnvs[name])); err == nil && slices.ContainsFunc(strings.Split(noProxy, ","), func(entry string) bool {
+			prefix, err := netip.ParsePrefix(entry)
+			return err == nil && prefix.Contains(addr)
+		}) {
+			noProxy = appendNoProxy(noProxy, addr.String())
 		}
 	}
 	proxyEnv["no_proxy"], proxyEnv["NO_PROXY"] = noProxy, noProxy
