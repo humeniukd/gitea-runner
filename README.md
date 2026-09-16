@@ -308,7 +308,7 @@ A password in a proxy URL is hidden in job logs. Any step can still read it, bec
 
 #### Caching (`actions/cache`)
 
-Each runner starts its own cache server, so runners do not share cached entries. When the runner itself runs in Docker, set `cache.host` to an address job containers can reach and `cache.port` to a fixed published port, or put jobs on a shared `container.network`.
+Each runner starts its own cache server, so runners do not share cached entries. A runner in a container on the jobs' Docker daemon attaches itself to each job network, so jobs reach its cache without extra setup.
 
 **Sharing a cache between runners**
 
@@ -333,7 +333,7 @@ cache:
   external_secret: "<secret>"
 ```
 
-Jobs connect to `external_server` too, so point it at the reverse proxy if one fronts the server. `--dir`, `--host` and `--port` override the matching `cache` keys. Eviction settings take effect on the cache server, not on the runners.
+`--dir`, `--host` and `--port` override the matching `cache` keys. Eviction settings take effect on the cache server, not on the runners.
 
 Runners can also share one `cache.dir` on a file system with working file locks, at the cost of slower cache requests.
 
