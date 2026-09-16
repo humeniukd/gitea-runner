@@ -42,7 +42,7 @@ func testArtifactRoundTrip(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			api, repo, _ := startIsolatedScenario(t, "artifact.yml", "e2e-artifact", tc.options)
+			api, repo, _, _ := startIsolatedScenario(t, "artifact.yml", "e2e-artifact", tc.options)
 
 			wfRun := waitForRun(t, api, repo)
 			requireSuccess(t, api, repo, wfRun.ID)
