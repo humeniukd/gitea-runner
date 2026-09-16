@@ -9,6 +9,7 @@ package container
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"runtime"
 	"time"
 
@@ -16,6 +17,10 @@ import (
 
 	"github.com/moby/moby/api/types/system"
 )
+
+func IsolatedNetwork(context.Context, netip.Addr, string) (string, error) {
+	return "", nil
+}
 
 // ImageExistsLocally returns a boolean indicating if an image with the
 // requested name, tag and architecture exists in the local docker image store
@@ -87,5 +92,13 @@ func NewDockerNetworkRemoveExecutor(name string) common.Executor {
 }
 
 func RemoveOrphanNetworks(ctx context.Context, runnerUUID string, createdBefore time.Time) error {
+	return nil
+}
+
+func CreateJobVolumes(ctx context.Context, runnerUUID string, volumeNames []string) error {
+	return nil
+}
+
+func RemoveOrphanJobVolumes(ctx context.Context, runnerUUID string, createdBefore time.Time) error {
 	return nil
 }

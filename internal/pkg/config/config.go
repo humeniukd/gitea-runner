@@ -63,8 +63,8 @@ type Runner struct {
 	FetchTimeout          time.Duration     `yaml:"fetch_timeout"`            // FetchTimeout specifies the timeout duration for fetching resources.
 	FetchInterval         time.Duration     `yaml:"fetch_interval"`           // FetchInterval specifies the interval duration for fetching resources.
 	FetchIntervalMax      time.Duration     `yaml:"fetch_interval_max"`       // FetchIntervalMax specifies the maximum backoff interval when idle.
-	WorkdirCleanupAge     time.Duration     `yaml:"workdir_cleanup_age"`      // WorkdirCleanupAge removes stale bind-workdir task directories and orphaned host-mode scratch dirs older than this duration during idle cleanup.
-	IdleCleanupInterval   time.Duration     `yaml:"idle_cleanup_interval"`    // IdleCleanupInterval runs the idle cleanup (stale directories and orphaned docker networks) periodically while the runner is idle. Set to 0 to disable cleanup cadence.
+	WorkdirCleanupAge     time.Duration     `yaml:"workdir_cleanup_age"`      // WorkdirCleanupAge removes stale bind-workdir task directories, orphaned host-mode scratch dirs and orphaned docker job resources older than this duration during idle cleanup.
+	IdleCleanupInterval   time.Duration     `yaml:"idle_cleanup_interval"`    // IdleCleanupInterval runs the idle cleanup (stale directories and orphaned docker networks and volumes) periodically while the runner is idle. Set to 0 to disable cleanup cadence.
 	LogReportInterval     time.Duration     `yaml:"log_report_interval"`      // LogReportInterval specifies the base interval for periodic log flush.
 	LogReportMaxLatency   time.Duration     `yaml:"log_report_max_latency"`   // LogReportMaxLatency specifies the max time a log row can wait before being sent.
 	LogReportBatchSize    int               `yaml:"log_report_batch_size"`    // LogReportBatchSize triggers immediate log flush when buffer reaches this size.
@@ -424,10 +424,10 @@ func warnUnknownKeys(file string, content []byte) {
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
 	decoder.KnownFields(true)
 
-	var typeErr *yaml.TypeError
-	if err := decoder.Decode(&Config{}); errors.As(err, &typeErr) {
-		for _, message := range typeErr.Errors {
-			log.Warnf("config file %q: %s, it will be ignored", file, message)
+	var loadErrs *yaml.LoadErrors
+	if err := decoder.Decode(&Config{}); errors.As(err, &loadErrs) {
+		for _, loadErr := range loadErrs.Errors {
+			log.Warnf("config file %q: %s, it will be ignored", file, loadErr)
 		}
 	}
 }
