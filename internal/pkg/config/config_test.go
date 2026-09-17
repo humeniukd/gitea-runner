@@ -102,45 +102,6 @@ metrics:
 	assert.Equal(t, 45*time.Second, cfg.Metrics.ReadinessGrace)
 }
 
-func TestLoadDefault_LoadsOtel(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte(`
-otel:
-  enabled: true
-  resource_attributes:
-    deployment.environment.name: production
-  endpoint: "http://collector:4318"
-  protocol: grpc
-  headers:
-    authorization: "Bearer shared"
-  traces:
-    enabled: false
-    endpoint: "http://collector:4318/v1/traces"
-    sampler_ratio: 0.25
-    rpc: true
-  metrics:
-    protocol: http/protobuf
-`), 0o600))
-
-	cfg, err := LoadDefault(path)
-	require.NoError(t, err)
-	require.NotNil(t, cfg.Otel.Enabled)
-	assert.True(t, *cfg.Otel.Enabled)
-	assert.Equal(t, "http://collector:4318", cfg.Otel.Endpoint)
-	assert.Equal(t, "grpc", cfg.Otel.Protocol)
-	assert.Equal(t, map[string]string{"deployment.environment.name": "production"}, cfg.Otel.ResourceAttributes)
-	assert.Equal(t, map[string]string{"authorization": "Bearer shared"}, cfg.Otel.Headers)
-	require.NotNil(t, cfg.Otel.Traces.Enabled)
-	assert.False(t, *cfg.Otel.Traces.Enabled)
-	assert.Equal(t, "http://collector:4318/v1/traces", cfg.Otel.Traces.Endpoint)
-	require.NotNil(t, cfg.Otel.Traces.SamplerRatio)
-	assert.InDelta(t, 0.25, *cfg.Otel.Traces.SamplerRatio, 0)
-	assert.True(t, cfg.Otel.Traces.RPC)
-	assert.Nil(t, cfg.Otel.Metrics.Enabled, "metrics enabled defaults to nil (inherits shared)")
-	assert.Equal(t, "http/protobuf", cfg.Otel.Metrics.Protocol)
-}
-
 func TestLoadDefault_UsesConfiguredWorkdirCleanupAge(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

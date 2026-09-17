@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"gitea.com/gitea/runner/internal/app/poll"
-	"gitea.com/gitea/runner/internal/app/run"
 )
 
 const runTimeout = 3 * time.Minute
@@ -68,13 +67,13 @@ func newScenario(t *testing.T) (*GiteaAPI, string) {
 	return api, repo
 }
 
-func startIsolatedScenario(t *testing.T, workflow, label string, options runnerOptions) (*GiteaAPI, string, *poll.Poller, *run.Runner) {
+func startIsolatedScenario(t *testing.T, workflow, label string, options runnerOptions) (*GiteaAPI, string, *poll.Poller) {
 	t.Helper()
 
 	api, repo := newScenario(t)
-	poller, runner := startRunner(t, repo, label, options)
+	poller := startRunner(t, repo, label, options)
 	pushWorkflow(t, api, repo, workflow)
-	return api, repo, poller, runner
+	return api, repo, poller
 }
 
 func pushWorkflow(t *testing.T, api *GiteaAPI, repo, workflow string) {
@@ -100,17 +99,6 @@ func requireSuccess(t *testing.T, api *GiteaAPI, repo string, runID int64) {
 	if completed.Conclusion != "success" {
 		dumpRunLogs(t, api, repo, runID)
 		t.Fatalf("run concluded %q, want success", completed.Conclusion)
-	}
-}
-
-func waitForRunnerIdle(t *testing.T, runner *run.Runner) {
-	t.Helper()
-	deadline := time.Now().Add(runTimeout)
-	for runner.RunningCount() > 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("runner did not finish the task")
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }
 

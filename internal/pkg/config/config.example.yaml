@@ -300,29 +300,3 @@ metrics:
   #addr: "127.0.0.1:9101"
   # Consecutive polling failures may last this long before /readyz returns 503.
   #readiness_grace: 30s
-
-otel:
-  # OpenTelemetry export is opt-in: nothing is sent until an endpoint is set here
-  # or via OTEL_* env vars (https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/).
-  # Keys below are shared defaults; traces:/metrics: override them.
-  #enabled: true
-  #resource_attributes:            # extra resource attrs, merged over OTEL_RESOURCE_ATTRIBUTES; also given to jobs
-  #  deployment.environment.name: "production" # defaults to "test" unless overridden
-  #endpoint: "http://localhost:4318" # signal path (/v1/traces, /v1/metrics) is appended
-  #protocol: "http/protobuf"        # or "grpc"
-  #headers:                         # merged over OTEL_EXPORTER_OTLP_HEADERS, per key
-  #  authorization: "Bearer secret"
-  traces:
-    #enabled: true
-    #endpoint: "http://localhost:4318/v1/traces" # used as-is
-    #protocol: "http/protobuf"
-    #headers:
-    #  authorization: "Bearer secret"
-    #sampler_ratio: 1.0             # fraction of root traces sampled; unset honors OTEL_TRACES_SAMPLER
-    #rpc: false                     # record noisy client RPC spans + trace propagation to Gitea; off by default (RPC metrics unaffected)
-  metrics:
-    #enabled: true                  # Prometheus endpoint unaffected by this section
-    #endpoint: "http://localhost:4318/v1/metrics" # used as-is
-    #protocol: "http/protobuf"
-    #headers:                       # merged over otel.headers and OTEL_EXPORTER_OTLP_METRICS_HEADERS, per key
-    #  authorization: "Bearer secret"

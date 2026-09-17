@@ -12,7 +12,7 @@ import (
 
 func testEphemeralRunner(t *testing.T) {
 	t.Parallel()
-	api, repo, poller, _ := startIsolatedScenario(t, "ephemeral.yml", "e2e-ephemeral", runnerOptions{ephemeral: true})
+	api, repo, poller := startIsolatedScenario(t, "ephemeral.yml", "e2e-ephemeral", runnerOptions{ephemeral: true})
 
 	wfRun := waitForRun(t, api, repo)
 	requireSuccess(t, api, repo, wfRun.ID)

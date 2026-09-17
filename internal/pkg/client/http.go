@@ -13,12 +13,9 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"connectrpc.com/connect"
-	"connectrpc.com/otelconnect"
 	"gitea.dev/actionslib/ping/v1/pingv1connect"
 	"gitea.dev/actionslib/pkg/protocol"
 	"gitea.dev/actionslib/runner/v1/runnerv1connect"
-	log "github.com/sirupsen/logrus"
-	"go.opentelemetry.io/otel/propagation"
 )
 
 func getHTTPClient(endpoint string, insecure bool, timeout time.Duration) *http.Client {
@@ -39,22 +36,9 @@ func getHTTPClient(endpoint string, insecure bool, timeout time.Duration) *http.
 // New returns a new runner client. timeout bounds every RPC: without it a
 // stalled connection parks the reporter for the whole job context, so logs and
 // heartbeats stop together and the task is reaped as a zombie.
-func New(endpoint string, insecure bool, uuid, token string, timeout time.Duration, rpcTraces bool, opts ...connect.ClientOption) *HTTPClient {
+func New(endpoint string, insecure bool, uuid, token string, timeout time.Duration, opts ...connect.ClientOption) *HTTPClient {
 	baseURL := strings.TrimRight(endpoint, "/") + "/api/actions"
 
-	otelOpts := []otelconnect.Option{}
-	if !rpcTraces {
-		otelOpts = append(otelOpts,
-			otelconnect.WithoutTracing(),
-			otelconnect.WithPropagator(propagation.NewCompositeTextMapPropagator()),
-		)
-	}
-	otelInterceptor, err := otelconnect.NewInterceptor(otelOpts...)
-	if err != nil {
-		log.WithError(err).Warn("otel rpc instrumentation disabled")
-	} else {
-		opts = append(opts, connect.WithInterceptors(otelInterceptor))
-	}
 	opts = append(opts, connect.WithInterceptors(connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
 			req.Header().Set("User-Agent", "gitea-runner/"+ver.Version())

@@ -30,7 +30,7 @@ type runnerOptions struct {
 	cacheHost string
 }
 
-func startRunner(t *testing.T, repo, labelName string, options runnerOptions) (*poll.Poller, *run.Runner) {
+func startRunner(t *testing.T, repo, labelName string, options runnerOptions) *poll.Poller {
 	t.Helper()
 	ctx := t.Context()
 	token, err := fixture.RegistrationToken(ctx, repo)
@@ -68,7 +68,7 @@ func startRunner(t *testing.T, repo, labelName string, options runnerOptions) (*
 	}
 	labelNames := []string{label.Name}
 
-	pingCli := client.New(fixture.baseURL, cfg.Runner.Insecure, "", "", config.RequestTimeout, false)
+	pingCli := client.New(fixture.baseURL, cfg.Runner.Insecure, "", "", config.RequestTimeout)
 	if _, err := pingCli.Ping(ctx, connect.NewRequest(&pingv1.PingRequest{Data: t.Name()})); err != nil {
 		t.Fatalf("ping %s: %v", fixture.baseURL, err)
 	}
@@ -98,7 +98,7 @@ func startRunner(t *testing.T, repo, labelName string, options runnerOptions) (*
 		Ephemeral: regResp.Msg.Runner.Ephemeral,
 	}
 
-	cli := client.New(fixture.baseURL, cfg.Runner.Insecure, reg.UUID, reg.Token, config.RequestTimeout, false)
+	cli := client.New(fixture.baseURL, cfg.Runner.Insecure, reg.UUID, reg.Token, config.RequestTimeout)
 
 	runner := run.NewRunner(cfg, reg, cli)
 	declResp, err := runner.Declare(ctx, labelNames)
@@ -118,5 +118,5 @@ func startRunner(t *testing.T, repo, labelName string, options runnerOptions) (*
 			t.Logf("runner shutdown: %v", err)
 		}
 	})
-	return poller, runner
+	return poller
 }

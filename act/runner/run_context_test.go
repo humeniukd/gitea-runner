@@ -1737,16 +1737,3 @@ func TestRunContextWithGithubEnvRunnerValues(t *testing.T) {
 	assert.Equal(t, "1", env["RUNNER_DEBUG"])
 	assert.Equal(t, "http://[2001:db8::1]:8080/", env["ACTIONS_RUNTIME_URL"])
 }
-
-func TestRunContextLastCommandOutput(t *testing.T) {
-	rc := &RunContext{}
-	assert.Empty(t, rc.LastCommandOutput())
-
-	rc.recordCommandOutput("first line")
-	rc.recordCommandOutput("  ") // blank lines are ignored
-	rc.recordCommandOutput("last error line\n")
-	assert.Equal(t, "last error line", rc.LastCommandOutput())
-
-	rc.resetCommandOutput()
-	assert.Empty(t, rc.LastCommandOutput(), "reset clears the recorded line")
-}

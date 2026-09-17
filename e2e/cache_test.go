@@ -21,7 +21,7 @@ func testActionsCacheRoundTrip(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			api, repo, _, _ := startIsolatedScenario(t, "cache.yml", "e2e-cache", runnerOptions{cacheV2: &tc.v2})
+			api, repo, _ := startIsolatedScenario(t, "cache.yml", "e2e-cache", runnerOptions{cacheV2: &tc.v2})
 
 			wfRun := waitForRun(t, api, repo)
 			requireSuccess(t, api, repo, wfRun.ID)
@@ -42,7 +42,7 @@ func testArtifactRoundTrip(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			api, repo, _, _ := startIsolatedScenario(t, "artifact.yml", "e2e-artifact", tc.options)
+			api, repo, _ := startIsolatedScenario(t, "artifact.yml", "e2e-artifact", tc.options)
 
 			wfRun := waitForRun(t, api, repo)
 			requireSuccess(t, api, repo, wfRun.ID)

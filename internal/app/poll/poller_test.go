@@ -13,7 +13,6 @@ import (
 
 	"gitea.com/gitea/runner/internal/pkg/client/mocks"
 	"gitea.com/gitea/runner/internal/pkg/config"
-	"gitea.com/gitea/runner/internal/pkg/metrics"
 
 	connect_go "connectrpc.com/connect"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
@@ -37,7 +36,7 @@ func TestPoller_WorkerStateCounters(t *testing.T) {
 
 	cfg, err := config.LoadDefault("")
 	require.NoError(t, err)
-	p := &Poller{client: client, cfg: cfg, telemetry: metrics.NewTelemetry()}
+	p := &Poller{client: client, cfg: cfg}
 
 	ctx := context.Background()
 	s1 := &workerState{}
@@ -67,7 +66,7 @@ func TestPoller_FetchErrorIncrementsErrorsOnly(t *testing.T) {
 
 	cfg, err := config.LoadDefault("")
 	require.NoError(t, err)
-	p := &Poller{client: client, cfg: cfg, telemetry: metrics.NewTelemetry()}
+	p := &Poller{client: client, cfg: cfg}
 
 	s := &workerState{}
 	_, ok := p.fetchTask(context.Background(), s)
@@ -85,7 +84,7 @@ func TestPoller_FetchTimeoutIsNoSignal(t *testing.T) {
 
 	cfg, err := config.LoadDefault("")
 	require.NoError(t, err)
-	p := &Poller{client: client, cfg: cfg, telemetry: metrics.NewTelemetry()}
+	p := &Poller{client: client, cfg: cfg}
 	p.lastPollFailed.Store(true)
 
 	hook := test.NewGlobal()

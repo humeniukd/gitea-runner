@@ -24,11 +24,10 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/internal/pkg/tracing"
+	"gitea.com/gitea/runner/internal/pkg/telemetry"
 
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const maxJobSummaryBytes = 1024 * 1024
@@ -200,21 +199,13 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		stepExec := step.main()
 		steps = append(steps, useStepLogger(rc, stepModel, stepStageMain, func(ctx context.Context) error {
 			rc.CurrentStepIndex = stepIdx
-			ctx, stepSpan := tracing.StartStep(ctx, stepModel, rc.Config.TaskID)
-			defer stepSpan.End()
-			rc.resetCommandOutput()
+			ctx, endStep := telemetry.StartStep(ctx, stepIdx, func() string { return rc.ExprEval.InterpolateName(ctx, stepModel.String()) })
 			err := stepExec(ctx)
-			switch {
-			case err != nil:
+			endStep(err, rc.StepResults[stepModel.ID])
+			if err != nil {
 				reportStepError(ctx, rc, err)
-				tracing.SetTaskFailed(stepSpan, err, rc.LastCommandOutput())
-			case ctx.Err() != nil:
+			} else if ctx.Err() != nil {
 				reportStepError(ctx, rc, ctx.Err())
-				tracing.SetTaskResult(stepSpan, "cancellation")
-			case rc.StepResults[stepModel.ID] != nil && rc.StepResults[stepModel.ID].Conclusion == model.StepStatusSkipped:
-				tracing.SetTaskResult(stepSpan, "skip")
-			default:
-				tracing.SetTaskResult(stepSpan, "success")
 			}
 			return nil
 		}))
@@ -542,7 +533,7 @@ func tryUploadJobSummary(ctx context.Context, rc *RunContext) {
 		"/jobs/" + strconv.FormatInt(jobID, 10) + "/steps/"
 	actPath := rc.JobContainer.GetActPath()
 	// Reuse a single client across all step uploads so connections can be pooled.
-	client := &http.Client{Timeout: jobSummaryUploadRequestTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)}
+	client := &http.Client{Timeout: jobSummaryUploadRequestTimeout}
 	for i := range rc.Run.Job().Steps {
 		summaryPath := path.Join(actPath, "workflow", "step-summary-"+strconv.Itoa(i)+".md")
 		body, ok := readSingleFileFromContainerArchive(ctx, rc.JobContainer, summaryPath, maxJobSummaryBytes)

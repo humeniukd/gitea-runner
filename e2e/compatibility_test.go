@@ -16,7 +16,7 @@ func TestCompatibility(t *testing.T) {
 		t.Skip(skipReason)
 	}
 
-	sharedPoller, _ := startRunner(t, "", "ubuntu-latest", runnerOptions{capacity: 16})
+	sharedPoller := startRunner(t, "", "ubuntu-latest", runnerOptions{capacity: 16})
 	t.Cleanup(func() {
 		select {
 		case <-sharedPoller.Done():
@@ -31,7 +31,6 @@ func TestCompatibility(t *testing.T) {
 	t.Run("cancellation_and_log_streaming", testRunCancellation)
 	t.Run("dispatch", testWorkflowDispatch)
 	t.Run("ephemeral", testEphemeralRunner)
-	t.Run("otel", testOtel)
 }
 
 func testPayloads(t *testing.T) {

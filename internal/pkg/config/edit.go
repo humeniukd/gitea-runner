@@ -572,12 +572,6 @@ func scalarNode(typ reflect.Type, value string) (*yaml.Node, error) {
 			return nil, fmt.Errorf("%q is not a valid %s", value, typ.Kind())
 		}
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.FormatInt(parsed, 10)}, nil
-	case reflect.Float32, reflect.Float64:
-		parsed, err := strconv.ParseFloat(value, typ.Bits())
-		if err != nil {
-			return nil, fmt.Errorf("%q is not a valid %s", value, typ.Kind())
-		}
-		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!float", Value: strconv.FormatFloat(parsed, 'g', -1, typ.Bits())}, nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		parsed, err := strconv.ParseUint(value, 10, typ.Bits())
 		if err != nil {

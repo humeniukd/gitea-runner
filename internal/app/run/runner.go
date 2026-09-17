@@ -34,7 +34,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/labels"
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 	"gitea.com/gitea/runner/internal/pkg/report"
-	"gitea.com/gitea/runner/internal/pkg/tracing"
+	"gitea.com/gitea/runner/internal/pkg/telemetry"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"connectrpc.com/connect"
@@ -42,7 +42,6 @@ import (
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	docker_container "github.com/moby/moby/api/types/container"
 	log "github.com/sirupsen/logrus"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // CapabilityCancelling tells the server this runner understands the
@@ -76,7 +75,6 @@ type Runner struct {
 	runningCount            atomic.Int64
 	lastIdleCleanupUnixNano atomic.Int64
 	now                     func() time.Time
-	telemetry               *metrics.Telemetry
 	healthCheckLast         time.Time
 	healthCheckReady        bool
 	healthCheckReason       string
@@ -139,12 +137,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		cacheHandler:   cacheHandler,
 		now:            time.Now,
 		runHealthCheck: executeHealthCheck,
-		telemetry:      metrics.NewTelemetry(),
 	}
-	runner.telemetry.ObserveWorkers(func() (int64, int64) {
-		busy := runner.runningCount.Load()
-		return busy, int64(cfg.Runner.Capacity) - busy
-	})
 	runner.isolatedCacheNetwork = sync.OnceValue(runner.detectIsolatedCacheNetwork)
 	return runner
 }
@@ -305,10 +298,7 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.Runner.Timeout)
 	defer cancel()
-	// The pipeline-run span bounds the whole task, so the reporter RPCs made with
-	// this ctx nest under it; the job span (added in run) nests the step spans.
-	ctx, pipelineSpan := tracing.StartPipeline(ctx, task, r.uuid, r.name, r.client.Address())
-	defer pipelineSpan.End()
+	ctx, endJob := telemetry.StartJob(ctx, task)
 	// A proxy URL may carry credentials, and every job is given it; keep them out of the log.
 	reporter := report.NewReporter(ctx, cancel, r.client, task, r.cfg, proxyPasswords()...)
 	var volumeCleanup []common.Executor
@@ -321,7 +311,6 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 		})
 	}
 	var runErr error
-	r.telemetry.RecordJobStart(ctx, r.pipelineName(task))
 	defer func() {
 		lastWords := ""
 		if runErr != nil {
@@ -332,21 +321,12 @@ func (r *Runner) Run(ctx context.Context, task *runnerv1.Task) error {
 			log.Warnf("task %d volume cleanup after reporting: %v", task.Id, err)
 		}
 
-		jobResult := tracing.ResultToSemconv(reporter.Result())
-		tracing.SetPipelineResult(pipelineSpan, jobResult)
-		if runErr != nil {
-			pipelineSpan.RecordError(runErr)
-		}
-
 		metrics.JobDuration.Observe(time.Since(start).Seconds())
 		metrics.JobsTotal.WithLabelValues(metrics.ResultToStatusLabel(reporter.Result())).Inc()
-
-		elapsed := time.Since(start).Seconds()
-		r.telemetry.RecordPipelineRunDuration(ctx, r.pipelineName(task), jobResult, elapsed)
-		r.telemetry.RecordJobEnd(ctx, r.pipelineName(task), jobResult, connect.CodeOf(runErr).String())
+		endJob(reporter.Result())
 	}()
 	reporter.RunDaemon()
-	runErr = r.run(ctx, task, reporter, pipelineSpan)
+	runErr = r.run(ctx, task, reporter)
 
 	return nil
 }
@@ -411,7 +391,7 @@ func (r *Runner) fallbackPlatform(ctx context.Context) string {
 	return labels.SelfHostedPlatform
 }
 
-func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.Reporter, pipelineSpan trace.Span) (err error) {
+func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.Reporter) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v", r)
@@ -432,8 +412,6 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	job := workflow.GetJob(jobID)
 	reporter.ResetSteps(len(job.Steps))
 
-	tracing.SetPipelineName(pipelineSpan, workflow.Name, jobID, job.Name)
-
 	taskContext := task.Context.Fields
 	envs := r.cloneEnvs()
 
@@ -448,13 +426,9 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	if v := taskContext["run_id"].GetStringValue(); v != "" {
 		envs["GITEA_RUN_ID"] = v
 	}
+	telemetry.AddJobEnv(ctx, envs)
 
-	// Give the job containers the trace context and exporter config, so
-	// applications running in them join the CI trace and export to the same
-	// collector.
-	maps.Copy(envs, tracing.JobEnv(ctx, r.cfg.Otel))
-
-	log.WithContext(ctx).Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
+	log.Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
 		r.getDefaultActionsURL(task),
 		r.client.Address())
 
@@ -592,6 +566,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 			RunnerUUID: r.uuid,
 		},
 		ContainerOptions:                  r.cfg.Container.Options,
+		ServiceReadyTimeout:               r.cfg.Container.ServiceReadyTimeout,
 		ContainerDaemonSocket:             r.cfg.Container.DockerHost,
 		Privileged:                        r.cfg.Container.Privileged,
 		DefaultActionInstance:             r.getDefaultActionsURL(task),
@@ -601,10 +576,8 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		JobCompletedHook:                  r.cfg.Runner.Hooks.JobCompleted,
 		Vars:                              task.Vars,
 		ValidVolumes:                      r.cfg.Container.ValidVolumes,
-		ServiceReadyTimeout:               r.cfg.Container.ServiceReadyTimeout,
 		SharedToolCache:                   r.cfg.Runner.ToolCacheMode == config.ToolCacheModeShared,
 		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
-		TaskID:                            task.Id,
 		RunnerName:                        r.name,
 	}
 
@@ -885,16 +858,6 @@ func warnIgnoredCacheSecret(cfg *config.Config) {
 		key = "cache.external_secret_file"
 	}
 	log.Warnf("%s is set but cache.external_server is not; the built-in cache server does not use a shared secret, so the value is ignored", key)
-}
-
-// pipelineName returns the semconv pipeline name for a task. The task context
-// carries no workflow name; the repository is the stable low-cardinality
-// grouping available at job start.
-func (r *Runner) pipelineName(task *runnerv1.Task) string {
-	if name := task.Context.Fields["repository"].GetStringValue(); name != "" {
-		return name
-	}
-	return "unknown"
 }
 
 func (r *Runner) cacheIsolatedFrom(job *model.Job, pickPlatform func([]string) string) bool {
