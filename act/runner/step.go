@@ -16,6 +16,7 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/internal/pkg/telemetry"
 
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
@@ -114,6 +115,8 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		} else {
 			logger.Infof("Run %s %s", stage, stepString)
 		}
+		ctx, endStep := telemetry.StartStep(ctx, stepModel, stage.String())
+		defer func() { endStep(err, stepResult) }()
 
 		// Prepare and clean Runner File Commands
 		actPath := rc.JobContainer.GetActPath()

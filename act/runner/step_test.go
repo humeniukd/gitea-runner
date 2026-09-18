@@ -13,13 +13,20 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/internal/pkg/telemetry"
 
 	"gitea.dev/actionslib/pkg/model"
+	runnerv1 "gitea.dev/actionslib/runner/v1"
 	log "github.com/sirupsen/logrus"
 	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	yaml "go.yaml.in/yaml/v4"
 )
 
@@ -534,6 +541,23 @@ func TestRunStepExecutorParity(t *testing.T) {
 		assert.Equal(t, map[string]string{"declared": "child", "undeclared": "leak"}, childRC.StepResults[child.Step.ID].Outputs)
 		assert.Empty(t, outer.RunContext.IntraActionState)
 		assert.Equal(t, "child", childRC.IntraActionState[child.Step.ID]["saved"])
+	})
+
+	t.Run("stages and composite steps are traced under Gitea's step names", func(t *testing.T) {
+		spans := tracetest.NewSpanRecorder()
+		otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+		t.Cleanup(func() { otel.SetTracerProvider(tracenoop.NewTracerProvider()) })
+		ctx, _ := telemetry.StartJob(t.Context(), &runnerv1.Task{Id: 7})
+		outer := newStep(t, &model.Step{ID: "outer", Uses: "actions/cache@v4", Number: 3})
+		child := newStep(t, &model.Step{ID: "child", Name: "Restore", Number: 1})
+
+		require.NoError(t, runStepExecutor(outer, stepStagePost, runStepExecutor(child, stepStageMain, noopExecutor))(ctx))
+
+		ended := spans.Ended()
+		require.Len(t, ended, 2)
+		assert.Equal(t, []string{"Restore", "Post Run actions/cache@v4"}, []string{ended[0].Name(), ended[1].Name()})
+		assert.Equal(t, ended[1].SpanContext().SpanID(), ended[0].Parent().SpanID())
+		assert.Contains(t, ended[0].Attributes(), semconv.CICDPipelineTaskRunID("7.3.post.1"))
 	})
 
 	t.Run("timeout must be positive", func(t *testing.T) {

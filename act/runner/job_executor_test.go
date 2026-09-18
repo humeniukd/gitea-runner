@@ -22,19 +22,13 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/internal/pkg/telemetry"
 
 	"gitea.dev/actionslib/pkg/model"
-	runnerv1 "gitea.dev/actionslib/runner/v1"
 	log "github.com/sirupsen/logrus"
 	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
-	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	yaml "go.yaml.in/yaml/v4"
 )
 
@@ -297,8 +291,6 @@ func TestNewJobExecutorDownloadsAllActionsBeforeTheFirstStep(t *testing.T) {
 }
 
 func TestNewJobExecutor(t *testing.T) {
-	otel.SetTracerProvider(sdktrace.NewTracerProvider())
-	t.Cleanup(func() { otel.SetTracerProvider(tracenoop.NewTracerProvider()) })
 	table := []struct {
 		name          string
 		steps         []*model.Step
@@ -472,7 +464,6 @@ func TestNewJobExecutor(t *testing.T) {
 
 			ctx, cancel := context.WithCancel(common.WithJobErrorContainer(context.Background()))
 			defer cancel()
-			ctx, _ = telemetry.StartJob(ctx, &runnerv1.Task{})
 			jim := &jobInfoMock{}
 			sfm := &stepFactoryMock{}
 			rc := &RunContext{
@@ -520,7 +511,6 @@ func TestNewJobExecutor(t *testing.T) {
 
 				sm.On("main").Return(func(ctx context.Context) error {
 					executorOrder = append(executorOrder, "step"+stepModel.ID)
-					assert.Equal(t, stepModel.ID, trace.SpanFromContext(ctx).(sdktrace.ReadOnlySpan).Name())
 					if tt.hasError {
 						return errors.New("error")
 					}

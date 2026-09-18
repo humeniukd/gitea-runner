@@ -35,21 +35,19 @@ import (
 
 const scope = "gitea.com/gitea/runner"
 
-type jobKey struct{}
+type taskRunKey struct{}
 
-type tracedJob struct {
-	taskID int64
-	runURL string
+type taskRun struct {
+	id, url string
 }
 
 func Setup(ctx context.Context, uuid, name string) (func(context.Context) error, error) {
 	var shutdowns []func(context.Context) error
-	shutdown := func(ctx context.Context) error {
-		var errs []error
+	shutdown := func(ctx context.Context) (err error) {
 		for _, fn := range shutdowns {
-			errs = append(errs, fn(ctx))
+			err = errors.Join(err, fn(ctx))
 		}
-		return errors.Join(errs...)
+		return err
 	}
 	traces, metrics := exporting("TRACES"), exporting("METRICS")
 	if !traces && !metrics {
@@ -118,13 +116,12 @@ func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(r
 	pipeline, owner, repo := field("workflow"), field("repository_owner"), field("repository")
 	repoURL := strings.TrimSuffix(field("server_url"), "/") + "/" + repo
 	runURL := repoURL + "/actions/runs/" + field("run_id")
-	ctx, span := otel.Tracer(scope).Start(ctx, "RUN "+pipeline, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(
+	repository := []attribute.KeyValue{semconv.VCSOwnerName(owner), semconv.VCSRepositoryName(strings.TrimPrefix(repo, owner+"/"))}
+	ctx, span := otel.Tracer(scope).Start(ctx, "RUN "+pipeline, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(repository...), trace.WithAttributes(
 		semconv.CICDPipelineName(pipeline),
 		semconv.CICDPipelineActionNameRun,
 		semconv.CICDPipelineRunID(field("run_id")),
 		semconv.CICDPipelineRunURLFull(runURL),
-		semconv.VCSOwnerName(owner),
-		semconv.VCSRepositoryName(strings.TrimPrefix(repo, owner+"/")),
 		semconv.VCSRepositoryURLFull(repoURL),
 		semconv.VCSRefHeadName(field("ref_name")),
 		semconv.VCSRefHeadRevision(field("sha")),
@@ -133,17 +130,17 @@ func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(r
 	meter := otel.Meter(scope)
 	active, _ := cicdconv.NewPipelineRunActive(meter)
 	duration, _ := cicdconv.NewPipelineRunDuration(meter)
-	active.Add(ctx, 1, pipeline, cicdconv.PipelineRunStateExecuting)
+	active.Add(ctx, 1, pipeline, cicdconv.PipelineRunStateExecuting, repository...)
 	start := time.Now()
-	return context.WithValue(ctx, jobKey{}, tracedJob{task.Id, runURL}), func(result runnerv1.Result) {
+	return context.WithValue(ctx, taskRunKey{}, taskRun{strconv.FormatInt(task.Id, 10), runURL}), func(result runnerv1.Result) {
 		attrs := end(span, semconv.CICDPipelineResultKey, jobResult(ctx, result))
-		active.Add(ctx, -1, pipeline, cicdconv.PipelineRunStateExecuting)
-		duration.Record(ctx, time.Since(start).Seconds(), pipeline, cicdconv.PipelineRunStateExecuting, attrs...)
+		active.Add(ctx, -1, pipeline, cicdconv.PipelineRunStateExecuting, repository...)
+		duration.Record(ctx, time.Since(start).Seconds(), pipeline, cicdconv.PipelineRunStateExecuting, append(attrs, repository...)...)
 	}
 }
 
 func AddJobEnv(ctx context.Context, envs map[string]string) {
-	if ctx.Value(jobKey{}) == nil {
+	if ctx.Value(taskRunKey{}) == nil {
 		return
 	}
 	add := func(key, value string) {
@@ -163,19 +160,26 @@ func AddJobEnv(ctx context.Context, envs map[string]string) {
 	}
 }
 
-// name is a func so untraced steps skip evaluating its expressions.
-func StartStep(ctx context.Context, number int, name func() string) (context.Context, func(error, *model.StepResult)) {
-	job, ok := ctx.Value(jobKey{}).(tracedJob)
+// StartStep names spans like Gitea's step list does, prefixing Pre and Post stages.
+func StartStep(ctx context.Context, step *model.Step, stage string) (context.Context, func(error, *model.StepResult)) {
+	parent, ok := ctx.Value(taskRunKey{}).(taskRun)
 	if !ok || !trace.SpanFromContext(ctx).IsRecording() {
 		return ctx, func(error, *model.StepResult) {}
 	}
-	title, _, _ := strings.Cut(name(), "\n")
-	stepCtx, span := otel.Tracer(scope).Start(ctx, title, trace.WithAttributes(
-		semconv.CICDPipelineTaskName(title),
-		semconv.CICDPipelineTaskRunID(strconv.FormatInt(job.taskID, 10)+"."+strconv.Itoa(number)),
-		semconv.CICDPipelineTaskRunURLFull(job.runURL),
+	name, id := step.Name, parent.id+"."+strconv.Itoa(step.Number)
+	if name == "" {
+		run, _, _ := strings.Cut(strings.TrimSpace(step.Run), "\n")
+		name = "Run " + cmp.Or(strings.TrimSpace(run), step.String())
+	}
+	if stage != "Main" {
+		name, id = stage+" "+name, id+"."+strings.ToLower(stage)
+	}
+	ctx, span := otel.Tracer(scope).Start(ctx, name, trace.WithAttributes(
+		semconv.CICDPipelineTaskName(name),
+		semconv.CICDPipelineTaskRunID(id),
+		semconv.CICDPipelineTaskRunURLFull(parent.url),
 	))
-	return stepCtx, func(err error, result *model.StepResult) {
+	return context.WithValue(ctx, taskRunKey{}, taskRun{id, parent.url}), func(err error, result *model.StepResult) {
 		end(span, semconv.CICDPipelineTaskRunResultKey, stepResult(ctx, err, result))
 	}
 }
@@ -202,10 +206,8 @@ func stepResult(ctx context.Context, err error, result *model.StepResult) string
 		return "timeout"
 	case errors.Is(err, context.Canceled) || ctx.Err() != nil:
 		return "cancellation"
-	case err != nil || result != nil && result.Outcome == model.StepStatusFailure:
+	case err != nil || result.Outcome == model.StepStatusFailure:
 		return "failure"
-	case result != nil && result.Conclusion == model.StepStatusSkipped:
-		return "skip"
 	}
 	return "success"
 }

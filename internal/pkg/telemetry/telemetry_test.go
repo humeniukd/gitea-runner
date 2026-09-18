@@ -91,9 +91,10 @@ func TestJob(t *testing.T) {
 	envs := map[string]string{}
 	ctx, endJob := StartJob(t.Context(), task)
 	AddJobEnv(ctx, envs)
-	_, endStep := StartStep(ctx, 0, func() string { panic("evaluated the name of an untraced step") })
+	stepCtx, endStep := StartStep(ctx, &model.Step{}, "Main")
 	endStep(nil, nil)
 	endJob(runnerv1.Result_RESULT_SUCCESS)
+	assert.Equal(t, ctx, stepCtx)
 	assert.Empty(t, envs)
 
 	resetProviders(t)
@@ -105,7 +106,7 @@ func TestJob(t *testing.T) {
 	envs = map[string]string{"OTEL_EXPORTER_OTLP_HEADERS": "authorization=job"}
 	ctx, endJob = StartJob(t.Context(), task)
 	AddJobEnv(ctx, envs)
-	_, endStep = StartStep(ctx, 1, func() string { return "make\nmake test" })
+	_, endStep = StartStep(ctx, &model.Step{Run: "make\nmake test", Number: 1}, "Main")
 	endStep(errors.New("exit code 1"), &model.StepResult{Outcome: model.StepStatusFailure})
 	endJob(runnerv1.Result_RESULT_FAILURE)
 
@@ -117,7 +118,7 @@ func TestJob(t *testing.T) {
 	ended := spans.Ended()
 	require.Len(t, ended, 2)
 	step, job := ended[0], ended[1]
-	assert.Equal(t, "make", step.Name())
+	assert.Equal(t, "Run make", step.Name())
 	assert.Equal(t, jobSpan.SpanID(), step.Parent().SpanID())
 	assert.Equal(t, codes.Error, step.Status().Code)
 	assert.Subset(t, step.Attributes(), []any{
@@ -141,8 +142,11 @@ func TestJob(t *testing.T) {
 		aggregations[m.Name] = m.Data
 	}
 	assert.Zero(t, aggregations["cicd.pipeline.run.active"].(metricdata.Sum[int64]).DataPoints[0].Value)
-	errorType, _ := aggregations["cicd.pipeline.run.duration"].(metricdata.Histogram[float64]).DataPoints[0].Attributes.Value(semconv.ErrorTypeKey)
-	assert.Equal(t, "failure", errorType.AsString())
+	assert.Subset(t, aggregations["cicd.pipeline.run.duration"].(metricdata.Histogram[float64]).DataPoints[0].Attributes.ToSlice(), []any{
+		semconv.ErrorTypeKey.String("failure"),
+		semconv.VCSOwnerName("owner"),
+		semconv.VCSRepositoryName("repo"),
+	})
 }
 
 func TestResults(t *testing.T) {
@@ -158,7 +162,6 @@ func TestResults(t *testing.T) {
 		"timeout":      {ctx: t.Context(), err: fmt.Errorf("exec: %w", context.DeadlineExceeded)},
 		"cancellation": {ctx: cancelled},
 		"failure":      {ctx: t.Context(), result: &model.StepResult{Outcome: model.StepStatusFailure, Conclusion: model.StepStatusSuccess}},
-		"skip":         {ctx: t.Context(), result: &model.StepResult{Outcome: model.StepStatusSkipped, Conclusion: model.StepStatusSkipped}},
 		"success":      {ctx: t.Context(), result: &model.StepResult{}},
 	} {
 		assert.Equal(t, want, stepResult(tc.ctx, tc.err, tc.result))

@@ -24,7 +24,6 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/internal/pkg/telemetry"
 
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
@@ -199,9 +198,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		stepExec := step.main()
 		steps = append(steps, useStepLogger(rc, stepModel, stepStageMain, func(ctx context.Context) error {
 			rc.CurrentStepIndex = stepIdx
-			ctx, endStep := telemetry.StartStep(ctx, stepIdx, func() string { return rc.ExprEval.InterpolateName(ctx, stepModel.String()) })
 			err := stepExec(ctx)
-			endStep(err, rc.StepResults[stepModel.ID])
 			if err != nil {
 				reportStepError(ctx, rc, err)
 			} else if ctx.Err() != nil {
