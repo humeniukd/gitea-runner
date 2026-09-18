@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/common/git"
 	"gitea.com/gitea/runner/act/container"
 
 	"gitea.dev/actionslib/pkg/model"
@@ -308,7 +309,8 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 		})
 	}
 
-	return common.NewPipelineExecutor(stagePipeline...).Then(handleFailure(plan))
+	executor := common.NewPipelineExecutor(stagePipeline...).Then(handleFailure(plan))
+	return func(ctx context.Context) error { return executor(git.WithPinnedCheckout(ctx)) }
 }
 
 func handleFailure(plan *model.Plan) common.Executor {

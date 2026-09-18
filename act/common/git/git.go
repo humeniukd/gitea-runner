@@ -70,11 +70,44 @@ func (e *Error) Commit() string {
 // uncontended in production.
 var goGitMu sync.Mutex
 
+type pinnedKey struct{}
+
+type pinnedResult[T any] struct {
+	value T
+	err   error
+}
+
+// WithPinnedCheckout makes lookups through ctx keep their first answer per directory, so a run keeps its revision when HEAD moves.
+func WithPinnedCheckout(ctx context.Context) context.Context {
+	if ctx.Value(pinnedKey{}) != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, pinnedKey{}, &sync.Map{})
+}
+
+func pinned[T any](ctx context.Context, key string, lookup func() (T, error)) (T, error) {
+	cache, ok := ctx.Value(pinnedKey{}).(*sync.Map)
+	if !ok {
+		return lookup()
+	}
+	hit, ok := cache.Load(key)
+	if !ok {
+		value, err := lookup()
+		hit, _ = cache.LoadOrStore(key, pinnedResult[T]{value, err})
+	}
+	result, _ := hit.(pinnedResult[T])
+	return result.value, result.err
+}
+
 // FindGitRevision get the current git revision
 func FindGitRevision(ctx context.Context, file string) (shortSha, sha string, err error) {
-	goGitMu.Lock()
-	defer goGitMu.Unlock()
-	return findGitRevision(ctx, file)
+	revision, err := pinned(ctx, "revision:"+file, func() ([2]string, error) {
+		goGitMu.Lock()
+		defer goGitMu.Unlock()
+		shortSha, sha, err := findGitRevision(ctx, file)
+		return [2]string{shortSha, sha}, err
+	})
+	return revision[0], revision[1], err
 }
 
 func findGitRevision(ctx context.Context, file string) (shortSha, sha string, err error) {
@@ -109,6 +142,10 @@ func findGitRevision(ctx context.Context, file string) (shortSha, sha string, er
 
 // FindGitRef get the current git ref
 func FindGitRef(ctx context.Context, file string) (string, error) {
+	return pinned(ctx, "ref:"+file, func() (string, error) { return findGitRef(ctx, file) })
+}
+
+func findGitRef(ctx context.Context, file string) (string, error) {
 	goGitMu.Lock()
 	defer goGitMu.Unlock()
 
