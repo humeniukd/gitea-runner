@@ -384,7 +384,7 @@ See **[docs/job-hooks.md](docs/job-hooks.md)** for the execution order, environm
 
 Set `OTEL_EXPORTER_OTLP_ENDPOINT` in the runner's environment and it exports a trace for every job, with a span per step, plus job and RPC metrics over OTLP/HTTP. Jobs receive the `OTEL_*` variables and `TRACEPARENT`, so instrumented tools inside them join the trace. Without an endpoint, OpenTelemetry stays off.
 
-See **[docs/otel.md](docs/otel.md)** for the supported variables and the emitted spans and metrics.
+See **[docs/telemetry.md](docs/telemetry.md)** for the supported variables and the emitted spans and metrics.
 
 #### Local job logs (`log.job.dir`)
 
