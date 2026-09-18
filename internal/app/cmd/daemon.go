@@ -174,7 +174,6 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			reg.UUID,
 			reg.Token,
 			config.RequestTimeout,
-			telemetry.ClientOptions()...,
 		)
 
 		runner := run.NewRunner(cfg, reg, cli)

@@ -4,33 +4,37 @@
 package telemetry
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"math/rand/v2"
+	"net/http"
+	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
-	"connectrpc.com/connect"
-	"connectrpc.com/otelconnect"
 	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/propagation"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
-	"go.opentelemetry.io/otel/semconv/v1.43.0/cicdconv"
 	"go.opentelemetry.io/otel/trace"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 const scope = "gitea.com/gitea/runner"
@@ -42,21 +46,16 @@ type taskRun struct {
 }
 
 func Setup(ctx context.Context, uuid, name string) (func(context.Context) error, error) {
-	var shutdowns []func(context.Context) error
-	shutdown := func(ctx context.Context) (err error) {
-		for _, fn := range shutdowns {
-			err = errors.Join(err, fn(ctx))
-		}
-		return err
+	noop := func(context.Context) error { return nil }
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+	if base := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint == "" && base != "" {
+		endpoint = strings.TrimSuffix(base, "/") + "/v1/traces"
 	}
-	traces, metrics := exporting("TRACES"), exporting("METRICS")
-	if !traces && !metrics {
-		return shutdown, nil
+	if endpoint == "" || strings.EqualFold(os.Getenv("OTEL_SDK_DISABLED"), "true") || strings.EqualFold(os.Getenv("OTEL_TRACES_EXPORTER"), "none") {
+		return noop, nil
 	}
-	for _, key := range []string{"OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"} {
-		if protocol := os.Getenv(key); protocol != "" && !strings.EqualFold(protocol, "http/protobuf") {
-			return shutdown, fmt.Errorf("%s=%s is not supported, only http/protobuf is", key, protocol)
-		}
+	if protocol := cmp.Or(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"), os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL")); protocol != "" && !strings.EqualFold(protocol, "http/protobuf") {
+		return noop, fmt.Errorf("OTLP protocol %q is not supported, only http/protobuf is", protocol)
 	}
 	res, err := resource.New(ctx, resource.WithTelemetrySDK(), resource.WithAttributes(
 		semconv.ServiceName("gitea-runner"),
@@ -66,76 +65,102 @@ func Setup(ctx context.Context, uuid, name string) (func(context.Context) error,
 		semconv.CICDWorkerName(name),
 	), resource.WithFromEnv())
 	if err != nil {
-		return shutdown, err
+		return noop, err
 	}
-	if traces {
-		exporter, err := otlptracehttp.New(ctx)
-		if err != nil {
-			return shutdown, err
+	timeout := 10 * time.Second
+	if ms, err := strconv.Atoi(cmp.Or(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT"), os.Getenv("OTEL_EXPORTER_OTLP_TIMEOUT"))); err == nil {
+		timeout = time.Duration(ms) * time.Millisecond
+	}
+	headers := http.Header{}
+	for _, key := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS"} {
+		for pair := range strings.SplitSeq(os.Getenv(key), ",") {
+			key, value, found := strings.Cut(pair, "=")
+			if decoded, err := url.PathUnescape(strings.TrimSpace(value)); found && err == nil {
+				headers.Set(strings.TrimSpace(key), decoded)
+			}
 		}
-		provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter), sdktrace.WithResource(res))
-		otel.SetTracerProvider(provider)
-		shutdowns = append(shutdowns, provider.Shutdown)
 	}
-	if metrics {
-		exporter, err := otlpmetrichttp.New(ctx)
-		if err != nil {
-			return shutdown, err
-		}
-		provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)), sdkmetric.WithResource(res))
-		otel.SetMeterProvider(provider)
-		shutdowns = append(shutdowns, provider.Shutdown)
-	}
-	return shutdown, nil
-}
-
-func exporting(signal string) bool {
-	return !strings.EqualFold(os.Getenv("OTEL_SDK_DISABLED"), "true") && !strings.EqualFold(os.Getenv("OTEL_"+signal+"_EXPORTER"), "none") &&
-		cmp.Or(os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_ENDPOINT"), os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != ""
-}
-
-func ClientOptions() []connect.ClientOption {
-	if _, ok := otel.GetMeterProvider().(*sdkmetric.MeterProvider); !ok {
-		return nil
-	}
-	interceptor, err := otelconnect.NewInterceptor(otelconnect.WithoutTracing())
+	exporter, err := otlptrace.New(ctx, &client{endpoint, headers, &http.Client{Timeout: timeout}})
 	if err != nil {
-		otel.Handle(err)
-		return nil
+		return noop, err
 	}
-	return []connect.ClientOption{connect.WithInterceptors(interceptor)}
+	provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter), sdktrace.WithResource(res))
+	otel.SetTracerProvider(provider)
+	return provider.Shutdown, nil
+}
+
+// client replaces otlptracehttp, which links gRPC and grows the binary by about 7 MB.
+type client struct {
+	endpoint string
+	headers  http.Header
+	http     *http.Client
+}
+
+func (*client) Start(context.Context) error { return nil }
+
+func (*client) Stop(context.Context) error { return nil }
+
+func (c *client) UploadTraces(ctx context.Context, spans []*tracepb.ResourceSpans) error {
+	var body []byte
+	for _, resourceSpans := range spans {
+		encoded, err := proto.Marshal(resourceSpans)
+		if err != nil {
+			return err
+		}
+		body = protowire.AppendBytes(protowire.AppendTag(body, 1, protowire.BytesType), encoded)
+	}
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header = c.headers.Clone()
+		req.Header.Set("Content-Type", "application/x-protobuf")
+		resp, err := c.http.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode < http.StatusMultipleChoices {
+				return nil
+			}
+			err = fmt.Errorf("OTLP export failed: %s", resp.Status)
+			if !slices.Contains([]int{http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout}, resp.StatusCode) {
+				return err
+			}
+		}
+		if attempt == 4 {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(rand.N(250 * time.Millisecond << attempt)):
+		}
+	}
 }
 
 func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(runnerv1.Result)) {
-	_, tracing := otel.GetTracerProvider().(*sdktrace.TracerProvider)
-	_, metering := otel.GetMeterProvider().(*sdkmetric.MeterProvider)
-	if !tracing && !metering {
+	if _, ok := otel.GetTracerProvider().(*sdktrace.TracerProvider); !ok {
 		return ctx, func(runnerv1.Result) {}
 	}
 	field := func(key string) string { return task.GetContext().GetFields()[key].GetStringValue() }
 	pipeline, owner, repo := field("workflow"), field("repository_owner"), field("repository")
 	repoURL := strings.TrimSuffix(field("server_url"), "/") + "/" + repo
 	runURL := repoURL + "/actions/runs/" + field("run_id")
-	repository := []attribute.KeyValue{semconv.VCSOwnerName(owner), semconv.VCSRepositoryName(strings.TrimPrefix(repo, owner+"/"))}
-	ctx, span := otel.Tracer(scope).Start(ctx, "RUN "+pipeline, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(repository...), trace.WithAttributes(
+	ctx, span := otel.Tracer(scope).Start(ctx, "RUN "+pipeline, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(
 		semconv.CICDPipelineName(pipeline),
 		semconv.CICDPipelineActionNameRun,
 		semconv.CICDPipelineRunID(field("run_id")),
 		semconv.CICDPipelineRunURLFull(runURL),
+		semconv.VCSOwnerName(owner),
+		semconv.VCSRepositoryName(strings.TrimPrefix(repo, owner+"/")),
 		semconv.VCSRepositoryURLFull(repoURL),
 		semconv.VCSRefHeadName(field("ref_name")),
 		semconv.VCSRefHeadRevision(field("sha")),
 		attribute.String("gitea.job.id", field("job")),
 	))
-	meter := otel.Meter(scope)
-	active, _ := cicdconv.NewPipelineRunActive(meter)
-	duration, _ := cicdconv.NewPipelineRunDuration(meter)
-	active.Add(ctx, 1, pipeline, cicdconv.PipelineRunStateExecuting, repository...)
-	start := time.Now()
 	return context.WithValue(ctx, taskRunKey{}, taskRun{strconv.FormatInt(task.Id, 10), runURL}), func(result runnerv1.Result) {
-		attrs := end(span, semconv.CICDPipelineResultKey, jobResult(ctx, result))
-		active.Add(ctx, -1, pipeline, cicdconv.PipelineRunStateExecuting, repository...)
-		duration.Record(ctx, time.Since(start).Seconds(), pipeline, cicdconv.PipelineRunStateExecuting, append(attrs, repository...)...)
+		end(span, semconv.CICDPipelineResultKey, jobResult(ctx, result))
 	}
 }
 
@@ -163,7 +188,7 @@ func AddJobEnv(ctx context.Context, envs map[string]string) {
 // StartStep names spans like Gitea's step list does, prefixing Pre and Post stages.
 func StartStep(ctx context.Context, step *model.Step, stage string) (context.Context, func(error, *model.StepResult)) {
 	parent, ok := ctx.Value(taskRunKey{}).(taskRun)
-	if !ok || !trace.SpanFromContext(ctx).IsRecording() {
+	if !ok {
 		return ctx, func(error, *model.StepResult) {}
 	}
 	name, id := step.Name, parent.id+"."+strconv.Itoa(step.Number)
@@ -212,13 +237,11 @@ func stepResult(ctx context.Context, err error, result *model.StepResult) string
 	return "success"
 }
 
-func end(span trace.Span, key attribute.Key, result string) []attribute.KeyValue {
-	attrs := []attribute.KeyValue{key.String(result)}
+func end(span trace.Span, key attribute.Key, result string) {
+	span.SetAttributes(key.String(result))
 	if result == "failure" || result == "timeout" || result == "error" {
-		attrs = append(attrs, semconv.ErrorTypeKey.String(result))
+		span.SetAttributes(semconv.ErrorTypeKey.String(result))
 		span.SetStatus(codes.Error, "")
 	}
-	span.SetAttributes(attrs...)
 	span.End()
-	return attrs
 }

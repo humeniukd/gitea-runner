@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,61 +19,89 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
-	metricnoop "go.opentelemetry.io/otel/metric/noop"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-func resetProviders(t *testing.T) {
-	t.Cleanup(func() {
-		otel.SetTracerProvider(tracenoop.NewTracerProvider())
-		otel.SetMeterProvider(metricnoop.NewMeterProvider())
-	})
+func setEnv(t *testing.T, env map[string]string) {
+	t.Cleanup(func() { otel.SetTracerProvider(tracenoop.NewTracerProvider()) })
+	for _, key := range []string{
+		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+	} {
+		t.Setenv(key, env[key])
+	}
 }
 
 func TestSetup(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	defer server.Close()
 	for _, tc := range []struct {
-		env             map[string]string
-		traces, metrics bool
-		err             string
+		env     map[string]string
+		enabled bool
+		err     string
 	}{
 		{},
-		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": server.URL}, traces: true, metrics: true},
-		{env: map[string]string{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": server.URL}, metrics: true},
-		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": server.URL, "OTEL_TRACES_EXPORTER": "NONE"}, metrics: true},
-		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": server.URL, "OTEL_SDK_DISABLED": "TRUE"}},
-		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": server.URL, "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"}, err: "OTEL_EXPORTER_OTLP_PROTOCOL=grpc is not supported, only http/protobuf is"},
+		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318"}, enabled: true},
+		{env: map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://collector:4318/v1/traces"}, enabled: true},
+		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318", "OTEL_TRACES_EXPORTER": "NONE"}},
+		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318", "OTEL_SDK_DISABLED": "TRUE"}},
+		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318", "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"}, err: `OTLP protocol "grpc" is not supported, only http/protobuf is`},
 	} {
 		t.Run(fmt.Sprint(tc.env), func(t *testing.T) {
-			resetProviders(t)
-			for _, key := range []string{
-				"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER",
-				"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-				"OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
-			} {
-				t.Setenv(key, tc.env[key])
-			}
+			setEnv(t, tc.env)
 			shutdown, err := Setup(t.Context(), "uuid", "runner")
 			if tc.err != "" {
 				require.EqualError(t, err, tc.err)
 			} else {
 				require.NoError(t, err)
 			}
-			_, traces := otel.GetTracerProvider().(*sdktrace.TracerProvider)
-			_, metrics := otel.GetMeterProvider().(*sdkmetric.MeterProvider)
-			assert.Equal(t, tc.traces, traces)
-			assert.Equal(t, tc.metrics, metrics)
+			_, enabled := otel.GetTracerProvider().(*sdktrace.TracerProvider)
+			assert.Equal(t, tc.enabled, enabled)
 			require.NoError(t, shutdown(t.Context()))
 		})
 	}
+}
+
+func TestExportRetriesAndMatchesOTLP(t *testing.T) {
+	type request struct {
+		path, authorization string
+		body                []byte
+	}
+	requests := make(chan request, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests <- request{r.URL.Path, r.Header.Get("Authorization"), body}
+		if len(requests) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer server.Close()
+	setEnv(t, map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": server.URL + "/otlp/", "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer%20token"})
+
+	shutdown, err := Setup(t.Context(), "uuid", "runner")
+	require.NoError(t, err)
+	_, span := otel.Tracer("test").Start(t.Context(), "op")
+	span.End()
+	require.NoError(t, shutdown(t.Context()))
+
+	require.Len(t, requests, 2)
+	<-requests
+	sent := <-requests
+	assert.Equal(t, "/otlp/v1/traces", sent.path)
+	assert.Equal(t, "Bearer token", sent.authorization)
+	field, wireType, length := protowire.ConsumeTag(sent.body)
+	require.Equal(t, protowire.Number(1), field)
+	require.Equal(t, protowire.BytesType, wireType)
+	encoded, _ := protowire.ConsumeBytes(sent.body[length:])
+	var decoded tracepb.ResourceSpans
+	require.NoError(t, proto.Unmarshal(encoded, &decoded))
+	assert.Equal(t, "op", decoded.GetScopeSpans()[0].GetSpans()[0].GetName())
 }
 
 func TestJob(t *testing.T) {
@@ -97,11 +126,9 @@ func TestJob(t *testing.T) {
 	assert.Equal(t, ctx, stepCtx)
 	assert.Empty(t, envs)
 
-	resetProviders(t)
 	spans := tracetest.NewSpanRecorder()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
-	reader := sdkmetric.NewManualReader()
-	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetTracerProvider(tracenoop.NewTracerProvider()) })
 
 	envs = map[string]string{"OTEL_EXPORTER_OTLP_HEADERS": "authorization=job"}
 	ctx, endJob = StartJob(t.Context(), task)
@@ -133,19 +160,6 @@ func TestJob(t *testing.T) {
 		semconv.VCSOwnerName("owner"),
 		semconv.VCSRepositoryName("repo"),
 		semconv.CICDPipelineResultKey.String("failure"),
-	})
-
-	var data metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(t.Context(), &data))
-	aggregations := map[string]metricdata.Aggregation{}
-	for _, m := range data.ScopeMetrics[0].Metrics {
-		aggregations[m.Name] = m.Data
-	}
-	assert.Zero(t, aggregations["cicd.pipeline.run.active"].(metricdata.Sum[int64]).DataPoints[0].Value)
-	assert.Subset(t, aggregations["cicd.pipeline.run.duration"].(metricdata.Histogram[float64]).DataPoints[0].Attributes.ToSlice(), []any{
-		semconv.ErrorTypeKey.String("failure"),
-		semconv.VCSOwnerName("owner"),
-		semconv.VCSRepositoryName("repo"),
 	})
 }
 
