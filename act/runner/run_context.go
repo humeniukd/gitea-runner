@@ -38,6 +38,7 @@ import (
 	"github.com/kballard/go-shellquote"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/opencontainers/selinux/go-selinux"
+	"go.yaml.in/yaml/v4"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
@@ -1158,8 +1159,9 @@ func (rc *RunContext) runsOnPlatformNames(ctx context.Context) []string {
 
 // resolvePlatformImage evaluates the job's container once for every consumer, ignoring one without an image as GitHub does.
 func (rc *RunContext) resolvePlatformImage(ctx context.Context) error {
+	withoutEnv, _ := splitContainerEnv(rc.Run.Job().RawContainer)
 	var spec *model.ContainerSpec
-	if err := model.DecodeEvaluated("container", rc.Run.Job().RawContainer, rc.ExprEval.shared(ctx).EvaluateYamlNode, &spec); err != nil {
+	if err := model.DecodeEvaluated("container", withoutEnv, rc.ExprEval.shared(ctx).EvaluateYamlNode, &spec); err != nil {
 		return err
 	}
 	if spec != nil && spec.Image != "" {
@@ -1169,6 +1171,23 @@ func (rc *RunContext) resolvePlatformImage(ctx context.Context) error {
 	image, err := rc.runsOnImage(ctx)
 	rc.platformImage = image
 	return err
+}
+
+// splitContainerEnv takes `env` out of a container mapping, since env reads the job env that resolves after the job environment starts.
+func splitContainerEnv(container yaml.Node) (withoutEnv, env yaml.Node) {
+	if container.Kind != yaml.MappingNode {
+		return container, env
+	}
+	withoutEnv = container
+	withoutEnv.Content = nil
+	for i := 0; i+1 < len(container.Content); i += 2 {
+		if container.Content[i].Value == "env" {
+			env = *container.Content[i+1]
+		} else {
+			withoutEnv.Content = append(withoutEnv.Content, container.Content[i:i+2]...)
+		}
+	}
+	return withoutEnv, env
 }
 
 func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
@@ -1198,9 +1217,6 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 
-	if err := evaluateJobEnvAndDefaults(ctx, rc); err != nil {
-		return false, err
-	}
 	if err := rc.resolvePlatformImage(ctx); err != nil {
 		return false, err
 	}

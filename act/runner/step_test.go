@@ -239,6 +239,7 @@ jobs:
 					enabled, err := rc.isEnabled(t.Context())
 					require.NoError(t, err)
 					require.True(t, enabled)
+					require.NoError(t, evaluateJobEnvAndDefaults(t.Context(), rc))
 					assert.Equal(t, model.RunDefaults{Shell: value}, rc.jobRunDefaults)
 					step := &stepRun{RunContext: rc, Step: job.Steps[0].Clone(), env: map[string]string{}}
 					require.NoError(t, setupEnv(t.Context(), step))

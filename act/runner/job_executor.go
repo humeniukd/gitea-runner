@@ -149,6 +149,18 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		return common.NewDebugExecutor("No steps found")
 	}
 
+	preSteps = append(preSteps, func(ctx context.Context) error {
+		// Have to be skipped for some Tests
+		if rc.Run == nil {
+			return nil
+		}
+		if err := evaluateJobEnvAndDefaults(ctx, rc); err != nil {
+			reportStepError(ctx, rc, err)
+			return err
+		}
+		return nil
+	})
+
 	for i, stepModel := range infoSteps {
 		if stepModel == nil {
 			return func(ctx context.Context) error {
@@ -401,7 +413,7 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 	logger.WithField("jobResult", jobResult).Infof("Job %s", jobResultMessage)
 }
 
-// evaluateJobEnvAndDefaults resolves the job's env and defaults.run once, as GitHub does at job setup.
+// evaluateJobEnvAndDefaults resolves the job's env, defaults.run and container env once, as GitHub does at job setup.
 func evaluateJobEnvAndDefaults(ctx context.Context, rc *RunContext) error {
 	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
 	env := rc.GetEnv()
@@ -426,7 +438,11 @@ func evaluateJobEnvAndDefaults(ctx context.Context, rc *RunContext) error {
 		return err
 	}
 	rc.jobRunDefaults = defaults.Run
-	return nil
+	if rc.containerSpec.Image == "" {
+		return nil
+	}
+	_, containerEnv := splitContainerEnv(rc.Run.Job().RawContainer)
+	return model.DecodeEvaluated("container env", containerEnv, rc.ExprEval.shared(ctx).EvaluateYamlNode, &rc.containerSpec.Env)
 }
 
 func setJobOutputs(ctx context.Context, rc *RunContext) error {
