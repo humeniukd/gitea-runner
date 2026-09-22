@@ -97,6 +97,9 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 			return err
 		}
 
+		ctx, endStep := telemetry.StartStep(ctx, stepModel, stage.String())
+		defer func() { endStep(err, stepResult) }()
+
 		if !runStep {
 			stepResult.Conclusion = model.StepStatusSkipped
 			stepResult.Outcome = model.StepStatusSkipped
@@ -115,8 +118,6 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		} else {
 			logger.Infof("Run %s %s", stage, stepString)
 		}
-		ctx, endStep := telemetry.StartStep(ctx, stepModel, stage.String())
-		defer func() { endStep(err, stepResult) }()
 
 		// Prepare and clean Runner File Commands
 		actPath := rc.JobContainer.GetActPath()

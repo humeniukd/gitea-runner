@@ -24,6 +24,7 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/internal/pkg/telemetry"
 
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
@@ -293,8 +294,10 @@ func postStepsContext(ctx context.Context) (context.Context, context.CancelFunc)
 	case context.Canceled:
 		// The cancelled context is abandoned for a fresh root, which drops the job-error
 		// container installed at the job root. Re-attach a fresh one so a failing post step
-		// records its error via SetJobError instead of panicking on a nil container.
-		return context.WithTimeout(common.WithJobErrorContainer(common.WithLogger(context.Background(), common.Logger(ctx))), 5*time.Minute)
+		// records its error via SetJobError instead of panicking on a nil container, and keep
+		// the job span so the post steps stay in the job's trace.
+		root := common.WithJobErrorContainer(common.WithLogger(context.Background(), common.Logger(ctx)))
+		return context.WithTimeout(telemetry.WithTraceFrom(root, ctx), 5*time.Minute)
 	case context.DeadlineExceeded:
 		return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 	default:

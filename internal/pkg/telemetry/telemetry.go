@@ -185,6 +185,15 @@ func AddJobEnv(ctx context.Context, envs map[string]string) {
 	}
 }
 
+// WithTraceFrom carries the job span from `from` onto ctx, for work detached from a cancelled job context.
+func WithTraceFrom(ctx, from context.Context) context.Context {
+	run, ok := from.Value(taskRunKey{}).(taskRun)
+	if !ok {
+		return ctx
+	}
+	return context.WithValue(trace.ContextWithSpan(ctx, trace.SpanFromContext(from)), taskRunKey{}, run)
+}
+
 // StartStep names spans like Gitea's step list does, prefixing Pre and Post stages.
 func StartStep(ctx context.Context, step *model.Step, stage string) (context.Context, func(error, *model.StepResult)) {
 	parent, ok := ctx.Value(taskRunKey{}).(taskRun)
@@ -231,16 +240,22 @@ func stepResult(ctx context.Context, err error, result *model.StepResult) string
 		return "timeout"
 	case errors.Is(err, context.Canceled) || ctx.Err() != nil:
 		return "cancellation"
-	case err != nil || result.Outcome == model.StepStatusFailure:
+	case err != nil || result.Conclusion == model.StepStatusFailure:
 		return "failure"
+	case result.Conclusion == model.StepStatusSkipped:
+		return "skip"
 	}
 	return "success"
 }
 
 func end(span trace.Span, key attribute.Key, result string) {
 	span.SetAttributes(key.String(result))
-	if result == "failure" || result == "timeout" || result == "error" {
+	switch result {
+	case "timeout":
 		span.SetAttributes(semconv.ErrorTypeKey.String(result))
+		span.SetStatus(codes.Error, "")
+	case "failure", "error":
+		span.SetAttributes(semconv.ErrorTypeOther)
 		span.SetStatus(codes.Error, "")
 	}
 	span.End()

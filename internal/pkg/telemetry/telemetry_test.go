@@ -152,7 +152,7 @@ func TestJob(t *testing.T) {
 		semconv.CICDPipelineTaskRunID("7.1"),
 		semconv.CICDPipelineTaskRunURLFull("https://gitea.example/owner/repo/actions/runs/42"),
 		semconv.CICDPipelineTaskRunResultKey.String("failure"),
-		semconv.ErrorTypeKey.String("failure"),
+		semconv.ErrorTypeOther,
 	})
 	assert.Equal(t, "RUN ci.yml", job.Name())
 	assert.Equal(t, trace.SpanKindServer, job.SpanKind())
@@ -175,8 +175,9 @@ func TestResults(t *testing.T) {
 	}{
 		"timeout":      {ctx: t.Context(), err: fmt.Errorf("exec: %w", context.DeadlineExceeded)},
 		"cancellation": {ctx: cancelled},
-		"failure":      {ctx: t.Context(), result: &model.StepResult{Outcome: model.StepStatusFailure, Conclusion: model.StepStatusSuccess}},
-		"success":      {ctx: t.Context(), result: &model.StepResult{}},
+		"failure":      {ctx: t.Context(), result: &model.StepResult{Outcome: model.StepStatusFailure, Conclusion: model.StepStatusFailure}},
+		"success":      {ctx: t.Context(), result: &model.StepResult{Outcome: model.StepStatusFailure, Conclusion: model.StepStatusSuccess}},
+		"skip":         {ctx: t.Context(), result: &model.StepResult{Outcome: model.StepStatusSkipped, Conclusion: model.StepStatusSkipped}},
 	} {
 		assert.Equal(t, want, stepResult(tc.ctx, tc.err, tc.result))
 	}
