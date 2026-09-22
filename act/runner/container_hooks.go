@@ -188,7 +188,7 @@ func (rc *RunContext) buildContainerExecuteHookScriptInput(
 }
 
 func (rc *RunContext) buildContainerExecuteHookStepInput(
-	spec *hooks.ContainerStepSpecs,
+	spec *hooks.ContainerStepSpec,
 ) *hooks.ExecuteHookInput {
 	return &hooks.ExecuteHookInput{
 		Kind:         "container-step",

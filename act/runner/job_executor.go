@@ -178,7 +178,15 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		if err != nil {
 			return common.NewErrorExecutor(err)
 		}
-
+		if d, ok := step.(stepPreparer); ok && rc.Config.ContainerHooks.Enabled {
+			spec, descErr := d.prepareContainerStep()
+			if descErr != nil {
+				return common.NewErrorExecutor(descErr)
+			}
+			if spec != nil {
+				rc.containerHooks.StepSpecs[stepModel.Number] = spec
+			}
+		}
 		if preparer, ok := step.(actionPreparer); ok {
 			preparers = append(preparers, preparer)
 		}
@@ -232,6 +240,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 	preSteps = append(preSteps, rc.runJobStartedHook)
 	preSteps = append(preSteps, printPrepareActions(rc, preparers))
 	preSteps = append(preSteps, stepPreSteps...)
+	preSteps = append(preSteps, rc.runContainerPrepareHook)
 	preSteps = append(preSteps, printCompleteJobName(rc))
 
 	// Ahead of the teardown below, while the job environment is still up.

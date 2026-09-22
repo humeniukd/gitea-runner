@@ -59,10 +59,10 @@ type PrepareHookResponse struct {
     Environments map[string]string `json:"environments"`
 }
 
-// ContainerStepSpecs describes a step that runs in its own container
+// ContainerStepSpec describes a step that runs in its own container
 // (uses: docker://...). Collected via prepareContainerStep() before 
 // execution starts and passed to the prepare hook inside prepare-input.json.
-type ContainerStepSpecs struct {
+type ContainerStepSpec struct {
 	StepNumber  int
 	StepID      string
 	StepName    string

@@ -11,6 +11,7 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/container/hooks"
 
 	"gitea.dev/actionslib/pkg/model"
 	"github.com/kballard/go-shellquote"
@@ -60,21 +61,59 @@ func (sd *stepDocker) getIfExpression(_ context.Context, _ stepStage) string {
 	return sd.Step.If.Value
 }
 
+// resolveContainerStepInputs extracts the docker image, args, and entrypoint
+// from a uses: docker://... step, interpolating ${{ }} expressions with eval.
+func resolveContainerStepInputs(eval ExpressionEvaluator, step *model.Step) (image string, args, entrypoint []string, err error) {
+	image = strings.TrimPrefix(step.Uses, "docker://")
+
+	args, err = shellquote.Split(eval.Interpolate(context.Background(), step.With["args"]))
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("step %q: failed to parse args: %w", step.ID, err)
+	}
+
+	if entry := eval.Interpolate(context.Background(), step.With["entrypoint"]); entry != "" {
+		entrypoint = []string{entry}
+	}
+	return image, args, entrypoint, nil
+}
+
+func (sd *stepDocker) prepareContainerStep() (*hooks.ContainerStepSpec, error) {
+	rc := sd.RunContext
+	step := sd.Step
+
+	image, args, entrypoint, err := resolveContainerStepInputs(rc.ExprEval, step)
+	if err != nil {
+		return nil, err
+	}
+
+	return &hooks.ContainerStepSpec{
+		StepNumber: step.Number,
+		StepID:     step.ID,
+		StepName:   step.Name,
+		Image:      image,
+		Entrypoint: entrypoint,
+		Args:       args,
+		WorkingDir: rc.Config.Workdir,
+	}, nil
+}
+
 func (sd *stepDocker) runUsesContainer() common.Executor {
 	rc := sd.RunContext
 	step := sd.Step
 
 	return func(ctx context.Context) error {
-		image := strings.TrimPrefix(step.Uses, "docker://")
-		eval := rc.NewExpressionEvaluator(ctx)
-		cmd, err := shellquote.Split(eval.Interpolate(ctx, step.With["args"]))
-		if err != nil {
-			return err
+		if rc.containerHooks.Enabled {
+			spec, ok := rc.containerHooks.StepSpecs[step.Number]
+			if !ok {
+				return fmt.Errorf("container step #%d was not described during collection", step.Number)
+			}
+			input := rc.buildContainerExecuteHookStepInput(spec)
+			return rc.runContainerExecuteHook(ctx, input)
 		}
 
-		var entrypoint []string
-		if entry := eval.Interpolate(ctx, step.With["entrypoint"]); entry != "" {
-			entrypoint = []string{entry}
+		image, cmd, entrypoint, err := resolveContainerStepInputs(rc.NewExpressionEvaluator(ctx), step)
+		if err != nil {
+			return err
 		}
 
 		stepContainer := sd.newStepContainer(ctx, image, cmd, entrypoint)

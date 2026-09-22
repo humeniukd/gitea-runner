@@ -148,6 +148,11 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir, actio
 		return nil
 	}
 
+	if rc.containerHooks.Enabled {
+		logger.Debugf("container-hook mode: skipping action dir copy to %s", containerActionDir)
+		return nil
+	}
+
 	var containerActionDirCopy string
 	containerActionDirCopy = strings.TrimSuffix(containerActionDir, actionPath)
 	logger.Debug(containerActionDirCopy)

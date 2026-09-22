@@ -15,6 +15,7 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/container/hooks"
 
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
@@ -30,6 +31,13 @@ type step interface {
 	getStepModel() *model.Step
 	getEnv() *map[string]string
 	getIfExpression(context context.Context, stage stepStage) string
+}
+
+// stepPreparer is implemented by steps that create their own container
+// (e.g., uses: docker://...). It returns a declarative description
+// without performing any actions. Used to collect prepare-input.json.
+type stepPreparer interface {
+    prepareContainerStep() (*hooks.ContainerStepSpec, error)
 }
 
 type stepStage int
@@ -164,7 +172,17 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 			files = append(files, &container.FileEntry{Name: summaryFileCommand, Mode: 0o666})
 			topRC.summaryFileInitialized[stepSummaryIndex] = true
 		}
-		_ = rc.JobContainer.Copy(actPath, files...)(ctx)
+		if rc.containerHooks.Enabled {
+			paths := make([]string, 0, len(files))
+			for _, f := range files {
+				paths = append(paths, path.Join(actPath, f.Name))
+			}
+			rc.containerHooks.StepFileCmds = paths
+			rc.containerHooks.StepFileCmdContents = nil
+		} else {
+			_ = rc.JobContainer.Copy(actPath, files...)(ctx)
+		}
+
 
 		// The command handler needs the step's env to judge ACTIONS_ALLOW_UNSECURE_COMMANDS.
 		// Cloned: the step executor keeps writing to its own env map after this point, on a
@@ -209,6 +227,13 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		}
 		// Process Runner File Commands
 		orgerr := err
+		if rc.containerHooks.Enabled {
+			hookErr := rc.parseFileCommandsFromContainerHook(ctx)
+			if hookErr != nil {
+				return hookErr
+			}
+			return orgerr
+		}
 		err = processRunnerEnvFileCommand(ctx, envFileCommand, rc, rc.setEnv)
 		if err != nil {
 			return err
