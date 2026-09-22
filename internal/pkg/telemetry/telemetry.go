@@ -157,7 +157,10 @@ func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(r
 		semconv.VCSRepositoryURLFull(repoURL),
 		semconv.VCSRefHeadName(field("ref_name")),
 		semconv.VCSRefHeadRevision(field("sha")),
-		attribute.String("gitea.job.id", field("job")),
+		attribute.String("gitea.job.key", field("job")),
+		attribute.String("gitea.run.number", field("run_number")),
+		attribute.String("gitea.run.attempt", field("run_attempt")),
+		attribute.Int64("gitea.task.id", task.Id),
 	))
 	return context.WithValue(ctx, taskRunKey{}, taskRun{strconv.FormatInt(task.Id, 10), runURL, pipeline}), func(result runnerv1.Result) {
 		end(span, semconv.CICDPipelineResultKey, jobResult(ctx, result))

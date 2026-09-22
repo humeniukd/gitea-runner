@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -111,6 +112,9 @@ func TestJob(t *testing.T) {
 		"repository_owner": "owner",
 		"server_url":       "https://gitea.example/",
 		"run_id":           "42",
+		"run_number":       "40",
+		"run_attempt":      "2",
+		"job":              "build",
 	})
 	require.NoError(t, err)
 	task := &runnerv1.Task{Id: 7, Context: fields}
@@ -161,6 +165,11 @@ func TestJob(t *testing.T) {
 		semconv.VCSOwnerName("owner"),
 		semconv.VCSRepositoryName("repo"),
 		semconv.CICDPipelineResultKey.String("failure"),
+		semconv.CICDPipelineRunID("42"),
+		attribute.String("gitea.run.number", "40"),
+		attribute.String("gitea.run.attempt", "2"),
+		attribute.String("gitea.job.key", "build"),
+		attribute.Int64("gitea.task.id", 7),
 	})
 }
 
