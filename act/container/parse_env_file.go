@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 
 	"gitea.com/gitea/runner/act/common"
@@ -35,49 +36,59 @@ func parseEnvFile(e Container, srcPath string, env *map[string]string) common.Ex
 		// tools emit a UTF-8 BOM. Without a BOM the file is read as UTF-8, as before.
 		decoded := transform.NewReader(reader, unicode.BOMOverride(unicode.UTF8.NewDecoder()))
 
-		s := bufio.NewScanner(decoded)
-		// Default 64 KiB max token size is too small for realistic env-file lines; allow up to 16 MiB.
-		s.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-		for s.Scan() {
-			line := s.Text()
-			// GitHub's runner ignores blank lines
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
-			singleLineEnv := strings.Index(line, "=")
-			multiLineEnv := strings.Index(line, "<<")
-			if singleLineEnv != -1 && (multiLineEnv == -1 || singleLineEnv < multiLineEnv) {
-				localEnv[line[:singleLineEnv]] = line[singleLineEnv+1:]
-			} else if multiLineEnv != -1 {
-				multiLineEnvContent := ""
-				multiLineEnvDelimiter := line[multiLineEnv+2:]
-				delimiterFound := false
-				for s.Scan() {
-					content := s.Text()
-					if content == multiLineEnvDelimiter {
-						delimiterFound = true
-						break
-					}
-					if multiLineEnvContent != "" {
-						multiLineEnvContent += "\n"
-					}
-					multiLineEnvContent += content
-				}
-				if err := s.Err(); err != nil {
-					return fmt.Errorf("reading env file: %w", err)
-				}
-				if !delimiterFound {
-					return fmt.Errorf("invalid format delimiter '%v' not found before end of file", multiLineEnvDelimiter)
-				}
-				localEnv[line[:multiLineEnv]] = multiLineEnvContent
-			} else {
-				return fmt.Errorf("invalid format '%v', expected a line with '=' or '<<'", line)
-			}
+		parsed, err := ParseEnvFileContent(decoded)
+		if err != nil {
+			return err
 		}
-		if err := s.Err(); err != nil {
-			return fmt.Errorf("reading env file: %w", err)
-		}
+		maps.Copy(localEnv, parsed)
 		env = &localEnv
 		return nil
 	}
+}
+
+func ParseEnvFileContent(decoded io.Reader) (map[string]string, error) {
+	localEnv := map[string]string{}
+	s := bufio.NewScanner(decoded)
+	// Default 64 KiB max token size is too small for realistic env-file lines; allow up to 16 MiB.
+	s.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for s.Scan() {
+		line := s.Text()
+		// GitHub's runner ignores blank lines
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		singleLineEnv := strings.Index(line, "=")
+		multiLineEnv := strings.Index(line, "<<")
+		if singleLineEnv != -1 && (multiLineEnv == -1 || singleLineEnv < multiLineEnv) {
+			localEnv[line[:singleLineEnv]] = line[singleLineEnv+1:]
+		} else if multiLineEnv != -1 {
+			multiLineEnvContent := ""
+			multiLineEnvDelimiter := line[multiLineEnv+2:]
+			delimiterFound := false
+			for s.Scan() {
+				content := s.Text()
+				if content == multiLineEnvDelimiter {
+					delimiterFound = true
+					break
+				}
+				if multiLineEnvContent != "" {
+					multiLineEnvContent += "\n"
+				}
+				multiLineEnvContent += content
+			}
+			if err := s.Err(); err != nil {
+				return nil, fmt.Errorf("reading env file: %w", err)
+			}
+			if !delimiterFound {
+				return nil, fmt.Errorf("invalid format delimiter '%v' not found before end of file", multiLineEnvDelimiter)
+			}
+			localEnv[line[:multiLineEnv]] = multiLineEnvContent
+		} else {
+			return nil, fmt.Errorf("invalid format '%v', expected a line with '=' or '<<'", line)
+		}
+	}
+	if err := s.Err(); err != nil {
+		return nil, fmt.Errorf("reading env file: %w", err)
+	}
+	return localEnv, nil
 }
