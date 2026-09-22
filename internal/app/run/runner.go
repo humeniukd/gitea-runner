@@ -24,6 +24,7 @@ import (
 	"gitea.com/gitea/runner/act/artifactcache"
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/container/hooks"
 	"gitea.com/gitea/runner/act/runner"
 	"gitea.com/gitea/runner/internal/pkg/client"
 	"gitea.com/gitea/runner/internal/pkg/config"
@@ -510,6 +511,11 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 			// so a network this job leaks, if the runner dies before its teardown, can be
 			// told apart from one belonging to another runner on the same daemon
 			RunnerUUID: r.uuid,
+		},
+		ContainerHooks: hooks.Config{
+			Enabled:    r.cfg.Container.Hooks.Enabled,
+			Entrypoint: r.cfg.Container.Hooks.Entrypoint,
+			Cmd:        r.cfg.Container.Hooks.Cmd,
 		},
 		ContainerOptions:                  r.cfg.Container.Options,
 		ServiceReadyTimeout:               r.cfg.Container.ServiceReadyTimeout,

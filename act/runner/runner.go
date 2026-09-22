@@ -16,6 +16,7 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/container/hooks"
 
 	"gitea.dev/actionslib/pkg/model"
 	docker_container "github.com/moby/moby/api/types/container"
@@ -99,6 +100,7 @@ type Config struct {
 	RunnerName                        string                       // name this runner registered with, reported as `runner.name`, defaults to the hostname
 	JobStartedHook                    string                       // script run inside the job environment before the job's first step; ACTIONS_RUNNER_HOOK_JOB_STARTED is read from Env when empty
 	JobCompletedHook                  string                       // script run inside the job environment after the job's last step; ACTIONS_RUNNER_HOOK_JOB_COMPLETED is read from Env when empty
+	ContainerHooks                    hooks.Config                 // configures the container-hooks mode
 }
 
 // RunnerDebug reports whether debug logging is on, exposed as `runner.debug` and
@@ -371,6 +373,9 @@ func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, mat
 		StepResults: make(map[string]*model.StepResult),
 		Matrix:      matrix,
 		caller:      runner.caller,
+		containerHooks: &containerHooks{
+        	StepSpecs: make(map[int]*hooks.ContainerStepSpecs),
+		},
 	}
 	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
 	rc.Name = rc.ExprEval.Interpolate(ctx, run.String())
