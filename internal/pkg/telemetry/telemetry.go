@@ -42,7 +42,7 @@ const scope = "gitea.com/gitea/runner"
 type taskRunKey struct{}
 
 type taskRun struct {
-	id, url string
+	id, url, pipeline string
 }
 
 func Setup(ctx context.Context, uuid, name string) (func(context.Context) error, error) {
@@ -159,8 +159,15 @@ func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(r
 		semconv.VCSRefHeadRevision(field("sha")),
 		attribute.String("gitea.job.id", field("job")),
 	))
-	return context.WithValue(ctx, taskRunKey{}, taskRun{strconv.FormatInt(task.Id, 10), runURL}), func(result runnerv1.Result) {
+	return context.WithValue(ctx, taskRunKey{}, taskRun{strconv.FormatInt(task.Id, 10), runURL, pipeline}), func(result runnerv1.Result) {
 		end(span, semconv.CICDPipelineResultKey, jobResult(ctx, result))
+	}
+}
+
+// SetJobName names the job span once the workflow is parsed, since the task context carries no job name.
+func SetJobName(ctx context.Context, job string) {
+	if run, ok := ctx.Value(taskRunKey{}).(taskRun); ok {
+		trace.SpanFromContext(ctx).SetName("RUN " + run.pipeline + " " + job)
 	}
 }
 
@@ -213,7 +220,7 @@ func StartStep(ctx context.Context, step *model.Step, stage string) (context.Con
 		semconv.CICDPipelineTaskRunID(id),
 		semconv.CICDPipelineTaskRunURLFull(parent.url),
 	))
-	return context.WithValue(ctx, taskRunKey{}, taskRun{id, parent.url}), func(err error, result *model.StepResult) {
+	return context.WithValue(ctx, taskRunKey{}, taskRun{id, parent.url, parent.pipeline}), func(err error, result *model.StepResult) {
 		end(span, semconv.CICDPipelineTaskRunResultKey, stepResult(ctx, err, result))
 	}
 }

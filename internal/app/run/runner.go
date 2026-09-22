@@ -5,6 +5,7 @@ package run
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json/v2"
 	"errors"
@@ -411,6 +412,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	}
 	job := workflow.GetJob(jobID)
 	reporter.ResetSteps(len(job.Steps))
+	telemetry.SetJobName(ctx, cmp.Or(job.Name, jobID))
 
 	taskContext := task.Context.Fields
 	envs := r.cloneEnvs()

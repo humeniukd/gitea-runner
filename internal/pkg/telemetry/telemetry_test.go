@@ -132,6 +132,7 @@ func TestJob(t *testing.T) {
 
 	envs = map[string]string{"OTEL_EXPORTER_OTLP_HEADERS": "authorization=job"}
 	ctx, endJob = StartJob(t.Context(), task)
+	SetJobName(ctx, "Build and test")
 	AddJobEnv(ctx, envs)
 	_, endStep = StartStep(ctx, &model.Step{Run: "make\nmake test", Number: 1}, "Main")
 	endStep(errors.New("exit code 1"), &model.StepResult{Outcome: model.StepStatusFailure})
@@ -154,7 +155,7 @@ func TestJob(t *testing.T) {
 		semconv.CICDPipelineTaskRunResultKey.String("failure"),
 		semconv.ErrorTypeOther,
 	})
-	assert.Equal(t, "RUN ci.yml", job.Name())
+	assert.Equal(t, "RUN ci.yml Build and test", job.Name())
 	assert.Equal(t, trace.SpanKindServer, job.SpanKind())
 	assert.Subset(t, job.Attributes(), []any{
 		semconv.VCSOwnerName("owner"),

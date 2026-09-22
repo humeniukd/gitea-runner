@@ -10,7 +10,7 @@ The exporter also reads `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_EXPORTER_OTLP_TIM
 
 ## What is sent
 
-A trace per job, with a span for every step named as in Gitea, including `Pre` and `Post` stages and the steps of composite actions. Spans carry the repository, ref, commit and result.
+A trace per job, named `RUN {workflow} {job}`, with a span for every step named as in Gitea, including `Pre` and `Post` stages and the steps of composite actions. Spans carry the repository, ref, commit and result.
 
 ## Tracing inside jobs
 
