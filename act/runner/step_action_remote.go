@@ -314,7 +314,7 @@ func (ra *remoteAction) IsCheckout() bool {
 	return false
 }
 
-// newRemoteAction resolves `self://` on instanceURL and `$/` in the enclosing composite action, else the workflow's repo and commit.
+// newRemoteAction resolves `self:` on instanceURL and `$/` in the enclosing composite action, else the workflow's repo and commit.
 func newRemoteAction(action string, github *model.GithubContext, instanceURL string) (*remoteAction, error) {
 	uses, err := model.ParseActionUses(action)
 	if err != nil {

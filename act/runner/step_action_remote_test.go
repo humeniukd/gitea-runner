@@ -612,7 +612,7 @@ func Test_newRemoteAction(t *testing.T) {
 			want:   nil,
 		},
 		{
-			action: "self://owner/repo/sub@v1",
+			action: "self:owner/repo/sub@v1",
 			want: &remoteAction{
 				URL:  "https://gitea.example.com",
 				Org:  "owner",
@@ -634,7 +634,7 @@ func Test_newRemoteAction(t *testing.T) {
 			assert.Equalf(t, tt.wantCloneURL, cloneURL, "newRemoteAction(%v).CloneURL()", tt.action)
 		})
 	}
-	_, err := newRemoteAction("self://owner/repo@v1", nil, "")
+	_, err := newRemoteAction("self:owner/repo@v1", nil, "")
 	require.ErrorContains(t, err, "without a Gitea instance")
 }
 
