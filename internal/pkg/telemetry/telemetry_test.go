@@ -120,6 +120,8 @@ func TestJob(t *testing.T) {
 	task := &runnerv1.Task{Id: 7, Context: fields}
 	t.Setenv("OTEL_SERVICE_NAME", "runner")
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=runner")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=runner")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
 
 	envs := map[string]string{}
 	ctx, endJob := StartJob(t.Context(), task)
@@ -143,6 +145,8 @@ func TestJob(t *testing.T) {
 	endJob(runnerv1.Result_RESULT_FAILURE)
 
 	assert.Equal(t, "authorization=job", envs["OTEL_EXPORTER_OTLP_HEADERS"])
+	assert.Equal(t, "http://collector:4318", envs["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	assert.NotContains(t, envs, "OTEL_EXPORTER_OTLP_TRACES_HEADERS")
 	assert.NotContains(t, envs, "OTEL_SERVICE_NAME")
 	jobSpan := trace.SpanContextFromContext(ctx)
 	assert.Equal(t, "00-"+jobSpan.TraceID().String()+"-"+jobSpan.SpanID().String()+"-01", envs["TRACEPARENT"])

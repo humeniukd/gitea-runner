@@ -14,4 +14,4 @@ A trace per job, named `RUN {workflow} {job}`, with a span for every step named 
 
 ## Tracing inside jobs
 
-Jobs receive the runner's `OTEL_*` variables and `TRACEPARENT`, so tools in a job that use OpenTelemetry add their spans to the job's trace. Workflows can read these variables, so keep collector credentials out of them.
+Jobs receive `TRACEPARENT` and the runner's `OTEL_*` variables except `OTEL_SERVICE_NAME` and the `*_HEADERS` ones, so tools in a job that use OpenTelemetry add their spans to the job's trace. The headers stay with the runner because they usually carry the collector's credentials, which workflows could read; a job that needs them sets its own.

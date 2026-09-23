@@ -24,7 +24,6 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/internal/pkg/telemetry"
 
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
@@ -283,8 +282,8 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 // finished main-pipeline context. Cleanup has to run even when the run was interrupted, so the
 // returned context always carries a fresh bounded deadline and is never itself cancelled.
 //
-//   - context.Canceled (server cancel): detach from the cancelled context via a fresh root so
-//     the post steps can run.
+//   - context.Canceled (server cancel): detach with WithoutCancel so the post steps can run,
+//     keeping the logger and job span but not the job-error container.
 //   - context.DeadlineExceeded (job timeout): detach the deadline with WithoutCancel, which
 //     keeps the original values — including the job-error container — so the timeout failure and
 //     any post-step error are preserved and the job is still reported as failed.
@@ -292,12 +291,8 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 func postStepsContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	switch ctx.Err() {
 	case context.Canceled:
-		// The cancelled context is abandoned for a fresh root, which drops the job-error
-		// container installed at the job root. Re-attach a fresh one so a failing post step
-		// records its error via SetJobError instead of panicking on a nil container, and keep
-		// the job span so the post steps stay in the job's trace.
-		root := common.WithJobErrorContainer(common.WithLogger(context.Background(), common.Logger(ctx)))
-		return context.WithTimeout(telemetry.WithTraceFrom(root, ctx), 5*time.Minute)
+		// A fresh job-error container shadows the job's, so a failing post step cannot turn the cancellation into a failure.
+		return context.WithTimeout(common.WithJobErrorContainer(context.WithoutCancel(ctx)), 5*time.Minute)
 	case context.DeadlineExceeded:
 		return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 	default:

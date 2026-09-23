@@ -140,14 +140,11 @@ func (c *client) UploadTraces(ctx context.Context, spans []*tracepb.ResourceSpan
 }
 
 func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(runnerv1.Result)) {
-	if _, ok := otel.GetTracerProvider().(*sdktrace.TracerProvider); !ok {
-		return ctx, func(runnerv1.Result) {}
-	}
 	field := func(key string) string { return task.GetContext().GetFields()[key].GetStringValue() }
 	pipeline, owner, repo := field("workflow"), field("repository_owner"), field("repository")
 	repoURL := strings.TrimSuffix(field("server_url"), "/") + "/" + repo
 	runURL := repoURL + "/actions/runs/" + field("run_id")
-	ctx, span := otel.Tracer(scope).Start(ctx, "RUN "+pipeline, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(
+	spanCtx, span := otel.Tracer(scope).Start(ctx, "RUN "+pipeline, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(
 		semconv.CICDPipelineName(pipeline),
 		semconv.CICDPipelineActionNameRun,
 		semconv.CICDPipelineRunID(field("run_id")),
@@ -162,7 +159,11 @@ func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(r
 		attribute.String("gitea.run.attempt", field("run_attempt")),
 		attribute.Int64("gitea.task.id", task.Id),
 	))
-	return context.WithValue(ctx, taskRunKey{}, taskRun{strconv.FormatInt(task.Id, 10), runURL, pipeline}), func(result runnerv1.Result) {
+	if !span.SpanContext().IsValid() {
+		return ctx, func(runnerv1.Result) {}
+	}
+	ctx = context.WithValue(spanCtx, taskRunKey{}, taskRun{strconv.FormatInt(task.Id, 10), runURL, pipeline})
+	return ctx, func(result runnerv1.Result) {
 		end(span, semconv.CICDPipelineResultKey, jobResult(ctx, result))
 	}
 }
@@ -184,7 +185,8 @@ func AddJobEnv(ctx context.Context, envs map[string]string) {
 		}
 	}
 	for _, kv := range os.Environ() {
-		if key, value, _ := strings.Cut(kv, "="); strings.HasPrefix(key, "OTEL_") && key != "OTEL_SERVICE_NAME" {
+		key, value, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(key, "OTEL_") && key != "OTEL_SERVICE_NAME" && !strings.HasSuffix(key, "_HEADERS") { // headers carry the collector's credentials
 			add(key, value)
 		}
 	}
@@ -193,15 +195,6 @@ func AddJobEnv(ctx context.Context, envs map[string]string) {
 	for key, value := range carrier {
 		add(strings.ToUpper(key), value)
 	}
-}
-
-// WithTraceFrom carries the job span from `from` onto ctx, for work detached from a cancelled job context.
-func WithTraceFrom(ctx, from context.Context) context.Context {
-	run, ok := from.Value(taskRunKey{}).(taskRun)
-	if !ok {
-		return ctx
-	}
-	return context.WithValue(trace.ContextWithSpan(ctx, trace.SpanFromContext(from)), taskRunKey{}, run)
 }
 
 // StartStep names spans like Gitea's step list does, prefixing Pre and Post stages.
