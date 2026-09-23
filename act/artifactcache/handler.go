@@ -10,6 +10,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
@@ -78,7 +79,8 @@ type credEntry struct {
 
 type Handler struct {
 	dir      string
-	storage  *Storage
+	storage  cacheStorage
+	metadata cacheMetadata
 	router   *httprouter.Router
 	listener net.Listener
 	port     int
@@ -110,6 +112,9 @@ type Handler struct {
 
 	// freeDisk is a field so tests can drive evictForFreeSpace without a full volume.
 	freeDisk func(string) (uint64, error)
+
+	metadataMu     sync.Mutex
+	metadataSyncAt time.Time
 }
 
 // Options configures a cache server started by StartHandler; the zero value is usable.
@@ -117,6 +122,7 @@ type Options struct {
 	Dir        string
 	OutboundIP string
 	Port       uint16
+	S3         *S3Options
 
 	// InternalSecret, when non-empty, enables a control-plane API at
 	// /_internal/{register,revoke} that lets a remote runner pre-register the
@@ -160,11 +166,22 @@ func StartHandler(opts Options) (*Handler, error) {
 
 	h.dir = dir
 
-	storage, err := NewStorage(filepath.Join(dir, "cache"))
+	var (
+		storage cacheStorage
+		err     error
+	)
+	if opts.S3 != nil {
+		storage, err = NewS3Storage(filepath.Join(dir, "cache"), *opts.S3)
+	} else {
+		storage, err = NewStorage(filepath.Join(dir, "cache"))
+	}
 	if err != nil {
 		return nil, err
 	}
 	h.storage = storage
+	if metadata, ok := storage.(cacheMetadata); ok {
+		h.metadata = metadata
+	}
 
 	if opts.OutboundIP != "" {
 		h.outboundIP = opts.OutboundIP
@@ -355,7 +372,7 @@ func (h *Handler) Close() error {
 }
 
 func (h *Handler) openDB() (*bolthold.Store, error) {
-	return bolthold.Open(filepath.Join(h.dir, "bolt.db"), 0o644, &bolthold.Options{
+	db, err := bolthold.Open(filepath.Join(h.dir, "bolt.db"), 0o644, &bolthold.Options{
 		Encoder: func(value any) ([]byte, error) { return json.Marshal(value) },
 		Decoder: func(data []byte, value any) error { return json.Unmarshal(data, value) },
 		Options: &bbolt.Options{
@@ -364,6 +381,52 @@ func (h *Handler) openDB() (*bolthold.Store, error) {
 			FreelistType: bbolt.DefaultOptions.FreelistType,
 		},
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := h.syncMetadata(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+const s3MetadataSyncInterval = 30 * time.Second
+
+func (h *Handler) syncMetadata(db *bolthold.Store) error {
+	if h.metadata == nil {
+		return nil
+	}
+	h.metadataMu.Lock()
+	defer h.metadataMu.Unlock()
+	if time.Since(h.metadataSyncAt) < s3MetadataSyncInterval {
+		return nil
+	}
+	if err := h.metadata.syncMetadata(db); err != nil {
+		return err
+	}
+	h.metadataSyncAt = time.Now()
+	return nil
+}
+
+func (h *Handler) saveCache(db *bolthold.Store, cache *Cache) error {
+	if h.metadata != nil && cache.Complete {
+		cache.UpdatedAt = time.Now().UnixNano()
+	}
+	if err := db.Update(cache.ID, cache); err != nil {
+		return err
+	}
+	if h.metadata != nil && cache.Complete {
+		return h.metadata.persistMetadata(cache)
+	}
+	return nil
+}
+
+func (h *Handler) removePersistedCache(id uint64) error {
+	if h.metadata != nil {
+		return h.metadata.removeMetadata(id)
+	}
+	return nil
 }
 
 // GET /_apis/artifactcache/cache
@@ -409,6 +472,7 @@ func (h *Handler) lookupCache(db *bolthold.Store, repo string, keys []string, ve
 	}
 	if !ok {
 		_ = db.Delete(cache.ID, cache)
+		_ = h.removePersistedCache(cache.ID)
 		return nil, nil //nolint:nilnil // absence is not an error here
 	}
 	// Handing out a download URL counts as access, or eviction could drop the entry between
@@ -440,7 +504,7 @@ func (h *Handler) reserve(w http.ResponseWriter, r *http.Request, _ httprouter.P
 	now := time.Now().Unix()
 	cache.CreatedAt = now
 	cache.UsedAt = now
-	if err := insertCache(db, cache); err != nil {
+	if err := h.insertCache(db, cache); err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
 	}
@@ -560,8 +624,14 @@ func (h *Handler) commitCache(cache *Cache) error {
 		return err
 	}
 	defer db.Close()
-	if err := db.Update(cache.ID, cache); err != nil {
+	if err := h.saveCache(db, cache); err != nil {
+		// The archive reached S3 before the completed record. Do not leave bytes
+		// that no runner can safely discover; a later cache save may retry.
+		_ = h.storage.Remove(cache.ID)
 		return err
+	}
+	if h.metadata != nil {
+		return nil
 	}
 	// A commit is the only thing that grows the store, so the only thing that can push the
 	// volume under the floor.
@@ -840,6 +910,30 @@ func insertCache(db *bolthold.Store, cache *Cache) error {
 	})
 }
 
+func (h *Handler) insertCache(db *bolthold.Store, cache *Cache) error {
+	if h.metadata == nil {
+		return insertCache(db, cache)
+	}
+	for range 3 {
+		var raw [8]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			return fmt.Errorf("generate S3 cache id: %w", err)
+		}
+		// Keep IDs exactly representable by JavaScript clients and within the
+		// signed int64 range accepted by the v1 upload/commit routes.
+		cache.ID = binary.BigEndian.Uint64(raw[:]) & maxJSONSafeCacheID
+		if cache.ID == 0 {
+			continue
+		}
+		if err := db.Insert(cache.ID, cache); err == nil {
+			return nil
+		} else if !errors.Is(err, bolthold.ErrKeyExists) {
+			return fmt.Errorf("insert S3 cache: %w", err)
+		}
+	}
+	return errors.New("generate unique S3 cache id")
+}
+
 // touchCache stamps UsedAt so gcCache does not reap an entry mid-upload. With requireIncomplete
 // it also refuses an entry that is already complete, which is what the v2 blob route needs: its
 // upload URL outlives the finalize call, and overwriting a finished entry would leave the blob
@@ -866,11 +960,13 @@ func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
 		return nil
 	}
 	cache.UsedAt = time.Now().Unix()
-	return db.Update(cache.ID, cache)
+	return h.saveCache(db, cache)
 }
 
 const (
 	miB = 1024 * 1024
+	// maxJSONSafeCacheID is the largest integer JavaScript can represent exactly.
+	maxJSONSafeCacheID = uint64(1<<53 - 1)
 
 	defaultSweepInterval = time.Hour
 
@@ -932,6 +1028,9 @@ func (h *Handler) gcCache() {
 	defer db.Close()
 
 	h.evictIncomplete(db)
+	if h.metadata != nil {
+		return // S3 lifecycle rules own completed-entry retention and capacity.
+	}
 	h.evictExpired(db)
 	h.evictSuperseded(db)
 	h.evictOversized(db)
@@ -1086,7 +1185,7 @@ func (h *Handler) touch(db *bolthold.Store, cache *Cache) {
 		return
 	}
 	cache.UsedAt = time.Now().Unix()
-	if err := db.Update(cache.ID, cache); err != nil {
+	if err := h.saveCache(db, cache); err != nil {
 		h.logger.Warnf("touch cache: %v", err)
 	}
 }
@@ -1131,6 +1230,10 @@ func totalSize(caches []*Cache) int64 {
 func (h *Handler) deleteCache(db *bolthold.Store, cache *Cache) bool {
 	if err := h.storage.Remove(cache.ID); err != nil {
 		h.logger.Warnf("remove cache blob: %v", err)
+		return false
+	}
+	if err := h.removePersistedCache(cache.ID); err != nil {
+		h.logger.Warnf("remove cache metadata: %v", err)
 		return false
 	}
 	if err := db.Delete(cache.ID, cache); err != nil {

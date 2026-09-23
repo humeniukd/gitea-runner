@@ -42,6 +42,23 @@ func (b *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 var testClient = &http.Client{Transport: &bearerTransport{token: testToken}}
 
+type testMetadataStore struct {
+	syncs     int
+	persisted []*Cache
+}
+
+func (s *testMetadataStore) syncMetadata(*bolthold.Store) error {
+	s.syncs++
+	return nil
+}
+
+func (s *testMetadataStore) persistMetadata(cache *Cache) error {
+	s.persisted = append(s.persisted, cache)
+	return nil
+}
+
+func (*testMetadataStore) removeMetadata(uint64) error { return nil }
+
 // testRetention mirrors config.DefaultCacheRetention; Policy has no defaults of its own.
 const testRetention = 7 * 24 * time.Hour
 
@@ -54,6 +71,62 @@ func signArtifactURL(h *Handler, id int64) string {
 
 func TestHandler_ExternalURL(t *testing.T) {
 	assert.Equal(t, "http://[2001:db8::1]:8080", (&Handler{outboundIP: "2001:db8::1", port: 8080}).ExternalURL())
+}
+
+func TestHandler_SharedMetadataOnlyPersistsCompletedCaches(t *testing.T) {
+	handler := newTestHandler(t, Policy{})
+	metadata := &testMetadataStore{}
+	handler.metadata = metadata
+
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	defer db.Close()
+	incomplete := &Cache{ID: 1, Key: "incomplete"}
+	require.NoError(t, db.Insert(incomplete.ID, incomplete))
+	require.NoError(t, handler.saveCache(db, incomplete))
+	assert.Empty(t, metadata.persisted)
+
+	complete := &Cache{ID: 2, Key: "complete", Complete: true}
+	require.NoError(t, db.Insert(complete.ID, complete))
+	require.NoError(t, handler.saveCache(db, complete))
+	require.Len(t, metadata.persisted, 1)
+	assert.Positive(t, complete.UpdatedAt)
+
+	stored := &Cache{}
+	require.NoError(t, db.Get(complete.ID, stored))
+	assert.Equal(t, complete.UpdatedAt, stored.UpdatedAt)
+}
+
+func TestHandler_S3CacheIDIsJavaScriptSafe(t *testing.T) {
+	handler := newTestHandler(t, Policy{})
+	handler.metadata = &testMetadataStore{}
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	defer db.Close()
+
+	cache := &Cache{Key: "key", Repo: testRepo}
+	require.NoError(t, handler.insertCache(db, cache))
+	assert.Positive(t, cache.ID)
+	assert.LessOrEqual(t, cache.ID, maxJSONSafeCacheID)
+}
+
+func TestHandler_SharedMetadataSyncIsRateLimited(t *testing.T) {
+	handler := newTestHandler(t, Policy{})
+	metadata := &testMetadataStore{}
+	handler.metadata = metadata
+
+	for range 2 {
+		db, err := handler.openDB()
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+	}
+	assert.Equal(t, 1, metadata.syncs)
+
+	handler.metadataSyncAt = time.Now().Add(-s3MetadataSyncInterval)
+	db, err := handler.openDB()
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	assert.Equal(t, 2, metadata.syncs)
 }
 
 func TestHandler(t *testing.T) {

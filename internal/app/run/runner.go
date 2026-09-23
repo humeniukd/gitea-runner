@@ -105,6 +105,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 				Dir:        cfg.Cache.Dir,
 				OutboundIP: cfg.Cache.Host,
 				Port:       cfg.Cache.Port,
+				S3:         CacheS3(cfg),
 				Policy:     CachePolicy(cfg),
 				Logger:     log.StandardLogger().WithField("module", "cache_request"),
 			})
@@ -813,6 +814,23 @@ func CachePolicy(cfg *config.Config) artifactcache.Policy {
 		SizeLimit:     int64(cfg.Cache.SizeLimit),
 		SweepInterval: cfg.Cache.SweepInterval,
 		MinFreeDisk:   minFreeDisk(cfg),
+	}
+}
+
+// CacheS3 translates the config package's YAML-facing structure into the
+// cache handler's storage options without making artifactcache depend on config.
+func CacheS3(cfg *config.Config) *artifactcache.S3Options {
+	if cfg.Cache.S3 == nil {
+		return nil
+	}
+	s3 := cfg.Cache.S3
+	pathStyle := true
+	if s3.PathStyle != nil {
+		pathStyle = *s3.PathStyle
+	}
+	return &artifactcache.S3Options{
+		Endpoint: s3.Endpoint, Region: s3.Region, Bucket: s3.Bucket, Prefix: s3.Prefix,
+		PathStyle: pathStyle, AccessKey: s3.AccessKey, SecretKey: s3.SecretKey,
 	}
 }
 

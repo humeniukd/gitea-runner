@@ -173,6 +173,18 @@ cache:
   # Surrounding whitespace is trimmed, so a trailing newline in the file is fine.
   # Setting both external_secret and external_secret_file is an error.
   #external_secret_file: ""
+  # Store actions/cache entries in a shared S3-compatible bucket instead of using a
+  # separate cache-server. Each runner still starts its own small cache API for its jobs.
+  # Mutually exclusive with external_server. Workflow artifacts remain stored in Gitea.
+  # Configure lifecycle rules on this prefix for completed entries and abandoned uploads.
+  #s3:
+  #  endpoint: "http://minio:9000"
+  #  region: "us-east-1"
+  #  bucket: "runner-cache"
+  #  prefix: "gitea-runner-cache"
+  #  path_style: true
+  #  access_key_file: "/run/secrets/cache-s3-access-key"
+  #  secret_key_file: "/run/secrets/cache-s3-secret-key"
   # When true, reuse a cached action instead of fetching from the remote on every job.
   # A moved tag (e.g. a re-tagged "v6") or an updated branch stays at the cached commit
   # until its cache entry expires or is manually removed.

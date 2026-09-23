@@ -91,21 +91,36 @@ type RunnerHooks struct {
 
 // Cache represents the configuration for caching.
 type Cache struct {
-	Enabled            *bool  `yaml:"enabled"`              // Enabled indicates whether caching is enabled. It is a pointer to distinguish between false and not set. If not set, it will be true.
-	Dir                string `yaml:"dir"`                  // Dir specifies the directory path for caching.
-	Host               string `yaml:"host"`                 // Host specifies the caching host.
-	Port               uint16 `yaml:"port"`                 // Port specifies the caching port.
-	ExternalServer     string `yaml:"external_server"`      // ExternalServer specifies the URL of external cache server
-	ExternalSecret     string `yaml:"external_secret"`      // ExternalSecret is a shared secret between this runner and an external gitea-runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Required whenever ExternalServer is set; ExternalSecretFile is the alternative way to provide it.
-	ExternalSecretFile string `yaml:"external_secret_file"` // ExternalSecretFile is the path to a file holding the ExternalSecret value, so the secret can be mounted instead of stored in the config file. LoadDefault reads it into ExternalSecret; setting both is an error.
-	OfflineMode        bool   `yaml:"offline_mode"`         // OfflineMode reuses a cached action without fetching from the remote; a moved tag or branch stays at the cached commit until the cache entry is removed.
-	V2                 *bool  `yaml:"v2"`                   // V2 advertises the actions cache service v2 API to jobs. The bundle edit that reaches it is made either way, the artifact actions need it too. Unset means enabled.
+	Enabled            *bool    `yaml:"enabled"`              // Enabled indicates whether caching is enabled. It is a pointer to distinguish between false and not set. If not set, it will be true.
+	Dir                string   `yaml:"dir"`                  // Dir specifies the directory path for caching.
+	Host               string   `yaml:"host"`                 // Host specifies the caching host.
+	Port               uint16   `yaml:"port"`                 // Port specifies the caching port.
+	ExternalServer     string   `yaml:"external_server"`      // ExternalServer specifies the URL of external cache server
+	ExternalSecret     string   `yaml:"external_secret"`      // ExternalSecret is a shared secret between this runner and an external gitea-runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Required whenever ExternalServer is set; ExternalSecretFile is the alternative way to provide it.
+	ExternalSecretFile string   `yaml:"external_secret_file"` // ExternalSecretFile is the path to a file holding the ExternalSecret value, so the secret can be mounted instead of stored in the config file. LoadDefault reads it into ExternalSecret; setting both is an error.
+	OfflineMode        bool     `yaml:"offline_mode"`         // OfflineMode reuses a cached action without fetching from the remote; a moved tag or branch stays at the cached commit until the cache entry is removed.
+	V2                 *bool    `yaml:"v2"`                   // V2 advertises the actions cache service v2 API to jobs. The bundle edit that reaches it is made either way, the artifact actions need it too. Unset means enabled.
+	S3                 *CacheS3 `yaml:"s3"`                   // S3 stores actions/cache entries in a shared S3-compatible bucket instead of on this runner's disk.
 
 	// Eviction settings, ignored when ExternalServer is set since that server applies its own.
 	Retention     time.Duration `yaml:"retention"`       // Retention removes entries nothing has read or written within this window. Default 168h, 0 keeps them regardless of age.
 	RepoSizeLimit Size          `yaml:"repo_size_limit"` // RepoSizeLimit caps one repository, evicting least recently accessed first. Default 10GB, 0 is no limit.
 	SizeLimit     Size          `yaml:"size_limit"`      // SizeLimit caps the whole cache the same way. No limit by default.
 	SweepInterval time.Duration `yaml:"sweep_interval"`  // SweepInterval is the minimum time between two eviction sweeps. Default 1h; a cadence has no "off".
+}
+
+// CacheS3 configures an S3-compatible shared cache store. Credentials can be
+// mounted from files so they do not have to live in the runner configuration.
+type CacheS3 struct {
+	Endpoint      string `yaml:"endpoint"`
+	Region        string `yaml:"region"`
+	Bucket        string `yaml:"bucket"`
+	Prefix        string `yaml:"prefix"`
+	PathStyle     *bool  `yaml:"path_style"`
+	AccessKey     string `yaml:"access_key"`
+	AccessKeyFile string `yaml:"access_key_file"`
+	SecretKey     string `yaml:"secret_key"`
+	SecretKeyFile string `yaml:"secret_key_file"`
 }
 
 // DefaultCache returns the cache eviction defaults, seeded before the file is read so a
@@ -269,6 +284,9 @@ func LoadDefault(file string) (*Config, error) {
 	if err := resolveCacheExternalSecret(cfg); err != nil {
 		return nil, err
 	}
+	if err := resolveCacheS3(cfg); err != nil {
+		return nil, err
+	}
 	if *cfg.Cache.Enabled {
 		if cfg.Cache.Dir == "" {
 			home, err := os.UserHomeDir()
@@ -279,6 +297,9 @@ func LoadDefault(file string) (*Config, error) {
 		}
 		if cfg.Cache.ExternalServer != "" && cfg.Cache.ExternalSecret == "" {
 			return nil, errors.New("cache.external_server is set but no shared secret is configured; set cache.external_secret (or cache.external_secret_file) to the same value used by the gitea-runner cache-server")
+		}
+		if cfg.Cache.S3 != nil && cfg.Cache.ExternalServer != "" {
+			return nil, errors.New("cache.s3 and cache.external_server cannot both be set")
 		}
 	}
 	if cfg.Container.WorkdirParent == "" {
@@ -444,5 +465,51 @@ func resolveCacheExternalSecret(cfg *Config) error {
 		return fmt.Errorf("cache.external_secret_file %q contains no secret", cfg.Cache.ExternalSecretFile)
 	}
 	cfg.Cache.ExternalSecret = secret
+	return nil
+}
+
+func resolveCacheS3(cfg *Config) error {
+	s3 := cfg.Cache.S3
+	if s3 == nil {
+		return nil
+	}
+	if s3.Endpoint == "" || s3.Bucket == "" {
+		return errors.New("cache.s3.endpoint and cache.s3.bucket must be set")
+	}
+	if s3.Region == "" {
+		s3.Region = "us-east-1"
+	}
+	if s3.PathStyle == nil {
+		pathStyle := true
+		s3.PathStyle = &pathStyle
+	}
+	if err := resolveCacheS3Credential("access_key", &s3.AccessKey, s3.AccessKeyFile); err != nil {
+		return err
+	}
+	if err := resolveCacheS3Credential("secret_key", &s3.SecretKey, s3.SecretKeyFile); err != nil {
+		return err
+	}
+	if s3.AccessKey == "" || s3.SecretKey == "" {
+		return errors.New("cache.s3.access_key (or cache.s3.access_key_file) and cache.s3.secret_key (or cache.s3.secret_key_file) must be set")
+	}
+	s3.Prefix = strings.Trim(s3.Prefix, "/")
+	return nil
+}
+
+func resolveCacheS3Credential(name string, value *string, file string) error {
+	if file == "" {
+		return nil
+	}
+	if *value != "" {
+		return fmt.Errorf("cache.s3.%s and cache.s3.%s_file are both set; configure only one", name, name)
+	}
+	content, err := os.ReadFile(file)
+	if err != nil {
+		return fmt.Errorf("read cache.s3.%s_file %q: %w", name, file, err)
+	}
+	*value = strings.TrimSpace(string(content))
+	if *value == "" {
+		return fmt.Errorf("cache.s3.%s_file %q contains no credential", name, file)
+	}
 	return nil
 }
