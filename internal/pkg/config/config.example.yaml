@@ -249,6 +249,12 @@ container:
   # How long a job waits for a service container that declares a healthcheck to become
   # healthy. A negative value (e.g. -1s) starts the steps without waiting.
   #service_ready_timeout: 5m
+  # The runner delegates container lifecycle operations to an external entrypoint instead of calling the Docker API.
+  # Full guide: docs/container-hooks.md
+  #hooks:
+  #  enabled: false
+  #  entrypoint: "" # entrypoint is an optional interpreter used to launch cmd. Empty means cmd is executed directly
+  #  cmd: "" # path to the hook entrypoint the runner invokes for every hook event (prepare, execute, cleanup)
 
 host:
   # The parent directory of a job's working directory.
