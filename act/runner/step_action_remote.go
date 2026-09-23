@@ -214,6 +214,10 @@ func (sar *stepActionRemote) main() common.Executor {
 
 			github := sar.getGithubContext(ctx)
 			if sar.remoteAction.IsCheckout() && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
+				if sar.RunContext.containerHooks.Enabled {
+					common.Logger(ctx).Debugf("Skipping local actions/checkout in container-hooks mode")
+					return nil
+				}
 				if sar.RunContext.Config.BindWorkdir {
 					common.Logger(ctx).Debugf("Skipping local actions/checkout because you bound your workspace")
 					return nil

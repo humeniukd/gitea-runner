@@ -125,7 +125,12 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		}
 
 		// Prepare and clean Runner File Commands
-		actPath := rc.JobContainer.GetActPath()
+		var actPath string
+		if rc.containerHooks.Enabled {
+			actPath = rc.containerHooks.ActPath
+		} else {
+			actPath = rc.JobContainer.GetActPath()
+		}
 
 		outputFileCommand := path.Join("workflow", "outputcmd.txt")
 		(*step.getEnv())["GITHUB_OUTPUT"] = path.Join(actPath, outputFileCommand)

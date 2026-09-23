@@ -59,8 +59,9 @@ type PrepareHookInputRunner struct {
 // PrepareHookResponse is the shape of the response file written by the prepare
 // hook. The runner reads it back from <state_dir>/prepare.json.
 type PrepareHookResponse struct {
-	ID           string            `json:"id"`
+	ActPath      string            `json:"actPath,omitempty"`
 	Environments map[string]string `json:"environments"`
+	ID           string            `json:"id"`
 }
 
 // ContainerStepSpec describes a step that runs in its own container
@@ -128,10 +129,7 @@ type RunnerJSON struct {
 	ToolCache       string `json:"toolCache"`
 	BindWorkdir     bool   `json:"bindWorkdir"`
 	SharedToolCache bool   `json:"sharedToolCache"`
-	ActPath         string `json:"actPath"`
-	EventPath       string `json:"eventPath"`
 	EventJSON       string `json:"eventJSON"`
-	EnvsPath        string `json:"envsPath"`
 	ActionsDir      string `json:"actionsDir"`
 }
 

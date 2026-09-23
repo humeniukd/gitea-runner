@@ -12,7 +12,6 @@ import (
 	"io"
 	"maps"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -129,17 +128,13 @@ func (rc *RunContext) buildContainerPrepareHookInput(ctx context.Context) *hooks
 	}
 
 	// --- runner ---
-	actPath := ext.GetActPath()
 	input.Runner = hooks.PrepareHookInputRunner{
 		RunnerJSON: hooks.RunnerJSON{
 			Workdir:         rc.Config.Workdir,
 			ToolCache:       rc.toolCache(container.DefaultToolCache),
 			BindWorkdir:     rc.Config.BindWorkdir,
 			SharedToolCache: rc.Config.SharedToolCache,
-			ActPath:         actPath,
-			EventPath:       path.Join(actPath, "workflow", "event.json"),
 			EventJSON:       rc.EventJSON,
-			EnvsPath:        path.Join(actPath, "workflow", "envs.txt"),
 			ActionsDir:      rc.ActionCacheDir(),
 		},
 	}
@@ -317,6 +312,12 @@ func (rc *RunContext) readContainerPrepareHookResponse() error {
 		return fmt.Errorf("prepare hook must return a non-empty \"id\" in %s", path)
 	}
 	rc.jobContainerID = resp.ID
+
+	if resp.ActPath != "" {
+		rc.containerHooks.ActPath = resp.ActPath
+	} else {
+		rc.containerHooks.ActPath = rc.JobContainer.GetActPath()
+	}
 
 	for k, v := range resp.Environments {
 		if k == "" {

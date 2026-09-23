@@ -106,6 +106,12 @@ type containerHooks struct {
 	// delegates all container lifecycle operations to an external entrypoint
 	// instead of calling the Docker API. Set once in startJobContainer.
 	Enabled bool
+	// ActPath is the base path for workflow-scoped files (event.json,
+	// file-command files, generated scripts, copied actions) that the runner
+	// and the hook share. The hook chooses it and returns it in prepare.json;
+	// when the hook omits it, the runner falls back to GetActPath()
+	// ("/var/run/act" on Linux). Only meaningful when Enabled is true.
+	ActPath string
 	// StateDir is the per-job directory where the runner and the hooks
 	// exchange JSON files (input and response). Created before the first
 	// hook call, removed after cleanup.
@@ -1381,7 +1387,12 @@ func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext
 		Workspace:        rc.Config.Env["GITHUB_WORKSPACE"],
 	}
 	if rc.JobContainer != nil {
-		ghc.EventPath = rc.JobContainer.GetActPath() + "/workflow/event.json"
+		if rc.containerHooks.Enabled {
+			ghc.EventPath = rc.containerHooks.ActPath + "/workflow/event.json"
+		} else {
+			ghc.EventPath = rc.JobContainer.GetActPath() + "/workflow/event.json"
+		}
+
 		ghc.Workspace = rc.JobContainer.ToContainerPath(rc.Config.Workdir)
 	}
 

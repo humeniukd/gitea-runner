@@ -7,6 +7,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	"gitea.com/gitea/runner/act/common"
@@ -107,7 +108,9 @@ func (sd *stepDocker) runUsesContainer() common.Executor {
 			if !ok {
 				return fmt.Errorf("container step #%d was not described during collection", step.Number)
 			}
-			input := rc.buildContainerExecuteHookStepInput(spec)
+			specWithEnv := *spec
+			specWithEnv.Env = maps.Clone(sd.env)
+			input := rc.buildContainerExecuteHookStepInput(&specWithEnv)
 			return rc.runContainerExecuteHook(ctx, input)
 		}
 
