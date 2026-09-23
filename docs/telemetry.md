@@ -6,7 +6,7 @@ The runner can send traces of the jobs it runs to an OpenTelemetry collector ove
 OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318
 ```
 
-The exporter also reads `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_EXPORTER_OTLP_TIMEOUT` and their `TRACES` variants. The standard [SDK variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/) for resource attributes, sampling and batching apply too, and `OTEL_TRACES_EXPORTER=none` or `OTEL_SDK_DISABLED=true` turns tracing off. Only the `http/protobuf` protocol is supported.
+The exporter also reads `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_EXPORTER_OTLP_TRACES_HEADERS`. The standard [SDK variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/) for resource attributes, sampling and batching apply too, and `OTEL_TRACES_EXPORTER=none` or `OTEL_SDK_DISABLED=true` turns tracing off. Only the `http/protobuf` protocol is supported.
 
 ## What is sent
 
@@ -14,4 +14,8 @@ A trace per job, named `RUN {workflow} {job}`, with a span for every step named 
 
 ## Tracing inside jobs
 
-Jobs receive `TRACEPARENT` and the runner's `OTEL_*` variables except `OTEL_SERVICE_NAME` and the `*_HEADERS` ones, so tools in a job that use OpenTelemetry add their spans to the job's trace. The headers stay with the runner because they usually carry the collector's credentials, which workflows could read; a job that needs them sets its own.
+Jobs receive `TRACEPARENT`, so tools in a job that use OpenTelemetry add their spans to the job's trace. Set the `OTEL_*` variables they export with in `runner.envs`.
+
+## Metrics
+
+Metrics stay on the Prometheus endpoint enabled by `metrics.enabled`. A collector picks them up by scraping `/metrics` with its `prometheus` receiver.

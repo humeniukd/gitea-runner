@@ -52,18 +52,6 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			return fmt.Errorf("failed to load registration file: %w", err)
 		}
 
-		shutdownTelemetry, err := telemetry.Setup(ctx, reg.UUID, reg.Name)
-		if err != nil {
-			log.WithError(err).Warn("OpenTelemetry export failed to start")
-		}
-		defer func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := shutdownTelemetry(ctx); err != nil {
-				log.WithError(err).Warn("OpenTelemetry export failed to flush")
-			}
-		}()
-
 		// Guard against a second runner process sharing this runner file: two
 		// processes with the same identity are indistinguishable to Gitea and
 		// end up cancelling each other's jobs.
@@ -83,6 +71,18 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			// reintroduce the duplicate-identity job cancellations.
 			defer func() { _ = releaseLock() }()
 		}
+
+		shutdownTelemetry, err := telemetry.Setup(ctx, reg.UUID, reg.Name)
+		if err != nil {
+			log.WithError(err).Warn("OpenTelemetry export failed to start")
+		}
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTelemetry(ctx); err != nil {
+				log.WithError(err).Warn("OpenTelemetry export failed to flush")
+			}
+		}()
 
 		lbls := resolveLabels(daemArgs.Labels, cfg.Runner.Labels, reg.Labels)
 

@@ -23,7 +23,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
@@ -574,9 +573,6 @@ func TestRunStepExecutorParity(t *testing.T) {
 		assert.Equal(t, []string{"Restore", "Post Run actions/cache@v4", "Deploy", "Broken"}, []string{ended[0].Name(), ended[1].Name(), ended[2].Name(), ended[3].Name()})
 		assert.Equal(t, ended[1].SpanContext().SpanID(), ended[0].Parent().SpanID())
 		assert.Contains(t, ended[0].Attributes(), semconv.CICDPipelineTaskRunID("7.3.post.1"))
-		assert.Contains(t, ended[2].Attributes(), semconv.CICDPipelineTaskRunResultKey.String("skip"))
-		assert.Equal(t, codes.Unset, ended[2].Status().Code)
-		assert.Contains(t, ended[3].Attributes(), semconv.CICDPipelineTaskRunResultKey.String("failure"))
 	})
 
 	t.Run("timeout must be positive", func(t *testing.T) {

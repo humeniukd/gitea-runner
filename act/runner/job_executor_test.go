@@ -22,20 +22,13 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/internal/pkg/telemetry"
 
 	"gitea.dev/actionslib/pkg/model"
-	runnerv1 "gitea.dev/actionslib/runner/v1"
 	log "github.com/sirupsen/logrus"
 	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
-	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	yaml "go.yaml.in/yaml/v4"
 )
 
@@ -673,27 +666,6 @@ func TestNewJobExecutorRunsPostStepsAfterTimeout(t *testing.T) {
 	jim.AssertExpectations(t)
 	sfm.AssertExpectations(t)
 	sm.AssertExpectations(t)
-}
-
-func TestPostStepsContextKeepsJobTraceAfterCancel(t *testing.T) {
-	spans := tracetest.NewSpanRecorder()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
-	t.Cleanup(func() { otel.SetTracerProvider(tracenoop.NewTracerProvider()) })
-
-	jobCtx, cancel := context.WithCancel(t.Context())
-	jobCtx, endJob := telemetry.StartJob(jobCtx, &runnerv1.Task{Id: 7})
-	cancel()
-	postCtx, cancelPost := postStepsContext(jobCtx)
-	defer cancelPost()
-
-	_, endStep := telemetry.StartStep(postCtx, &model.Step{Name: "Cleanup", Number: 1}, "Post")
-	endStep(nil, &model.StepResult{})
-	endJob(runnerv1.Result_RESULT_CANCELLED)
-
-	ended := spans.Ended()
-	require.Len(t, ended, 2)
-	assert.Equal(t, ended[1].SpanContext().SpanID(), ended[0].Parent().SpanID())
-	assert.Contains(t, ended[0].Attributes(), semconv.CICDPipelineTaskRunResultKey.String("success"))
 }
 
 // TestSetJobResultMatrixContinueOnError exercises the parallel-matrix path

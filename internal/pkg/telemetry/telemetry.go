@@ -10,19 +10,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
+	"github.com/avast/retry-go/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -33,7 +32,6 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
-	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -67,10 +65,6 @@ func Setup(ctx context.Context, uuid, name string) (func(context.Context) error,
 	if err != nil {
 		return noop, err
 	}
-	timeout := 10 * time.Second
-	if ms, err := strconv.Atoi(cmp.Or(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT"), os.Getenv("OTEL_EXPORTER_OTLP_TIMEOUT"))); err == nil {
-		timeout = time.Duration(ms) * time.Millisecond
-	}
 	headers := http.Header{}
 	for _, key := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS"} {
 		for pair := range strings.SplitSeq(os.Getenv(key), ",") {
@@ -80,7 +74,7 @@ func Setup(ctx context.Context, uuid, name string) (func(context.Context) error,
 			}
 		}
 	}
-	exporter, err := otlptrace.New(ctx, &client{endpoint, headers, &http.Client{Timeout: timeout}})
+	exporter, err := otlptrace.New(ctx, &client{endpoint, headers})
 	if err != nil {
 		return noop, err
 	}
@@ -89,11 +83,10 @@ func Setup(ctx context.Context, uuid, name string) (func(context.Context) error,
 	return provider.Shutdown, nil
 }
 
-// client replaces otlptracehttp, which links gRPC and grows the binary by about 7 MB.
+// client replaces otlptracehttp, which links gRPC (+7 MB): https://github.com/open-telemetry/opentelemetry-go/issues/2579
 type client struct {
 	endpoint string
 	headers  http.Header
-	http     *http.Client
 }
 
 func (*client) Start(context.Context) error { return nil }
@@ -101,42 +94,32 @@ func (*client) Start(context.Context) error { return nil }
 func (*client) Stop(context.Context) error { return nil }
 
 func (c *client) UploadTraces(ctx context.Context, spans []*tracepb.ResourceSpans) error {
-	var body []byte
-	for _, resourceSpans := range spans {
-		encoded, err := proto.Marshal(resourceSpans)
-		if err != nil {
-			return err
-		}
-		body = protowire.AppendBytes(protowire.AppendTag(body, 1, protowire.BytesType), encoded)
+	body, err := proto.Marshal(&tracepb.TracesData{ResourceSpans: spans})
+	if err != nil {
+		return err
 	}
-	for attempt := 0; ; attempt++ {
+	return retry.New(retry.Context(ctx), retry.Attempts(5), retry.LastErrorOnly(true)).Do(func() error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 		if err != nil {
-			return err
+			return retry.Unrecoverable(err)
 		}
 		req.Header = c.headers.Clone()
 		req.Header.Set("Content-Type", "application/x-protobuf")
-		resp, err := c.http.Do(req)
-		if err == nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-			if resp.StatusCode < http.StatusMultipleChoices {
-				return nil
-			}
-			err = fmt.Errorf("OTLP export failed: %s", resp.Status)
-			if !slices.Contains([]int{http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout}, resp.StatusCode) {
-				return err
-			}
-		}
-		if attempt == 4 {
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
 			return err
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(rand.N(250 * time.Millisecond << attempt)):
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode < http.StatusMultipleChoices {
+			return nil
 		}
-	}
+		err = fmt.Errorf("OTLP export failed: %s", resp.Status)
+		if slices.Contains([]int{http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout}, resp.StatusCode) {
+			return err
+		}
+		return retry.Unrecoverable(err)
+	})
 }
 
 func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(runnerv1.Result)) {
@@ -168,7 +151,6 @@ func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(r
 	}
 }
 
-// SetJobName names the job span once the workflow is parsed, since the task context carries no job name.
 func SetJobName(ctx context.Context, job string) {
 	if run, ok := ctx.Value(taskRunKey{}).(taskRun); ok {
 		trace.SpanFromContext(ctx).SetName("RUN " + run.pipeline + " " + job)
@@ -176,28 +158,13 @@ func SetJobName(ctx context.Context, job string) {
 }
 
 func AddJobEnv(ctx context.Context, envs map[string]string) {
-	if ctx.Value(taskRunKey{}) == nil {
-		return
-	}
-	add := func(key, value string) {
-		if _, ok := envs[key]; !ok {
-			envs[key] = value
-		}
-	}
-	for _, kv := range os.Environ() {
-		key, value, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(key, "OTEL_") && key != "OTEL_SERVICE_NAME" && !strings.HasSuffix(key, "_HEADERS") { // headers carry the collector's credentials
-			add(key, value)
-		}
-	}
 	carrier := propagation.MapCarrier{}
 	propagation.TraceContext{}.Inject(ctx, carrier)
 	for key, value := range carrier {
-		add(strings.ToUpper(key), value)
+		envs[strings.ToUpper(key)] = value
 	}
 }
 
-// StartStep names spans like Gitea's step list does, prefixing Pre and Post stages.
 func StartStep(ctx context.Context, step *model.Step, stage string) (context.Context, func(error, *model.StepResult)) {
 	parent, ok := ctx.Value(taskRunKey{}).(taskRun)
 	if !ok {

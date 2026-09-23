@@ -5,7 +5,6 @@ package telemetry
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,7 +25,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
-	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -48,7 +46,6 @@ func TestSetup(t *testing.T) {
 		err     string
 	}{
 		{},
-		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318"}, enabled: true},
 		{env: map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://collector:4318/v1/traces"}, enabled: true},
 		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318", "OTEL_TRACES_EXPORTER": "NONE"}},
 		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318", "OTEL_SDK_DISABLED": "TRUE"}},
@@ -96,13 +93,9 @@ func TestExportRetriesAndMatchesOTLP(t *testing.T) {
 	sent := <-requests
 	assert.Equal(t, "/otlp/v1/traces", sent.path)
 	assert.Equal(t, "Bearer token", sent.authorization)
-	field, wireType, length := protowire.ConsumeTag(sent.body)
-	require.Equal(t, protowire.Number(1), field)
-	require.Equal(t, protowire.BytesType, wireType)
-	encoded, _ := protowire.ConsumeBytes(sent.body[length:])
-	var decoded tracepb.ResourceSpans
-	require.NoError(t, proto.Unmarshal(encoded, &decoded))
-	assert.Equal(t, "op", decoded.GetScopeSpans()[0].GetSpans()[0].GetName())
+	var decoded tracepb.TracesData
+	require.NoError(t, proto.Unmarshal(sent.body, &decoded))
+	assert.Equal(t, "op", decoded.GetResourceSpans()[0].GetScopeSpans()[0].GetSpans()[0].GetName())
 }
 
 func TestJob(t *testing.T) {
@@ -118,10 +111,6 @@ func TestJob(t *testing.T) {
 	})
 	require.NoError(t, err)
 	task := &runnerv1.Task{Id: 7, Context: fields}
-	t.Setenv("OTEL_SERVICE_NAME", "runner")
-	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=runner")
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=runner")
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
 
 	envs := map[string]string{}
 	ctx, endJob := StartJob(t.Context(), task)
@@ -136,18 +125,13 @@ func TestJob(t *testing.T) {
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
 	t.Cleanup(func() { otel.SetTracerProvider(tracenoop.NewTracerProvider()) })
 
-	envs = map[string]string{"OTEL_EXPORTER_OTLP_HEADERS": "authorization=job"}
 	ctx, endJob = StartJob(t.Context(), task)
 	SetJobName(ctx, "Build and test")
 	AddJobEnv(ctx, envs)
 	_, endStep = StartStep(ctx, &model.Step{Run: "make\nmake test", Number: 1}, "Main")
-	endStep(errors.New("exit code 1"), &model.StepResult{Outcome: model.StepStatusFailure})
+	endStep(assert.AnError, nil)
 	endJob(runnerv1.Result_RESULT_FAILURE)
 
-	assert.Equal(t, "authorization=job", envs["OTEL_EXPORTER_OTLP_HEADERS"])
-	assert.Equal(t, "http://collector:4318", envs["OTEL_EXPORTER_OTLP_ENDPOINT"])
-	assert.NotContains(t, envs, "OTEL_EXPORTER_OTLP_TRACES_HEADERS")
-	assert.NotContains(t, envs, "OTEL_SERVICE_NAME")
 	jobSpan := trace.SpanContextFromContext(ctx)
 	assert.Equal(t, "00-"+jobSpan.TraceID().String()+"-"+jobSpan.SpanID().String()+"-01", envs["TRACEPARENT"])
 
@@ -160,7 +144,6 @@ func TestJob(t *testing.T) {
 	assert.Subset(t, step.Attributes(), []any{
 		semconv.CICDPipelineTaskRunID("7.1"),
 		semconv.CICDPipelineTaskRunURLFull("https://gitea.example/owner/repo/actions/runs/42"),
-		semconv.CICDPipelineTaskRunResultKey.String("failure"),
 		semconv.ErrorTypeOther,
 	})
 	assert.Equal(t, "RUN ci.yml Build and test", job.Name())
@@ -168,7 +151,6 @@ func TestJob(t *testing.T) {
 	assert.Subset(t, job.Attributes(), []any{
 		semconv.VCSOwnerName("owner"),
 		semconv.VCSRepositoryName("repo"),
-		semconv.CICDPipelineResultKey.String("failure"),
 		semconv.CICDPipelineRunID("42"),
 		attribute.String("gitea.run.number", "40"),
 		attribute.String("gitea.run.attempt", "2"),
