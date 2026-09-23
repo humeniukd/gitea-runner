@@ -1,21 +1,25 @@
+// Copyright 2022 The Gitea Authors. All rights reserved.
+// Copyright 2020 The nektos/act Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package runner
 
 import (
-    "context"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "io"
-    "maps"
-    "os"
-    "path"
-    "path/filepath"
-    "slices"
-    "strings"
-    "time"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"os"
+	"path"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
 
-    "gitea.com/gitea/runner/act/common"
-    "gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/container/hooks"
 )
 
@@ -39,16 +43,16 @@ func (rc *RunContext) buildContainerPrepareHookInput(ctx context.Context) *hooks
 	jobCreds := rc.buildJobContainerCredentials(ctx)
 
 	input.Job.Container = hooks.ContainerJSON{
-		Name:       rc.jobContainerName(),
-		Image:      image,
-		Credentials: jobCreds,
-		Entrypoint: []string{"/bin/sleep", fmt.Sprint(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds())},
-		WorkingDir: ext.ToContainerPath(rc.Config.Workdir),
-		Env:        envMap,
-		Privileged: rc.Config.Privileged,
-		UsernsMode: rc.Config.UsernsMode,
-		Platform:   rc.Config.ContainerArchitecture,
-		Options:    rc.options(ctx),
+		Name:           rc.jobContainerName(),
+		Image:          image,
+		Credentials:    jobCreds,
+		Entrypoint:     []string{"/bin/sleep", fmt.Sprint(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds())},
+		WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
+		Env:            envMap,
+		Privileged:     rc.Config.Privileged,
+		UsernsMode:     rc.Config.UsernsMode,
+		Platform:       rc.Config.ContainerArchitecture,
+		Options:        rc.options(ctx),
 		NetworkAliases: []string{rc.Name},
 	}
 
@@ -144,8 +148,8 @@ func (rc *RunContext) buildContainerPrepareHookInput(ctx context.Context) *hooks
 }
 
 func (rc *RunContext) buildContainerExecuteHookCommandInput(
-	cmd []string, 
-	env map[string]string, 
+	cmd []string,
+	env map[string]string,
 	workdir string,
 ) *hooks.ExecuteHookInput {
 	if workdir == "" {
@@ -171,8 +175,8 @@ func (rc *RunContext) buildContainerExecuteHookCommandInput(
 }
 
 func (rc *RunContext) buildContainerExecuteHookScriptInput(
-	script string, 
-	env map[string]string, 
+	script string,
+	env map[string]string,
 	workdir string,
 ) *hooks.ExecuteHookInput {
 	if workdir == "" {
@@ -207,8 +211,8 @@ func (rc *RunContext) buildContainerExecuteHookStepInput(
 // refers to them via $env. envPrefix is the common prefix for the generated
 // environment variable names, without the trailing USERNAME/PASSWORD.
 func (rc *RunContext) buildContainerHookCredentials(
-	ctx context.Context, 
-	creds map[string]string, 
+	ctx context.Context,
+	creds map[string]string,
 	envPrefix string,
 ) *hooks.CredentialsJSON {
 	if len(creds) != 2 {
@@ -246,8 +250,8 @@ func (rc *RunContext) buildJobContainerCredentials(ctx context.Context) *hooks.C
 }
 
 func (rc *RunContext) buildServiceCredentials(
-	ctx context.Context, 
-	serviceID string, 
+	ctx context.Context,
+	serviceID string,
 	creds map[string]string,
 ) *hooks.CredentialsJSON {
 	prefix := fmt.Sprintf("RUNNER_CONTAINER_HOOK_SECRET_JOB_SERVICES_%s_CREDENTIALS_",
@@ -261,14 +265,14 @@ func (rc *RunContext) getContainerHookEnvironments(event string) []string {
 	maps.Copy(envMap, rc.containerHooks.Vars)
 	maps.Copy(envMap, rc.containerHooks.Secrets)
 
-	envMap["RUNNER_CONTAINER_HOOK_ID"]            = rc.jobContainerID
-	envMap["RUNNER_CONTAINER_HOOK_INPUT_FILE"]    = hooks.GetContainerHookInputFile(event, rc.containerHooks.StateDir)
-	envMap["RUNNER_CONTAINER_HOOK_JOB_NAME"]      = rc.JobName
-	envMap["RUNNER_CONTAINER_HOOK_LOG_LEVEL"]     = rc.getContainerHookLogLevel()
-	envMap["RUNNER_CONTAINER_HOOK_NAME"]          = rc.jobContainerName()
+	envMap["RUNNER_CONTAINER_HOOK_ID"] = rc.jobContainerID
+	envMap["RUNNER_CONTAINER_HOOK_INPUT_FILE"] = hooks.GetContainerHookInputFile(event, rc.containerHooks.StateDir)
+	envMap["RUNNER_CONTAINER_HOOK_JOB_NAME"] = rc.JobName
+	envMap["RUNNER_CONTAINER_HOOK_LOG_LEVEL"] = rc.getContainerHookLogLevel()
+	envMap["RUNNER_CONTAINER_HOOK_NAME"] = rc.jobContainerName()
 	envMap["RUNNER_CONTAINER_HOOK_RESPONSE_FILE"] = hooks.GetContainerHookResponseFile(event, rc.containerHooks.StateDir)
-	envMap["RUNNER_CONTAINER_HOOK_STATE_DIR"]     = rc.containerHooks.StateDir
-	envMap["RUNNER_CONTAINER_HOOK_TYPE"]          = event
+	envMap["RUNNER_CONTAINER_HOOK_STATE_DIR"] = rc.containerHooks.StateDir
+	envMap["RUNNER_CONTAINER_HOOK_TYPE"] = event
 	envMap["RUNNER_CONTAINER_HOOK_WORKFLOW_NAME"] = rc.Run.Workflow.Name
 
 	result := make([]string, 0, len(envMap))
@@ -280,27 +284,27 @@ func (rc *RunContext) getContainerHookEnvironments(event string) []string {
 }
 
 func (rc *RunContext) getContainerHookLogLevel() string {
-    if rc.Config.JobLoggerLevel != nil {
-        return rc.Config.JobLoggerLevel.String()
-    }
-    if rc.Config.RunnerDebug() {
-        return "debug"
-    }
-    return "info"
+	if rc.Config.JobLoggerLevel != nil {
+		return rc.Config.JobLoggerLevel.String()
+	}
+	if rc.Config.RunnerDebug() {
+		return "debug"
+	}
+	return "info"
 }
 
 // getContainerHookLogWriter wraps the hook's output in the same log format used
 // by regular steps, so it shows up in the job UI alongside everything else.
 func (rc *RunContext) getContainerHookLogWriter(ctx context.Context) io.Writer {
-    logger := common.Logger(ctx)
-    rawLogger := logger.WithField(rawOutputField, true)
-    return common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
-        rawLogger.Infof("%s", s)
-        return true
-    })
+	logger := common.Logger(ctx)
+	rawLogger := logger.WithField(rawOutputField, true)
+	return common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
+		rawLogger.Infof("%s", s)
+		return true
+	})
 }
 
-func (rc *RunContext) readContainerPrepareHookResponse(ctx context.Context) error {
+func (rc *RunContext) readContainerPrepareHookResponse() error {
 	path := hooks.GetContainerHookResponseFile("prepare", rc.containerHooks.StateDir)
 	resp, err := hooks.ReadContainerHookResponse[hooks.PrepareHookResponse]("prepare", path)
 	if err != nil {
@@ -326,7 +330,7 @@ func (rc *RunContext) readContainerPrepareHookResponse(ctx context.Context) erro
 	return nil
 }
 
-func (rc *RunContext) readContainerExecuteHookResponse(ctx context.Context, hookErr error) error {
+func (rc *RunContext) readContainerExecuteHookResponse(hookErr error) error {
 	path := hooks.GetContainerHookResponseFile("execute", rc.containerHooks.StateDir)
 	resp, readErr := hooks.ReadContainerHookResponse[hooks.ExecuteHookResponse]("execute", path)
 	if readErr != nil {
@@ -358,11 +362,11 @@ func (rc *RunContext) runContainerPrepareHook(ctx context.Context) error {
 		return fmt.Errorf("container hook prepare failed: %w", err)
 	}
 
-	return rc.readContainerPrepareHookResponse(ctx)
+	return rc.readContainerPrepareHookResponse()
 }
 
 func (rc *RunContext) runContainerExecuteHook(
-	ctx context.Context, 
+	ctx context.Context,
 	input *hooks.ExecuteHookInput,
 ) error {
 	if !rc.containerHooks.Enabled {
@@ -379,7 +383,7 @@ func (rc *RunContext) runContainerExecuteHook(
 	env := rc.getContainerHookEnvironments("execute")
 	hookErr := hooks.RunContainerHook(ctx, rc.Config.ContainerHooks, "execute", env, rc.getContainerHookLogWriter(ctx))
 
-	return rc.readContainerExecuteHookResponse(ctx, hookErr)
+	return rc.readContainerExecuteHookResponse(hookErr)
 }
 
 func (rc *RunContext) runContainerCleanupHook(ctx context.Context) error {
@@ -397,9 +401,8 @@ func (rc *RunContext) runContainerCleanupHook(ctx context.Context) error {
 }
 
 func (rc *RunContext) runScriptStepInContainerHook(
-	ctx context.Context, 
-	script string, 
-	env map[string]string, 
+	script string,
+	env map[string]string,
 	workdir string,
 ) common.Executor {
 	return func(ctx context.Context) error {
@@ -446,7 +449,7 @@ func (rc *RunContext) parseFileCommandsFromContainerHook(ctx context.Context) er
 				return err
 			}
 		case "pathcmd.txt":
-			for _, line := range strings.Split(content, "\n") {
+			for line := range strings.SplitSeq(content, "\n") {
 				if line != "" {
 					rc.addPath(ctx, line)
 				}

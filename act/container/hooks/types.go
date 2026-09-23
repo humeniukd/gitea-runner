@@ -1,15 +1,19 @@
+// Copyright 2022 The Gitea Authors. All rights reserved.
+// Copyright 2020 The nektos/act Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package hooks
 
 // Config configures the container-hooks mode. When Enabled is true, the runner
-// stops calling the Docker API for job container operations and instead 
+// stops calling the Docker API for job container operations and instead
 // invokes Cmd (optionally through Entrypoint) for every hook event.
 type Config struct {
-    Enabled    bool   `yaml:"enabled"`    // Enabled turns container-hooks mode on. When false, the runner uses the built-in Docker backend and ignores Entrypoint and Cmd.
-    Entrypoint string `yaml:"entrypoint"` // Entrypoint is an optional interpreter used to launch Cmd (for example, "/bin/sh" on Linux or "cmd.exe" on Windows). Empty means Cmd is executed directly.
-    Cmd        string `yaml:"cmd"`        // Cmd is the path to the single hook entrypoint the runner invokes for every hook event.
+	Enabled    bool   `yaml:"enabled"`    // Enabled turns container-hooks mode on. When false, the runner uses the built-in Docker backend and ignores Entrypoint and Cmd.
+	Entrypoint string `yaml:"entrypoint"` // Entrypoint is an optional interpreter used to launch Cmd (for example, "/bin/sh" on Linux or "cmd.exe" on Windows). Empty means Cmd is executed directly.
+	Cmd        string `yaml:"cmd"`        // Cmd is the path to the single hook entrypoint the runner invokes for every hook event.
 }
 
-// ExecuteHookInput is what the runner passes to the execute hook before 
+// ExecuteHookInput is what the runner passes to the execute hook before
 // running a step. It is written to <state_dir>/execute-input.json.
 type ExecuteHookInput struct {
 	// Kind selects what to run: "script" (a run: step), "command" (an action or
@@ -55,12 +59,12 @@ type PrepareHookInputRunner struct {
 // PrepareHookResponse is the shape of the response file written by the prepare
 // hook. The runner reads it back from <state_dir>/prepare.json.
 type PrepareHookResponse struct {
-    ID           string            `json:"id"`
-    Environments map[string]string `json:"environments"`
+	ID           string            `json:"id"`
+	Environments map[string]string `json:"environments"`
 }
 
 // ContainerStepSpec describes a step that runs in its own container
-// (uses: docker://...). Collected via prepareContainerStep() before 
+// (uses: docker://...). Collected via prepareContainerStep() before
 // execution starts and passed to the prepare hook inside prepare-input.json.
 type ContainerStepSpec struct {
 	StepNumber  int
@@ -87,18 +91,18 @@ type EnvRef struct {
 // ContainerJSON describes a single container (the job container or a container
 // step declared with uses: docker://...).
 type ContainerJSON struct {
-	Name           string             `json:"name"`
-	Image          string             `json:"image"`
-	Credentials    *CredentialsJSON   `json:"credentials,omitempty"`
-	Entrypoint     []string           `json:"entrypoint,omitempty"`
-	Cmd            []string           `json:"cmd,omitempty"`
-	WorkingDir     string             `json:"workingDir,omitempty"`
-	Env            map[string]string  `json:"env,omitempty"`
-	Privileged     bool               `json:"privileged,omitempty"`
-	UsernsMode     string             `json:"usernsMode,omitempty"`
-	Platform       string             `json:"platform,omitempty"`
-	Options        string             `json:"options,omitempty"`
-	NetworkAliases []string           `json:"networkAliases,omitempty"`
+	Name           string            `json:"name"`
+	Image          string            `json:"image"`
+	Credentials    *CredentialsJSON  `json:"credentials,omitempty"`
+	Entrypoint     []string          `json:"entrypoint,omitempty"`
+	Cmd            []string          `json:"cmd,omitempty"`
+	WorkingDir     string            `json:"workingDir,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	Privileged     bool              `json:"privileged,omitempty"`
+	UsernsMode     string            `json:"usernsMode,omitempty"`
+	Platform       string            `json:"platform,omitempty"`
+	Options        string            `json:"options,omitempty"`
+	NetworkAliases []string          `json:"networkAliases,omitempty"`
 }
 
 type CredentialsJSON struct {
@@ -112,8 +116,8 @@ type MountsJSON struct {
 }
 
 type NetworkJSON struct {
-	Name             string `json:"name"`
-	CreateAndDelete  bool   `json:"createAndDelete"`
+	Name            string `json:"name"`
+	CreateAndDelete bool   `json:"createAndDelete"`
 }
 
 // RunnerJSON carries runner-side paths and flags the hook may need to reproduce
@@ -133,15 +137,15 @@ type RunnerJSON struct {
 
 // ServiceJSON describes a service container.
 type ServiceJSON struct {
-	Name           string             `json:"name"`
-	Image          string             `json:"image"`
-	Credentials    *CredentialsJSON   `json:"credentials,omitempty"`
-	Cmd            []string           `json:"cmd,omitempty"`
-	WorkingDir     string             `json:"workingDir,omitempty"`
-	Env            map[string]string  `json:"env,omitempty"`
-	Ports          []string           `json:"ports,omitempty"`
-	Options        string             `json:"options,omitempty"`
-	NetworkAliases []string           `json:"networkAliases,omitempty"`
+	Name           string            `json:"name"`
+	Image          string            `json:"image"`
+	Credentials    *CredentialsJSON  `json:"credentials,omitempty"`
+	Cmd            []string          `json:"cmd,omitempty"`
+	WorkingDir     string            `json:"workingDir,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	Ports          []string          `json:"ports,omitempty"`
+	Options        string            `json:"options,omitempty"`
+	NetworkAliases []string          `json:"networkAliases,omitempty"`
 }
 
 // StepJSON describes a step that runs in its own container (uses: docker://...).

@@ -374,7 +374,7 @@ func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, mat
 		Matrix:      matrix,
 		caller:      runner.caller,
 		containerHooks: &containerHooks{
-        	StepSpecs: make(map[int]*hooks.ContainerStepSpec),
+			StepSpecs: make(map[int]*hooks.ContainerStepSpec),
 		},
 	}
 	rc.ExprEval = rc.NewExpressionEvaluator(ctx)

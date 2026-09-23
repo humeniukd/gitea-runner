@@ -43,9 +43,9 @@ func (rc *RunContext) runJobHook(ctx context.Context, hookPath, name string) err
 	}
 	if rc.containerHooks.Enabled {
 		// TODO: implement required
-        common.Logger(ctx).Warnf("Job hook %q skipped in custom container mode", hookPath)
-        return nil
-    }
+		common.Logger(ctx).Warnf("Job hook %q skipped in custom container mode", hookPath)
+		return nil
+	}
 
 	cmd, shell := hookCommand(hookPath)
 	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)

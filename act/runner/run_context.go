@@ -102,33 +102,33 @@ type RunContext struct {
 
 // container-hooks state.
 type containerHooks struct {
-	// Enabled is true when the job runs in container-hooks mode: the runner 
-	// delegates all container lifecycle operations to an external entrypoint 
+	// Enabled is true when the job runs in container-hooks mode: the runner
+	// delegates all container lifecycle operations to an external entrypoint
 	// instead of calling the Docker API. Set once in startJobContainer.
 	Enabled bool
-	// StateDir is the per-job directory where the runner and the hooks 
+	// StateDir is the per-job directory where the runner and the hooks
 	// exchange JSON files (input and response). Created before the first
 	// hook call, removed after cleanup.
 	StateDir string
-	// Vars holds extra environment variables returned by the prepare hook. 
-	// They are merged into the environment of every subsequent hook call 
+	// Vars holds extra environment variables returned by the prepare hook.
+	// They are merged into the environment of every subsequent hook call
 	// (execute, cleanup), but not into the job's step environment.
 	Vars map[string]string
-	// Secrets holds registry credentials (username/password) for the job 
+	// Secrets holds registry credentials (username/password) for the job
 	// container and service containers. Real values live only here and
 	// in the hook's process environment; the JSON passed to the hook carries
 	// $env references by name, never the values themselves.
 	Secrets map[string]string
-	// StepFileCmds lists the per-step file-command paths the runner expects 
+	// StepFileCmds lists the per-step file-command paths the runner expects
 	// the execute hook to create before the command runs and read back
 	// afterwards (GITHUB_OUTPUT, GITHUB_STATE, GITHUB_ENV, GITHUB_PATH, step
 	// summary). Set by runStepExecutor before the hook call.
 	StepFileCmds []string
-	// StepFileCmdContents holds the contents of those files as returned by 
+	// StepFileCmdContents holds the contents of those files as returned by
 	// the execute hook in execute.json.
 	StepFileCmdContents map[string]string
-	// StepSpecs describes every container-backed step (uses: docker://...), 
-	// collected before the prepare hook runs so the hook can create all 
+	// StepSpecs describes every container-backed step (uses: docker://...),
+	// collected before the prepare hook runs so the hook can create all
 	// required containers up front. Keyed by step number.
 	StepSpecs map[int]*hooks.ContainerStepSpec
 }
@@ -616,9 +616,9 @@ func (rc *RunContext) startJobContainer() common.Executor {
 
 		if rc.Config.ContainerHooks.Enabled {
 			rc.containerHooks.Enabled = true
-			
+
 			if rc.Config.ContainerHooks.Cmd == "" {
-				return fmt.Errorf("container hooks enabled but no cmd configured")
+				return errors.New("container hooks enabled but no cmd configured")
 			}
 
 			stateDir, err := os.MkdirTemp("", "gitea-runner-container-hooks-")
@@ -626,8 +626,8 @@ func (rc *RunContext) startJobContainer() common.Executor {
 				return fmt.Errorf("failed to create hook state dir: %w", err)
 			}
 			rc.containerHooks.StateDir = stateDir
-			
-    		_ = rc.GetEnv()
+
+			_ = rc.GetEnv()
 			// In the Docker backend, RUNNER_* variables go into the job container's
 			// env list. In container-hooks mode there is no container the runner
 			// owns, so we place them in rc.Env instead, where they are picked up by
@@ -677,14 +677,14 @@ func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNet
 
 		var errs []error
 
-        if rc.containerHooks.Enabled {
+		if rc.containerHooks.Enabled {
 			// cleanup hook
 			if err := rc.runContainerCleanupHook(ctx); err != nil {
 				logger.Errorf("container hook cleanup failed: %v", err)
 				errs = append(errs, err)
 			}
 			return errors.Join(errs...)
-        }
+		}
 		if removeJobContainer {
 			errs = append(errs, rc.JobContainer.Remove()(ctx))
 		}

@@ -49,9 +49,9 @@ func (sr *stepRun) main() common.Executor {
 			rc.ApplyExtraPath(ctx, &sr.env)
 			sr.printRunScriptActionDetails(ctx)
 			// Use container-hooks
-            if rc.containerHooks.Enabled {
-                return rc.runScriptStepInContainerHook(ctx, sr.interpolatedScript, sr.env, sr.WorkingDirectory)(ctx)
-            }
+			if rc.containerHooks.Enabled {
+				return rc.runScriptStepInContainerHook(sr.interpolatedScript, sr.env, sr.WorkingDirectory)(ctx)
+			}
 			if he, ok := rc.JobContainer.(*container.HostEnvironment); ok && he != nil {
 				return he.ExecWithCmdLine(sr.cmd, sr.cmdline, sr.env, "", sr.WorkingDirectory)(ctx)
 			}

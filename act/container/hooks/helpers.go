@@ -1,23 +1,27 @@
+// Copyright 2022 The Gitea Authors. All rights reserved.
+// Copyright 2020 The nektos/act Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package hooks
 
 import (
-    "context"
+	"context"
 	"encoding/json"
-    "fmt"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-    "strings"
+	"strings"
 
-    "gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/container"
 )
 
-func GetContainerHookInputFile(event string, stateDir string) string {
+func GetContainerHookInputFile(event, stateDir string) string {
 	return filepath.Join(stateDir, event+"-input.json")
 }
 
-func GetContainerHookResponseFile(event string, stateDir string) string {
+func GetContainerHookResponseFile(event, stateDir string) string {
 	return filepath.Join(stateDir, event+".json")
 }
 
@@ -39,9 +43,6 @@ func ParseEnvFileContent(
 func ReadContainerHookResponse[T any](event, path string) (*T, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("container hook %s: read %s: %w", event, path, err)
 	}
 	var resp T
@@ -55,26 +56,26 @@ func ReadContainerHookResponse[T any](event, path string) (*T, error) {
 // and streams its stdout and stderr into logWriter. When hooks are disabled or
 // Cmd is empty, it is a no-op. The hook's exit code is returned as an error.
 func RunContainerHook(
-	ctx context.Context, 
-	cfg Config, 
-	event string, 
-	env []string, 
+	ctx context.Context,
+	cfg Config,
+	event string,
+	env []string,
 	logWriter io.Writer,
 ) error {
-    if !cfg.Enabled || cfg.Cmd == "" {
-        return nil
-    }
-    var cmd *exec.Cmd
-    if cfg.Entrypoint != "" {
-        cmd = exec.CommandContext(ctx, cfg.Entrypoint, cfg.Cmd)
-    } else {
-        cmd = exec.CommandContext(ctx, cfg.Cmd)
-    }
-    cmd.Env = append(os.Environ(), env...)
-    cmd.Stdout = logWriter
-    cmd.Stderr = logWriter
-    if err := cmd.Run(); err != nil {
-        return fmt.Errorf("container hook %s failed: %w", event, err)
-    }
-    return nil
+	if !cfg.Enabled || cfg.Cmd == "" {
+		return nil
+	}
+	var cmd *exec.Cmd
+	if cfg.Entrypoint != "" {
+		cmd = exec.CommandContext(ctx, cfg.Entrypoint, cfg.Cmd)
+	} else {
+		cmd = exec.CommandContext(ctx, cfg.Cmd)
+	}
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stdout = logWriter
+	cmd.Stderr = logWriter
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("container hook %s failed: %w", event, err)
+	}
+	return nil
 }

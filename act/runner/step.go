@@ -37,7 +37,7 @@ type step interface {
 // (e.g., uses: docker://...). It returns a declarative description
 // without performing any actions. Used to collect prepare-input.json.
 type stepPreparer interface {
-    prepareContainerStep() (*hooks.ContainerStepSpec, error)
+	prepareContainerStep() (*hooks.ContainerStepSpec, error)
 }
 
 type stepStage int
@@ -182,7 +182,6 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		} else {
 			_ = rc.JobContainer.Copy(actPath, files...)(ctx)
 		}
-
 
 		// The command handler needs the step's env to judge ACTIONS_ALLOW_UNSECURE_COMMANDS.
 		// Cloned: the step executor keeps writing to its own env map after this point, on a
