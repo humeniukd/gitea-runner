@@ -22,7 +22,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
@@ -556,8 +555,8 @@ func TestRunStepExecutorParity(t *testing.T) {
 
 	t.Run("stages and composite steps are traced under Gitea's step names", func(t *testing.T) {
 		spans := tracetest.NewSpanRecorder()
-		otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
-		t.Cleanup(func() { otel.SetTracerProvider(tracenoop.NewTracerProvider()) })
+		telemetry.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+		t.Cleanup(func() { telemetry.SetTracerProvider(tracenoop.NewTracerProvider()) })
 		ctx, _ := telemetry.StartJob(t.Context(), &runnerv1.Task{Id: 7})
 		outer := newStep(t, &model.Step{ID: "outer", Uses: "actions/cache@v4", Number: 3})
 		child := newStep(t, &model.Step{ID: "child", Name: "Restore", Number: 1})

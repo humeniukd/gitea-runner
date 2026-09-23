@@ -16,7 +16,6 @@ import (
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -30,7 +29,7 @@ import (
 )
 
 func setEnv(t *testing.T, env map[string]string) {
-	t.Cleanup(func() { otel.SetTracerProvider(tracenoop.NewTracerProvider()) })
+	t.Cleanup(func() { SetTracerProvider(tracenoop.NewTracerProvider()) })
 	for _, key := range []string{
 		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
@@ -59,8 +58,8 @@ func TestSetup(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			_, enabled := otel.GetTracerProvider().(*sdktrace.TracerProvider)
-			assert.Equal(t, tc.enabled, enabled)
+			_, disabled := tracer.(tracenoop.Tracer)
+			assert.Equal(t, tc.enabled, !disabled)
 			require.NoError(t, shutdown(t.Context()))
 		})
 	}
@@ -84,7 +83,7 @@ func TestExportRetriesAndMatchesOTLP(t *testing.T) {
 
 	shutdown, err := Setup(t.Context(), "uuid", "runner")
 	require.NoError(t, err)
-	_, span := otel.Tracer("test").Start(t.Context(), "op")
+	_, span := tracer.Start(t.Context(), "op")
 	span.End()
 	require.NoError(t, shutdown(t.Context()))
 
@@ -122,13 +121,15 @@ func TestJob(t *testing.T) {
 	assert.Empty(t, envs)
 
 	spans := tracetest.NewSpanRecorder()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
-	t.Cleanup(func() { otel.SetTracerProvider(tracenoop.NewTracerProvider()) })
+	SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+	t.Cleanup(func() { SetTracerProvider(tracenoop.NewTracerProvider()) })
 
 	ctx, endJob = StartJob(t.Context(), task)
 	SetJobName(ctx, "Build and test")
 	AddJobEnv(ctx, envs)
-	_, endStep = StartStep(ctx, &model.Step{Run: "make\nmake test", Number: 1}, "Main")
+	stepCtx, endStep = StartStep(ctx, &model.Step{Run: "make\nmake test", Number: 1}, "Main")
+	assert.False(t, trace.SpanFromContext(ctx).IsRecording())
+	assert.False(t, trace.SpanFromContext(stepCtx).IsRecording())
 	endStep(assert.AnError, nil)
 	endJob(runnerv1.Result_RESULT_FAILURE)
 

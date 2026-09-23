@@ -22,7 +22,6 @@ import (
 	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	"github.com/avast/retry-go/v5"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -31,6 +30,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -41,6 +41,14 @@ type taskRunKey struct{}
 
 type taskRun struct {
 	id, url, pipeline string
+	span              trace.Span
+}
+
+// tracer stays off the global provider and ctx carries only span contexts, so the Docker client's otelhttp records nothing.
+var tracer trace.Tracer = tracenoop.Tracer{}
+
+func SetTracerProvider(provider trace.TracerProvider) {
+	tracer = provider.Tracer(scope)
 }
 
 func Setup(ctx context.Context, uuid, name string) (func(context.Context) error, error) {
@@ -79,7 +87,7 @@ func Setup(ctx context.Context, uuid, name string) (func(context.Context) error,
 		return noop, err
 	}
 	provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter), sdktrace.WithResource(res))
-	otel.SetTracerProvider(provider)
+	SetTracerProvider(provider)
 	return provider.Shutdown, nil
 }
 
@@ -127,7 +135,7 @@ func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(r
 	pipeline, owner, repo := field("workflow"), field("repository_owner"), field("repository")
 	repoURL := strings.TrimSuffix(field("server_url"), "/") + "/" + repo
 	runURL := repoURL + "/actions/runs/" + field("run_id")
-	spanCtx, span := otel.Tracer(scope).Start(ctx, "RUN "+pipeline, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(
+	_, span := tracer.Start(ctx, "RUN "+pipeline, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(
 		semconv.CICDPipelineName(pipeline),
 		semconv.CICDPipelineActionNameRun,
 		semconv.CICDPipelineRunID(field("run_id")),
@@ -145,7 +153,7 @@ func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(r
 	if !span.SpanContext().IsValid() {
 		return ctx, func(runnerv1.Result) {}
 	}
-	ctx = context.WithValue(spanCtx, taskRunKey{}, taskRun{strconv.FormatInt(task.Id, 10), runURL, pipeline})
+	ctx = context.WithValue(trace.ContextWithSpanContext(ctx, span.SpanContext()), taskRunKey{}, taskRun{strconv.FormatInt(task.Id, 10), runURL, pipeline, span})
 	return ctx, func(result runnerv1.Result) {
 		end(span, semconv.CICDPipelineResultKey, jobResult(ctx, result))
 	}
@@ -153,7 +161,7 @@ func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(r
 
 func SetJobName(ctx context.Context, job string) {
 	if run, ok := ctx.Value(taskRunKey{}).(taskRun); ok {
-		trace.SpanFromContext(ctx).SetName("RUN " + run.pipeline + " " + job)
+		run.span.SetName("RUN " + run.pipeline + " " + job)
 	}
 }
 
@@ -178,12 +186,13 @@ func StartStep(ctx context.Context, step *model.Step, stage string) (context.Con
 	if stage != "Main" {
 		name, id = stage+" "+name, id+"."+strings.ToLower(stage)
 	}
-	ctx, span := otel.Tracer(scope).Start(ctx, name, trace.WithAttributes(
+	_, span := tracer.Start(ctx, name, trace.WithAttributes(
 		semconv.CICDPipelineTaskName(name),
 		semconv.CICDPipelineTaskRunID(id),
 		semconv.CICDPipelineTaskRunURLFull(parent.url),
 	))
-	return context.WithValue(ctx, taskRunKey{}, taskRun{id, parent.url, parent.pipeline}), func(err error, result *model.StepResult) {
+	ctx = context.WithValue(trace.ContextWithSpanContext(ctx, span.SpanContext()), taskRunKey{}, taskRun{id, parent.url, parent.pipeline, span})
+	return ctx, func(err error, result *model.StepResult) {
 		end(span, semconv.CICDPipelineTaskRunResultKey, stepResult(ctx, err, result))
 	}
 }
