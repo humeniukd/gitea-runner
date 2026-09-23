@@ -82,11 +82,7 @@ func Setup(ctx context.Context, uuid, name string) (func(context.Context) error,
 			}
 		}
 	}
-	exporter, err := otlptrace.New(ctx, &client{endpoint, headers})
-	if err != nil {
-		return noop, err
-	}
-	provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter), sdktrace.WithResource(res))
+	provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(otlptrace.NewUnstarted(&client{endpoint, headers})), sdktrace.WithResource(res))
 	SetTracerProvider(provider)
 	return provider.Shutdown, nil
 }
@@ -96,6 +92,9 @@ type client struct {
 	endpoint string
 	headers  http.Header
 }
+
+// exportClient refuses redirects, which would carry the collector's header credentials to another host.
+var exportClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 func (*client) Start(context.Context) error { return nil }
 
@@ -113,7 +112,7 @@ func (c *client) UploadTraces(ctx context.Context, spans []*tracepb.ResourceSpan
 		}
 		req.Header = c.headers.Clone()
 		req.Header.Set("Content-Type", "application/x-protobuf")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := exportClient.Do(req)
 		if err != nil {
 			return err
 		}

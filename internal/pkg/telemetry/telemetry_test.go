@@ -66,15 +66,13 @@ func TestSetup(t *testing.T) {
 }
 
 func TestExportRetriesAndMatchesOTLP(t *testing.T) {
-	type request struct {
-		path, authorization string
-		body                []byte
-	}
-	requests := make(chan request, 2)
+	bodies := make(chan []byte, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/otlp/v1/traces", r.URL.Path)
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
 		body, _ := io.ReadAll(r.Body)
-		requests <- request{r.URL.Path, r.Header.Get("Authorization"), body}
-		if len(requests) == 1 {
+		bodies <- body
+		if len(bodies) == 1 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 	}))
@@ -87,14 +85,19 @@ func TestExportRetriesAndMatchesOTLP(t *testing.T) {
 	span.End()
 	require.NoError(t, shutdown(t.Context()))
 
-	require.Len(t, requests, 2)
-	<-requests
-	sent := <-requests
-	assert.Equal(t, "/otlp/v1/traces", sent.path)
-	assert.Equal(t, "Bearer token", sent.authorization)
+	require.Len(t, bodies, 2)
+	<-bodies
 	var decoded tracepb.TracesData
-	require.NoError(t, proto.Unmarshal(sent.body, &decoded))
+	require.NoError(t, proto.Unmarshal(<-bodies, &decoded))
 	assert.Equal(t, "op", decoded.GetResourceSpans()[0].GetScopeSpans()[0].GetSpans()[0].GetName())
+}
+
+func TestExportRefusesRedirects(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("redirect followed") }))
+	defer target.Close()
+	origin := httptest.NewServer(http.RedirectHandler(target.URL, http.StatusTemporaryRedirect))
+	defer origin.Close()
+	require.EqualError(t, (&client{origin.URL, http.Header{}}).UploadTraces(t.Context(), nil), "OTLP export failed: 307 Temporary Redirect")
 }
 
 func TestJob(t *testing.T) {
