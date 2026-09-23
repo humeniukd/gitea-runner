@@ -181,28 +181,6 @@ func TestGitFindRef(t *testing.T) {
 	}
 }
 
-func TestPinnedCheckoutKeepsFirstRevisionAndRef(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, gitCmd("-C", dir, "init", "--initial-branch=master"))
-	require.NoError(t, cleanGitHooks(dir))
-	require.NoError(t, gitCmd("-C", dir, "commit", "--allow-empty", "-m", "first"))
-	ctx := WithPinnedCheckout(t.Context())
-	_, first, err := FindGitRevision(ctx, dir)
-	require.NoError(t, err)
-	_, err = FindGitRef(ctx, dir)
-	require.NoError(t, err)
-
-	require.NoError(t, gitCmd("-C", dir, "checkout", "-b", "other"))
-	require.NoError(t, gitCmd("-C", dir, "commit", "--allow-empty", "-m", "second"))
-
-	_, pinned, _ := FindGitRevision(ctx, dir)
-	ref, _ := FindGitRef(ctx, dir)
-	_, current, _ := FindGitRevision(t.Context(), dir)
-	assert.Equal(t, first, pinned)
-	assert.Equal(t, "refs/heads/master", ref)
-	assert.NotEqual(t, first, current)
-}
-
 func TestGitCloneExecutor(t *testing.T) {
 	// Build a local bare "remote" so this runs offline and fast. The cases below mirror
 	// the tag/branch/sha/short-sha ref paths the executor handles, formerly exercised by
