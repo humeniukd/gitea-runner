@@ -68,18 +68,14 @@ type PrepareHookResponse struct {
 // (uses: docker://...). Collected via prepareContainerStep() before
 // execution starts and passed to the prepare hook inside prepare-input.json.
 type ContainerStepSpec struct {
-	StepNumber  int
-	StepID      string
-	StepName    string
-	Image       string
-	Entrypoint  []string
-	Args        []string
-	WorkingDir  string
-	Env         map[string]string
-	Credentials *struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
+	StepNumber int
+	StepID     string
+	StepName   string
+	Image      string
+	Entrypoint []string
+	Args       []string
+	WorkingDir string
+	Env        map[string]string
 }
 
 // EnvRef is a reference to an environment variable inside JSON. Instead of a
