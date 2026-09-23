@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	maps0 "maps"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -67,6 +68,7 @@ type RunContext struct {
 	actionInputs        map[string]any // inputs of the composite action this runs, nil for a job
 	Masks               []string
 	cleanUpJobContainer common.Executor
+	deferVolumeCleanup  func(common.Executor)
 	caller              *caller           // job calling this RunContext (reusable workflows)
 	workflowCallInputs  map[string]any    // the caller's with:, resolved once by resolveWorkflowCall
 	workflowCallSecrets map[string]string // the caller's secrets:, resolved once by resolveWorkflowCall
@@ -97,6 +99,7 @@ type RunContext struct {
 	hasBash        *bool // memoized implicit-shell probe, only set on the top-level RunContext
 	jobNetworkName string
 	dockerProxy    *container.DockerProxy
+	hadDockerProxy bool
 	// stepEnv is a copy of the running step's environment, so that workflow commands parsed out
 	// of the container's output can be judged against it. Written by runStepExecutor and read on
 	// the log-writer goroutine, hence unsecureCommandMu, which also guards unsecureCommandErr.
@@ -252,7 +255,7 @@ func (rc *RunContext) validVolumes() []string {
 		volumes = append(volumes, sharedToolCacheVolume)
 	}
 	if rc.Config.BindWorkdir {
-		volumes = append(volumes, rc.Config.Workdir)
+		volumes = append(volumes, rc.Config.Workdir, rc.workdirMountRoot())
 	}
 	if rc.dockerProxy != nil {
 		volumes = append(volumes, rc.dockerProxy.Socket)
@@ -260,6 +263,13 @@ func (rc *RunContext) validVolumes() []string {
 	// TODO: add a new configuration to control whether the docker daemon can be mounted
 	return append(volumes, name, name+"-env",
 		getDockerDaemonSocketMountPath(rc.containerDaemonSocket()))
+}
+
+func (rc *RunContext) workdirMountRoot() string {
+	if rc.Config.PresetGitHubContext != nil {
+		return filepath.Dir(filepath.Dir(rc.Config.Workdir)) // only the daemon presets, its workdir is <parent>/<owner>/<repo>
+	}
+	return rc.Config.Workdir
 }
 
 func (rc *RunContext) jobDockerSocket() string {
@@ -270,20 +280,10 @@ func (rc *RunContext) jobDockerSocket() string {
 }
 
 func (rc *RunContext) startDockerProxy(ctx context.Context) {
-	daemonSocket := rc.containerDaemonSocket()
-	if daemonSocket == "-" || strings.HasPrefix(strings.ToLower(daemonSocket), "npipe://") {
+	if !filepath.IsAbs(strings.TrimPrefix(rc.containerDaemonSocket(), "unix://")) || common.Dryrun(ctx) {
 		return
 	}
-	dir := container.DockerProxyDir(ctx)
-	if dir == "" {
-		return
-	}
-	proxy, err := container.StartDockerProxy(getDockerDaemonSocketMountPath(daemonSocket), dir, rc.jobContainerName())
-	if err != nil {
-		common.Logger(ctx).Warnf("docker proxy not started, the job gets the daemon socket directly: %v", err)
-		return
-	}
-	rc.dockerProxy = proxy
+	rc.dockerProxy = container.NewDockerProxy(ctx, rc.jobContainerName())
 }
 
 // toolCache returns the tool cache path the job sees, relocatable through RUNNER_TOOL_CACHE.
@@ -366,6 +366,11 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string, error) {
 	mounts[name+"-env"] = ext.GetActPath() // runner-internal, never overridable
 
 	if workdir := ext.ToContainerPath(rc.Config.Workdir); !claimed[workdir] {
+		source := rc.workdirMountRoot()
+		target := ext.ToContainerPath(source)
+		if claimed[target] {
+			source, target = rc.Config.Workdir, workdir
+		}
 		if rc.Config.BindWorkdir {
 			bindModifiers := ""
 			if runtime.GOOS == "darwin" {
@@ -374,9 +379,9 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string, error) {
 			if selinux.GetEnabled() {
 				bindModifiers = ":z"
 			}
-			binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, workdir, bindModifiers))
+			binds = append(binds, fmt.Sprintf("%s:%s%s", source, target, bindModifiers))
 		} else {
-			mounts[name] = workdir
+			mounts[name] = target
 		}
 	}
 
@@ -468,8 +473,15 @@ func printStartJobContainerGroup(ctx context.Context, image, name, network strin
 // newContainer is a variable so tests can substitute a container that needs no Docker daemon.
 var newContainer = container.NewContainer
 
+type jobVolumeCleanupKey struct{}
+
+func WithJobVolumeCleanup(ctx context.Context, deferCleanup func(common.Executor)) context.Context {
+	return context.WithValue(ctx, jobVolumeCleanupKey{}, deferCleanup)
+}
+
 func (rc *RunContext) startJobContainer() common.Executor {
 	return func(ctx context.Context) error {
+		rc.deferVolumeCleanup, _ = ctx.Value(jobVolumeCleanupKey{}).(func(common.Executor))
 		logger := common.Logger(ctx)
 		image := rc.platformImage
 		logWriter := rc.commandLogWriter(ctx)
@@ -483,26 +495,23 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		// For gitea, to support --volumes-from <container_name_or_id> in options.
 		// We need to set the container name to the environment variable.
 		rc.Env["JOB_CONTAINER_NAME"] = name
-		rc.startDockerProxy(ctx)
 
 		envList := make([]string, 0)
 
 		envList = append(envList, rc.runnerEnv(ctx)...)
 		envList = append(envList, fmt.Sprintf("%s=%s", "LANG", "C.UTF-8")) // Use same locale as GitHub Actions
 
-		ext := container.LinuxContainerEnvironmentExtensions{}
-		binds, mounts, err := rc.GetBindsAndMounts()
-		if err != nil {
-			return err
-		}
-
 		// specify the network to which the container will connect when `docker create` stage. (like execute command line: docker create --network <networkName> <image>)
 		// if using service containers, will create a new network for the containers.
 		// and it will be removed after at last.
 		networkName, createAndDeleteNetwork := rc.networkNameForGitea()
+		rc.cleanUpJobContainer = rc.cleanupJobResources(networkName, createAndDeleteNetwork, false)
 
-		// add service containers
-		for serviceID, spec := range rc.Run.Job().Services {
+		services := rc.Run.Job().Services
+		if err := decodeDeferred(ctx, rc.ExprEval, "job services", rc.Run.Job().RawServices, &services); err != nil {
+			return err
+		}
+		for serviceID, spec := range services {
 			// GitHub compatibility: skip services whose image evaluates to an
 			// empty string, enabling conditional services via expressions
 			serviceImage, err := rc.ExprEval.Interpolate(ctx, spec.Image)
@@ -590,8 +599,6 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			rc.serviceContainers = append(rc.serviceContainers, &serviceContainer{name: serviceID, image: serviceImage, container: c})
 		}
 
-		rc.cleanUpJobContainer = rc.cleanupJobResources(networkName, createAndDeleteNetwork)
-
 		// For Gitea, `jobContainerNetwork` should be the same as `networkName`
 		jobContainerNetwork := networkName
 
@@ -599,7 +606,8 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		if err != nil {
 			return err
 		}
-		rc.JobContainer = newContainer(&container.NewContainerInput{
+		ext := container.LinuxContainerEnvironmentExtensions{}
+		containerInput := &container.NewContainerInput{
 			Cmd:             nil,
 			Entrypoint:      []string{"/bin/sleep", fmt.Sprint(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds())},
 			WorkingDir:      ext.ToContainerPath(rc.Config.Workdir),
@@ -608,10 +616,8 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			Password:        password,
 			Name:            name,
 			Env:             envList,
-			Mounts:          mounts,
 			NetworkMode:     jobContainerNetwork,
 			NetworkAliases:  []string{rc.Name},
-			Binds:           binds,
 			Stdout:          logWriter,
 			Stderr:          logWriter,
 			Privileged:      rc.Config.Privileged,
@@ -620,25 +626,34 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			RunnerOptions:   rc.Config.ContainerOptions,
 			WorkflowOptions: workflowOptions,
 			AutoRemove:      true,
-			ValidVolumes:    rc.validVolumes(),
 			AllocatePTY:     rc.Config.AllocatePTY,
-		})
+		}
+		rc.JobContainer = newContainer(containerInput)
 		if rc.JobContainer == nil {
 			return errors.New("failed to create job container")
 		}
+		defer printStartJobContainerGroup(ctx, image, name, networkName)()
+		if err := common.NewPipelineExecutor(
+			rc.cleanupJobResources(networkName, createAndDeleteNetwork, true),
+			rc.pullServicesImages(rc.Config.ForcePull),
+			rc.JobContainer.Pull(rc.Config.ForcePull),
+		)(ctx); err != nil {
+			return err
+		}
+		rc.startDockerProxy(ctx)
+		if containerInput.Binds, containerInput.Mounts, err = rc.GetBindsAndMounts(); err != nil {
+			return err
+		}
+		containerInput.ValidVolumes = rc.validVolumes()
 
 		rc.jobNetworkName = networkName
 
-		defer printStartJobContainerGroup(ctx, image, name, networkName)()
 		return common.NewPipelineExecutor(
-			rc.pullServicesImages(rc.Config.ForcePull),
-			rc.JobContainer.Pull(rc.Config.ForcePull),
-			rc.stopJobContainer(),
 			container.NewDockerNetworkCreateExecutor(networkName, rc.Config.ContainerNetworkCreateOptions).
 				IfBool(createAndDeleteNetwork),
 			rc.startServiceContainers(),
 			rc.reportUnstartedServices(),
-			rc.waitForServiceContainers(),
+			func(ctx context.Context) error { return rc.createJobVolumes(ctx, containerInput.Mounts) },
 			rc.JobContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 			rc.JobContainer.Start(false),
 			rc.captureJobContainerInfo(),
@@ -651,6 +666,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 				Mode: 0o666,
 				Body: "",
 			}),
+			rc.waitForServiceContainers(),
 		)(ctx)
 	}
 }
@@ -663,45 +679,67 @@ func (rc *RunContext) commandLogWriter(ctx context.Context) io.Writer {
 	})
 }
 
-// cleanupJobResources removes everything the job created, continuing past failures.
-// Only job container and volume errors are returned, the rest are logged.
-func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNetwork bool) common.Executor {
+func (rc *RunContext) cleanupJobResources(networkName string, createAndDeleteNetwork, preclean bool) common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
-		removeJobContainer := rc.JobContainer != nil
-
-		var errs []error
-		if removeJobContainer {
+		errs := []error{rc.closeDockerProxy(ctx)}
+		if rc.JobContainer != nil {
 			errs = append(errs, rc.JobContainer.Remove()(ctx))
 		}
 		if len(rc.serviceContainers) > 0 {
 			logger.Infof("Cleaning up services for job %s", rc.JobName)
-			if err := rc.stopServiceContainers()(ctx); err != nil {
-				logger.Errorf("Error while cleaning services: %v", err)
-			}
+			errs = append(errs, rc.stopServiceContainers()(ctx))
 		}
-		if rc.dockerProxy != nil {
-			if err := rc.dockerProxy.Close(ctx); err != nil {
-				logger.Errorf("Error while removing what the job created: %v", err)
-			}
-			rc.dockerProxy = nil
+		if !common.Dryrun(ctx) && (preclean || rc.hadDockerProxy) {
+			errs = append(errs, container.RemoveDockerJobResources(ctx, rc.jobContainerName()))
 		}
-		if removeJobContainer {
-			// after the containers using them, services can hold these via `--volumes-from`
-			name := rc.jobContainerName()
-			errs = append(errs,
-				container.NewDockerVolumeRemoveExecutor(name, false)(ctx),
-				container.NewDockerVolumeRemoveExecutor(name+"-env", false)(ctx))
+		if preclean || rc.deferVolumeCleanup == nil {
+			errs = append(errs, rc.cleanupJobVolumes(ctx))
+		} else {
+			rc.deferVolumeCleanup(rc.cleanupJobVolumes)
 		}
 		if createAndDeleteNetwork {
-			// last, once every container has detached
 			logger.Infof("Cleaning up network for job %s, and network name is: %s", rc.JobName, networkName)
-			if err := container.NewDockerNetworkRemoveExecutor(networkName)(ctx); err != nil {
-				logger.Errorf("Error while cleaning network: %v", err)
-			}
+			errs = append(errs, container.NewDockerNetworkRemoveExecutor(networkName)(ctx))
 		}
 		return errors.Join(errs...)
 	}
+}
+
+func (rc *RunContext) createJobVolumes(ctx context.Context, mounts map[string]string) error {
+	runnerUUID := rc.Config.ContainerNetworkCreateOptions.RunnerUUID
+	if runnerUUID == "" || common.Dryrun(ctx) {
+		return nil
+	}
+	name := rc.jobContainerName()
+	volumeNames := []string{name, name + "-env"}
+	if _, ok := mounts[name]; !ok { // the workspace is a bind mount, the env volume is always ours
+		volumeNames = volumeNames[1:]
+	}
+	return container.CreateJobVolumes(ctx, runnerUUID, volumeNames)
+}
+
+func (rc *RunContext) cleanupJobVolumes(ctx context.Context) error {
+	if rc.JobContainer == nil {
+		return nil
+	}
+	name := rc.jobContainerName()
+	return errors.Join(
+		container.NewDockerVolumeRemoveExecutor(name, false)(ctx),
+		container.NewDockerVolumeRemoveExecutor(name+"-env", false)(ctx))
+}
+
+func (rc *RunContext) closeDockerProxy(ctx context.Context) error {
+	if rc.dockerProxy == nil {
+		return nil
+	}
+	rc.hadDockerProxy = true
+	err := rc.dockerProxy.Close(ctx)
+	rc.dockerProxy = nil
+	if err != nil {
+		return fmt.Errorf("close docker proxy: %w", err)
+	}
+	return nil
 }
 
 func (rc *RunContext) ApplyExtraPath(ctx context.Context, env *map[string]string) {
@@ -763,7 +801,6 @@ func (rc *RunContext) UpdateExtraPath(ctx context.Context, githubEnvPath string)
 	return nil
 }
 
-// stopJobContainer removes the job container (if it exists) and its volume (if it exists)
 func (rc *RunContext) stopJobContainer() common.Executor {
 	return func(ctx context.Context) error {
 		if rc.cleanUpJobContainer != nil {
@@ -788,7 +825,6 @@ func (rc *RunContext) startServiceContainers() common.Executor {
 		execs := []common.Executor{}
 		for _, svc := range rc.serviceContainers {
 			execs = append(execs, common.NewPipelineExecutor(
-				svc.container.Pull(false),
 				svc.container.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 				svc.container.Start(false),
 			))
@@ -800,19 +836,23 @@ func (rc *RunContext) startServiceContainers() common.Executor {
 func (rc *RunContext) stopServiceContainers() common.Executor {
 	return func(ctx context.Context) error {
 		execs := []common.Executor{}
-		for _, svc := range rc.serviceContainers {
-			execs = append(execs, svc.container.Remove().Finally(svc.container.Close()))
+		errs := make([]error, len(rc.serviceContainers))
+		for index, svc := range rc.serviceContainers {
+			execs = append(execs, func(ctx context.Context) error {
+				if err := errors.Join(svc.container.Remove()(ctx), svc.container.Close()(ctx)); err != nil {
+					errs[index] = fmt.Errorf("clean service %s: %w", svc.name, err)
+				}
+				return nil
+			})
 		}
-		return common.NewParallelExecutor(len(execs), execs...)(ctx)
+		errs = append(errs, common.NewParallelExecutor(len(execs), execs...)(ctx))
+		return errors.Join(errs...)
 	}
 }
 
-const (
-	defaultServiceReadyTimeout = 5 * time.Minute
-	serviceReadyPollMax        = 32 * time.Second
-)
+const defaultServiceReadyTimeout = 5 * time.Minute
 
-var serviceReadyPollInterval = 2 * time.Second // a variable so tests need not wait
+const serviceReadyPollInterval = time.Second
 
 // reportUnstartedServices logs a service that did not start. The steps that need it
 // report it better than the runner can, so the job carries on.
@@ -872,7 +912,7 @@ func (rc *RunContext) waitForServiceContainers() common.Executor {
 // ready at once and one that exited is left to the steps that need it.
 func (svc *serviceContainer) waitUntilHealthy(ctx context.Context, timeout time.Duration) error {
 	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
-	interval := serviceReadyPollInterval
+	loggedStarting := false
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -902,12 +942,14 @@ func (svc *serviceContainer) waitUntilHealthy(ctx context.Context, timeout time.
 			return nil
 		}
 
-		rawLogger.Infof("%s service is starting, waiting %d seconds before checking again.", svc.name, int(interval.Seconds()))
+		if !loggedStarting {
+			rawLogger.Infof("%s service is starting.", svc.name)
+			loggedStarting = true
+		}
 		select {
 		case <-ctx.Done(): // reported at the top of the loop
-		case <-time.After(interval):
+		case <-time.After(serviceReadyPollInterval):
 		}
-		interval = min(interval*2, serviceReadyPollMax)
 	}
 }
 
@@ -949,7 +991,10 @@ func (rc *RunContext) captureJobContainerInfo() common.Executor {
 			return nil
 		}
 		rc.jobContainerID = info.ID
-		if source := info.Mounts[rc.githubWorkspace()]; source != "" {
+		if rc.dockerProxy != nil {
+			rc.dockerProxy.SetMounts(info.Mounts)
+		}
+		if source := info.DaemonPath(rc.githubWorkspace()); source != "" {
 			rc.Env["GITEA_DOCKER_WORKSPACE"] = source
 		}
 		return nil
@@ -995,6 +1040,15 @@ func (rc *RunContext) interpolateOutputs() common.Executor {
 		// with its own resolved values (last wins, as on GitHub) instead of the first combo's
 		// resolved values freezing the shared template against later combos.
 		// Resolved up front so one failure publishes none of them, as GitHub does.
+		var deferredOutputs map[string]string
+		if err := decodeDeferred(ctx, ee, "job outputs", job.RawOutputs, &deferredOutputs); err != nil {
+			return err
+		}
+		if deferredOutputs != nil {
+			defer lockJob(job)()
+			job.Outputs = deferredOutputs
+			return nil
+		}
 		outputs := make(map[string]string, len(rc.outputTemplate))
 		var err error
 		for k, v := range rc.outputTemplate {
@@ -1033,17 +1087,13 @@ func (rc *RunContext) startContainer() common.Executor {
 }
 
 func (rc *RunContext) cleanupFailedStart(ctx context.Context) {
-	if rc.cleanUpJobContainer == nil {
-		return
+	cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	cleanup := rc.cleanUpJobContainer
+	if cleanup == nil {
+		cleanup = rc.closeDockerProxy
 	}
-	cleanCtx := ctx
-	if ctx.Err() != nil {
-		// the start likely failed because ctx was cancelled, detach so teardown still runs
-		var cancel context.CancelFunc
-		cleanCtx, cancel = context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), time.Minute)
-		defer cancel()
-	}
-	if err := rc.cleanUpJobContainer(cleanCtx); err != nil {
+	if err := cleanup(cleanCtx); err != nil {
 		common.Logger(ctx).Errorf("Error while cleaning up after failed container start for job %s: %v", rc.JobName, err)
 	}
 }
@@ -1289,21 +1339,26 @@ func trimToLen(s string, l int) string {
 	return s
 }
 
-func (rc *RunContext) getJobContext() *model.JobContext {
-	jobStatus := "success"
+// ownStatus is the result of this context's own steps, which for a composite action is its action status
+func (rc *RunContext) ownStatus() string {
 	if rc.jobFailed {
-		jobStatus = "failure"
+		return "failure"
 	}
 	for _, stepStatus := range rc.StepResults {
 		if stepStatus.Conclusion == model.StepStatusFailure {
-			jobStatus = "failure"
-			break
+			return "failure"
 		}
 	}
+	return "success"
+}
+
+func (rc *RunContext) getJobContext() *model.JobContext {
+	job := rc.topLevelRunContext()
+	jobStatus := job.ownStatus()
 	// A cancelled run takes precedence over success/failure so cancelled() is true and
 	// success()/failure() are false, matching GitHub Actions: on cancellation only
 	// always() and cancelled() steps run.
-	if rc.jobCancelled {
+	if job.jobCancelled {
 		jobStatus = "cancelled"
 	}
 
@@ -1311,17 +1366,17 @@ func (rc *RunContext) getJobContext() *model.JobContext {
 		Status:   jobStatus,
 		Services: map[string]model.JobService{}, // an empty map, never null
 	}
-	if rc.jobContainerID != "" {
-		jobContext.Container.ID = rc.jobContainerID
-		jobContext.Container.Network = rc.jobNetworkName
+	if job.jobContainerID != "" {
+		jobContext.Container.ID = job.jobContainerID
+		jobContext.Container.Network = job.jobNetworkName
 	}
-	for _, svc := range rc.serviceContainers {
+	for _, svc := range job.serviceContainers {
 		if svc.info == nil {
 			continue
 		}
 		jobContext.Services[svc.name] = model.JobService{
 			ID:      svc.info.ID,
-			Network: rc.jobNetworkName,
+			Network: job.jobNetworkName,
 			Ports:   svc.info.Ports,
 		}
 	}
@@ -1655,7 +1710,7 @@ func imageOSFromImage(image string) string {
 func setActionRuntimeVars(rc *RunContext, env map[string]string) {
 	actionsRuntimeURL := os.Getenv("ACTIONS_RUNTIME_URL")
 	if actionsRuntimeURL == "" {
-		actionsRuntimeURL = fmt.Sprintf("http://%s:%s/", rc.Config.ArtifactServerAddr, rc.Config.ArtifactServerPort)
+		actionsRuntimeURL = "http://" + net.JoinHostPort(rc.Config.ArtifactServerAddr, rc.Config.ArtifactServerPort) + "/"
 	}
 	env["ACTIONS_RUNTIME_URL"] = actionsRuntimeURL
 

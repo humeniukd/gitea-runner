@@ -345,18 +345,22 @@ func TestDockerWaitFailure(t *testing.T) {
 // A remove that raced the daemon's AutoRemove teardown is not a failure and must not
 // be logged as one.
 func TestRemoveIgnoresAutoRemoveRace(t *testing.T) {
+	removeFailure := errors.New("driver failed to remove root filesystem")
 	removeOpts := mobyclient.ContainerRemoveOptions{RemoveVolumes: true, Force: true}
 	killOpts := mobyclient.ContainerKillOptions{Signal: "SIGKILL"}
 	for _, tc := range []struct {
-		name        string
-		err         error
-		wantWait    bool
-		wantFailure bool
+		name     string
+		err      error
+		wantWait bool
+		waitErr  error
+		wantErr  error
 	}{
 		{name: "removal in progress", err: cerrdefs.ErrConflict.WithMessage("removal of container abc is already in progress"), wantWait: true},
+		{name: "wait canceled", err: cerrdefs.ErrConflict, wantWait: true, waitErr: context.Canceled, wantErr: context.Canceled},
+		{name: "removed during wait", err: cerrdefs.ErrConflict, wantWait: true, waitErr: cerrdefs.ErrNotFound},
 		{name: "already removed", err: cerrdefs.ErrNotFound.WithMessage("No such container: abc")},
 		{name: "removed cleanly", err: nil},
-		{name: "real failure", err: errors.New("driver failed to remove root filesystem"), wantFailure: true},
+		{name: "real failure", err: removeFailure, wantErr: removeFailure},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, hook := test.NewNullLogger()
@@ -366,21 +370,24 @@ func TestRemoveIgnoresAutoRemoveRace(t *testing.T) {
 			client.On("ContainerRemove", ctx, "abc", removeOpts).Return(mobyclient.ContainerRemoveResult{}, tc.err)
 			if tc.wantWait {
 				removed := make(chan container.WaitResponse, 1)
-				removed <- container.WaitResponse{}
+				waitErrors := make(chan error, 1)
+				if tc.waitErr == nil {
+					removed <- container.WaitResponse{}
+				} else {
+					waitErrors <- tc.waitErr
+				}
 				client.On("ContainerWait", mock.Anything, "abc", mobyclient.ContainerWaitOptions{Condition: container.WaitConditionRemoved}).
-					Return(mobyclient.ContainerWaitResult{Result: removed})
+					Return(mobyclient.ContainerWaitResult{Result: removed, Error: waitErrors})
 			}
 			cr := &containerReference{id: "abc", cli: client}
 
-			require.NoError(t, cr.remove()(ctx))
-			// a failure keeps the id, so a later Remove() can retry it
-			if tc.wantFailure {
+			require.ErrorIs(t, cr.remove()(ctx), tc.wantErr)
+			if tc.wantErr != nil {
 				assert.Equal(t, "abc", cr.id)
-				assert.Len(t, hook.AllEntries(), 1)
 			} else {
 				assert.Empty(t, cr.id)
-				assert.Empty(t, hook.AllEntries())
 			}
+			assert.Empty(t, hook.AllEntries())
 			client.AssertExpectations(t)
 		})
 	}
@@ -808,12 +815,23 @@ func TestContainerInfoFromInspect(t *testing.T) {
 			Mounts: []container.MountPoint{
 				{Type: mount.TypeVolume, Name: "job", Source: "/var/lib/docker/volumes/job/_data", Destination: "/workspace/owner/repo"},
 				{Type: mount.TypeBind, Source: "/var/run/docker.sock", Destination: "/var/run/docker.sock"},
+				{Type: mount.TypeVolume, Name: "cache", Source: "/var/lib/docker/volumes/cache/_data", Destination: "/cache"},
+				{Type: mount.TypeBind, Source: "/custom/resolv.conf", Destination: "/etc/resolv.conf"},
+			},
+			HostConfig: &container.HostConfig{
+				Tmpfs:  map[string]string{"/workspace/owner/repo//tmp/": "size=1m"},
+				Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: "cache", Target: "/cache/", VolumeOptions: &mount.VolumeOptions{Subpath: "project"}}},
 			},
 		})
 
 		assert.Equal(t, map[string]string{
-			"/workspace/owner/repo": "/var/lib/docker/volumes/job/_data",
-			"/var/run/docker.sock":  "/var/run/docker.sock",
+			"/workspace/owner/repo":     "/var/lib/docker/volumes/job/_data",
+			"/workspace/owner/repo/tmp": "",
+			"/var/run/docker.sock":      "/var/run/docker.sock",
+			"/cache":                    "/var/lib/docker/volumes/cache/_data/project",
+			"/etc/resolv.conf":          "/custom/resolv.conf",
+			"/etc/hosts":                "",
+			"/etc/hostname":             "",
 		}, info.Mounts)
 	})
 }

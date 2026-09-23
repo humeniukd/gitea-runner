@@ -19,6 +19,7 @@ import (
 
 	"gitea.dev/actionslib/pkg/exprparser"
 	"gitea.dev/actionslib/pkg/model"
+	"go.yaml.in/yaml/v4"
 )
 
 type step interface {
@@ -261,6 +262,14 @@ func setupEnv(ctx context.Context, step step) error {
 			}
 		}
 	}
+	if step.getStepModel().RawWith.Kind == yaml.ScalarNode {
+		decoded := &model.Step{}
+		if err := decodeDeferred(ctx, inputEval(), "with", step.getStepModel().RawWith, &decoded.With); err != nil {
+			return err
+		}
+		step.getStepModel().With = decoded.With
+		mergeIntoMap(step, step.getEnv(), decoded.GetEnv())
+	}
 	return nil
 }
 
@@ -290,7 +299,12 @@ func isStepEnabled(ctx context.Context, expr string, step step, stage stepStage)
 		defaultStatusCheck = exprparser.DefaultStatusCheckSuccess
 	}
 
-	runStep, err := EvalBool(ctx, rc.NewStepExpressionEvaluator(ctx, step), expr, defaultStatusCheck)
+	// success() and failure() in a composite's own main steps read the composite's result, other stages the job's
+	jobContext := rc.getJobContext()
+	if rc.Parent != nil && stage == stepStageMain && jobContext.Status != "cancelled" {
+		jobContext.Status = rc.ownStatus()
+	}
+	runStep, err := EvalBool(ctx, rc.newStepExpressionEvaluator(ctx, step, rc.actionInputs, jobContext), expr, defaultStatusCheck)
 	if err != nil {
 		return false, fmt.Errorf("if-expression %q evaluation failed: %s", expr, err)
 	}

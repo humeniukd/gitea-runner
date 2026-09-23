@@ -20,7 +20,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -234,7 +233,7 @@ func StartHandler(opts Options) (*Handler, error) {
 
 func (h *Handler) ExternalURL() string {
 	// TODO: make the external url configurable if necessary
-	return fmt.Sprintf("http://%s:%d", h.outboundIP, h.port)
+	return "http://" + net.JoinHostPort(h.outboundIP, strconv.Itoa(h.port))
 }
 
 func (h *Handler) baseURL(cred JobCredential) string {
@@ -603,18 +602,26 @@ func (h *Handler) bearerAuth(handler httprouter.Handle) httprouter.Handle {
 		h.logger.Debugf("%s %s", r.Method, r.URL.Path)
 		token := bearerToken(r)
 		if token == "" {
-			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("missing bearer token"))
+			h.unauthorized(w, r, errors.New("missing bearer token"))
 			return
 		}
 		cred, ok := h.lookupCredential(token)
 		if !ok {
-			h.responseJSON(w, r, http.StatusUnauthorized, errors.New("unknown bearer token"))
+			h.unauthorized(w, r, errors.New("unknown bearer token"))
 			return
 		}
 		ctx := context.WithValue(r.Context(), credKey{}, cred)
 		handler(w, r.WithContext(ctx), params)
 		go h.gcCache()
 	}
+}
+
+func (h *Handler) unauthorized(w http.ResponseWriter, r *http.Request, err error) {
+	if strings.HasPrefix(r.URL.Path, cacheServiceV2Path) {
+		h.twirpError(w, r, twirpUnauthenticated, err)
+		return
+	}
+	h.responseJSON(w, r, http.StatusUnauthorized, err)
 }
 
 // signedAuth authenticates a signed URL. purpose separates the flavours of URL the
@@ -720,6 +727,12 @@ func (h *Handler) internalRevoke(w http.ResponseWriter, r *http.Request, _ httpr
 	h.responseJSON(w, r, http.StatusOK)
 }
 
+// hashedToken fingerprints a job's bearer, so a reservation can tell its own retry from another job.
+func hashedToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
 func bearerToken(r *http.Request) string {
 	auth := r.Header.Get("Authorization")
 	const prefix = "Bearer "
@@ -770,14 +783,9 @@ func findCache(db *bolthold.Store, repo string, keys []string, version string) (
 		if exact != nil {
 			return exact, nil
 		}
-		prefixPattern := "^" + regexp.QuoteMeta(prefix)
-		re, err := regexp.Compile(prefixPattern)
-		if err != nil {
-			continue
-		}
 		if err := db.FindOne(cache,
-			bolthold.Where("Repo").Eq(repo).
-				And("Key").RegExp(re).
+			bolthold.Where("Repo").Eq(repo).Index("Repo").
+				And("Key").MatchFunc(func(key string) (bool, error) { return strings.HasPrefix(key, prefix), nil }).
 				And("Version").Eq(version).
 				And("Complete").Eq(true).
 				SortBy("CreatedAt").Reverse()); err != nil {
@@ -805,8 +813,8 @@ func findExactCache(db *bolthold.Store, repo, key, version string, complete bool
 	}
 	cache := &Cache{}
 	err := db.FindOne(cache,
-		bolthold.Where("Repo").Eq(repo).
-			And("Key").Eq(key).
+		bolthold.Where("Key").Eq(key).Index("Key").
+			And("Repo").Eq(repo).
 			And("Version").Eq(version).
 			And("Complete").Eq(complete).
 			SortBy(sortBy).Reverse())
@@ -820,14 +828,16 @@ func findExactCache(db *bolthold.Store, repo, key, version string, complete bool
 }
 
 func insertCache(db *bolthold.Store, cache *Cache) error {
-	if err := db.Insert(bolthold.NextSequence(), cache); err != nil {
-		return fmt.Errorf("insert cache: %w", err)
-	}
-	// write back id to db
-	if err := db.Update(cache.ID, cache); err != nil {
-		return fmt.Errorf("write back id to db: %w", err)
-	}
-	return nil
+	return db.Bolt().Update(func(tx *bbolt.Tx) error {
+		if err := db.TxInsert(tx, bolthold.NextSequence(), cache); err != nil {
+			return fmt.Errorf("insert cache: %w", err)
+		}
+		// write back id to db
+		if err := db.TxUpdate(tx, cache.ID, cache); err != nil {
+			return fmt.Errorf("write back id to db: %w", err)
+		}
+		return nil
+	})
 }
 
 // touchCache stamps UsedAt so gcCache does not reap an entry mid-upload. With requireIncomplete
@@ -852,6 +862,9 @@ func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
 	if requireIncomplete && cache.Complete {
 		return fmt.Errorf("cache %d: already complete", id)
 	}
+	if !touchNeeded(cache) {
+		return nil
+	}
 	cache.UsedAt = time.Now().Unix()
 	return db.Update(cache.ID, cache)
 }
@@ -861,9 +874,11 @@ const (
 
 	defaultSweepInterval = time.Hour
 
-	// inUseGrace matches artifactURLTTL so an entry outlives every signed URL still usable
-	// for it, and no sweep cuts off a download in progress.
-	inUseGrace = artifactURLTTL
+	touchStale = time.Minute // how stale a completed entry's UsedAt may get before an access rewrites it, sparing hits the fsync
+
+	// inUseGrace covers artifactURLTTL plus the touchStale lag so an entry outlives every signed URL
+	// still usable for it, and no sweep cuts off a download in progress.
+	inUseGrace = artifactURLTTL + touchStale
 
 	// uploadStallTimeout is how long a reservation may sit without a chunk before it counts
 	// as abandoned. Widening it also widens the window for findExactCache to hand a finalize
@@ -957,7 +972,7 @@ func (h *Handler) evictExpired(db *bolthold.Store) {
 		return
 	}
 	// Never below inUseGrace, or a short retention would outrun a signed URL already issued.
-	window := max(h.policy.Retention, inUseGrace)
+	window := max(h.policy.Retention+touchStale, inUseGrace)
 	h.sweep(db, bolthold.Where("UsedAt").Lt(time.Now().Add(-window).Unix()).Index("UsedAt"))
 }
 
@@ -1058,10 +1073,18 @@ func inUse(cache *Cache) bool {
 	return time.Since(time.Unix(cache.UsedAt, 0)) < inUseGrace
 }
 
+// touchNeeded skips a write that would not change the second, and completed entries fresher than touchStale.
+func touchNeeded(cache *Cache) bool {
+	return cache.UsedAt < time.Now().Unix() && (!cache.Complete || time.Since(time.Unix(cache.UsedAt, 0)) >= touchStale)
+}
+
 // touch stamps UsedAt through the caller's store, a bolt write on the read path. It cannot
 // go through touchCache, which opens its own store and would block on the exclusive lock
 // for as long as the caller holds one.
 func (h *Handler) touch(db *bolthold.Store, cache *Cache) {
+	if !touchNeeded(cache) {
+		return
+	}
 	cache.UsedAt = time.Now().Unix()
 	if err := db.Update(cache.ID, cache); err != nil {
 		h.logger.Warnf("touch cache: %v", err)

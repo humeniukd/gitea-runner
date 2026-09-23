@@ -27,6 +27,29 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
+// setStrategyContext leaves `max-parallel` unset when the job declares none, as GitHub does.
+func setStrategyContext(strategy map[string]any, jobStrategy *model.Strategy) {
+	strategy["fail-fast"] = jobStrategy.GetFailFast()
+	if limit, declared, err := jobStrategy.ParseMaxParallel(); declared && err == nil {
+		strategy["max-parallel"] = limit
+	}
+}
+
+// decodeDeferred decodes a whole-value `${{ }}` parked in a Raw* field, evaluating a clone since the node is shared across matrix combinations.
+func decodeDeferred[T any](ctx context.Context, eval *expressionEvaluator, name string, raw yaml.Node, out *T) error {
+	if raw.Kind != yaml.ScalarNode {
+		return nil
+	}
+	node := model.CloneYamlNode(raw)
+	if err := eval.EvaluateYamlNode(ctx, &node); err != nil {
+		return fmt.Errorf("unable to evaluate %s: %w", name, err)
+	}
+	if err := node.Decode(out); err != nil {
+		return fmt.Errorf("unable to decode %s: %w", name, err)
+	}
+	return nil
+}
+
 // NewExpressionEvaluator creates a new evaluator
 func (rc *RunContext) NewExpressionEvaluator(ctx context.Context) *ExpressionEvaluator {
 	return rc.NewExpressionEvaluatorWithEnv(ctx, rc.GetEnv())
@@ -41,8 +64,7 @@ func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map
 	if rc.Run != nil {
 		job := rc.Run.Job()
 		if job != nil && job.Strategy != nil {
-			strategy["fail-fast"] = job.Strategy.FailFast
-			strategy["max-parallel"] = job.Strategy.MaxParallel
+			setStrategyContext(strategy, job.Strategy)
 		}
 
 		jobs := rc.Run.Workflow.Jobs
@@ -105,21 +127,20 @@ var hashfiles string
 
 // NewStepExpressionEvaluator creates a new evaluator with the `inputs` of the enclosing workflow or composite action
 func (rc *RunContext) NewStepExpressionEvaluator(ctx context.Context, step step) *ExpressionEvaluator {
-	return rc.newStepExpressionEvaluator(ctx, step, rc.actionInputs)
+	return rc.newStepExpressionEvaluator(ctx, step, rc.actionInputs, rc.getJobContext())
 }
 
 // NewActionInputsExpressionEvaluator creates a new evaluator with the step's own with: values as `inputs`
 func (rc *RunContext) NewActionInputsExpressionEvaluator(ctx context.Context, step step) *ExpressionEvaluator {
-	return rc.newStepExpressionEvaluator(ctx, step, inputsFromEnv(*step.getEnv()))
+	return rc.newStepExpressionEvaluator(ctx, step, inputsFromEnv(*step.getEnv()), rc.getJobContext())
 }
 
-func (rc *RunContext) newStepExpressionEvaluator(ctx context.Context, step step, stepInputs map[string]any) *ExpressionEvaluator {
+func (rc *RunContext) newStepExpressionEvaluator(ctx context.Context, step step, stepInputs map[string]any, jobContext *model.JobContext) *ExpressionEvaluator {
 	// todo: cleanup EvaluationEnvironment creation
 	job := rc.Run.Job()
 	strategy := make(map[string]any)
 	if job.Strategy != nil {
-		strategy["fail-fast"] = job.Strategy.FailFast
-		strategy["max-parallel"] = job.Strategy.MaxParallel
+		setStrategyContext(strategy, job.Strategy)
 	}
 
 	jobs := rc.Run.Workflow.Jobs
@@ -136,7 +157,7 @@ func (rc *RunContext) newStepExpressionEvaluator(ctx context.Context, step step,
 	ee := &exprparser.EvaluationEnvironment{
 		Github:   step.getGithubContext(ctx),
 		Env:      *step.getEnv(),
-		Job:      rc.getJobContext(),
+		Job:      jobContext,
 		Steps:    rc.getStepsContext(),
 		Secrets:  getWorkflowSecrets(rc),
 		Vars:     getWorkflowVars(ctx, rc),
@@ -333,12 +354,16 @@ func (rc *RunContext) resolveWorkflowCall(ctx context.Context) error {
 	}
 	callerJob := rc.caller.runContext.Run.Job()
 	callerEval := rc.caller.runContext.ExprEval
+	callerWith := callerJob.With
+	if err := decodeDeferred(ctx, callerEval, "workflow inputs", callerJob.RawWith, &callerWith); err != nil {
+		return err
+	}
 	calleeEval := sync.OnceValue(func() *expressionEvaluator { return rc.NewExpressionEvaluator(ctx) })
 	config := rc.Run.Workflow.WorkflowCallConfig()
 
 	rc.workflowCallInputs = make(map[string]any, len(config.Inputs))
 	for name, input := range config.Inputs {
-		value, eval, label := callerJob.With[name], callerEval, "input"
+		value, eval, label := callerWith[name], callerEval, "input"
 		if value == nil {
 			value, eval, label = input.Default, calleeEval(), "the default of input"
 		}
