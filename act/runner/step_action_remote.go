@@ -79,6 +79,9 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 		// Actions served from the action cache are read out of a git object store rather than a
 		// directory, so they never reach the bundle patch below and keep to the v1 cache API.
 		if sar.RunContext.Config.ActionCache != nil {
+			if sar.RunContext.containerHooks.Enabled {
+				return errors.New("action cache is not supported together with container-hooks mode; unset the cache or disable container.hooks")
+			}
 			cache := sar.RunContext.Config.ActionCache
 
 			var err error
@@ -183,6 +186,10 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			// A stage of its own: it takes the same clone lock, and it has to land before
 			// runAction copies the action into the job container.
 			sar.patchActionToolkit,
+			func(ctx context.Context) error {
+				sar.RunContext.recordContainerHookAction(filepath.Base(actionDir), actionDir)
+				return nil
+			},
 		)(ctx)
 	}
 }

@@ -136,6 +136,7 @@ func (rc *RunContext) buildContainerPrepareHookInput(ctx context.Context) *hooks
 			SharedToolCache: rc.Config.SharedToolCache,
 			EventJSON:       rc.EventJSON,
 			ActionsDir:      rc.ActionCacheDir(),
+			Actions:         rc.containerHooks.Actions,
 		},
 	}
 
@@ -157,7 +158,7 @@ func (rc *RunContext) buildContainerExecuteHookCommandInput(
 	// detail.
 	fixedCmd := make([]string, len(cmd))
 	for i, c := range cmd {
-		fixedCmd[i] = strings.ReplaceAll(c, "/var/run/act/actions", rc.ActionCacheDir())
+		fixedCmd[i] = strings.ReplaceAll(c, "/var/run/act/actions", rc.containerHooks.ActPath+"/actions")
 	}
 
 	return &hooks.ExecuteHookInput{
@@ -347,6 +348,16 @@ func (rc *RunContext) readContainerExecuteHookResponse(hookErr error) error {
 		return container.ExitCodeError(resp.ExitCode)
 	}
 	return hookErr
+}
+
+func (rc *RunContext) recordContainerHookAction(hash, localPath string) {
+	if !rc.containerHooks.Enabled {
+		return
+	}
+	rc.containerHooks.actionsMutex.Lock()
+	defer rc.containerHooks.actionsMutex.Unlock()
+	rc.containerHooks.Actions = append(rc.containerHooks.Actions,
+		hooks.HookAction{Hash: hash, LocalPath: localPath})
 }
 
 func (rc *RunContext) runContainerPrepareHook(ctx context.Context) error {

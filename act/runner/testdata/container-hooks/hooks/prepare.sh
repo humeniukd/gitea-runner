@@ -23,6 +23,20 @@ mkdir -p "$WORKDIR"
 jq -r '.runner.eventJSON' "$INPUT" > "$ACT_PATH/workflow/event.json"
 : > "$ACT_PATH/workflow/envs.txt"
 
+ACTIONS_COUNT=$(jq '.runner.actions // [] | length' "$INPUT")
+i=0
+while [ "$i" -lt "$ACTIONS_COUNT" ]; do
+    HASH=$(jq -r ".runner.actions[$i].hash" "$INPUT")
+    SRC=$(jq -r ".runner.actions[$i].localPath" "$INPUT")
+    DST="$ACT_PATH/actions/$HASH"
+
+    rm -rf "$DST"
+    mkdir -p "$(dirname "$DST")"
+    cp -r "$SRC" "$DST"
+
+    i=$((i + 1))
+done
+
 cat > "$RESPONSE" <<EOF
 {
   "id": "test-pod-123",

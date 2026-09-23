@@ -136,7 +136,9 @@ type containerHooks struct {
 	// StepSpecs describes every container-backed step (uses: docker://...),
 	// collected before the prepare hook runs so the hook can create all
 	// required containers up front. Keyed by step number.
-	StepSpecs map[int]*hooks.ContainerStepSpec
+	StepSpecs    map[int]*hooks.ContainerStepSpec
+	Actions      []hooks.HookAction
+	actionsMutex sync.Mutex
 }
 
 // serviceContainer pairs a service container with the workflow id that keys job.services.

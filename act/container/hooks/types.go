@@ -85,6 +85,14 @@ type EnvRef struct {
 	Env string `json:"$env"`
 }
 
+// HookAction is one external action the runner downloaded for this job.
+// The hook must stage LocalPath into <actPath>/actions/<Hash>/ before the
+// job runs, so that node/exec inside the job find it at the expected path.
+type HookAction struct {
+	Hash      string `json:"hash"`
+	LocalPath string `json:"localPath"`
+}
+
 // ContainerJSON describes a single container (the job container or a container
 // step declared with uses: docker://...).
 type ContainerJSON struct {
@@ -121,12 +129,13 @@ type NetworkJSON struct {
 // the execution environment (for example, where the workspace or action cache
 // lives on the runner's filesystem).
 type RunnerJSON struct {
-	Workdir         string `json:"workdir"`
-	ToolCache       string `json:"toolCache"`
-	BindWorkdir     bool   `json:"bindWorkdir"`
-	SharedToolCache bool   `json:"sharedToolCache"`
-	EventJSON       string `json:"eventJSON"`
-	ActionsDir      string `json:"actionsDir"`
+	Workdir         string       `json:"workdir"`
+	ToolCache       string       `json:"toolCache"`
+	BindWorkdir     bool         `json:"bindWorkdir"`
+	SharedToolCache bool         `json:"sharedToolCache"`
+	EventJSON       string       `json:"eventJSON"`
+	ActionsDir      string       `json:"actionsDir"`
+	Actions         []HookAction `json:"actions,omitempty"`
 }
 
 // ServiceJSON describes a service container.
