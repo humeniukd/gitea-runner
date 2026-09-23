@@ -1,0 +1,44 @@
+name: Container Hooks
+on:
+  - push
+
+jobs:
+  test:
+    runs-on: docker
+    container:
+      image: node:24-bookworm-slim
+      credentials:
+        username: username
+        password: password
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - run: |
+          echo "step 1: script step"
+      - uses: docker://alpine:3.20
+        with:
+          entrypoint: /bin/sh
+          args: |
+            -c "echo 'step 2: container step'"
+        env:
+          CONTAINER_STEP_VAR: 'special var from container step'
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          path: './src'
+        env:
+          ACTION_STEP_VAR: 'special var from action (checkout) step'
+      - run: |
+          echo "step 4: after checkout"
