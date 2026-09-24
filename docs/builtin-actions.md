@@ -1,34 +1,21 @@
 # Built-in actions
 
-Native Go actions selected with `uses: builtin:<name>`. They run in the runner
-process. `actions/checkout@v4` and other remote actions are unchanged.
+Built-in actions ship with the runner, so a job needs no action download and no Node in its image.
 
 ```yaml
 - uses: builtin:checkout
-  with:
-    fetch-depth: 0
 ```
-
-Unknown `builtin:` names fail at step construction. Names match
-`^[a-z0-9][a-z0-9-]*$`.
 
 ## checkout
 
-Subset of `actions/checkout` v4. Other inputs are ignored.
+Works like `actions/checkout` with these inputs. Any other input fails the step.
 
-| Input | Default | Notes |
-| --- | --- | --- |
-| `repository` | `github.repository` | `org/repo` |
-| `ref` | `github.ref` | |
-| `token` | `github.token` | clone auth |
-| `path` | workspace root | must stay under `GITHUB_WORKSPACE` |
-| `fetch-depth` | `1` | honored on clone; `0` is full history |
+| Input | Default |
+| --- | --- |
+| `repository` | `github.repository` |
+| `ref` | the triggering commit, or the default branch of another repository |
+| `token` | `github.token` |
+| `path` | workspace root |
+| `fetch-depth` | `1`, `0` for full history |
 
-Same-repo checkout copies the host workspace in (or no-ops if it is already
-bind-mounted) unless skip is disabled. Otherwise the runner clones on the host
-and copies the tree into the container.
-
-## Adding one
-
-1. Implement `action.Action` under `internal/pkg/action/<name>` and `Register` from `init()`.
-2. Blank-import the package from `act/runner/builtins_register.go`.
+With `gitea-runner exec`, checking out the workflow's own repository copies your local working directory, unless `--no-skip-checkout` is set.

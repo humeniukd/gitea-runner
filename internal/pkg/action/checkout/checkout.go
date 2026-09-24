@@ -4,51 +4,29 @@
 package checkout
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
+	"cmp"
+	"context"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
 	"gitea.com/gitea/runner/act/common/git"
 	"gitea.com/gitea/runner/internal/pkg/action"
-
-	"gitea.dev/actionslib/pkg/model"
 )
 
-type Action struct{}
+var inputNames = []string{"repository", "ref", "token", "path", "fetch-depth"}
 
-func init() {
-	action.Register(&Action{})
-}
-
-func (*Action) Name() string  { return "checkout" }
-func (*Action) HasPre() bool  { return false }
-func (*Action) HasPost() bool { return false }
-
-func (*Action) Pre(_ *action.Context) error  { return nil }
-func (*Action) Post(_ *action.Context) error { return nil }
-
-func (a *Action) Main(c *action.Context) error {
-	if c == nil || c.RunContext == nil {
-		return errors.New("checkout: nil context")
+func Main(ctx context.Context, c *action.Context) error {
+	for name := range c.Inputs {
+		if !slices.Contains(inputNames, name) {
+			return fmt.Errorf("checkout: unsupported input %q", name)
+		}
 	}
-
-	ghc := c.RunContext.GithubContext()
-	if ghc == nil {
-		return errors.New("checkout: no github context available")
-	}
-	cfg := c.RunContext.Config()
-
-	repository := firstNonEmpty(c.Inputs["repository"], ghc.Repository)
-	ref := shortRef(firstNonEmpty(c.Inputs["ref"], ghc.Ref))
-	token := firstNonEmpty(c.Inputs["token"], ghc.Token, cfg.Token())
-	subPath := strings.TrimSpace(c.Inputs["path"])
-	dst, err := workspaceDestination(c.RunContext.ContainerWorkdir(), subPath)
+	dst, err := workspaceDestination(c.Workspace, c.Inputs["path"])
 	if err != nil {
 		return err
 	}
@@ -57,61 +35,44 @@ func (a *Action) Main(c *action.Context) error {
 		return err
 	}
 
-	c.Logger.Infof("checkout: repository=%s ref=%s path=%s", repository, ref, subPath)
-
-	if isLocalCheckoutLike(c.Inputs, ghc) && !cfg.NoSkipCheckout() {
-		if cfg.BindWorkdir() {
-			c.Logger.Debugf("checkout: workspace already bind-mounted, skipping")
-			return nil
-		}
-		jobContainer := c.RunContext.JobContainer()
-		if jobContainer == nil {
-			return errors.New("checkout: no job container available")
-		}
-		src := c.RunContext.Workdir() + string(filepath.Separator) + "."
-		c.Logger.Debugf("checkout: copying workspace %s -> %s", src, dst)
-		return jobContainer.CopyDir(dst, src, cfg.UseGitIgnore())(c.Ctx)
+	ghc := c.Github
+	repository := cmp.Or(c.Inputs["repository"], ghc.Repository)
+	ref := shortRef(c.Inputs["ref"])
+	isWorkflowRepo := repository == ghc.Repository
+	local := isWorkflowRepo && slices.Contains([]string{"", shortRef(ghc.Ref), ghc.Sha}, ref) && !c.NoSkipCheckout
+	if local && !c.BindWorkdir {
+		return c.Container.CopyDir(dst, c.HostWorkdir+string(filepath.Separator)+".", c.UseGitIgnore, false)(ctx)
+	}
+	if local && dst == c.Workspace {
+		return nil
 	}
 
-	if repository == "" {
-		return errors.New("checkout: empty `repository` and no github.repository in context")
-	}
 	if ref == "" {
-		return errors.New("checkout: empty `ref` and no github.ref in context")
+		ref = "HEAD"
+		if isWorkflowRepo {
+			ref = ghc.Sha
+		}
 	}
-
-	cloneURL := repoURL(ghc, cfg, repository)
-	cloneDir := stageDir(c.RunContext.ActionCacheDir(), c.Step.UsesHash(), repository)
-
-	if err := os.MkdirAll(filepath.Dir(cloneDir), 0o755); err != nil {
-		return fmt.Errorf("checkout: prepare stage dir: %w", err)
+	dir, err := os.MkdirTemp("", "checkout-")
+	if err != nil {
+		return err
 	}
-
-	c.Logger.Infof("checkout: clone %s ref=%s -> %s", cloneURL, ref, cloneDir)
-	clone := git.NewGitCloneExecutor(git.NewGitCloneExecutorInput{
-		URL:             cloneURL,
+	defer os.RemoveAll(dir)
+	if err := git.NewGitCloneExecutor(git.NewGitCloneExecutorInput{
+		URL:             strings.TrimSuffix(ghc.ServerURL, "/") + "/" + repository,
 		Ref:             ref,
-		Dir:             cloneDir,
-		Token:           token,
+		Dir:             dir,
+		Token:           cmp.Or(c.Inputs["token"], ghc.Token),
 		Depth:           depth,
-		OfflineMode:     cfg.ActionOfflineMode(),
-		InsecureSkipTLS: cfg.InsecureSkipTLS(),
-	})
-	if err := clone(c.Ctx); err != nil {
-		return fmt.Errorf("checkout: clone %s @ %s: %w", cloneURL, ref, err)
+		InsecureSkipTLS: c.InsecureSkipTLS,
+	})(ctx); err != nil {
+		return fmt.Errorf("checkout: clone %s@%s: %w", repository, ref, err)
 	}
-
-	jobContainer := c.RunContext.JobContainer()
-	if jobContainer == nil {
-		return errors.New("checkout: no job container available")
-	}
-	src := cloneDir + string(filepath.Separator) + "."
-	c.Logger.Debugf("checkout: copying clone %s -> %s", src, dst)
-	return jobContainer.CopyDir(dst, src, cfg.UseGitIgnore())(c.Ctx)
+	return c.Container.CopyDir(dst, dir+string(filepath.Separator)+".", false, false)(ctx)
 }
 
 func workspaceDestination(workspace, checkoutPath string) (string, error) {
-	cleanPath := path.Clean(checkoutPath)
+	cleanPath := path.Clean(strings.TrimSpace(checkoutPath))
 	if path.IsAbs(cleanPath) || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") {
 		return "", fmt.Errorf("checkout: path %q must be relative to the workspace", checkoutPath)
 	}
@@ -130,40 +91,7 @@ func fetchDepth(input string) (int, error) {
 	return depth, nil
 }
 
-func isLocalCheckoutLike(inputs map[string]string, ghc *model.GithubContext) bool {
-	if repo, ok := inputs["repository"]; ok && repo != "" && repo != ghc.Repository {
-		return false
-	}
-	if ref, ok := inputs["ref"]; ok && ref != "" && ref != ghc.Ref {
-		return false
-	}
-	return true
-}
-
-func repoURL(ghc *model.GithubContext, cfg action.Config, repository string) string {
-	base := strings.TrimRight(ghc.ServerURL, "/")
-	if base == "" {
-		base = strings.TrimRight(cfg.DefaultActionInstance(), "/")
-		if base != "" && !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
-			base = "https://" + base
-		}
-	}
-	if base == "" {
-		inst := strings.TrimRight(cfg.GitHubInstance(), "/")
-		if inst != "" && !strings.HasPrefix(inst, "http://") && !strings.HasPrefix(inst, "https://") {
-			inst = "https://" + inst
-		}
-		base = inst
-	}
-	return base + "/" + repository
-}
-
-func stageDir(actionCacheDir, usesHash, repository string) string {
-	suffix := sha256.Sum256([]byte(repository))
-	return filepath.Join(actionCacheDir, "builtin-checkout", usesHash, hex.EncodeToString(suffix[:8]))
-}
-
-// NewGitCloneExecutor re-prefixes the ref as refs/heads/<ref>.
+// NewGitCloneExecutor expects short branch and tag names.
 func shortRef(ref string) string {
 	for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
 		if s, ok := strings.CutPrefix(ref, prefix); ok {
@@ -171,13 +99,4 @@ func shortRef(ref string) string {
 		}
 	}
 	return ref
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }

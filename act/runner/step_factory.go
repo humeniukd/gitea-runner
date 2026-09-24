@@ -6,8 +6,9 @@ package runner
 
 import (
 	"fmt"
-
-	"gitea.com/gitea/runner/internal/pkg/action"
+	"maps"
+	"slices"
+	"strings"
 
 	"gitea.dev/actionslib/pkg/model"
 )
@@ -35,20 +36,16 @@ func (sf *stepFactoryImpl) newStep(stepModel *model.Step, rc *RunContext) (step,
 			runAction:  runActionImpl,
 		}, nil
 	case model.StepTypeUsesActionRemote:
-		if name, isBuiltin := action.ParseUses(stepModel.Uses); isBuiltin {
-			if !action.ValidName(name) {
-				return nil, fmt.Errorf("invalid built-in action name %q for job:%s step:%+v",
-					name, rc.Run, stepModel)
-			}
-			a, ok := action.Lookup(name)
+		if name, ok := strings.CutPrefix(stepModel.Uses, "builtin:"); ok {
+			run, ok := builtinActions[name]
 			if !ok {
 				return nil, fmt.Errorf("unknown built-in action %q (known: %v) for job:%s step:%+v",
-					name, action.Names(), rc.Run, stepModel)
+					name, slices.Sorted(maps.Keys(builtinActions)), rc.Run, stepModel)
 			}
 			return &stepActionBuiltin{
 				Step:       stepModel,
 				RunContext: rc,
-				action:     a,
+				run:        run,
 			}, nil
 		}
 		return &stepActionRemote{

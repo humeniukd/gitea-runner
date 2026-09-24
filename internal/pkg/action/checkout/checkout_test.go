@@ -5,8 +5,9 @@ package checkout
 
 import (
 	"context"
-	"errors"
-	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,236 +16,98 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/action"
 
 	"gitea.dev/actionslib/pkg/model"
-	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 type fakeContainer struct {
-	container.LinuxContainerEnvironmentExtensions
-	copyDirDst string
-	copyDirSrc string
-	copyDirGI  bool
-	called     bool
-	copyErr    error
+	container.ExecutionsEnvironment
+	dst, src string
+	log      []string
 }
 
-func (f *fakeContainer) CopyDir(destPath, srcPath string, useGitIgnore bool) common.Executor {
-	return func(_ context.Context) error {
-		f.called = true
-		f.copyDirDst = destPath
-		f.copyDirSrc = srcPath
-		f.copyDirGI = useGitIgnore
-		return f.copyErr
+func (f *fakeContainer) CopyDir(dst, src string, _, _ bool) common.Executor {
+	return func(context.Context) error {
+		f.dst, f.src = dst, src
+		if out, err := exec.Command("git", "--git-dir", filepath.Join(src, ".git"), "log", "--format=%s").Output(); err == nil {
+			f.log = strings.Fields(string(out))
+		}
+		return nil
 	}
 }
 
-func (f *fakeContainer) Create(_, _ []string) common.Executor      { return nopExec }
-func (f *fakeContainer) ConnectToNetwork(_ string) common.Executor { return nopExec }
-func (f *fakeContainer) Copy(_ string, _ ...*container.FileEntry) common.Executor {
-	return nopExec
-}
-func (f *fakeContainer) CopyTarStream(_ context.Context, _ string, _ io.Reader) error { return nil }
-func (f *fakeContainer) GetContainerArchive(_ context.Context, _ string) (io.ReadCloser, error) {
-	return nil, errors.New("not implemented")
-}
-func (f *fakeContainer) Pull(_ bool) common.Executor  { return nopExec }
-func (f *fakeContainer) Start(_ bool) common.Executor { return nopExec }
-func (f *fakeContainer) Exec(_ []string, _ map[string]string, _, _ string) common.Executor {
-	return nopExec
-}
-
-func (f *fakeContainer) UpdateFromEnv(_ string, _ *map[string]string) common.Executor {
-	return nopExec
-}
-func (f *fakeContainer) UpdateFromImageEnv(_ *map[string]string) common.Executor { return nopExec }
-func (f *fakeContainer) Inspect(_ context.Context) (*container.Info, error) {
-	return &container.Info{}, nil
-}
-func (f *fakeContainer) Remove() common.Executor                                { return nopExec }
-func (f *fakeContainer) Close() common.Executor                                 { return nopExec }
-func (f *fakeContainer) DumpLogs(_ context.Context) error                       { return nil }
-func (f *fakeContainer) ReplaceLogWriter(_, _ io.Writer) (io.Writer, io.Writer) { return nil, nil }
-
-var nopExec common.Executor = func(_ context.Context) error { return nil }
-
-type fakeRunContext struct {
-	jc    container.ExecutionsEnvironment
-	wd    string
-	cwd   string
-	cache string
-	gh    *model.GithubContext
-	cfg   action.Config
-}
-
-func (f *fakeRunContext) JobContainer() container.ExecutionsEnvironment { return f.jc }
-func (f *fakeRunContext) Workdir() string                               { return f.wd }
-func (f *fakeRunContext) ContainerWorkdir() string                      { return f.cwd }
-func (f *fakeRunContext) ActionCacheDir() string                        { return f.cache }
-func (f *fakeRunContext) GithubContext() *model.GithubContext           { return f.gh }
-func (f *fakeRunContext) Config() action.Config                         { return f.cfg }
-
-type fakeConfig struct {
-	token             string
-	githubInstance    string
-	defaultActionInst string
-	insecureTLS       bool
-	bind              bool
-	noSkip            bool
-	gitIgnore         bool
-	offline           bool
-}
-
-func (f *fakeConfig) Token() string                 { return f.token }
-func (f *fakeConfig) GitHubInstance() string        { return f.githubInstance }
-func (f *fakeConfig) DefaultActionInstance() string { return f.defaultActionInst }
-func (f *fakeConfig) InsecureSkipTLS() bool         { return f.insecureTLS }
-func (f *fakeConfig) BindWorkdir() bool             { return f.bind }
-func (f *fakeConfig) NoSkipCheckout() bool          { return f.noSkip }
-func (f *fakeConfig) UseGitIgnore() bool            { return f.gitIgnore }
-func (f *fakeConfig) ActionOfflineMode() bool       { return f.offline }
-
-func checkoutCtx(t *testing.T, fc *fakeContainer, cfg *fakeConfig, inputs map[string]string) *action.Context {
+func runGit(t *testing.T, args ...string) string {
 	t.Helper()
-	if fc == nil {
-		fc = &fakeContainer{}
-	}
-	if cfg == nil {
-		cfg = &fakeConfig{}
-	}
-	if inputs == nil {
-		inputs = map[string]string{}
-	}
-	return &action.Context{
-		Ctx: context.Background(),
-		RunContext: &fakeRunContext{
-			jc:    fc,
-			wd:    "/host/work",
-			cwd:   "/workspace",
-			cache: t.TempDir(),
-			gh:    &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main"},
-			cfg:   cfg,
-		},
-		Step:   &model.Step{Uses: "builtin:checkout"},
-		Inputs: inputs,
-		Env:    map[string]string{},
-		Logger: log.New(),
-	}
+	cmd := exec.Command("git", args...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return strings.TrimSpace(string(out))
 }
 
-func TestCheckoutSkipsWhenWorkspaceBound(t *testing.T) {
-	fc := &fakeContainer{}
-	err := (&Action{}).Main(checkoutCtx(t, fc, &fakeConfig{bind: true}, nil))
-	require.NoError(t, err)
-	assert.False(t, fc.called)
-}
+func TestCheckout(t *testing.T) {
+	work := t.TempDir()
+	runGit(t, "init", "--initial-branch=main", work)
+	runGit(t, "-C", work, "commit", "--allow-empty", "-m", "c1")
+	sha := runGit(t, "-C", work, "rev-parse", "HEAD")
+	runGit(t, "-C", work, "commit", "--allow-empty", "-m", "c2")
+	runGit(t, "-C", work, "checkout", "-b", "feature")
+	runGit(t, "-C", work, "commit", "--allow-empty", "-m", "f1")
+	runGit(t, "-C", work, "checkout", "--orphan", "trunk")
+	runGit(t, "-C", work, "commit", "--allow-empty", "-m", "t1")
+	runGit(t, "-C", work, "commit", "--allow-empty", "-m", "t2")
+	server := t.TempDir()
+	runGit(t, "clone", "--bare", "--branch", "main", work, filepath.Join(server, "org", "repo"))
+	runGit(t, "clone", "--bare", "--branch", "trunk", work, filepath.Join(server, "other", "repo"))
+	host := t.TempDir()
 
-func TestCheckoutCopiesLocalWorkspace(t *testing.T) {
-	fc := &fakeContainer{}
-	err := (&Action{}).Main(checkoutCtx(t, fc, &fakeConfig{gitIgnore: true}, map[string]string{"path": "src"}))
-	require.NoError(t, err)
-	assert.True(t, fc.called)
-	assert.Equal(t, "/workspace/src", fc.copyDirDst)
-	assert.True(t, strings.HasPrefix(fc.copyDirSrc, "/host/work"))
-	assert.True(t, fc.copyDirGI)
-}
-
-func TestCheckoutRejectsPathOutsideWorkspace(t *testing.T) {
-	fc := &fakeContainer{}
-	err := (&Action{}).Main(checkoutCtx(t, fc, &fakeConfig{bind: true}, map[string]string{"path": "../outside"}))
-	require.Error(t, err)
-	assert.False(t, fc.called)
-}
-
-func TestWorkspaceDestination(t *testing.T) {
 	for _, tc := range []struct {
-		path string
-		want string
-		err  bool
+		name          string
+		bind, noSkip  bool
+		inputs        map[string]string
+		dst           string
+		log           []string
+		hostCopy, err bool
 	}{
-		{path: "", want: "/workspace"},
-		{path: ".", want: "/workspace"},
-		{path: "src", want: "/workspace/src"},
-		{path: "nested/../src", want: "/workspace/src"},
-		{path: "../outside", err: true},
-		{path: "/outside", err: true},
-		{path: "nested/../../outside", err: true},
+		{name: "bound workspace is skipped", bind: true},
+		{name: "workflow ref copies host workdir", inputs: map[string]string{"ref": "main", "path": "a/../src"}, dst: "/workspace/src", hostCopy: true},
+		{name: "bound path clones event sha", bind: true, inputs: map[string]string{"path": "src"}, dst: "/workspace/src", log: []string{"c1"}},
+		{name: "no-skip clones event sha", noSkip: true, dst: "/workspace", log: []string{"c1"}},
+		{name: "ref clones shallow", inputs: map[string]string{"ref": "refs/heads/feature"}, dst: "/workspace", log: []string{"f1"}},
+		{name: "fetch-depth 0 clones full history", inputs: map[string]string{"ref": "feature", "fetch-depth": "0"}, dst: "/workspace", log: []string{"f1", "c2", "c1"}},
+		{name: "other repository defaults to its default branch", inputs: map[string]string{"repository": "other/repo"}, dst: "/workspace", log: []string{"t2"}},
+		{name: "unsupported input", inputs: map[string]string{"submodules": "true"}, err: true},
+		{name: "relative path escaping workspace", inputs: map[string]string{"path": "../x"}, err: true},
+		{name: "absolute path", inputs: map[string]string{"path": "/x"}, err: true},
+		{name: "negative fetch-depth", inputs: map[string]string{"fetch-depth": "-1"}, err: true},
 	} {
-		t.Run(tc.path, func(t *testing.T) {
-			got, err := workspaceDestination("/workspace", tc.path)
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &fakeContainer{}
+			err := Main(t.Context(), &action.Context{
+				Container:      fc,
+				Github:         &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main", Sha: sha, ServerURL: server},
+				Inputs:         tc.inputs,
+				HostWorkdir:    host,
+				Workspace:      "/workspace",
+				BindWorkdir:    tc.bind,
+				NoSkipCheckout: tc.noSkip,
+			})
 			if tc.err {
 				require.Error(t, err)
+				assert.Empty(t, fc.dst)
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
-func TestFetchDepth(t *testing.T) {
-	for _, tc := range []struct {
-		input string
-		want  int
-		err   bool
-	}{
-		{input: "", want: 1},
-		{input: " ", want: 1},
-		{input: "0", want: 0},
-		{input: "5", want: 5},
-		{input: " 5", want: 5},
-		{input: "-1", err: true},
-		{input: "invalid", err: true},
-	} {
-		t.Run(tc.input, func(t *testing.T) {
-			got, err := fetchDepth(tc.input)
-			if tc.err {
-				require.Error(t, err)
-				return
+			assert.Equal(t, tc.dst, fc.dst)
+			assert.Equal(t, tc.log, fc.log)
+			assert.Equal(t, tc.hostCopy, strings.HasPrefix(fc.src, host))
+			if tc.log != nil {
+				assert.NoDirExists(t, fc.src)
 			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
 		})
 	}
-}
-
-func TestCheckoutTakesClonePath(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		cfg    *fakeConfig
-		inputs map[string]string
-	}{
-		{name: "no-skip", cfg: &fakeConfig{noSkip: true, offline: true}},
-		{name: "other-repo", cfg: &fakeConfig{offline: true}, inputs: map[string]string{"repository": "other/repo"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Error(t, (&Action{}).Main(checkoutCtx(t, nil, tc.cfg, tc.inputs)))
-		})
-	}
-}
-
-func TestRepoURL(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		gh   *model.GithubContext
-		cfg  *fakeConfig
-		want string
-	}{
-		{"server-url", &model.GithubContext{ServerURL: "https://gitea.example.com"}, &fakeConfig{githubInstance: "gitea.example.com", defaultActionInst: "https://github.com"}, "https://gitea.example.com/org/repo"},
-		{"default-instance", &model.GithubContext{}, &fakeConfig{defaultActionInst: "github.com"}, "https://github.com/org/repo"},
-		{"github-instance", &model.GithubContext{}, &fakeConfig{githubInstance: "gitea.local"}, "https://gitea.local/org/repo"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, repoURL(tc.gh, tc.cfg, "org/repo"))
-		})
-	}
-}
-
-func TestIsLocalCheckoutLike(t *testing.T) {
-	gh := &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main"}
-	assert.True(t, isLocalCheckoutLike(map[string]string{}, gh))
-	assert.True(t, isLocalCheckoutLike(map[string]string{"repository": "org/repo"}, gh))
-	assert.True(t, isLocalCheckoutLike(map[string]string{"repository": "org/repo", "ref": "refs/heads/main"}, gh))
-	assert.False(t, isLocalCheckoutLike(map[string]string{"repository": "other/repo"}, gh))
-	assert.False(t, isLocalCheckoutLike(map[string]string{"ref": "refs/heads/feature"}, gh))
 }

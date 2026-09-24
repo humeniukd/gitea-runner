@@ -9,7 +9,6 @@ import (
 
 	"gitea.dev/actionslib/pkg/model"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestStepFactoryNewStep(t *testing.T) {
@@ -83,35 +82,11 @@ func TestStepFactoryNewStep(t *testing.T) {
 }
 
 func TestStepFactoryInvalidStep(t *testing.T) {
-	model := &model.Step{
-		Uses: "remote/action@v1",
-		Run:  "cmd",
+	for _, stepModel := range []*model.Step{
+		{Uses: "remote/action@v1", Run: "cmd"},
+		{Uses: "builtin:unknown"},
+	} {
+		_, err := (&stepFactoryImpl{}).newStep(stepModel, &RunContext{})
+		assert.Error(t, err, stepModel.Uses)
 	}
-
-	sf := &stepFactoryImpl{}
-
-	_, err := sf.newStep(model, &RunContext{})
-
-	assert.Error(t, err)
-}
-
-func TestStepFactoryUnknownBuiltin(t *testing.T) {
-	sf := &stepFactoryImpl{}
-	s, err := sf.newStep(&model.Step{Uses: "builtin:this-name-is-not-registered"}, &RunContext{})
-	assert.Nil(t, s)
-	assert.Error(t, err)
-}
-
-func TestStepFactoryBareNameIsRemoteAction(t *testing.T) {
-	sf := &stepFactoryImpl{}
-	s, err := sf.newStep(&model.Step{Uses: "checkout"}, &RunContext{})
-	require.NoError(t, err)
-	assert.IsType(t, &stepActionRemote{}, s)
-}
-
-func TestStepFactoryInvalidBuiltinName(t *testing.T) {
-	sf := &stepFactoryImpl{}
-	s, err := sf.newStep(&model.Step{Uses: "builtin:has/slash"}, &RunContext{})
-	assert.Nil(t, s)
-	assert.Error(t, err)
 }
