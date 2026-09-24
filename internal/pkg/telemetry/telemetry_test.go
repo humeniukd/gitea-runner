@@ -14,6 +14,7 @@ import (
 
 	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -23,6 +24,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -31,8 +34,9 @@ import (
 func setEnv(t *testing.T, env map[string]string) {
 	t.Cleanup(func() { SetTracerProvider(tracenoop.NewTracerProvider()) })
 	for _, key := range []string{
-		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+		"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_METRICS_HEADERS", "OTEL_METRIC_EXPORT_INTERVAL",
 	} {
 		t.Setenv(key, env[key])
 	}
@@ -46,13 +50,13 @@ func TestSetup(t *testing.T) {
 	}{
 		{},
 		{env: map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://collector:4318/v1/traces"}, enabled: true},
-		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318", "OTEL_TRACES_EXPORTER": "NONE"}},
+		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318", "OTEL_TRACES_EXPORTER": "NONE", "OTEL_METRICS_EXPORTER": "none"}},
 		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318", "OTEL_SDK_DISABLED": "TRUE"}},
 		{env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318", "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"}, err: `OTLP protocol "grpc" is not supported, only http/protobuf is`},
 	} {
 		t.Run(fmt.Sprint(tc.env), func(t *testing.T) {
 			setEnv(t, tc.env)
-			shutdown, err := Setup(t.Context(), "uuid", "runner")
+			shutdown, err := Setup(t.Context(), "uuid", "runner", prometheus.NewRegistry())
 			if tc.err != "" {
 				require.EqualError(t, err, tc.err)
 			} else {
@@ -77,9 +81,9 @@ func TestExportRetriesAndMatchesOTLP(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	setEnv(t, map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": server.URL + "/otlp/", "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer%20token"})
+	setEnv(t, map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": server.URL + "/otlp/", "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer%20token", "OTEL_METRICS_EXPORTER": "none"})
 
-	shutdown, err := Setup(t.Context(), "uuid", "runner")
+	shutdown, err := Setup(t.Context(), "uuid", "runner", prometheus.NewRegistry())
 	require.NoError(t, err)
 	_, span := tracer.Start(t.Context(), "op")
 	span.End()
@@ -98,6 +102,77 @@ func TestExportRefusesRedirects(t *testing.T) {
 	origin := httptest.NewServer(http.RedirectHandler(target.URL, http.StatusTemporaryRedirect))
 	defer origin.Close()
 	require.EqualError(t, (&client{origin.URL, http.Header{}}).UploadTraces(t.Context(), nil), "OTLP export failed: 307 Temporary Redirect")
+}
+
+func TestExportMetrics(t *testing.T) {
+	bodies := make(chan []byte, 100)
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/metrics", r.URL.Path)
+		assert.Equal(t, "Bearer metrics", r.Header.Get("Authorization"))
+		body, _ := io.ReadAll(r.Body)
+		select {
+		case bodies <- body:
+		default:
+		}
+	}))
+	defer server.Close()
+	setEnv(t, map[string]string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT": server.URL, "OTEL_TRACES_EXPORTER": "none",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS": "authorization=Bearer%20metrics", "OTEL_METRIC_EXPORT_INTERVAL": "10",
+	})
+	registry := prometheus.NewRegistry()
+	counter := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "jobs_total", Help: "Jobs."}, []string{"status"})
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{Name: "running"})
+	histogram := prometheus.NewHistogram(prometheus.HistogramOpts{Name: "duration_seconds", Buckets: []float64{1, 2}})
+	summary := prometheus.NewSummary(prometheus.SummaryOpts{Name: "gc_seconds", Objectives: map[float64]float64{0.5: 0.05}})
+	registry.MustRegister(counter, gauge, histogram, summary)
+	counter.WithLabelValues("success").Add(3)
+	gauge.Set(2)
+	for _, v := range []float64{0.5, 1.5, 3} {
+		histogram.Observe(v)
+	}
+	summary.Observe(4)
+
+	shutdown, err := Setup(t.Context(), "uuid", "runner", registry)
+	require.NoError(t, err)
+	_, tracesOff := tracer.(tracenoop.Tracer)
+	assert.True(t, tracesOff)
+	<-bodies
+	require.NoError(t, shutdown(t.Context()))
+
+	var body []byte
+	for len(bodies) > 0 {
+		body = <-bodies
+	}
+	var data metricpb.MetricsData
+	require.NoError(t, proto.Unmarshal(body, &data))
+	resourceMetrics := data.GetResourceMetrics()[0]
+	attrs := func(kvs []*commonpb.KeyValue) map[string]string {
+		m := map[string]string{}
+		for _, kv := range kvs {
+			m[kv.GetKey()] = kv.GetValue().GetStringValue()
+		}
+		return m
+	}
+	assert.Equal(t, "gitea-runner", attrs(resourceMetrics.GetResource().GetAttributes())["service.name"])
+	byName := map[string]*metricpb.Metric{}
+	for _, m := range resourceMetrics.GetScopeMetrics()[0].GetMetrics() {
+		byName[m.GetName()] = m
+	}
+	sum := byName["jobs_total"].GetSum()
+	assert.True(t, sum.GetIsMonotonic())
+	assert.Equal(t, cumulative, sum.GetAggregationTemporality())
+	assert.Equal(t, "Jobs.", byName["jobs_total"].GetDescription())
+	assert.InDelta(t, 3, sum.GetDataPoints()[0].GetAsDouble(), 0)
+	assert.Equal(t, map[string]string{"status": "success"}, attrs(sum.GetDataPoints()[0].GetAttributes()))
+	assert.InDelta(t, 2, byName["running"].GetGauge().GetDataPoints()[0].GetAsDouble(), 0)
+	point := byName["duration_seconds"].GetHistogram().GetDataPoints()[0]
+	assert.Equal(t, []float64{1, 2}, point.GetExplicitBounds())
+	assert.Equal(t, []uint64{1, 1, 1}, point.GetBucketCounts())
+	assert.Equal(t, uint64(3), point.GetCount())
+	assert.InDelta(t, 5, point.GetSum(), 0)
+	quantile := byName["gc_seconds"].GetSummary().GetDataPoints()[0].GetQuantileValues()[0]
+	assert.InDelta(t, 4, quantile.GetValue(), 0)
 }
 
 func TestJob(t *testing.T) {

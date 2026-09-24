@@ -22,6 +22,7 @@ import (
 	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	"github.com/avast/retry-go/v5"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -51,17 +52,36 @@ func SetTracerProvider(provider trace.TracerProvider) {
 	tracer = provider.Tracer(scope)
 }
 
-func Setup(ctx context.Context, uuid, name string) (func(context.Context) error, error) {
+func Setup(ctx context.Context, uuid, name string, gatherer prometheus.Gatherer) (func(context.Context) error, error) {
 	noop := func(context.Context) error { return nil }
-	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-	if base := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint == "" && base != "" {
-		endpoint = strings.TrimSuffix(base, "/") + "/v1/traces"
-	}
-	if endpoint == "" || strings.EqualFold(os.Getenv("OTEL_SDK_DISABLED"), "true") || strings.EqualFold(os.Getenv("OTEL_TRACES_EXPORTER"), "none") {
+	if strings.EqualFold(os.Getenv("OTEL_SDK_DISABLED"), "true") {
 		return noop, nil
 	}
-	if protocol := cmp.Or(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"), os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL")); protocol != "" && !strings.EqualFold(protocol, "http/protobuf") {
-		return noop, fmt.Errorf("OTLP protocol %q is not supported, only http/protobuf is", protocol)
+	clients := map[string]*client{}
+	for _, signal := range []string{"TRACES", "METRICS"} {
+		endpoint := os.Getenv("OTEL_EXPORTER_OTLP_" + signal + "_ENDPOINT")
+		if base := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint == "" && base != "" {
+			endpoint = strings.TrimSuffix(base, "/") + "/v1/" + strings.ToLower(signal)
+		}
+		if endpoint == "" || strings.EqualFold(os.Getenv("OTEL_"+signal+"_EXPORTER"), "none") {
+			continue
+		}
+		if protocol := cmp.Or(os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_PROTOCOL"), os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL")); protocol != "" && !strings.EqualFold(protocol, "http/protobuf") {
+			return noop, fmt.Errorf("OTLP protocol %q is not supported, only http/protobuf is", protocol)
+		}
+		headers := http.Header{}
+		for _, key := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_" + signal + "_HEADERS"} {
+			for pair := range strings.SplitSeq(os.Getenv(key), ",") {
+				key, value, found := strings.Cut(pair, "=")
+				if decoded, err := url.PathUnescape(strings.TrimSpace(value)); found && err == nil {
+					headers.Set(strings.TrimSpace(key), decoded)
+				}
+			}
+		}
+		clients[signal] = &client{endpoint, headers}
+	}
+	if len(clients) == 0 {
+		return noop, nil
 	}
 	res, err := resource.New(ctx, resource.WithTelemetrySDK(), resource.WithAttributes(
 		semconv.ServiceName("gitea-runner"),
@@ -73,21 +93,25 @@ func Setup(ctx context.Context, uuid, name string) (func(context.Context) error,
 	if err != nil {
 		return noop, err
 	}
-	headers := http.Header{}
-	for _, key := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS"} {
-		for pair := range strings.SplitSeq(os.Getenv(key), ",") {
-			key, value, found := strings.Cut(pair, "=")
-			if decoded, err := url.PathUnescape(strings.TrimSpace(value)); found && err == nil {
-				headers.Set(strings.TrimSpace(key), decoded)
-			}
-		}
+	var shutdown []func(context.Context) error
+	if c := clients["TRACES"]; c != nil {
+		provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(otlptrace.NewUnstarted(c)), sdktrace.WithResource(res))
+		SetTracerProvider(provider)
+		shutdown = append(shutdown, provider.Shutdown)
 	}
-	provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(otlptrace.NewUnstarted(&client{endpoint, headers})), sdktrace.WithResource(res))
-	SetTracerProvider(provider)
-	return provider.Shutdown, nil
+	if c := clients["METRICS"]; c != nil {
+		shutdown = append(shutdown, pushMetrics(c, res, gatherer))
+	}
+	return func(ctx context.Context) error {
+		var errs []error
+		for _, fn := range shutdown {
+			errs = append(errs, fn(ctx))
+		}
+		return errors.Join(errs...)
+	}, nil
 }
 
-// client replaces otlptracehttp, which links gRPC (+7 MB): https://github.com/open-telemetry/opentelemetry-go/issues/2579
+// client replaces the otlp*http exporters, which link gRPC (+7 MB): https://github.com/open-telemetry/opentelemetry-go/issues/2579
 type client struct {
 	endpoint string
 	headers  http.Header
@@ -101,7 +125,11 @@ func (*client) Start(context.Context) error { return nil }
 func (*client) Stop(context.Context) error { return nil }
 
 func (c *client) UploadTraces(ctx context.Context, spans []*tracepb.ResourceSpans) error {
-	body, err := proto.Marshal(&tracepb.TracesData{ResourceSpans: spans})
+	return c.upload(ctx, &tracepb.TracesData{ResourceSpans: spans})
+}
+
+func (c *client) upload(ctx context.Context, data proto.Message) error {
+	body, err := proto.Marshal(data)
 	if err != nil {
 		return err
 	}
