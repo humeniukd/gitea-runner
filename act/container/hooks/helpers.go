@@ -1,5 +1,4 @@
-// Copyright 2022 The Gitea Authors. All rights reserved.
-// Copyright 2020 The nektos/act Authors. All rights reserved.
+// Copyright 2026 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
 package hooks
