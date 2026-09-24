@@ -194,6 +194,7 @@ cache:
 container:
   # Specifies the network to which the container will connect.
   # Could be host, bridge or the name of a custom network.
+  # A runner container outside bridge cannot join it, so jobs on bridge cannot reach its cache.
   # If it's empty, runner will create a network automatically.
   # Deprecated: `network_mode` is still accepted for old configs; use `network` instead.
   #network: ""
