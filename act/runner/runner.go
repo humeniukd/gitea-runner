@@ -14,6 +14,7 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/ghcontext"
 
 	"gitea.dev/actionslib/pkg/model"
 	docker_container "github.com/moby/moby/api/types/container"
@@ -56,6 +57,7 @@ type Config struct {
 	DisableActEnv                 bool                                          // do not inject the ACT=true environment variable into jobs
 	ContainerNetworkMode          docker_container.NetworkMode                  // the network mode of job containers (the value of --network)
 	ContainerNetworkCreateOptions container.NewDockerNetworkCreateExecutorInput // the default network create options
+	CacheContainer                string                                        // let jobs reach an otherwise isolated cache
 	ProxyEnv                      map[string]string                             // the proxy variables the job runs with, also given to service containers and image builds
 	NoActionPatch                 bool                                          // run actions exactly as published, applying no compatibility patches, see patch_actions.go
 
@@ -321,7 +323,8 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 		})
 	}
 
-	return common.NewPipelineExecutor(stagePipeline...).Then(handleFailure(plan))
+	executor := common.NewPipelineExecutor(stagePipeline...).Then(handleFailure(plan))
+	return func(ctx context.Context) error { return executor(ghcontext.WithPinnedCheckout(ctx)) }
 }
 
 func handleFailure(plan *model.Plan) common.Executor {
