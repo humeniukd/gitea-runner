@@ -306,6 +306,10 @@ Dockerfile actions are built with these variables as build arguments, so their `
 
 A password in a proxy URL is hidden in job logs. Any step can still read it, because the step is given the proxy URL in its environment.
 
+#### Built-in actions (`uses: builtin:<name>`)
+
+Use `uses: builtin:checkout` to check out a repository without downloading `actions/checkout` or needing Node in the job image, see **[docs/builtin-actions.md](docs/builtin-actions.md)**.
+
 #### Caching (`actions/cache`)
 
 Each runner starts its own cache server, so runners do not share cached entries. A runner in a container on the jobs' Docker daemon attaches itself to each job network, so jobs reach its cache without extra setup.
@@ -379,6 +383,10 @@ Because they run where the steps run and see the job's environment, they are the
 Both hooks are synchronous and block the job while they run. Either one exiting non-zero fails the job, and there is no per-hook timeout.
 
 See **[docs/job-hooks.md](docs/job-hooks.md)** for the execution order, environment, and platform notes.
+
+#### OpenTelemetry (`OTEL_*`)
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` in the runner's environment to send a trace of every job to an OpenTelemetry collector. See **[docs/telemetry.md](docs/telemetry.md)**.
 
 #### Local job logs (`log.job.dir`)
 
