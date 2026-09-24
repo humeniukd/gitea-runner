@@ -439,8 +439,8 @@ func cloneAtDepth(ctx context.Context, input NewGitCloneExecutorInput, opts git.
 			}
 		} else {
 			refNames := []plumbing.ReferenceName{plumbing.NewBranchReferenceName(input.Ref), plumbing.NewTagReferenceName(input.Ref)}
-			if input.Ref == plumbing.HEAD.String() {
-				refNames = []plumbing.ReferenceName{plumbing.HEAD} // the remote's default branch
+			if input.Ref == plumbing.HEAD.String() || strings.HasPrefix(input.Ref, "refs/") {
+				refNames = []plumbing.ReferenceName{plumbing.ReferenceName(input.Ref)} // HEAD is the remote's default branch
 			}
 			for _, refName := range refNames {
 				shallowOpts := opts

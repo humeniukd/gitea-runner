@@ -60,6 +60,7 @@ func TestCheckout(t *testing.T) {
 	runGit(t, "-C", work, "checkout", "--orphan", "trunk")
 	runGit(t, "-C", work, "commit", "--allow-empty", "-m", "t1")
 	runGit(t, "-C", work, "commit", "--allow-empty", "-m", "t2")
+	runGit(t, "-C", work, "tag", "trunk", "main")
 	server := t.TempDir()
 	runGit(t, "clone", "--bare", "--branch", "main", work, filepath.Join(server, "org", "repo"))
 	runGit(t, "clone", "--bare", "--branch", "trunk", work, filepath.Join(server, "other", "repo"))
@@ -78,6 +79,7 @@ func TestCheckout(t *testing.T) {
 		{name: "bound path clones event sha", bind: true, inputs: map[string]string{"path": "src"}, dst: "/workspace/src", log: []string{"c1"}},
 		{name: "no-skip clones event sha", noSkip: true, dst: "/workspace", log: []string{"c1"}},
 		{name: "ref clones shallow", inputs: map[string]string{"ref": "refs/heads/feature"}, dst: "/workspace", log: []string{"f1"}},
+		{name: "tag ref wins over same-named branch", inputs: map[string]string{"ref": "refs/tags/trunk"}, dst: "/workspace", log: []string{"c2"}},
 		{name: "fetch-depth 0 clones full history", inputs: map[string]string{"ref": "feature", "fetch-depth": "0"}, dst: "/workspace", log: []string{"f1", "c2", "c1"}},
 		{name: "other repository defaults to its default branch", inputs: map[string]string{"repository": "other/repo"}, dst: "/workspace", log: []string{"t2"}},
 		{name: "unsupported input", inputs: map[string]string{"submodules": "true"}, err: true},

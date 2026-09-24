@@ -37,9 +37,9 @@ func Main(ctx context.Context, c *action.Context) error {
 
 	ghc := c.Github
 	repository := cmp.Or(c.Inputs["repository"], ghc.Repository)
-	ref := shortRef(c.Inputs["ref"])
+	ref := shortBranch(c.Inputs["ref"])
 	isWorkflowRepo := repository == ghc.Repository
-	local := isWorkflowRepo && slices.Contains([]string{"", shortRef(ghc.Ref), ghc.Sha}, ref) && !c.NoSkipCheckout
+	local := isWorkflowRepo && slices.Contains([]string{"", shortBranch(ghc.Ref), ghc.Sha}, ref) && !c.NoSkipCheckout
 	if local && !c.BindWorkdir {
 		return c.Container.CopyDir(dst, c.HostWorkdir+string(filepath.Separator)+".", c.UseGitIgnore, false)(ctx)
 	}
@@ -91,12 +91,7 @@ func fetchDepth(input string) (int, error) {
 	return depth, nil
 }
 
-// NewGitCloneExecutor expects short branch and tag names.
-func shortRef(ref string) string {
-	for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
-		if s, ok := strings.CutPrefix(ref, prefix); ok {
-			return s
-		}
-	}
-	return ref
+// NewGitCloneExecutor resolves branches by short name, a full tag ref stays exact.
+func shortBranch(ref string) string {
+	return strings.TrimPrefix(ref, "refs/heads/")
 }
