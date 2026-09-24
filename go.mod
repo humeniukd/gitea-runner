@@ -7,7 +7,7 @@ toolchain go1.27.1
 require (
 	connectrpc.com/connect v1.21.0
 	dario.cat/mergo v1.0.2
-	gitea.dev/actionslib v1.2.1-0.20260924013847-75d5a966cb4e
+	gitea.dev/actionslib v1.2.1-0.20260924095526-151c974ab3a8
 	github.com/avast/retry-go/v5 v5.0.0
 	github.com/containerd/errdefs v1.0.0
 	github.com/creack/pty v1.1.24
