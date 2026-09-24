@@ -44,37 +44,32 @@ cache:
 
 func TestLoadDefault_CacheS3(t *testing.T) {
 	dir := t.TempDir()
-	accessPath := filepath.Join(dir, "access")
-	secretPath := filepath.Join(dir, "secret")
-	require.NoError(t, os.WriteFile(accessPath, []byte(" access\n"), 0o600))
-	require.NoError(t, os.WriteFile(secretPath, []byte(" secret\n"), 0o600))
+	accessPath := filepath.Join(dir, "access.key")
+	require.NoError(t, os.WriteFile(accessPath, []byte("access\n"), 0o600))
 	path := filepath.Join(dir, "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("\ncache:\n  s3:\n    endpoint: http://minio:9000\n    bucket: caches\n    access_key_file: "+accessPath+"\n    secret_key_file: "+secretPath+"\n"), 0o600))
+	content := `
+cache:
+  s3:
+    endpoint: "http://minio:9000"
+    bucket: "caches"
+    prefix: "/runners/"
+    access_key_file: "` + accessPath + `"
+    secret_key: "secret"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 
 	cfg, err := LoadDefault(path)
 	require.NoError(t, err)
-	require.NotNil(t, cfg.Cache.S3)
-	assert.Equal(t, "access", cfg.Cache.S3.AccessKey)
-	assert.Equal(t, "secret", cfg.Cache.S3.SecretKey)
-	assert.Equal(t, "us-east-1", cfg.Cache.S3.Region)
-	assert.True(t, *cfg.Cache.S3.PathStyle)
-}
+	assert.Equal(t, CacheS3{
+		Endpoint: "http://minio:9000", Bucket: "caches", Prefix: "runners",
+		AccessKey: "access", AccessKeyFile: accessPath, SecretKey: "secret",
+	}, *cfg.Cache.S3)
 
-func TestLoadDefault_RejectsCacheS3ExternalServer(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte(`
-cache:
-  external_server: http://cache.invalid/
-  external_secret: shared
-  s3:
-    endpoint: http://minio:9000
-    bucket: caches
-    access_key: access
-    secret_key: secret
+	require.NoError(t, os.WriteFile(path, []byte(content+`  external_server: "http://cache.invalid/"
+  external_secret: "shh"
 `), 0o600))
-
-	_, err := LoadDefault(path)
-	require.ErrorContains(t, err, "cache.s3 and cache.external_server")
+	_, err = LoadDefault(path)
+	assert.ErrorContains(t, err, "cache.s3 and cache.external_server cannot both be set")
 }
 
 func TestLoadDefault_ToolCacheMode(t *testing.T) {

@@ -43,23 +43,6 @@ func (b *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 var testClient = &http.Client{Transport: &bearerTransport{token: testToken}}
 
-type testMetadataStore struct {
-	syncs     int
-	persisted []*Cache
-}
-
-func (s *testMetadataStore) syncMetadata(*bolthold.Store) error {
-	s.syncs++
-	return nil
-}
-
-func (s *testMetadataStore) persistMetadata(cache *Cache) error {
-	s.persisted = append(s.persisted, cache)
-	return nil
-}
-
-func (*testMetadataStore) removeMetadata(uint64) error { return nil }
-
 // testRetention mirrors config.DefaultCacheRetention; Policy has no defaults of its own.
 const testRetention = 7 * 24 * time.Hour
 
@@ -72,62 +55,6 @@ func signArtifactURL(h *Handler, id int64) string {
 
 func TestHandler_ExternalURL(t *testing.T) {
 	assert.Equal(t, "http://[2001:db8::1]:8080", (&Handler{outboundIP: "2001:db8::1", port: 8080}).ExternalURL())
-}
-
-func TestHandler_SharedMetadataOnlyPersistsCompletedCaches(t *testing.T) {
-	handler := newTestHandler(t, Policy{})
-	metadata := &testMetadataStore{}
-	handler.metadata = metadata
-
-	db, err := handler.openDB()
-	require.NoError(t, err)
-	defer db.Close()
-	incomplete := &Cache{ID: 1, Key: "incomplete"}
-	require.NoError(t, db.Insert(incomplete.ID, incomplete))
-	require.NoError(t, handler.saveCache(db, incomplete))
-	assert.Empty(t, metadata.persisted)
-
-	complete := &Cache{ID: 2, Key: "complete", Complete: true}
-	require.NoError(t, db.Insert(complete.ID, complete))
-	require.NoError(t, handler.saveCache(db, complete))
-	require.Len(t, metadata.persisted, 1)
-	assert.Positive(t, complete.UpdatedAt)
-
-	stored := &Cache{}
-	require.NoError(t, db.Get(complete.ID, stored))
-	assert.Equal(t, complete.UpdatedAt, stored.UpdatedAt)
-}
-
-func TestHandler_S3CacheIDIsJavaScriptSafe(t *testing.T) {
-	handler := newTestHandler(t, Policy{})
-	handler.metadata = &testMetadataStore{}
-	db, err := handler.openDB()
-	require.NoError(t, err)
-	defer db.Close()
-
-	cache := &Cache{Key: "key", Repo: testRepo}
-	require.NoError(t, handler.insertCache(db, cache))
-	assert.Positive(t, cache.ID)
-	assert.LessOrEqual(t, cache.ID, maxJSONSafeCacheID)
-}
-
-func TestHandler_SharedMetadataSyncIsRateLimited(t *testing.T) {
-	handler := newTestHandler(t, Policy{})
-	metadata := &testMetadataStore{}
-	handler.metadata = metadata
-
-	for range 2 {
-		db, err := handler.openDB()
-		require.NoError(t, err)
-		require.NoError(t, db.Close())
-	}
-	assert.Equal(t, 1, metadata.syncs)
-
-	handler.metadataSyncAt = time.Now().Add(-s3MetadataSyncInterval)
-	db, err := handler.openDB()
-	require.NoError(t, err)
-	require.NoError(t, db.Close())
-	assert.Equal(t, 2, metadata.syncs)
 }
 
 func TestHandler_Upstream(t *testing.T) {
@@ -937,7 +864,7 @@ func TestHandler_gcCache(t *testing.T) {
 	db, err := handler.openDB()
 	require.NoError(t, err)
 	for _, c := range cases {
-		require.NoError(t, insertCache(db, c.Cache))
+		require.NoError(t, handler.insertCache(db, c.Cache))
 	}
 	require.NoError(t, db.Close())
 
@@ -1109,7 +1036,7 @@ func TestHandler_SweepKeepsEntryWhenBlobSurvives(t *testing.T) {
 	handler := newTestHandler(t, Policy{Retention: testRetention}, cache)
 
 	// A non-empty directory where the blob belongs makes os.Remove fail on every platform.
-	blob := handler.storage.filename(cache.ID)
+	blob := handler.storage.(*Storage).filename(cache.ID)
 	require.NoError(t, os.MkdirAll(blob, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(blob, "held"), []byte("x"), 0o600))
 
@@ -1192,21 +1119,25 @@ func TestHandler_touchCacheSkipsFreshCompletedEntries(t *testing.T) {
 // newTestHandler starts a handler with testToken registered, seeded with entries.
 func newTestHandler(t *testing.T, policy Policy, entries ...*Cache) *Handler {
 	t.Helper()
-	handler, err := StartHandler(Options{
-		Dir:        filepath.Join(t.TempDir(), "artifactcache"),
-		OutboundIP: "127.0.0.1",
-		Policy:     policy,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, handler.Close()) })
-	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
+	handler := startTestHandler(t, Options{Policy: policy})
 
 	db, err := handler.openDB()
 	require.NoError(t, err)
 	for _, e := range entries {
-		require.NoError(t, insertCache(db, e))
+		require.NoError(t, handler.insertCache(db, e))
 	}
 	require.NoError(t, db.Close())
+	return handler
+}
+
+func startTestHandler(t *testing.T, opts Options) *Handler {
+	t.Helper()
+	opts.Dir = filepath.Join(t.TempDir(), "artifactcache")
+	opts.OutboundIP = "127.0.0.1"
+	handler, err := StartHandler(opts)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handler.Close()) })
+	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
 	return handler
 }
 
@@ -1550,8 +1481,8 @@ func TestHandler_GC_PerRepoDedup(t *testing.T) {
 	stale := time.Now().Add(-inUseGrace - time.Minute).Unix()
 	a := &Cache{Repo: "owner/repoA", Key: key, Version: version, Complete: true, CreatedAt: stale, UsedAt: stale, Size: 1}
 	b := &Cache{Repo: "owner/repoB", Key: key, Version: version, Complete: true, CreatedAt: now, UsedAt: now, Size: 1}
-	require.NoError(t, insertCache(db, a))
-	require.NoError(t, insertCache(db, b))
+	require.NoError(t, handler.insertCache(db, a))
+	require.NoError(t, handler.insertCache(db, b))
 	// Write the backing blobs so the dedup deletion has something to remove.
 	require.NoError(t, handler.storage.Write(a.ID, 0, strings.NewReader("a")))
 	_, err = handler.storage.Commit(a.ID, 1)

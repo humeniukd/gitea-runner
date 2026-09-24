@@ -343,11 +343,10 @@ Runners can also share one `cache.dir` on a file system with working file locks,
 
 **Sharing a cache through S3-compatible storage**
 
-MinIO, RustFS, and AWS S3-compatible endpoints can hold `actions/cache` data without a dedicated `cache-server`. Each runner still exposes its built-in cache API to the jobs it runs, while completed cache archives are stored in the shared bucket:
+Runners can share a cache through an S3-compatible bucket, such as AWS S3, MinIO or RustFS, without a cache server:
 
 ```yaml
 cache:
-  host: "runner-host" # reachable from job containers
   s3:
     endpoint: "http://minio:9000"
     region: "us-east-1"
@@ -358,9 +357,7 @@ cache:
     secret_key_file: "/run/secrets/cache-s3-secret-key"
 ```
 
-`cache.s3` and `cache.external_server` cannot be combined. S3 lifecycle rules own completed-cache retention and capacity; apply them to the configured prefix and configure the bucket to abort abandoned multipart uploads. A failed in-progress save is reclaimed by the runner after its normal short timeout. This only changes `actions/cache`: workflow artifacts continue to use Gitea.
-
-The runner proxies cache downloads after looking them up in S3, so job traffic still traverses the runner; S3 credentials and bucket URLs are never exposed to jobs.
+An entry saved on one runner reaches the others within 30 seconds. `retention` and the size limits do not apply to the bucket, so give it lifecycle rules that expire entries and abort incomplete multipart uploads.
 
 **Eviction**
 

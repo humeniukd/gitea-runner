@@ -166,10 +166,10 @@ cache:
   # Surrounding whitespace is trimmed, so a trailing newline in the file is fine.
   # Setting both external_secret and external_secret_file is an error.
   #external_secret_file: ""
-  # Store actions/cache entries in a shared S3-compatible bucket instead of using a
-  # separate cache-server. Each runner still starts its own small cache API for its jobs.
-  # Mutually exclusive with external_server. Workflow artifacts remain stored in Gitea.
-  # Configure lifecycle rules on this prefix for completed entries and abandoned uploads.
+  # Share entries with other runners through an S3-compatible bucket instead of external_server.
+  # region defaults to us-east-1, and path_style to false on AWS and true elsewhere. access_key and
+  # secret_key can also be set inline. Lifecycle rules on the bucket take the place of retention
+  # and the size limits below, and should also abort incomplete multipart uploads.
   #s3:
   #  endpoint: "http://minio:9000"
   #  region: "us-east-1"

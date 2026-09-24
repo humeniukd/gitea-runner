@@ -20,5 +20,4 @@ type Cache struct {
 	Complete  bool   `json:"complete" boltholdIndex:"Complete"`
 	UsedAt    int64  `json:"usedAt" boltholdIndex:"UsedAt"`
 	CreatedAt int64  `json:"createdAt" boltholdIndex:"CreatedAt"`
-	UpdatedAt int64  `json:"updatedAt"`
 }
