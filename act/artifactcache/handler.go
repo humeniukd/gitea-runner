@@ -440,7 +440,7 @@ func (h *Handler) syncMetadata(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		if err := h.importMetadata(ctx); err != nil && ctx.Err() == nil {
-			h.logger.Warnf("sync shared cache: %v", err)
+			h.logger.Warnf("sync S3 cache: %v", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -704,7 +704,7 @@ func (h *Handler) commitCache(cache *Cache) error {
 		return err
 	}
 	if h.s3 != nil {
-		return nil // lifecycle rules on the bucket bound a shared cache
+		return nil // lifecycle rules on the bucket bound its size
 	}
 	// A commit is the only thing that grows the store, so the only thing that can push the
 	// volume under the floor.
@@ -973,7 +973,7 @@ func (h *Handler) insertCache(db *bolthold.Store, cache *Cache) error {
 	if h.s3 != nil {
 		var id [8]byte
 		_, _ = rand.Read(id[:])
-		cache.ID = binary.BigEndian.Uint64(id[:]) >> 11 // runners share the ID space, and v1 clients parse an ID as a JS number
+		cache.ID = binary.BigEndian.Uint64(id[:]) >> 11 // IDs must be unique across runners, and v1 clients parse an ID as a JS number
 		return db.Insert(cache.ID, cache)
 	}
 	return db.Bolt().Update(func(tx *bbolt.Tx) error {
@@ -1083,7 +1083,7 @@ func (h *Handler) gcCache() {
 
 	h.evictIncomplete(db)
 	if h.s3 != nil {
-		return // lifecycle rules on the bucket expire shared entries
+		return // lifecycle rules on the bucket expire its entries
 	}
 	h.evictExpired(db)
 	h.evictSuperseded(db)

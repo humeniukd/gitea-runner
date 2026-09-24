@@ -26,7 +26,7 @@ import (
 	"time"
 )
 
-// S3Options configures the bucket runners share completed cache entries through.
+// S3Options configures the bucket that stores completed cache entries.
 type S3Options struct {
 	Endpoint  string
 	Region    string

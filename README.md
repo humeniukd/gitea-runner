@@ -341,9 +341,9 @@ cache:
 
 Runners can also share one `cache.dir` on a file system with working file locks, at the cost of slower cache requests.
 
-**Sharing a cache through S3-compatible storage**
+**Storing the cache in an S3-compatible bucket**
 
-Runners can share a cache through an S3-compatible bucket, such as AWS S3, MinIO or RustFS, without a cache server:
+The cache can also be stored in an S3-compatible bucket such as AWS S3, MinIO or RustFS, with no cache server. Runners with the same settings use the same cache:
 
 ```yaml
 cache:
@@ -357,7 +357,7 @@ cache:
     secret_key_file: "/run/secrets/cache-s3-secret-key"
 ```
 
-An entry saved on one runner reaches the others within 30 seconds. `retention` and the size limits do not apply to the bucket, so give it lifecycle rules that expire entries and abort incomplete multipart uploads.
+A cache saved on one runner can be restored on the others within 30 seconds. The eviction settings below do not apply to the bucket, so add lifecycle rules to it that expire old caches and abort incomplete multipart uploads.
 
 **Eviction**
 

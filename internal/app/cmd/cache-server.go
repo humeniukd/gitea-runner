@@ -30,7 +30,7 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 
 		initLogging(cfg)
 		if cfg.Cache.S3 != nil {
-			return errors.New("cache.s3 uses each runner's built-in cache server; do not run cache-server")
+			return errors.New("cache-server does not support cache.s3; set cache.s3 on the runners instead")
 		}
 
 		var (

@@ -101,7 +101,7 @@ type Cache struct {
 	OfflineMode        bool   `yaml:"offline_mode"`         // OfflineMode reuses a cached action without fetching from the remote; a moved tag or branch stays at the cached commit until the cache entry is removed.
 	V2                 *bool  `yaml:"v2"`                   // V2 advertises the actions cache service v2 API to jobs. The bundle edit that reaches it is made either way, the artifact actions need it too. Unset means enabled.
 
-	S3 *CacheS3 `yaml:"s3"` // S3 shares actions/cache entries with other runners through an S3-compatible bucket.
+	S3 *CacheS3 `yaml:"s3"` // S3 stores the cache in an S3-compatible bucket, so runners with the same settings use the same cache.
 
 	// Eviction settings, ignored when ExternalServer is set since that server applies its own. With S3, bucket lifecycle rules replace all but SweepInterval.
 	Retention     time.Duration `yaml:"retention"`       // Retention removes entries nothing has read or written within this window. Default 168h, 0 keeps them regardless of age.
@@ -110,7 +110,7 @@ type Cache struct {
 	SweepInterval time.Duration `yaml:"sweep_interval"`  // SweepInterval is the minimum time between two eviction sweeps. Default 1h; a cadence has no "off".
 }
 
-// CacheS3 is the S3-compatible bucket runners share cache entries through.
+// CacheS3 is an S3-compatible bucket that stores the cache.
 type CacheS3 struct {
 	Endpoint      string `yaml:"endpoint"`
 	Region        string `yaml:"region"`

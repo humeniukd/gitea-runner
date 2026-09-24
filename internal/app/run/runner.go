@@ -823,7 +823,7 @@ func warnIgnoredCachePolicy(cfg *config.Config) {
 	case cfg.Cache.ExternalServer != "" && (limits || cfg.Cache.SweepInterval != defaults.SweepInterval):
 		log.Warn("cache eviction settings are ignored when cache.external_server is set; configure them on that server instead")
 	case cfg.Cache.S3 != nil && limits:
-		log.Warn("cache retention and size limits are ignored when cache.s3 is set; use lifecycle rules on the bucket instead")
+		log.Warn("cache eviction settings are ignored when cache.s3 is set; use lifecycle rules on the bucket instead")
 	}
 }
 
