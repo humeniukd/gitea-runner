@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -40,6 +41,7 @@ import (
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	docker_container "github.com/moby/moby/api/types/container"
 	log "github.com/sirupsen/logrus"
+	"go.yaml.in/yaml/v4"
 )
 
 // CapabilityCancelling tells the server this runner understands the
@@ -66,6 +68,8 @@ type Runner struct {
 	envs         map[string]string
 	cacheHandler *artifactcache.Handler
 	capabilities string
+
+	isolatedCacheNetwork func() string
 
 	runningTasks            sync.Map
 	runningCount            atomic.Int64
@@ -110,7 +114,6 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 			} else {
 				cacheHandler = handler
 				envs["ACTIONS_CACHE_URL"] = handler.ExternalURL() + "/"
-				warnIfCacheUnreachable(cfg, handler.ExternalURL())
 			}
 		}
 	}
@@ -135,6 +138,7 @@ func NewRunner(cfg *config.Config, reg *config.Registration, cli client.Client) 
 		now:            time.Now,
 		runHealthCheck: executeHealthCheck,
 	}
+	runner.isolatedCacheNetwork = sync.OnceValue(runner.detectIsolatedCacheNetwork)
 	return runner
 }
 
@@ -411,7 +415,9 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 
 	// Added per task because this job's service containers must be reached directly, and
 	// act reaches them by their workflow key.
-	proxyEnv := JobProxyEnv(envs, r.builtInCacheURL(), slices.Sorted(maps.Keys(job.Services)))
+	var services map[string]yaml.Node
+	_ = job.RawServices.Decode(&services) // a whole-value expression names no service before evaluation
+	proxyEnv := JobProxyEnv(envs, r.builtInCacheURL(), slices.Sorted(maps.Keys(services)))
 	maps.Copy(envs, proxyEnv)
 
 	if r.capabilities != "" {
@@ -425,24 +431,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		r.getDefaultActionsURL(task),
 		r.client.Address())
 
-	preset := &model.GithubContext{
-		Event:           taskContext["event"].GetStructValue().AsMap(),
-		RunID:           taskContext["run_id"].GetStringValue(),
-		RunNumber:       taskContext["run_number"].GetStringValue(),
-		RunAttempt:      taskContext["run_attempt"].GetStringValue(),
-		Actor:           taskContext["actor"].GetStringValue(),
-		Repository:      taskContext["repository"].GetStringValue(),
-		EventName:       taskContext["event_name"].GetStringValue(),
-		Sha:             taskContext["sha"].GetStringValue(),
-		Ref:             taskContext["ref"].GetStringValue(),
-		RefName:         taskContext["ref_name"].GetStringValue(),
-		RefType:         taskContext["ref_type"].GetStringValue(),
-		HeadRef:         taskContext["head_ref"].GetStringValue(),
-		BaseRef:         taskContext["base_ref"].GetStringValue(),
-		Token:           taskContext["token"].GetStringValue(),
-		RepositoryOwner: taskContext["repository_owner"].GetStringValue(),
-		RetentionDays:   taskContext["retention_days"].GetStringValue(),
-	}
+	preset := model.GithubContextFromMap(task.Context.AsMap())
 	if t := task.Secrets["GITEA_TOKEN"]; t != "" {
 		preset.Token = t
 	} else if t := task.Secrets["GITHUB_TOKEN"]; t != "" {
@@ -477,7 +466,6 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	// is that server's responsibility to authenticate requests.
 	revokeCache, resultsURL := r.registerCacheForTask(giteaRuntimeToken, preset.Repository, reporter)
 	defer revokeCache()
-	r.setResultsService(envs, resultsURL)
 
 	eventJSON, err := json.Marshal(preset.Event)
 	if err != nil {
@@ -517,6 +505,13 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		}
 		return fallbackPlatform()
 	}
+
+	if resultsURL != "" && r.cacheIsolatedFrom(job, platformPicker) {
+		reporter.Logf("::warning::%s", runner.EscapeCommandData(fmt.Sprintf("jobs cannot reach the cache server at %s on docker network %q, so caching fails and artifacts go to Gitea directly, set cache.host and cache.port to an address jobs reach, or container.network to %[2]q",
+			r.cacheHandler.ExternalURL(), r.isolatedCacheNetwork())))
+		resultsURL = ""
+	}
+	r.setResultsService(envs, resultsURL)
 
 	runnerConfig := &runner.Config{
 		// On Linux, Workdir will be like "/<parent_directory>/<owner>/<repo>"
@@ -847,12 +842,24 @@ func warnIgnoredCacheSecret(cfg *config.Config) {
 	log.Warnf("%s is set but cache.external_server is not; the built-in cache server does not use a shared secret, so the value is ignored", key)
 }
 
-func warnIfCacheUnreachable(cfg *config.Config, cacheURL string) {
-	if cfg.Cache.Host != "" || cfg.Container.Network != "" {
-		return
+func (r *Runner) cacheIsolatedFrom(job *model.Job, pickPlatform func([]string) string) bool {
+	jobContainer := job.Container()
+	return (jobContainer != nil && jobContainer.Image != "" || pickPlatform(job.RunsOn()) != labels.SelfHostedPlatform) && r.isolatedCacheNetwork() != ""
+}
+
+func (r *Runner) detectIsolatedCacheNetwork() string {
+	if r.cacheHandler == nil {
+		return ""
 	}
-	if _, err := os.Stat("/.dockerenv"); err != nil {
-		return
+	addr, err := netip.ParseAddr(hostOf(r.cacheHandler.ExternalURL()))
+	if err != nil {
+		return ""
 	}
-	log.Warnf("jobs are given %s for the cache server; if they cannot reach it, set container.network to a network this runner is on, or cache.host", cacheURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	network, err := container.IsolatedNetwork(ctx, addr, r.cfg.Container.Network)
+	if err != nil {
+		log.Warnf("cannot check whether jobs reach the cache server: %v", err)
+	}
+	return network
 }

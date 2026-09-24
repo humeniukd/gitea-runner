@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"gitea.com/gitea/runner/act/common"
@@ -148,11 +149,8 @@ func TestSetupEnv(t *testing.T) {
 		},
 		JobContainer: cm,
 	}
-	step := &model.Step{
-		With: map[string]string{
-			"STEP_WITH": "with-value",
-		},
-	}
+	step := &model.Step{}
+	require.NoError(t, step.RawWith.Encode(map[string]string{"STEP_WITH": "with-value", "ID": "${{ fromJSON('1234567') }}"}))
 	env := map[string]string{}
 
 	sm.On("getRunContext").Return(rc)
@@ -161,6 +159,7 @@ func TestSetupEnv(t *testing.T) {
 	sm.On("getEnv").Return(&env)
 
 	require.NoError(t, setupEnv(context.Background(), sm))
+	require.NoError(t, setupInputs(context.Background(), sm))
 
 	// These are commit or system specific
 	delete(env, "GITHUB_REF")
@@ -197,6 +196,7 @@ func TestSetupEnv(t *testing.T) {
 		"GITHUB_RUN_NUMBER":        "1",
 		"GITHUB_SERVER_URL":        "https://",
 		"GITHUB_WORKFLOW":          "",
+		"INPUT_ID":                 "1234567",
 		"INPUT_STEP_WITH":          "with-value",
 		"RC_KEY":                   "rcvalue",
 		"RUNNER_ENVIRONMENT":       "self-hosted",
@@ -205,6 +205,67 @@ func TestSetupEnv(t *testing.T) {
 	}, env)
 
 	cm.AssertExpectations(t)
+
+	for _, expression := range []string{"inputs.args", "env.ARGS"} {
+		t.Run("deferred inputs from "+expression, func(t *testing.T) {
+			workflow, err := model.ReadWorkflow(strings.NewReader(`
+env: ${{ fromJSON(matrix.env) }}
+jobs:
+  test:
+    env:
+      PRIORITY: ${{ matrix.priority }}
+    defaults:
+      run: ${{ fromJSON(matrix.defaults) }}
+    container:
+      image: node:20
+      env:
+        CONTAINER: ${{ env.PRIORITY }}
+    steps:
+      - uses: ./act
+        env:
+          ARGS: ${{ inputs.args }}
+        with: ${{ fromJSON(` + expression + `) }}
+`))
+			require.NoError(t, err)
+			job := workflow.GetJob("test")
+			rawEnv := model.CloneYamlNode(workflow.RawEnv)
+			rawWith := model.CloneYamlNode(job.Steps[0].RawWith)
+			for _, value := range []string{"first", "second"} {
+				t.Run(value, func(t *testing.T) {
+					t.Parallel()
+					rc, err := (&runnerImpl{config: &Config{}}).newRunContext(t.Context(), &model.Run{Workflow: workflow, JobID: "test"}, map[string]any{"env": `{"WORKFLOW":"` + value + `${{ github.job }}","PRIORITY":"workflow"}`, "priority": "${{ github.job }}", "defaults": `{"shell":"` + value + `"}`})
+					require.NoError(t, err)
+					rc.workflowCallInputs = map[string]any{"args": `{"name":"` + value + `${{ github.job }}","fetch-depth":1234567}`}
+					enabled, err := rc.isEnabled(t.Context())
+					require.NoError(t, err)
+					require.True(t, enabled)
+					require.NoError(t, evaluateJobEnvAndDefaults(t.Context(), rc))
+					assert.Equal(t, model.RunDefaults{Shell: value}, rc.jobRunDefaults)
+					step := &stepRun{RunContext: rc, Step: job.Steps[0].Clone(), env: map[string]string{}}
+					require.NoError(t, setupEnv(t.Context(), step))
+					require.NoError(t, setupInputs(t.Context(), step))
+					assert.Equal(t, map[string]string{"ARGS": `${{ inputs.args }}`, "INPUT_NAME": value + "${{ github.job }}", "INPUT_FETCH-DEPTH": "1234567"}, step.Step.GetEnv())
+					assert.Equal(t, value+"${{ github.job }}", step.env["INPUT_NAME"])
+					assert.Equal(t, value+"${{ github.job }}", step.env["WORKFLOW"])
+					assert.Equal(t, "${{ github.job }}", step.env["PRIORITY"])
+					assert.Equal(t, "${{ github.job }}", step.env["CONTAINER"])
+					assert.Equal(t, rawEnv, workflow.RawEnv)
+					assert.Equal(t, rawWith, job.Steps[0].RawWith)
+					assert.Nil(t, workflow.Env)
+					assert.Nil(t, job.Steps[0].With)
+				})
+			}
+		})
+	}
+
+	t.Run("rejects inputs that still contain an expression", func(t *testing.T) {
+		workflow, err := model.ReadWorkflow(strings.NewReader("jobs:\n  test:\n    steps:\n      - uses: ./act\n        with: ${{ inputs.args }}\n"))
+		require.NoError(t, err)
+		rc, err := (&runnerImpl{config: &Config{}}).newRunContext(t.Context(), &model.Run{Workflow: workflow, JobID: "test"}, nil)
+		require.NoError(t, err)
+		rc.workflowCallInputs = map[string]any{"args": "${{ inputs.unresolved }}"}
+		require.ErrorContains(t, setupInputs(t.Context(), &stepRun{RunContext: rc, Step: workflow.Jobs["test"].Steps[0].Clone(), env: map[string]string{}}), "with:")
+	})
 }
 
 func TestIsStepEnabled(t *testing.T) {
