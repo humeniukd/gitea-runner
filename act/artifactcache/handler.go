@@ -10,14 +10,12 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"embed"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -34,14 +32,16 @@ import (
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/internal/pkg/disk"
 
+	_ "embed"
+
 	"github.com/julienschmidt/httprouter"
 	"github.com/sirupsen/logrus"
 	"github.com/timshannon/bolthold"
 	"go.etcd.io/bbolt"
 )
 
-//go:embed dist/* swagger.yaml
-var swaggerFS embed.FS
+//go:embed openapi.json
+var openAPISpec []byte
 
 const (
 	apiPath      = "/_apis/artifactcache"
@@ -209,10 +209,8 @@ func StartHandler(opts Options) (*Handler, error) {
 	}
 	h.secret = secret
 
-	sub, _ := fs.Sub(swaggerFS, "dist")
 	router := httprouter.New()
-	router.ServeFiles("/swagger/*filepath", http.FS(sub))
-	router.GET("/swagger.yaml", h.swagger)
+	router.GET("/openapi.json", h.openAPI)
 	router.GET(apiPath+"/cache", h.bearerAuth(h.find))
 	router.POST(apiPath+"/caches", h.bearerAuth(h.reserve))
 	router.PATCH(apiPath+"/caches/:id", h.bearerAuth(h.upload))
@@ -1323,14 +1321,9 @@ func (h *Handler) responseJSON(w http.ResponseWriter, r *http.Request, code int,
 	_, _ = w.Write(data)
 }
 
-func (h *Handler) swagger(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-	data, err := swaggerFS.ReadFile("swagger.yaml")
-	if err != nil {
-		http.Error(w, "swagger.yaml not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "text/yaml")
-	_, _ = w.Write(data)
+func (h *Handler) openAPI(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(openAPISpec)
 }
 
 func parseContentRange(s string) (int64, int64, error) {

@@ -1,22 +1,17 @@
-# Swagger-ui
+# Artifact cache OpenAPI contract
 
-This dist folder use the swagger-ui-dist tools
+The cache server serves its hand-maintained OpenAPI 3.1.0 document at
+`/openapi.json` with the `application/json` content type. It is embedded directly
+from `openapi.json`; no code generation or bundled documentation UI is required.
 
-https://github.com/swagger-api/swagger-ui
+The document describes the legacy dependency-cache API under
+`/_apis/artifactcache`. It does not cover the v2 cache service, artifact proxy,
+or internal control-plane API. Keep it in sync when changing the documented
+routes, request and response formats, or authentication requirements.
 
-How to generate this swagger-ui dist/ files
+Cache management requires a registered per-job `ACTIONS_RUNTIME_TOKEN` bearer
+token. Downloads use the signed `archiveLocation` returned by cache lookup.
+The specification itself is public and contains no job credentials.
 
-Installation instruction here https://petstore.swagger.io/v2/swagger.json
-
-Replace https://petstore.swagger.io/v2/swagger.json by `/swagger.yaml`
-
-Command to proceed
-
-```shell
-$ rm -r dist/
-$ wget https://github.com/swagger-api/swagger-ui/archive/refs/tags/v5.32.6.tar.gz -O swagger-ui.tar.gz
-$ tar xvf swagger-ui.tar.gz && rm swagger-ui.tar.gz
-$ cp -r swagger-ui-5.32.6/dist/ .
-$ rm -r swagger-ui-5.32.6/
-$ sed -i 's|https://petstore.swagger.io/v2/swagger.json|/swagger.yaml|g' dist/swagger-initializer.js
-```
+To view the contract interactively, import the JSON into an OpenAPI viewer.
+The server does not provide HTML, JavaScript, CSS, or favicon assets.

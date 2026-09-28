@@ -1,0 +1,312 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Gitea Runner Artifact Cache API",
+    "version": "1.0.0",
+    "description": "The legacy dependency-cache API exposed under /_apis/artifactcache. Cache management requires a registered per-job ACTIONS_RUNTIME_TOKEN and is scoped to its repository. Artifact downloads use the signed archiveLocation returned by cache lookup. This document does not describe the v2 cache service, artifact proxy, or internal control-plane API."
+  },
+  "servers": [
+    {
+      "url": "/_apis/artifactcache"
+    }
+  ],
+  "paths": {
+    "/cache": {
+      "get": {
+        "summary": "Find cache by keys and version",
+        "description": "Looks up the most recent complete cache matching one of the given keys (case insensitive) and version.\n",
+        "parameters": [
+          {
+            "name": "keys",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated list of cache keys (prefix match allowed)."
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Version of the cache."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cache found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "string",
+                      "examples": [
+                        "hit"
+                      ]
+                    },
+                    "archiveLocation": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "cacheKey": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No cache found"
+          },
+          "500": {
+            "description": "Internal error"
+          },
+          "401": {
+            "description": "Missing, unknown, or invalid authentication credentials"
+          }
+        }
+      }
+    },
+    "/caches": {
+      "post": {
+        "summary": "Reserve a new cache",
+        "description": "Reserves a cache entry for uploading.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cache reserved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "cacheId": {
+                      "type": "integer",
+                      "format": "int64"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "500": {
+            "description": "Internal error"
+          },
+          "401": {
+            "description": "Missing, unknown, or invalid authentication credentials"
+          }
+        }
+      }
+    },
+    "/caches/{id}": {
+      "patch": {
+        "summary": "Upload cache data",
+        "description": "Uploads a chunk of data to the reserved cache.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "Content-Range",
+            "in": "header",
+            "required": true,
+            "description": "Byte range of the uploaded chunk, for example bytes 0-1023/*.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "bytes 0-1023/*"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {}
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chunk uploaded"
+          },
+          "400": {
+            "description": "Bad request (e.g. already complete, invalid Content-Range)"
+          },
+          "500": {
+            "description": "Internal error"
+          },
+          "401": {
+            "description": "Missing, unknown, or invalid authentication credentials"
+          },
+          "403": {
+            "description": "Cache belongs to another repository"
+          }
+        }
+      },
+      "post": {
+        "summary": "Commit cache",
+        "description": "Marks the cache as complete and finalizes its size.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cache committed"
+          },
+          "400": {
+            "description": "Bad request (e.g. already complete or not reserved)"
+          },
+          "500": {
+            "description": "Internal error"
+          },
+          "401": {
+            "description": "Missing, unknown, or invalid authentication credentials"
+          },
+          "403": {
+            "description": "Cache belongs to another repository"
+          }
+        }
+      }
+    },
+    "/artifacts/{id}": {
+      "get": {
+        "summary": "Download cache artifact",
+        "description": "Serves the completed cache archive for a given cache ID.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "exp",
+            "in": "query",
+            "required": true,
+            "description": "Expiry timestamp from the signed archiveLocation, in Unix seconds.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cache artifact stream",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "400": {
+            "description": "Invalid ID"
+          },
+          "500": {
+            "description": "Internal error"
+          },
+          "401": {
+            "description": "Missing, unknown, or invalid authentication credentials"
+          },
+          "404": {
+            "description": "Cache artifact not found"
+          }
+        },
+        "security": [
+          {
+            "artifactSignature": []
+          }
+        ]
+      }
+    },
+    "/clean": {
+      "post": {
+        "summary": "Clean old caches",
+        "description": "Acknowledges a cleanup request. Authentication schedules the normal background garbage collection; this does not force-delete caches.",
+        "responses": {
+          "200": {
+            "description": "Cleanup acknowledged"
+          },
+          "401": {
+            "description": "Missing, unknown, or invalid authentication credentials"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Request": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Cache key (case insensitive)."
+          },
+          "version": {
+            "type": "string",
+            "description": "Cache version string."
+          },
+          "cacheSize": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expected cache size in bytes."
+          }
+        },
+        "required": [
+          "key",
+          "version"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "jobToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "ACTIONS_RUNTIME_TOKEN registered for the current job."
+      },
+      "artifactSignature": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "sig",
+        "description": "HMAC signature from archiveLocation; use the URL unchanged with its exp query parameter."
+      }
+    }
+  },
+  "security": [
+    {
+      "jobToken": []
+    }
+  ]
+}

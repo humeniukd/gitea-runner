@@ -53,6 +53,37 @@ func signArtifactURL(h *Handler, id int64) string {
 	return h.signedArtifactURL(JobCredential{}, uint64(id), time.Now().Add(artifactURLTTL))
 }
 
+func TestHandler_OpenAPI(t *testing.T) {
+	handler, err := StartHandler(Options{Dir: t.TempDir(), OutboundIP: "127.0.0.1"})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handler.Close()) })
+
+	// The contract is public even when no job tokens have been registered.
+	resp, err := http.Get(handler.ExternalURL() + "/openapi.json")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+	var spec struct {
+		OpenAPI string         `json:"openapi"`
+		Paths   map[string]any `json:"paths"`
+	}
+	require.NoError(t, json.UnmarshalRead(resp.Body, &spec))
+	assert.Equal(t, "3.1.0", spec.OpenAPI)
+	for _, path := range []string{"/cache", "/caches", "/caches/{id}", "/artifacts/{id}", "/clean"} {
+		assert.Contains(t, spec.Paths, path)
+	}
+
+	for _, path := range []string{"/swagger.yaml", "/swagger/", "/swagger/index.html", "/swagger/favicon-32x32.png"} {
+		t.Run(path, func(t *testing.T) {
+			resp, err := http.Get(handler.ExternalURL() + path)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+		})
+	}
+}
+
 func TestHandler_ExternalURL(t *testing.T) {
 	assert.Equal(t, "http://[2001:db8::1]:8080", (&Handler{outboundIP: "2001:db8::1", port: 8080}).ExternalURL())
 }
