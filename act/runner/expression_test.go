@@ -9,9 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"gitea.com/gitea/runner/act/exprparser"
-	"gitea.com/gitea/runner/act/model"
-
+	"gitea.dev/actionslib/pkg/exprparser"
+	"gitea.dev/actionslib/pkg/model"
 	assert "github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	yaml "go.yaml.in/yaml/v4"
@@ -90,7 +89,7 @@ func TestEvaluateRunContext(t *testing.T) {
 		out     any
 		errMesg string
 	}{
-		{" 1 ", 1, ""},
+		{" 1 ", 1.0, ""},
 		// {"1 + 3", "4", ""},
 		// {"(1 + 3) * -2", "-8", ""},
 		{"'my text'", "my text", ""},
@@ -157,8 +156,10 @@ func TestEvaluateRunContext(t *testing.T) {
 
 func TestEvaluateStep(t *testing.T) {
 	rc := createRunContext(t)
+	rc.Env["INPUT_FORGED"] = "leaked"
 	step := &stepRun{
 		RunContext: rc,
+		env:        map[string]string{"INPUT_FORGED": "leaked"},
 	}
 
 	ee := rc.NewStepExpressionEvaluator(context.Background(), step)
@@ -177,6 +178,7 @@ func TestEvaluateStep(t *testing.T) {
 		{"steps.id_with_underscores.conclusion", model.StepStatusSuccess.String(), ""},
 		{"steps.id_with_underscores.outcome", model.StepStatusFailure.String(), ""},
 		{"steps.id_with_underscores.outputs.foo_with_underscores", "bar_with_underscores", ""},
+		{"inputs.forged", nil, ""}, // INPUT_* env is not an input
 	}
 
 	for _, table := range tables {
@@ -259,68 +261,24 @@ func TestInterpolate(t *testing.T) {
 		{"${{ env.SOMETHING_FALSE || false }}", "false"},
 		{"${{ env.SOMETHING_FALSE }} && ${{ env.SOMETHING_TRUE }}", "false && true"},
 		{"${{ fromJSON('{}') < 2 }}", "false"},
+		{"${{ 1 }}", "1"},
+		{"${{ 1.0 }}", "1"},
+		{"${{ null }}", ""},
+		{"${{ fromJSON('[1,2]') }}", "Array"},
+		{"${{ fromJSON('{\"a\":1}') }}", "Object"},
 	}
 
 	for _, table := range tables {
 		t.Run("interpolate", func(t *testing.T) {
-			assertObject := assert.New(t)
-			out := ee.Interpolate(context.Background(), table.in)
-			assertObject.Equal(table.out, out, table.in)
+			out, err := ee.Interpolate(context.Background(), table.in)
+			require.NoError(t, err, table.in)
+			assert.Equal(t, table.out, out, table.in)
 		})
 	}
-}
 
-func TestRewriteSubExpression(t *testing.T) {
-	table := []struct {
-		in  string
-		out string
-	}{
-		{in: "Hello World", out: "Hello World"},
-		{in: "${{ true }}", out: "${{ true }}"},
-		{in: "${{ true }} ${{ true }}", out: "format('{0} {1}', true, true)"},
-		{in: "${{ true || false }} ${{ true && true }}", out: "format('{0} {1}', true || false, true && true)"},
-		{in: "${{ '}}' }}", out: "${{ '}}' }}"},
-		{in: "${{ '''}}''' }}", out: "${{ '''}}''' }}"},
-		{in: "${{ '''' }}", out: "${{ '''' }}"},
-		{in: `${{ fromJSON('"}}"') }}`, out: `${{ fromJSON('"}}"') }}`},
-		{in: `${{ fromJSON('"\"}}\""') }}`, out: `${{ fromJSON('"\"}}\""') }}`},
-		{in: `${{ fromJSON('"''}}"') }}`, out: `${{ fromJSON('"''}}"') }}`},
-		{in: "Hello ${{ 'World' }}", out: "format('Hello {0}', 'World')"},
-	}
-
-	for _, table := range table {
-		t.Run("TestRewriteSubExpression", func(t *testing.T) {
-			assertObject := assert.New(t)
-			out, err := rewriteSubExpression(context.Background(), table.in, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertObject.Equal(table.out, out, table.in)
-		})
-	}
-}
-
-func TestRewriteSubExpressionForceFormat(t *testing.T) {
-	table := []struct {
-		in  string
-		out string
-	}{
-		{in: "Hello World", out: "Hello World"},
-		{in: "${{ true }}", out: "format('{0}', true)"},
-		{in: "${{ '}}' }}", out: "format('{0}', '}}')"},
-		{in: `${{ fromJSON('"}}"') }}`, out: `format('{0}', fromJSON('"}}"'))`},
-		{in: "Hello ${{ 'World' }}", out: "format('Hello {0}', 'World')"},
-	}
-
-	for _, table := range table {
-		t.Run("TestRewriteSubExpressionForceFormat", func(t *testing.T) {
-			assertObject := assert.New(t)
-			out, err := rewriteSubExpression(context.Background(), table.in, true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertObject.Equal(table.out, out, table.in)
-		})
+	for _, in := range []string{"${{ 1) && (2 }}", "run ${{ 1) && (2 }} now", "${{ 1"} {
+		_, err := ee.Interpolate(context.Background(), in)
+		assert.Error(t, err, in)
 	}
 }
 
@@ -336,6 +294,8 @@ on:
       name:
         type: string
         default: gitea
+      unset:
+        type: boolean
 `,
 		"workflow_dispatch": `
 on:
@@ -347,6 +307,8 @@ on:
       name:
         type: string
         default: gitea
+      unset:
+        type: boolean
 `,
 	}
 
@@ -395,10 +357,122 @@ on:
 				}
 				ghc := &model.GithubContext{EventName: eventName, Event: table.event}
 
-				inputs := getEvaluatorInputs(context.Background(), rc, nil, ghc)
+				inputs := getEvaluatorInputs(rc, nil, ghc)
 				assert.Equal(t, table.flag, inputs["flag"])
 				assert.Equal(t, "gitea", inputs["name"])
+				assert.Equal(t, false, inputs["unset"])
 			})
 		}
 	}
+
+	t.Run("deferred workflow call inputs", func(t *testing.T) {
+		workflow, err := model.ReadWorkflow(strings.NewReader(workflows["workflow_call"] + `
+jobs:
+  test: {}
+  call:
+    uses: ./reuse.yml
+    with: ${{ fromJSON(matrix.args) }}
+`))
+		require.NoError(t, err)
+		workflow.GetJob("test")
+		job := workflow.GetJob("call")
+		rawWith := model.CloneYamlNode(job.RawWith)
+		for _, value := range []string{"true", "false"} {
+			t.Run(value, func(t *testing.T) {
+				t.Parallel()
+				parent, err := (&runnerImpl{config: &Config{}}).newRunContext(t.Context(), &model.Run{Workflow: workflow, JobID: "call"}, map[string]any{"args": `{"flag":` + value + `,"name":"${{ 'runner' }}"}`})
+				require.NoError(t, err)
+				child, err := (&runnerImpl{config: &Config{}, caller: &caller{runContext: parent}}).newRunContext(t.Context(), &model.Run{Workflow: workflow, JobID: "test"}, nil)
+				require.NoError(t, err)
+				assert.Equal(t, map[string]any{"flag": value == "true", "name": "${{ 'runner' }}", "unset": false}, child.workflowCallInputs)
+				assert.Equal(t, rawWith, job.RawWith)
+				assert.Nil(t, job.With)
+			})
+		}
+	})
+}
+
+func TestGetEvaluatorInputsResolvedByGitea(t *testing.T) {
+	wf, err := model.ReadWorkflow(strings.NewReader(`
+on:
+  workflow_call:
+    inputs:
+      name: {type: string, default: callee}
+  workflow_dispatch:
+    inputs:
+      name: {type: string}
+`))
+	require.NoError(t, err)
+	config := &Config{Workdir: ".", WorkflowCallInputs: map[string]any{"name": "caller", "target": "dispatch"}}
+	ghc := &model.GithubContext{EventName: "workflow_dispatch", Event: map[string]any{"inputs": map[string]any{"name": "dispatch"}}}
+
+	// the event's own inputs must not override those Gitea resolved
+	job := &RunContext{Config: config, Run: &model.Run{JobID: "job1", Workflow: wf}}
+	assert.Equal(t, map[string]any{"name": "caller", "target": "dispatch"}, getEvaluatorInputs(job, nil, ghc))
+
+	composite := &RunContext{Config: config, Run: &model.Run{JobID: "job1", Workflow: &model.Workflow{}}, Parent: job}
+	assert.Equal(t, map[string]any{"arg": "x"}, getEvaluatorInputs(composite, map[string]any{"arg": "x"}, ghc))
+}
+
+func TestResolveWorkflowCallToleratesMismatchesAndPassesInheritedSecretsVerbatim(t *testing.T) {
+	callerWorkflow, err := model.ReadWorkflow(strings.NewReader(`
+jobs:
+  call:
+    uses: ./reuse.yml
+    with: {flag: not-a-boolean}
+    secrets: {undeclared: "${{ secrets.token }}"}
+  inherit:
+    uses: ./reuse.yml
+    secrets: inherit
+`))
+	require.NoError(t, err)
+	callee, err := model.ReadWorkflow(strings.NewReader(`
+on:
+  workflow_call:
+    inputs:
+      flag: {type: boolean, default: true}
+jobs:
+  test: {}
+`))
+	require.NoError(t, err)
+	notCallable, err := model.ReadWorkflow(strings.NewReader("on: push\njobs:\n  test: {}\n"))
+	require.NoError(t, err)
+	config := &Config{Secrets: map[string]string{"token": "${{ github.token }}"}}
+	resolve := func(callerJobID string, workflow *model.Workflow) *RunContext {
+		parent, err := (&runnerImpl{config: config}).newRunContext(t.Context(), &model.Run{Workflow: callerWorkflow, JobID: callerJobID}, nil)
+		require.NoError(t, err)
+		child, err := (&runnerImpl{config: config, caller: &caller{runContext: parent}}).newRunContext(t.Context(), &model.Run{Workflow: workflow, JobID: "test"}, nil)
+		require.NoError(t, err)
+		return child
+	}
+
+	called := resolve("call", callee)
+	assert.Equal(t, map[string]any{"flag": true}, called.workflowCallInputs)
+	assert.Equal(t, map[string]string{"undeclared": "${{ github.token }}"}, called.workflowCallSecrets)
+	inherited := resolve("inherit", notCallable)
+	assert.Empty(t, inherited.workflowCallInputs)
+	assert.Equal(t, config.Secrets, inherited.workflowCallSecrets)
+}
+
+func TestJobNameMasksSecrets(t *testing.T) {
+	workflow, err := model.ReadWorkflow(strings.NewReader(`
+jobs:
+  a:
+    name: deploy ${{ secrets.A }}
+  b:
+    name: deploy ${{ secrets.B }}
+`))
+	require.NoError(t, err)
+
+	runner := &runnerImpl{config: &Config{Secrets: map[string]string{"A": "s3cr3t-a", "B": "s3cr3t-b"}}}
+	containerName := func(jobID string) string {
+		rc, err := runner.newRunContext(t.Context(), &model.Run{JobID: jobID, Workflow: workflow}, nil)
+		require.NoError(t, err)
+		assert.NotContains(t, rc.Name, "s3cr3t")
+		return rc.jobContainerName()
+	}
+
+	a, b := containerName("a"), containerName("b")
+	assert.NotContains(t, a, "s3cr3t") // it reaches the container name, which no log masker covers
+	assert.NotEqual(t, a, b)           // masking the name must not collapse two jobs onto one container
 }

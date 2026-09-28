@@ -9,7 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -23,8 +23,9 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/act/exprparser"
-	"gitea.com/gitea/runner/act/model"
+
+	"gitea.dev/actionslib/pkg/exprparser"
+	"gitea.dev/actionslib/pkg/model"
 )
 
 const maxJobSummaryBytes = 1024 * 1024
@@ -66,7 +67,7 @@ func reportStepError(ctx context.Context, rc *RunContext, err error) {
 		rc.markInterrupted(ctx.Err())
 		return
 	}
-	common.Logger(ctx).Errorf("##[error]%v", err)
+	common.Logger(ctx).Errorf("##[error]%s", EscapeCommandData(err.Error()))
 	common.SetJobError(ctx, err)
 	rc.markFailed()
 }
@@ -153,11 +154,9 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		if rc.Run == nil {
 			return nil
 		}
-		rc.ExprEval = rc.NewExpressionEvaluator(ctx)
-		// evaluate environment variables since they can contain
-		// GitHub's special environment variables.
-		for k, v := range rc.GetEnv() {
-			rc.Env[k] = rc.ExprEval.Interpolate(ctx, v)
+		if err := evaluateJobEnvAndDefaults(ctx, rc); err != nil {
+			reportStepError(ctx, rc, err)
+			return err
 		}
 		return nil
 	})
@@ -226,79 +225,64 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		}
 	}
 
-	// The setup section of the job log: download the actions, run the pre steps, then name the job.
+	// The setup section of the job log. The started hook goes first, so what it sets up is
+	// in place for the first action download and the first step.
+	preSteps = append(preSteps, rc.runJobStartedHook)
 	preSteps = append(preSteps, printPrepareActions(rc, preparers))
 	preSteps = append(preSteps, stepPreSteps...)
 	preSteps = append(preSteps, printCompleteJobName(rc))
 
+	// Ahead of the teardown below, while the job environment is still up.
+	postExecutor = postExecutor.Finally(rc.runJobCompletedHook)
+	postExecutor = postExecutor.Finally(func(ctx context.Context) error {
+		// swallowed: a bad output fails this job, it must not abandon the rest of the plan
+		if err := info.interpolateOutputs()(ctx); err != nil {
+			reportStepError(ctx, rc, err)
+		} else if err := setJobOutputs(ctx, rc); err != nil {
+			reportStepError(ctx, rc, err)
+		}
+		return nil
+	})
+
 	postExecutor = postExecutor.Finally(func(ctx context.Context) error {
 		jobError := common.JobError(ctx)
 		var err error
-		// jobError == nil keeps a failed job's container alive for post-mortem debugging when
-		// AutoRemove is off (the act-CLI --rm behavior; the shipped runner always sets
-		// AutoRemove). A cancelled run is not a failure to inspect, and the cancel-path post
-		// context now carries its own error container so a failing post step makes jobError
-		// non-nil — OR in rc.jobCancelled so cancellation still always tears the container down.
-		if rc.Config.AutoRemove || jobError == nil || rc.jobCancelled {
-			// always allow 1 min for stopping and removing the runner, even if we were cancelled
-			ctx, cancel := context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), time.Minute)
-			defer cancel()
+		// always allow 1 min for stopping and removing the runner, even if we were cancelled
+		ctx, cancel := context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), time.Minute)
+		defer cancel()
 
-			logger := common.Logger(ctx)
-			tryUploadJobSummary(ctx, rc)
-			// For Gitea
-			// We don't need to call `stopServiceContainers` here since it will be called by following `info.stopContainer`
-			// logger.Infof("Cleaning up services for job %s", rc.JobName)
-			// if err := rc.stopServiceContainers()(ctx); err != nil {
-			// 	logger.Errorf("Error while cleaning services: %v", err)
-			// }
-
-			logger.Infof("Cleaning up container for job %s", rc.JobName)
-			if err = info.stopContainer()(ctx); err != nil {
-				logger.Errorf("Error while stop job container: %v", err)
-			}
-
-			// For Gitea
-			// We don't need to call `NewDockerNetworkRemoveExecutor` here since it is called by above `info.stopContainer`
-			// if !rc.IsHostEnv(ctx) && rc.Config.ContainerNetworkMode == "" {
-			// 	// clean network in docker mode only
-			// 	// if the value of `ContainerNetworkMode` is empty string,
-			// 	// it means that the network to which containers are connecting is created by `runner`,
-			// 	// so, we should remove the network at last.
-			// 	networkName, _ := rc.networkName()
-			// 	logger.Infof("Cleaning up network for job %s, and network name is: %s", rc.JobName, networkName)
-			// 	if err := container.NewDockerNetworkRemoveExecutor(networkName)(ctx); err != nil {
-			// 		logger.Errorf("Error while cleaning network: %v", err)
-			// 	}
-			// }
+		logger := common.Logger(ctx)
+		tryUploadJobSummary(ctx, rc)
+		logger.Infof("Cleaning up container for job %s", rc.JobName)
+		if err = info.stopContainer()(ctx); err != nil {
+			logger.Errorf("##[error]%s", EscapeCommandData("Error while stop job container: "+err.Error()))
 		}
 		setJobResult(ctx, info, rc, jobError == nil)
-		setJobOutputs(ctx, rc)
 
 		return err
 	})
 
-	stepsExecutor := newStepsExecutor(rc, preSteps, steps)
-
-	return common.NewPipelineExecutor(info.startContainer(), stepsExecutor.
-		Finally(func(ctx context.Context) error {
+	return common.Executor(func(ctx context.Context) error {
+		if err := info.startContainer()(ctx); err != nil {
+			return err
+		}
+		return newStepsExecutor(rc, preSteps, steps).Finally(func(ctx context.Context) error {
 			// Record an interrupt (backstop for interrupts that land outside the main
 			// step loop) so the post steps observe the cancelled/failed job status.
 			rc.markInterrupted(ctx.Err())
 			postCtx, cancel := postStepsContext(ctx)
 			defer cancel()
 			return postExecutor(postCtx)
-		}).
-		Finally(info.interpolateOutputs()).
-		Finally(info.closeContainer()))
+		})(ctx)
+	}).Finally(info.closeContainer())
 }
 
 // postStepsContext derives the context used to run the job's post/cleanup steps from the
 // finished main-pipeline context. Cleanup has to run even when the run was interrupted, so the
 // returned context always carries a fresh bounded deadline and is never itself cancelled.
 //
-//   - context.Canceled (server cancel): detach from the cancelled context via a fresh root so
-//     the post steps can run.
+//   - context.Canceled (server cancel): detach with WithoutCancel under a fresh job-error
+//     container, so a failing post step cannot turn the cancellation into a failure.
 //   - context.DeadlineExceeded (job timeout): detach the deadline with WithoutCancel, which
 //     keeps the original values — including the job-error container — so the timeout failure and
 //     any post-step error are preserved and the job is still reported as failed.
@@ -306,10 +290,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 func postStepsContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	switch ctx.Err() {
 	case context.Canceled:
-		// The cancelled context is abandoned for a fresh root, which drops the job-error
-		// container installed at the job root. Re-attach a fresh one so a failing post step
-		// records its error via SetJobError instead of panicking on a nil container.
-		return context.WithTimeout(common.WithJobErrorContainer(common.WithLogger(context.Background(), common.Logger(ctx))), 5*time.Minute)
+		return context.WithTimeout(common.WithJobErrorContainer(context.WithoutCancel(ctx)), 5*time.Minute)
 	case context.DeadlineExceeded:
 		return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 	default:
@@ -387,7 +368,7 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 	// concurrent succeeding one.
 	job := rc.Run.Job()
 	var continueOnError bool
-	if !success {
+	if !success && !rc.jobCancelled {
 		// Use a fresh context so an expired job timeout cannot block expression evaluation.
 		evalCtx := common.WithLogger(context.Background(), common.Logger(ctx))
 		continueOnError = evaluateJobContinueOnError(evalCtx, rc, job)
@@ -400,7 +381,11 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 		if len(info.matrix()) > 0 && job.Result != "" {
 			result = job.Result
 		}
-		if !success {
+		// cancelled is sticky, so a sibling combination finishing last cannot mask it
+		switch {
+		case rc.jobCancelled:
+			result = "cancelled"
+		case !success && result != "cancelled":
 			result = "failure"
 			job.SetContinueOnError(continueOnError)
 		}
@@ -410,43 +395,74 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 
 	if rc.caller != nil {
 		// set reusable workflow job result
-		rc.caller.setReusedWorkflowJobResult(rc.JobName, jobResult) // For Gitea
+		rc.caller.setReusedWorkflowJobResult(rc.Run.JobID, jobResult) // For Gitea
 		return
 	}
 
-	jobResultMessage := "succeeded"
-	if jobResult != "success" {
-		jobResultMessage = "failed"
+	jobResultMessage := "failed"
+	switch jobResult {
+	case "success":
+		jobResultMessage = "succeeded"
+	case "cancelled":
+		jobResultMessage = "cancelled"
 	}
 
 	logger.WithField("jobResult", jobResult).Infof("Job %s", jobResultMessage)
 }
 
-func setJobOutputs(ctx context.Context, rc *RunContext) {
-	if rc.caller != nil {
-		// map outputs for reusable workflows
-		callerOutputs := make(map[string]string)
-
-		ee := rc.NewExpressionEvaluator(ctx)
-
-		for k, v := range rc.Run.Workflow.WorkflowCallConfig().Outputs {
-			callerOutputs[k] = ee.Interpolate(ctx, ee.Interpolate(ctx, v.Value))
+// evaluateJobEnvAndDefaults resolves the job's env, defaults.run and container env once, as GitHub does at job setup.
+func evaluateJobEnvAndDefaults(ctx context.Context, rc *RunContext) error {
+	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
+	env := rc.GetEnv()
+	var workflowEnv map[string]string
+	if rc.Run.Workflow.Env == nil {
+		if err := model.DecodeEvaluated("workflow env", rc.Run.Workflow.RawEnv, rc.ExprEval.shared(ctx).EvaluateYamlNode, &workflowEnv); err != nil {
+			return err
 		}
-
-		// Matrix combinations of a reusable-workflow caller share the caller's *model.Job;
-		// serialize the write so parallel combos don't race on its Outputs field.
-		callerJob := rc.caller.runContext.Run.Job()
-		defer lockJob(callerJob)()
-		callerJob.Outputs = callerOutputs
 	}
+	if workflowEnv != nil {
+		rc.Env = mergeMaps(workflowEnv, env)
+		rc.ExprEval = rc.NewExpressionEvaluator(ctx)
+	}
+	var err error
+	for k, v := range env {
+		if rc.Env[k], err = rc.ExprEval.Interpolate(ctx, v); err != nil {
+			return fmt.Errorf("unable to interpolate env %s: %w", k, err)
+		}
+	}
+	var defaults model.Defaults
+	if err := model.DecodeEvaluated("defaults", rc.Run.Job().RawDefaults, rc.ExprEval.shared(ctx).EvaluateYamlNode, &defaults); err != nil {
+		return err
+	}
+	rc.jobRunDefaults = defaults.Run
+	return model.DecodeEvaluated("container env", rc.containerEnv, rc.ExprEval.shared(ctx).EvaluateYamlNode, &rc.containerSpec.Env)
+}
+
+func setJobOutputs(ctx context.Context, rc *RunContext) error {
+	if rc.caller == nil {
+		return nil
+	}
+	callerOutputs, err := rc.NewExpressionEvaluator(ctx).shared(ctx).EvaluateWorkflowCallOutputs(rc.Run.Workflow.WorkflowCallConfig())
+	if err != nil {
+		return fmt.Errorf("unable to interpolate workflow %w", err)
+	}
+
+	// Matrix combinations of a reusable-workflow caller share the caller's *model.Job;
+	// serialize the write so parallel combos don't race on its Outputs field.
+	callerJob := rc.caller.runContext.Run.Job()
+	defer lockJob(callerJob)()
+	callerJob.Outputs = callerOutputs
+	return nil
 }
 
 // applyJobTimeout applies the job-level timeout-minutes to ctx, mirroring the
 // step-level evaluateStepTimeout in step.go.
 func applyJobTimeout(ctx context.Context, rc *RunContext, job *model.Job) (context.Context, context.CancelFunc) {
-	timeout := rc.ExprEval.Interpolate(ctx, job.TimeoutMinutes)
-	if timeout != "" {
-		if timeoutMinutes, err := strconv.ParseInt(timeout, 10, 64); err == nil {
+	timeout, err := rc.ExprEval.Interpolate(ctx, job.TimeoutMinutes)
+	if err != nil {
+		common.Logger(ctx).Errorf("An error occurred when attempting to determine the job timeout: %s", err)
+	} else if timeout != "" {
+		if timeoutMinutes, err := strconv.ParseInt(timeout, 10, 64); err == nil && timeoutMinutes > 0 {
 			return context.WithTimeout(ctx, time.Duration(timeoutMinutes)*time.Minute)
 		}
 	}
@@ -509,7 +525,8 @@ func tryUploadJobSummary(ctx context.Context, rc *RunContext) {
 		if !ok || len(body) == 0 {
 			continue
 		}
-		uploadJobSummary(ctx, client, base+strconv.Itoa(i)+"/summary", runtimeToken, body)
+		// Gitea renders summaries on the run page, so mask before the upload.
+		uploadJobSummary(ctx, client, base+strconv.Itoa(i)+"/summary", runtimeToken, []byte(rc.maskSecrets(string(body))))
 	}
 }
 
@@ -643,17 +660,9 @@ func archiveEntryMatchesPath(entryName, requestedPath string) bool {
 
 func useStepLogger(rc *RunContext, stepModel *model.Step, stage stepStage, executor common.Executor) common.Executor {
 	return func(ctx context.Context) error {
-		ctx = withStepLogger(ctx, stepModel.Number, stepModel.ID, rc.ExprEval.Interpolate(ctx, stepModel.String()), stage.String())
+		ctx = withStepLogger(ctx, stepModel.Number, stepModel.ID, rc.ExprEval.InterpolateName(ctx, stepModel.String()), stage.String())
 
-		rawLogger := common.Logger(ctx).WithField("raw_output", true)
-		logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
-			if rc.Config.LogOutput {
-				rawLogger.Infof("%s", s)
-			} else {
-				rawLogger.Debugf("%s", s)
-			}
-			return true
-		})
+		logWriter := rc.commandLogWriter(ctx)
 
 		oldout, olderr := rc.JobContainer.ReplaceLogWriter(logWriter, logWriter)
 		defer rc.JobContainer.ReplaceLogWriter(oldout, olderr)

@@ -19,8 +19,8 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/common/git"
-	"gitea.com/gitea/runner/act/model"
 
+	"gitea.dev/actionslib/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -29,6 +29,52 @@ import (
 
 type stepActionRemoteMocks struct {
 	mock.Mock
+}
+
+func actionDirSuffix(suffix string) any {
+	return mock.MatchedBy(func(actionDir string) bool { return strings.HasSuffix(actionDir, suffix) })
+}
+
+func setCloneExecutor(t *testing.T, executor func(git.NewGitCloneExecutorInput) common.Executor) {
+	original := stepActionRemoteNewCloneExecutor
+	stepActionRemoteNewCloneExecutor = executor
+	t.Cleanup(func() { stepActionRemoteNewCloneExecutor = original })
+}
+
+func TestShortSHAActionRejected(t *testing.T) {
+	actionRoot := t.TempDir()
+	repo := filepath.Join(actionRoot, "actions", "hello-world-docker-action")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	gitMust(t, "", "init", "--initial-branch=main", repo)
+	gitMust(t, repo, "config", "user.email", "test@test")
+	gitMust(t, repo, "config", "user.name", "test")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "action.yml"),
+		[]byte("name: hello\nruns:\n  using: node24\n  main: index.js\n"), 0o644))
+	gitMust(t, repo, "add", ".")
+	gitMust(t, repo, "commit", "-m", "initial")
+	output, err := exec.Command("git", "-C", repo, "rev-parse", "--short=7", "HEAD").Output()
+	require.NoError(t, err)
+
+	workflowDir := t.TempDir()
+	workflow := fmt.Sprintf("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/hello-world-docker-action@%s\n", strings.TrimSpace(string(output)))
+	require.NoError(t, os.WriteFile(filepath.Join(workflowDir, "push.yml"), []byte(workflow), 0o644))
+
+	runner, err := New(&Config{
+		Workdir:               workflowDir,
+		EventName:             "push",
+		GitHubInstance:        "github.com",
+		DefaultActionInstance: actionRoot,
+		ContainerMaxLifetime:  time.Hour,
+		PlatformPicker:        func([]string) string { return baseImage },
+	})
+	require.NoError(t, err)
+	planner, err := model.NewWorkflowPlanner(workflowDir, true)
+	require.NoError(t, err)
+	plan, err := planner.PlanEvent("push")
+	require.NoError(t, err)
+
+	err = runner.NewPlanExecutor(plan)(common.WithDryrun(t.Context(), true))
+	require.ErrorContains(t, err, "shortened version of a commit SHA")
 }
 
 func (sarm *stepActionRemoteMocks) readAction(_ context.Context, step *model.Step, actionDir, actionPath string, readFile actionYamlReader, writeFile fileWriter) (*model.Action, error) {
@@ -136,16 +182,12 @@ func TestStepActionRemote(t *testing.T) {
 
 			clonedAction := false
 
-			origStepAtionRemoteNewCloneExecutor := stepActionRemoteNewCloneExecutor
-			stepActionRemoteNewCloneExecutor = func(input git.NewGitCloneExecutorInput) common.Executor {
+			setCloneExecutor(t, func(input git.NewGitCloneExecutorInput) common.Executor {
 				return func(ctx context.Context) error {
 					clonedAction = true
 					return nil
 				}
-			}
-			defer (func() {
-				stepActionRemoteNewCloneExecutor = origStepAtionRemoteNewCloneExecutor
-			})()
+			})
 
 			sar := &stepActionRemote{
 				RunContext: &RunContext{
@@ -170,33 +212,19 @@ func TestStepActionRemote(t *testing.T) {
 			}
 			sar.RunContext.ExprEval = sar.RunContext.NewExpressionEvaluator(ctx)
 
-			suffixMatcher := func(suffix string) any {
-				return mock.MatchedBy(func(actionDir string) bool {
-					return strings.HasSuffix(actionDir, suffix)
-				})
-			}
-
 			if tt.mocks.read {
-				sarm.On("readAction", sar.Step, suffixMatcher(sar.Step.UsesHash()), "", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
+				sarm.On("readAction", sar.Step, actionDirSuffix(sar.Step.UsesHash()), "", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
 			}
 			if tt.mocks.run {
-				sarm.On("runAction", sar, suffixMatcher(sar.Step.UsesHash()), newRemoteAction(sar.Step.Uses)).Return(func(ctx context.Context) error { return tt.runError })
+				sarm.On("runAction", sar, actionDirSuffix(sar.Step.UsesHash()), mustNewRemoteAction(t, sar.Step.Uses)).Return(func(ctx context.Context) error { return tt.runError })
 
-				cm.On("Copy", "/var/run/act", mock.AnythingOfType("[]*container.FileEntry")).Return(func(ctx context.Context) error {
-					return nil
-				})
+				cm.On("Copy", "/var/run/act", mock.AnythingOfType("[]*container.FileEntry")).Return(noopExecutor)
 
-				cm.On("UpdateFromEnv", "/var/run/act/workflow/envs.txt", mock.AnythingOfType("*map[string]string")).Return(func(ctx context.Context) error {
-					return nil
-				})
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/envs.txt", mock.AnythingOfType("*map[string]string")).Return(noopExecutor)
 
-				cm.On("UpdateFromEnv", "/var/run/act/workflow/statecmd.txt", mock.AnythingOfType("*map[string]string")).Return(func(ctx context.Context) error {
-					return nil
-				})
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/statecmd.txt", mock.AnythingOfType("*map[string]string")).Return(noopExecutor)
 
-				cm.On("UpdateFromEnv", "/var/run/act/workflow/outputcmd.txt", mock.AnythingOfType("*map[string]string")).Return(func(ctx context.Context) error {
-					return nil
-				})
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/outputcmd.txt", mock.AnythingOfType("*map[string]string")).Return(noopExecutor)
 
 				cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/pathcmd.txt").Return(io.NopCloser(&bytes.Buffer{}), nil)
 			}
@@ -214,279 +242,61 @@ func TestStepActionRemote(t *testing.T) {
 			cm.AssertExpectations(t)
 		})
 	}
-}
 
-func TestStepActionRemotePre(t *testing.T) {
-	table := []struct {
-		name      string
-		stepModel *model.Step
-	}{
-		{
-			name: "run-pre",
-			stepModel: &model.Step{
-				Uses: "org/repo/path@ref",
-			},
-		},
-	}
-
-	for _, tt := range table {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
-
-			clonedAction := false
-			sarm := &stepActionRemoteMocks{}
-
-			origStepAtionRemoteNewCloneExecutor := stepActionRemoteNewCloneExecutor
-			stepActionRemoteNewCloneExecutor = func(input git.NewGitCloneExecutorInput) common.Executor {
-				return func(ctx context.Context) error {
-					clonedAction = true
-					return nil
-				}
-			}
-			defer (func() {
-				stepActionRemoteNewCloneExecutor = origStepAtionRemoteNewCloneExecutor
-			})()
-
-			sar := &stepActionRemote{
-				Step: tt.stepModel,
-				RunContext: &RunContext{
-					Config: &Config{
-						GitHubInstance: "https://github.com",
-						ActionCacheDir: "/tmp/test-cache",
-					},
-					Run: &model.Run{
-						JobID: "1",
-						Workflow: &model.Workflow{
-							Jobs: map[string]*model.Job{
-								"1": {},
-							},
-						},
-					},
-				},
-				readAction: sarm.readAction,
-			}
-
-			suffixMatcher := func(suffix string) any {
-				return mock.MatchedBy(func(actionDir string) bool {
-					return strings.HasSuffix(actionDir, suffix)
-				})
-			}
-
-			sarm.On("readAction", sar.Step, suffixMatcher(sar.Step.UsesHash()), "path", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
-
-			err := sar.pre()(ctx)
-
-			assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
-			assert.True(t, clonedAction)
-
-			sarm.AssertExpectations(t)
-		})
-	}
-}
-
-func TestStepActionRemotePreThroughAction(t *testing.T) {
-	table := []struct {
-		name      string
-		stepModel *model.Step
-	}{
-		{
-			name: "run-pre",
-			stepModel: &model.Step{
-				Uses: "org/repo/path@ref",
-			},
-		},
-	}
-
-	for _, tt := range table {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
-
-			clonedAction := false
-			sarm := &stepActionRemoteMocks{}
-
-			origStepAtionRemoteNewCloneExecutor := stepActionRemoteNewCloneExecutor
-			stepActionRemoteNewCloneExecutor = func(input git.NewGitCloneExecutorInput) common.Executor {
-				return func(ctx context.Context) error {
-					if input.URL == "https://github.com/org/repo" {
-						clonedAction = true
-					}
-					return nil
-				}
-			}
-			defer (func() {
-				stepActionRemoteNewCloneExecutor = origStepAtionRemoteNewCloneExecutor
-			})()
-
-			sar := &stepActionRemote{
-				Step: tt.stepModel,
-				RunContext: &RunContext{
-					Config: &Config{
-						GitHubInstance:                "https://enterprise.github.com",
-						ReplaceGheActionWithGithubCom: []string{"org/repo"},
-						ActionCacheDir:                "/tmp/test-cache",
-					},
-					Run: &model.Run{
-						JobID: "1",
-						Workflow: &model.Workflow{
-							Jobs: map[string]*model.Job{
-								"1": {},
-							},
-						},
-					},
-				},
-				readAction: sarm.readAction,
-			}
-
-			suffixMatcher := func(suffix string) any {
-				return mock.MatchedBy(func(actionDir string) bool {
-					return strings.HasSuffix(actionDir, suffix)
-				})
-			}
-
-			sarm.On("readAction", sar.Step, suffixMatcher(sar.Step.UsesHash()), "path", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
-
-			err := sar.pre()(ctx)
-
-			assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
-			assert.True(t, clonedAction)
-
-			sarm.AssertExpectations(t)
-		})
-	}
-}
-
-func TestStepActionRemotePreThroughActionToken(t *testing.T) {
-	table := []struct {
-		name      string
-		stepModel *model.Step
-	}{
-		{
-			name: "run-pre",
-			stepModel: &model.Step{
-				Uses: "org/repo/path@ref",
-			},
-		},
-	}
-
-	for _, tt := range table {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
-
-			var actualURL string
-			var actualToken string
-			sarm := &stepActionRemoteMocks{}
-
-			origStepAtionRemoteNewCloneExecutor := stepActionRemoteNewCloneExecutor
-			stepActionRemoteNewCloneExecutor = func(input git.NewGitCloneExecutorInput) common.Executor {
-				return func(ctx context.Context) error {
-					actualURL = input.URL
-					actualToken = input.Token
-					return nil
-				}
-			}
-			defer (func() {
-				stepActionRemoteNewCloneExecutor = origStepAtionRemoteNewCloneExecutor
-			})()
-
-			// Use unique cache directory to ensure action gets cloned, not served from cache
-			uniqueCacheDir := fmt.Sprintf("/tmp/test-cache-token-%d", time.Now().UnixNano())
-
-			sar := &stepActionRemote{
-				Step: tt.stepModel,
-				RunContext: &RunContext{
-					Config: &Config{
-						GitHubInstance:                     "https://enterprise.github.com",
-						ReplaceGheActionWithGithubCom:      []string{"org/repo"},
-						ReplaceGheActionTokenWithGithubCom: "PRIVATE_ACTIONS_TOKEN_ON_GITHUB",
-						ActionCacheDir:                     uniqueCacheDir,
-						Token:                              "PRIVATE_ACTIONS_TOKEN_ON_GITHUB",
-					},
-					Run: &model.Run{
-						JobID: "1",
-						Workflow: &model.Workflow{
-							Jobs: map[string]*model.Job{
-								"1": {},
-							},
-						},
-					},
-				},
-				readAction: sarm.readAction,
-			}
-
-			suffixMatcher := func(suffix string) any {
-				return mock.MatchedBy(func(actionDir string) bool {
-					return strings.HasSuffix(actionDir, suffix)
-				})
-			}
-
-			sarm.On("readAction", sar.Step, suffixMatcher(sar.Step.UsesHash()), "path", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
-
-			err := sar.pre()(ctx)
-
-			assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
-			// Verify that the clone was called (URL should be redirected to github.com)
-			assert.True(t, actualURL != "", "Expected clone to be called") //nolint:testifylint // pre-existing issue from nektos/act
-			assert.Equal(t, "https://github.com/org/repo", actualURL, "URL should be redirected to github.com")
-			// Note: Token might be empty because getGitCloneToken doesn't check ReplaceGheActionTokenWithGithubCom
-			// The important part is that the URL replacement works
-			if actualToken != "" {
-				assert.Equal(t, "PRIVATE_ACTIONS_TOKEN_ON_GITHUB", actualToken, "If token is set, it should be the replacement token")
-			}
-
-			sarm.AssertExpectations(t)
-		})
-	}
-}
-
-func TestStepActionRemoteUsesGitHubInstanceWhenDefaultActionInstanceEmpty(t *testing.T) {
-	ctx := context.Background()
-
-	var actualURL string
-	sarm := &stepActionRemoteMocks{}
-
-	origStepAtionRemoteNewCloneExecutor := stepActionRemoteNewCloneExecutor
-	stepActionRemoteNewCloneExecutor = func(input git.NewGitCloneExecutorInput) common.Executor {
-		return func(ctx context.Context) error {
-			actualURL = input.URL
-			return nil
+	t.Run("refreshes composite inputs without leaking environment", func(t *testing.T) {
+		step := &stepActionRemote{
+			Step:         &model.Step{Uses: "org/composite@v1", With: map[string]string{"SHARED": "first"}},
+			RunContext:   &RunContext{Config: &Config{ActionCacheDir: t.TempDir()}, Run: &model.Run{JobID: "job", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"job": {}}}}, JobContainer: &jobContainerMock{}},
+			action:       &model.Action{Inputs: map[string]model.Input{"shared": {}}},
+			env:          map[string]string{},
+			remoteAction: mustNewRemoteAction(t, "org/composite@v1"),
 		}
-	}
-	defer func() {
-		stepActionRemoteNewCloneExecutor = origStepAtionRemoteNewCloneExecutor
-	}()
 
-	sar := &stepActionRemote{
-		Step: &model.Step{
-			Uses: "actions/setup-go@v4",
-		},
-		RunContext: &RunContext{
-			Config: &Config{
-				GitHubInstance:        "gitea.example",
-				DefaultActionInstance: "",
-				ActionCacheDir:        t.TempDir(),
-			},
-			Run: &model.Run{
-				JobID: "1",
-				Workflow: &model.Workflow{
-					Jobs: map[string]*model.Job{
-						"1": {},
-					},
+		for _, value := range []string{"first", "second"} {
+			step.env["INPUT_SHARED"] = value
+			composite, err := step.getCompositeRunContext(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, map[string]any{"shared": value}, composite.actionInputs)
+			assert.NotContains(t, composite.Env, "INPUT_SHARED")
+		}
+	})
+}
+
+func TestStepActionRemotePrepare(t *testing.T) {
+	for _, test := range []struct {
+		name, uses, instance, actionPath, wantURL string
+	}{
+		{name: "nested action", uses: "org/repo/path@ref", instance: "https://github.com", actionPath: "path", wantURL: "https://github.com/org/repo"},
+		{name: "instance fallback", uses: "actions/setup-go@v4", instance: "gitea.example", wantURL: "https://gitea.example/actions/setup-go"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var actualURL string
+			setCloneExecutor(t, func(input git.NewGitCloneExecutorInput) common.Executor {
+				return func(context.Context) error {
+					actualURL = input.URL
+					return nil
+				}
+			})
+
+			actionMocks := &stepActionRemoteMocks{}
+			action := &stepActionRemote{
+				Step: &model.Step{Uses: test.uses},
+				RunContext: &RunContext{
+					Config: &Config{GitHubInstance: test.instance, ActionCacheDir: t.TempDir()},
+					Run: &model.Run{JobID: "1", Workflow: &model.Workflow{
+						Jobs: map[string]*model.Job{"1": {}},
+					}},
 				},
-			},
-		},
-		readAction: sarm.readAction,
-	}
+				readAction: actionMocks.readAction,
+			}
+			actionMocks.On("readAction", action.Step, actionDirSuffix(action.Step.UsesHash()), test.actionPath,
+				mock.Anything, mock.Anything).Return(&model.Action{}, nil)
 
-	suffixMatcher := func(suffix string) any {
-		return mock.MatchedBy(func(actionDir string) bool {
-			return strings.HasSuffix(actionDir, suffix)
+			require.NoError(t, action.prepareActionExecutor()(t.Context()))
+			assert.Equal(t, test.wantURL, actualURL)
+			actionMocks.AssertExpectations(t)
 		})
 	}
-	sarm.On("readAction", sar.Step, suffixMatcher(sar.Step.UsesHash()), "", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
-
-	require.NoError(t, sar.prepareActionExecutor()(ctx))
-	assert.Equal(t, "https://gitea.example/actions/setup-go", actualURL)
-	sarm.AssertExpectations(t)
 }
 
 func TestStepActionRemotePost(t *testing.T) {
@@ -653,35 +463,29 @@ func TestStepActionRemotePost(t *testing.T) {
 				},
 				Step:   tt.stepModel,
 				action: tt.actionModel,
+				// post only ever runs after prepareActionExecutor resolved the action
+				remoteAction: mustNewRemoteAction(t, tt.stepModel.Uses),
 			}
 			sar.RunContext.ExprEval = sar.RunContext.NewExpressionEvaluator(ctx)
 
 			if tt.mocks.exec {
 				// Use mock.MatchedBy to match the exec command with hash-based path
 				execMatcher := mock.MatchedBy(func(args []string) bool {
-					if len(args) != 2 {
+					if len(args) != 3 {
 						return false
 					}
-					return args[0] == "node" && strings.Contains(args[1], "post.js")
+					return args[0] == "node" && args[1] == "--preserve-symlinks-main" && strings.Contains(args[2], "post.js")
 				})
 
 				cm.On("Exec", execMatcher, sar.env, "", "").Return(func(ctx context.Context) error { return tt.err })
 
-				cm.On("Copy", "/var/run/act", mock.AnythingOfType("[]*container.FileEntry")).Return(func(ctx context.Context) error {
-					return nil
-				})
+				cm.On("Copy", "/var/run/act", mock.AnythingOfType("[]*container.FileEntry")).Return(noopExecutor)
 
-				cm.On("UpdateFromEnv", "/var/run/act/workflow/envs.txt", mock.AnythingOfType("*map[string]string")).Return(func(ctx context.Context) error {
-					return nil
-				})
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/envs.txt", mock.AnythingOfType("*map[string]string")).Return(noopExecutor)
 
-				cm.On("UpdateFromEnv", "/var/run/act/workflow/statecmd.txt", mock.AnythingOfType("*map[string]string")).Return(func(ctx context.Context) error {
-					return nil
-				})
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/statecmd.txt", mock.AnythingOfType("*map[string]string")).Return(noopExecutor)
 
-				cm.On("UpdateFromEnv", "/var/run/act/workflow/outputcmd.txt", mock.AnythingOfType("*map[string]string")).Return(func(ctx context.Context) error {
-					return nil
-				})
+				cm.On("UpdateFromEnv", "/var/run/act/workflow/outputcmd.txt", mock.AnythingOfType("*map[string]string")).Return(noopExecutor)
 
 				cm.On("GetContainerArchive", ctx, "/var/run/act/workflow/pathcmd.txt").Return(io.NopCloser(&bytes.Buffer{}), nil)
 			}
@@ -807,10 +611,21 @@ func Test_newRemoteAction(t *testing.T) {
 			action: "ssh://gitea.com/onlyonesegment@main", // missing org/repo after the host
 			want:   nil,
 		},
+		{
+			action: "self:owner/repo/sub@v1",
+			want: &remoteAction{
+				URL:  "https://gitea.example.com",
+				Org:  "owner",
+				Repo: "repo",
+				Path: "sub",
+				Ref:  "v1",
+			},
+			wantCloneURL: "https://gitea.example.com/owner/repo",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.action, func(t *testing.T) {
-			got := newRemoteAction(tt.action)
+			got, _ := newRemoteAction(tt.action, nil, "gitea.example.com")
 			assert.Equalf(t, tt.want, got, "newRemoteAction(%v)", tt.action)
 			cloneURL := ""
 			if got != nil {
@@ -819,6 +634,83 @@ func Test_newRemoteAction(t *testing.T) {
 			assert.Equalf(t, tt.wantCloneURL, cloneURL, "newRemoteAction(%v).CloneURL()", tt.action)
 		})
 	}
+	_, err := newRemoteAction("self:owner/repo@v1", nil, "")
+	require.ErrorContains(t, err, "without a Gitea instance")
+}
+
+func mustNewRemoteAction(t *testing.T, uses string) *remoteAction {
+	t.Helper()
+	action, err := newRemoteAction(uses, nil, "")
+	require.NoError(t, err)
+	return action
+}
+
+func Test_newRemoteActionSelfRepo(t *testing.T) {
+	workflow := &model.GithubContext{
+		ServerURL:  "https://gitea.example.com",
+		Repository: "owner/workflow-repo",
+		Sha:        "abc123",
+	}
+	composite := &model.GithubContext{
+		ServerURL:        "https://gitea.example.com",
+		Repository:       "owner/workflow-repo",
+		Sha:              "abc123",
+		ActionRepository: "other/action-repo",
+		ActionRef:        "v1",
+	}
+	tests := []struct {
+		name   string
+		action string
+		github *model.GithubContext
+		want   *remoteAction
+	}{
+		{
+			name:   "top level resolves to the workflow repo at its commit",
+			action: "$/.gitea/actions/build",
+			github: workflow,
+			want: &remoteAction{
+				URL:  "https://gitea.example.com",
+				Org:  "owner",
+				Repo: "workflow-repo",
+				Path: ".gitea/actions/build",
+				Ref:  "abc123",
+			},
+		},
+		{
+			name:   "inside a composite resolves to the enclosing action",
+			action: "$/.gitea/actions/build",
+			github: composite,
+			want: &remoteAction{
+				URL:  "https://gitea.example.com",
+				Org:  "other",
+				Repo: "action-repo",
+				Path: ".gitea/actions/build",
+				Ref:  "v1",
+			},
+		},
+		{name: "empty path", action: "$/", github: workflow},
+		{name: "ref suffix is not allowed", action: "$/.gitea/actions/build@v1", github: workflow},
+		{name: "path traversal", action: "$/../escape", github: workflow},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := newRemoteAction(tt.action, tt.github, "")
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func Test_stepActionRemoteSelfRepoActionDir(t *testing.T) {
+	dirFor := func(repo string) string {
+		sar := &stepActionRemote{
+			Step:         &model.Step{Uses: "$/.gitea/actions/build"},
+			RunContext:   &RunContext{Config: &Config{ActionCacheDir: "/cache"}},
+			remoteAction: &remoteAction{Org: "owner", Repo: repo, Ref: "v1"},
+		}
+		return sar.actionDir()
+	}
+	// The same `$/x` in two repos must not share a cache directory.
+	assert.NotEqual(t, dirFor("one"), dirFor("two"))
 }
 
 func Test_remoteActionReference(t *testing.T) {
@@ -833,7 +725,7 @@ func Test_remoteActionReference(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.uses, func(t *testing.T) {
-			assert.Equal(t, tt.want, newRemoteAction(tt.uses).Reference())
+			assert.Equal(t, tt.want, mustNewRemoteAction(t, tt.uses).Reference())
 		})
 	}
 }
@@ -890,7 +782,7 @@ func TestStepActionRemotePreResolvesDownloadedCommit(t *testing.T) {
 func TestStepActionRemoteActionDownloadInfo(t *testing.T) {
 	t.Run("reports the action and its resolved commit", func(t *testing.T) {
 		sar := &stepActionRemote{
-			remoteAction: newRemoteAction("actions/checkout@v7"),
+			remoteAction: mustNewRemoteAction(t, "actions/checkout@v7"),
 			action:       &model.Action{},
 			resolvedSha:  "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
 		}
@@ -904,7 +796,7 @@ func TestStepActionRemoteActionDownloadInfo(t *testing.T) {
 
 	t.Run("reports nothing when no action was downloaded", func(t *testing.T) {
 		// The local checkout of the workflow's own repository resolves no action.
-		sar := &stepActionRemote{remoteAction: newRemoteAction("actions/checkout@v7")}
+		sar := &stepActionRemote{remoteAction: mustNewRemoteAction(t, "actions/checkout@v7")}
 
 		_, _, ok := sar.actionDownloadInfo()
 
@@ -963,14 +855,10 @@ func TestStepActionRemoteCloneTokenSurvivesNilSecrets(t *testing.T) {
 			ctx := context.Background()
 
 			var capturedToken string
-			origStepAtionRemoteNewCloneExecutor := stepActionRemoteNewCloneExecutor
-			stepActionRemoteNewCloneExecutor = func(input git.NewGitCloneExecutorInput) common.Executor {
+			setCloneExecutor(t, func(input git.NewGitCloneExecutorInput) common.Executor {
 				capturedToken = input.Token
 				return func(ctx context.Context) error { return nil }
-			}
-			defer (func() {
-				stepActionRemoteNewCloneExecutor = origStepAtionRemoteNewCloneExecutor
-			})()
+			})
 
 			sarm := &stepActionRemoteMocks{}
 			sar := &stepActionRemote{
@@ -997,12 +885,7 @@ func TestStepActionRemoteCloneTokenSurvivesNilSecrets(t *testing.T) {
 			}
 			sar.RunContext.ExprEval = sar.RunContext.NewExpressionEvaluator(ctx)
 
-			suffixMatcher := func(suffix string) any {
-				return mock.MatchedBy(func(actionDir string) bool {
-					return strings.HasSuffix(actionDir, suffix)
-				})
-			}
-			sarm.On("readAction", sar.Step, suffixMatcher(sar.Step.UsesHash()), "", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
+			sarm.On("readAction", sar.Step, actionDirSuffix(sar.Step.UsesHash()), "", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
 
 			err := sar.prepareActionExecutor()(ctx)
 			require.NoError(t, err)

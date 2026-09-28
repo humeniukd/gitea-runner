@@ -17,48 +17,27 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/act/exprparser"
-	"gitea.com/gitea/runner/act/model"
 
 	_ "embed"
 
+	"gitea.dev/actionslib/pkg/expreval"
+	"gitea.dev/actionslib/pkg/exprparser"
+	"gitea.dev/actionslib/pkg/model"
 	"go.yaml.in/yaml/v4"
 )
 
-// ExpressionEvaluator is the interface for evaluating expressions
-type ExpressionEvaluator interface {
-	evaluate(context.Context, string, exprparser.DefaultStatusCheck) (any, error)
-	EvaluateYamlNode(context.Context, *yaml.Node) error
-	Interpolate(context.Context, string) string
-}
-
 // NewExpressionEvaluator creates a new evaluator
-func (rc *RunContext) NewExpressionEvaluator(ctx context.Context) ExpressionEvaluator {
+func (rc *RunContext) NewExpressionEvaluator(ctx context.Context) *ExpressionEvaluator {
 	return rc.NewExpressionEvaluatorWithEnv(ctx, rc.GetEnv())
 }
 
-func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map[string]string) ExpressionEvaluator {
+func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map[string]string) *ExpressionEvaluator {
 	var workflowCallResult map[string]*model.WorkflowCallResult
 
 	// todo: cleanup EvaluationEnvironment creation
-	using := make(map[string]exprparser.Needs)
 	strategy := make(map[string]any)
 	if rc.Run != nil {
-		job := rc.Run.Job()
-		if job != nil && job.Strategy != nil {
-			strategy["fail-fast"] = job.Strategy.FailFast
-			strategy["max-parallel"] = job.Strategy.MaxParallel
-		}
-
-		jobs := rc.Run.Workflow.Jobs
-		jobNeeds := rc.Run.Job().Needs()
-
-		for _, needs := range jobNeeds {
-			using[needs] = exprparser.Needs{
-				Outputs: jobs[needs].Outputs,
-				Result:  jobs[needs].NeedsResult(),
-			}
-		}
+		strategy = exprparser.StrategyContext(rc.Run.Job().Strategy, rc.jobIndex, rc.jobTotal)
 
 		// only setup jobs context in case of workflow_call
 		// and existing expression evaluator (this means, jobs are at
@@ -66,7 +45,7 @@ func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map
 		if rc.caller != nil && rc.ExprEval != nil {
 			workflowCallResult = map[string]*model.WorkflowCallResult{}
 
-			for jobName, job := range jobs {
+			for jobName, job := range rc.Run.Workflow.Jobs {
 				result := model.WorkflowCallResult{
 					Outputs: map[string]string{},
 				}
@@ -77,7 +56,7 @@ func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map
 	}
 
 	ghc := rc.getGithubContext(ctx)
-	inputs := getEvaluatorInputs(ctx, rc, nil, ghc)
+	inputs := getEvaluatorInputs(rc, rc.actionInputs, ghc)
 
 	ee := &exprparser.EvaluationEnvironment{
 		Github: ghc,
@@ -87,18 +66,16 @@ func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map
 		// todo: should be unavailable
 		// but required to interpolate/evaluate the step outputs on the job
 		Steps:     rc.getStepsContext(),
-		Secrets:   getWorkflowSecrets(ctx, rc),
+		Secrets:   getWorkflowSecrets(rc),
 		Vars:      getWorkflowVars(ctx, rc),
 		Strategy:  strategy,
 		Matrix:    rc.Matrix,
-		Needs:     using,
+		Needs:     exprparser.NeedsContext(rc.Run),
 		Inputs:    inputs,
 		HashFiles: getHashFilesFunction(ctx, rc),
 	}
-	if rc.JobContainer != nil {
-		ee.Runner = rc.JobContainer.GetRunnerContext(ctx)
-	}
-	return expressionEvaluator{
+	ee.Runner = rc.getRunnerContext(ctx)
+	return &expressionEvaluator{
 		interpreter: exprparser.NewInterpeter(ee, exprparser.Config{
 			Run:        rc.Run,
 			WorkingDir: rc.Config.Workdir,
@@ -110,49 +87,35 @@ func (rc *RunContext) NewExpressionEvaluatorWithEnv(ctx context.Context, env map
 //go:embed hashfiles/index.js
 var hashfiles string
 
-// NewStepExpressionEvaluator creates a new evaluator
-func (rc *RunContext) NewStepExpressionEvaluator(ctx context.Context, step step) ExpressionEvaluator {
+// NewStepExpressionEvaluator creates a new evaluator with the `inputs` of the enclosing workflow or composite action
+func (rc *RunContext) NewStepExpressionEvaluator(ctx context.Context, step step) *ExpressionEvaluator {
+	return rc.newStepExpressionEvaluator(ctx, step, rc.actionInputs, rc.getJobContext())
+}
+
+// NewActionInputsExpressionEvaluator creates a new evaluator with the step's own with: values as `inputs`
+func (rc *RunContext) NewActionInputsExpressionEvaluator(ctx context.Context, step step) *ExpressionEvaluator {
+	return rc.newStepExpressionEvaluator(ctx, step, inputsFromEnv(*step.getEnv()), rc.getJobContext())
+}
+
+func (rc *RunContext) newStepExpressionEvaluator(ctx context.Context, step step, stepInputs map[string]any, jobContext *model.JobContext) *ExpressionEvaluator {
 	// todo: cleanup EvaluationEnvironment creation
-	job := rc.Run.Job()
-	strategy := make(map[string]any)
-	if job.Strategy != nil {
-		strategy["fail-fast"] = job.Strategy.FailFast
-		strategy["max-parallel"] = job.Strategy.MaxParallel
-	}
-
-	jobs := rc.Run.Workflow.Jobs
-	jobNeeds := rc.Run.Job().Needs()
-
-	using := make(map[string]exprparser.Needs)
-	for _, needs := range jobNeeds {
-		using[needs] = exprparser.Needs{
-			Outputs: jobs[needs].Outputs,
-			Result:  jobs[needs].NeedsResult(),
-		}
-	}
-
-	ghc := rc.getGithubContext(ctx)
-	inputs := getEvaluatorInputs(ctx, rc, step, ghc)
-
 	ee := &exprparser.EvaluationEnvironment{
 		Github:   step.getGithubContext(ctx),
 		Env:      *step.getEnv(),
-		Job:      rc.getJobContext(),
+		Job:      jobContext,
 		Steps:    rc.getStepsContext(),
-		Secrets:  getWorkflowSecrets(ctx, rc),
+		Secrets:  getWorkflowSecrets(rc),
 		Vars:     getWorkflowVars(ctx, rc),
-		Strategy: strategy,
+		Strategy: exprparser.StrategyContext(rc.Run.Job().Strategy, rc.jobIndex, rc.jobTotal),
 		Matrix:   rc.Matrix,
-		Needs:    using,
+		Needs:    exprparser.NeedsContext(rc.Run),
 		// todo: should be unavailable
 		// but required to interpolate/evaluate the inputs in actions/composite
-		Inputs:    inputs,
+		Inputs:    getEvaluatorInputs(rc, stepInputs, rc.getGithubContext(ctx)),
 		HashFiles: getHashFilesFunction(ctx, rc),
 	}
-	if rc.JobContainer != nil {
-		ee.Runner = rc.JobContainer.GetRunnerContext(ctx)
-	}
-	return expressionEvaluator{
+	ee.Runner = rc.getRunnerContext(ctx)
+	return &expressionEvaluator{
 		interpreter: exprparser.NewInterpeter(ee, exprparser.Config{
 			Run:        rc.Run,
 			WorkingDir: rc.Config.Workdir,
@@ -180,7 +143,7 @@ func getHashFilesFunction(ctx context.Context, rc *RunContext) func(v []reflect.
 							followSymlink = true
 							continue
 						}
-						return "", fmt.Errorf("Invalid glob option %s, available option: '--follow-symbolic-links'", s)
+						return "", fmt.Errorf("invalid glob option %s, available option: '--follow-symbolic-links'", s)
 					}
 				}
 				patterns = append(patterns, s)
@@ -198,7 +161,7 @@ func getHashFilesFunction(ctx context.Context, rc *RunContext) func(v []reflect.
 				Mode: 0o644,
 				Body: hashfiles,
 			}).
-				Then(rc.execJobContainer([]string{"node", path.Join(rc.JobContainer.GetActPath(), name)},
+				Then(rc.JobContainer.Exec([]string{"node", path.Join(rc.JobContainer.GetActPath(), name)},
 					env, "", "")).
 				Finally(func(context.Context) error {
 					rc.JobContainer.ReplaceLogWriter(stdout, stderr)
@@ -224,6 +187,8 @@ type expressionEvaluator struct {
 	interpreter exprparser.Interpreter
 }
 
+type ExpressionEvaluator = expressionEvaluator
+
 func (ee expressionEvaluator) evaluate(ctx context.Context, in string, defaultStatusCheck exprparser.DefaultStatusCheck) (any, error) {
 	logger := common.Logger(ctx)
 	logger.Debugf("evaluating expression '%s'", in)
@@ -236,349 +201,129 @@ func (ee expressionEvaluator) evaluate(ctx context.Context, in string, defaultSt
 	return evaluated, err
 }
 
-func (ee expressionEvaluator) evaluateScalarYamlNode(ctx context.Context, node *yaml.Node) (*yaml.Node, error) {
-	var in string
-	if err := node.Decode(&in); err != nil {
-		return nil, err
-	}
-	if !strings.Contains(in, "${{") || !strings.Contains(in, "}}") {
-		return nil, nil //nolint:nilnil // pre-existing issue from nektos/act
-	}
-	expr, _ := rewriteSubExpression(ctx, in, false)
-	res, err := ee.evaluate(ctx, expr, exprparser.DefaultStatusCheckNone)
-	if err != nil {
-		return nil, err
-	}
-	ret := &yaml.Node{}
-	if err := ret.Encode(res); err != nil {
-		return nil, err
-	}
-	return ret, err
-}
-
-func (ee expressionEvaluator) evaluateMappingYamlNode(ctx context.Context, node *yaml.Node) (*yaml.Node, error) {
-	var ret *yaml.Node
-	// GitHub has this undocumented feature to merge maps, called insert directive
-	insertDirective := regexp.MustCompile(`\${{\s*insert\s*}}`)
-	for i := 0; i < len(node.Content)/2; i++ {
-		changed := func() error {
-			if ret == nil {
-				ret = &yaml.Node{}
-				if err := ret.Encode(node); err != nil {
-					return err
-				}
-				ret.Content = ret.Content[:i*2]
-			}
-			return nil
-		}
-		k := node.Content[i*2]
-		v := node.Content[i*2+1]
-		ev, err := ee.evaluateYamlNodeInternal(ctx, v)
-		if err != nil {
-			return nil, err
-		}
-		if ev != nil {
-			if err := changed(); err != nil {
-				return nil, err
-			}
-		} else {
-			ev = v
-		}
-		var sk string
-		// Merge the nested map of the insert directive
-		if k.Decode(&sk) == nil && insertDirective.MatchString(sk) {
-			if ev.Kind != yaml.MappingNode {
-				return nil, fmt.Errorf("failed to insert node %v into mapping %v unexpected type %v expected MappingNode", ev, node, ev.Kind)
-			}
-			if err := changed(); err != nil {
-				return nil, err
-			}
-			ret.Content = append(ret.Content, ev.Content...)
-		} else {
-			ek, err := ee.evaluateYamlNodeInternal(ctx, k)
-			if err != nil {
-				return nil, err
-			}
-			if ek != nil {
-				if err := changed(); err != nil {
-					return nil, err
-				}
-			} else {
-				ek = k
-			}
-			if ret != nil {
-				ret.Content = append(ret.Content, ek, ev)
-			}
-		}
-	}
-	return ret, nil
-}
-
-func (ee expressionEvaluator) evaluateSequenceYamlNode(ctx context.Context, node *yaml.Node) (*yaml.Node, error) {
-	var ret *yaml.Node
-	for i := 0; i < len(node.Content); i++ {
-		v := node.Content[i]
-		// Preserve nested sequences
-		wasseq := v.Kind == yaml.SequenceNode
-		ev, err := ee.evaluateYamlNodeInternal(ctx, v)
-		if err != nil {
-			return nil, err
-		}
-		if ev != nil {
-			if ret == nil {
-				ret = &yaml.Node{}
-				if err := ret.Encode(node); err != nil {
-					return nil, err
-				}
-				ret.Content = ret.Content[:i]
-			}
-			// GitHub has this undocumented feature to merge sequences / arrays
-			// We have a nested sequence via evaluation, merge the arrays
-			if ev.Kind == yaml.SequenceNode && !wasseq {
-				ret.Content = append(ret.Content, ev.Content...)
-			} else {
-				ret.Content = append(ret.Content, ev)
-			}
-		} else if ret != nil {
-			ret.Content = append(ret.Content, v)
-		}
-	}
-	return ret, nil
-}
-
-func (ee expressionEvaluator) evaluateYamlNodeInternal(ctx context.Context, node *yaml.Node) (*yaml.Node, error) {
-	switch node.Kind {
-	case yaml.ScalarNode:
-		return ee.evaluateScalarYamlNode(ctx, node)
-	case yaml.MappingNode:
-		return ee.evaluateMappingYamlNode(ctx, node)
-	case yaml.SequenceNode:
-		return ee.evaluateSequenceYamlNode(ctx, node)
-	default:
-		return nil, nil //nolint:nilnil // pre-existing issue from nektos/act
-	}
+// shared returns the evaluation layer of the shared library, bound to this context so the
+// evaluation of every single expression is still logged and masked here.
+func (ee expressionEvaluator) shared(ctx context.Context) expreval.Evaluator {
+	return expreval.New(func(in string, defaultStatusCheck exprparser.DefaultStatusCheck) (any, error) {
+		return ee.evaluate(ctx, in, defaultStatusCheck)
+	})
 }
 
 func (ee expressionEvaluator) EvaluateYamlNode(ctx context.Context, node *yaml.Node) error {
-	ret, err := ee.evaluateYamlNodeInternal(ctx, node)
-	if err != nil {
-		return err
-	}
-	if ret != nil {
-		return ret.Decode(node)
-	}
-	return nil
+	return ee.shared(ctx).EvaluateYamlNode(node)
 }
 
-func (ee expressionEvaluator) Interpolate(ctx context.Context, in string) string {
-	if !strings.Contains(in, "${{") || !strings.Contains(in, "}}") {
+func (ee expressionEvaluator) Interpolate(ctx context.Context, in string) (string, error) {
+	return ee.shared(ctx).Interpolate(in)
+}
+
+// InterpolateName keeps the source text of a job or step name that cannot be evaluated, as GitHub does.
+func (ee expressionEvaluator) InterpolateName(ctx context.Context, in string) string {
+	out, err := ee.Interpolate(ctx, in)
+	if err != nil {
+		common.Logger(ctx).Warnf("Unable to evaluate the display name '%s': %s", in, err)
 		return in
 	}
-
-	expr, _ := rewriteSubExpression(ctx, in, true)
-	evaluated, err := ee.evaluate(ctx, expr, exprparser.DefaultStatusCheckNone)
-	if err != nil {
-		common.Logger(ctx).Errorf("Unable to interpolate expression '%s': %s", expr, err)
-		return ""
-	}
-
-	value, ok := evaluated.(string)
-	if !ok {
-		panic(fmt.Sprintf("Expression %s did not evaluate to a string", expr))
-	}
-
-	return value
+	return out
 }
 
-// EvalBool evaluates an expression against given evaluator
-func EvalBool(ctx context.Context, evaluator ExpressionEvaluator, expr string, defaultStatusCheck exprparser.DefaultStatusCheck) (bool, error) {
-	nextExpr, _ := rewriteSubExpression(ctx, expr, false)
-
-	evaluated, err := evaluator.evaluate(ctx, nextExpr, defaultStatusCheck)
-	if err != nil {
-		return false, err
-	}
-
-	return exprparser.IsTruthy(evaluated), nil
+// EvalBool evaluates an expression against given evaluator. An `if:` is an expression even without
+// `${{ }}`, while literal text around one makes the whole value a string.
+func EvalBool(ctx context.Context, evaluator *expressionEvaluator, expr string, defaultStatusCheck exprparser.DefaultStatusCheck) (bool, error) {
+	return expreval.New(func(in string, dsc exprparser.DefaultStatusCheck) (any, error) {
+		return evaluator.evaluate(ctx, in, dsc)
+	}).EvalBool(expr, defaultStatusCheck)
 }
 
-func escapeFormatString(in string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(in, "{", "{{"), "}", "}}")
-}
-
-func rewriteSubExpression(ctx context.Context, in string, forceFormat bool) (string, error) { //nolint:unparam // pre-existing issue from nektos/act
-	if !strings.Contains(in, "${{") || !strings.Contains(in, "}}") {
-		return in, nil
-	}
-
-	strPattern := regexp.MustCompile("(?:''|[^'])*'")
-	pos := 0
-	exprStart := -1
-	strStart := -1
-	var results []string
-	var formatOut strings.Builder
-	for pos < len(in) {
-		if strStart > -1 {
-			matches := strPattern.FindStringIndex(in[pos:])
-			if matches == nil {
-				panic("unclosed string.")
-			}
-
-			strStart = -1
-			pos += matches[1]
-		} else if exprStart > -1 {
-			exprEnd := strings.Index(in[pos:], "}}")
-			strStart = strings.Index(in[pos:], "'")
-
-			if exprEnd > -1 && strStart > -1 {
-				if exprEnd < strStart {
-					strStart = -1
-				} else {
-					exprEnd = -1
-				}
-			}
-
-			if exprEnd > -1 {
-				fmt.Fprintf(&formatOut, "{%d}", len(results))
-				results = append(results, strings.TrimSpace(in[exprStart:pos+exprEnd]))
-				pos += exprEnd + 2
-				exprStart = -1
-			} else if strStart > -1 {
-				pos += strStart + 1
-			} else {
-				panic("unclosed expression.")
-			}
-		} else {
-			exprStart = strings.Index(in[pos:], "${{")
-			if exprStart != -1 {
-				formatOut.WriteString(escapeFormatString(in[pos : pos+exprStart]))
-				exprStart = pos + exprStart + 3
-				pos = exprStart
-			} else {
-				formatOut.WriteString(escapeFormatString(in[pos:]))
-				pos = len(in)
-			}
-		}
-	}
-
-	if len(results) == 1 && formatOut.String() == "{0}" && !forceFormat {
-		return in, nil
-	}
-
-	out := fmt.Sprintf("format('%s', %s)", strings.ReplaceAll(formatOut.String(), "'", "''"), strings.Join(results, ", "))
-	if in != out {
-		common.Logger(ctx).Debugf("expression '%s' rewritten to '%s'", in, out)
-	}
-	return out, nil
-}
-
-func getEvaluatorInputs(ctx context.Context, rc *RunContext, step step, ghc *model.GithubContext) map[string]any {
+func inputsFromEnv(env map[string]string) map[string]any {
 	inputs := map[string]any{}
-
-	setupWorkflowInputs(ctx, &inputs, rc)
-
-	var env map[string]string
-	if step != nil {
-		env = *step.getEnv()
-	} else {
-		env = rc.GetEnv()
-	}
-
 	for k, v := range env {
 		if after, ok := strings.CutPrefix(k, "INPUT_"); ok {
 			inputs[strings.ToLower(after)] = v
 		}
 	}
+	return inputs
+}
 
-	if ghc.EventName == "workflow_dispatch" {
-		config := rc.Run.Workflow.WorkflowDispatchConfig()
-		if config != nil && config.Inputs != nil {
-			for k, v := range config.Inputs {
-				value := nestedMapLookup(ghc.Event, "inputs", k)
-				if value == nil {
-					value = v.Default
-				}
-				inputs[k] = coerceInputValue(value, v.Type)
-			}
-		}
+func getEvaluatorInputs(rc *RunContext, stepInputs map[string]any, ghc *model.GithubContext) map[string]any {
+	inputs := map[string]any{}
+
+	// only a called workflow's job itself takes the inputs Gitea resolved,
+	// composite actions copy its Config but have their own `inputs`
+	if rc.Config.WorkflowCallInputs != nil && rc.Parent == nil {
+		maps.Copy(inputs, rc.Config.WorkflowCallInputs)
+		maps.Copy(inputs, stepInputs)
+		return inputs
 	}
 
-	if ghc.EventName == "workflow_call" {
-		config := rc.Run.Workflow.WorkflowCallConfig()
-		if config != nil && config.Inputs != nil {
-			for k, v := range config.Inputs {
-				value := nestedMapLookup(ghc.Event, "inputs", k)
-				if value == nil {
-					value = v.Default
+	maps.Copy(inputs, rc.workflowCallInputs)
+	maps.Copy(inputs, stepInputs)
+
+	switch ghc.EventName {
+	case "workflow_dispatch":
+		if config := rc.Run.Workflow.WorkflowDispatchConfig(); config != nil {
+			for name, input := range config.Inputs {
+				if input.Type == "number" {
+					input.Type = "string" // boolean is the only typed dispatch input, as in Gitea
 				}
-				inputs[k] = coerceInputValue(value, v.Type)
+				setEvaluatorInput(inputs, ghc, name, model.WorkflowCallInput{Type: input.Type, Default: input.Default})
 			}
+		}
+	case "workflow_call":
+		for name, input := range rc.Run.Workflow.WorkflowCallConfig().Inputs {
+			setEvaluatorInput(inputs, ghc, name, input)
 		}
 	}
 	return inputs
 }
 
-// coerceInputValue converts an input value to the type declared by the workflow.
-// The event payload carries natively typed JSON values on newer Gitea versions,
-// while defaults and older servers provide strings.
-func coerceInputValue(value any, inputType string) any {
-	if inputType != "boolean" {
-		return value
+func setEvaluatorInput(inputs map[string]any, ghc *model.GithubContext, name string, input model.WorkflowCallInput) {
+	value := model.NestedMapLookup(ghc.Event, "inputs", name)
+	if value == nil {
+		value, _ = input.DefaultValue()
 	}
-	if b, ok := value.(bool); ok {
-		return b
-	}
-	return value == "true"
+	inputs[name] = model.CoerceInputValue(value, input.Type)
 }
 
-func setupWorkflowInputs(ctx context.Context, inputs *map[string]any, rc *RunContext) {
-	if rc.caller != nil {
-		config := rc.Run.Workflow.WorkflowCallConfig()
-
-		for name, input := range config.Inputs {
-			value := rc.caller.runContext.Run.Job().With[name]
-			if value != nil {
-				if str, ok := value.(string); ok {
-					// evaluate using the calling RunContext (outside)
-					value = rc.caller.runContext.ExprEval.Interpolate(ctx, str)
-				}
-			}
-
-			if value == nil && config != nil && config.Inputs != nil {
-				value = input.Default
-				if rc.ExprEval != nil {
-					if str, ok := value.(string); ok {
-						// evaluate using the called RunContext (inside)
-						value = rc.ExprEval.Interpolate(ctx, str)
-					}
-				}
-			}
-
-			(*inputs)[name] = coerceInputValue(value, input.Type)
-		}
+// resolveWorkflowCall evaluates the caller's with: and secrets: once, as the server does before dispatching a called workflow.
+func (rc *RunContext) resolveWorkflowCall(ctx context.Context) error {
+	if rc.caller == nil {
+		return nil
 	}
+	logger := common.Logger(ctx)
+	callerJob := rc.caller.runContext.Run.Job()
+	callerEval := rc.caller.runContext.ExprEval.shared(ctx)
+	var callerWith map[string]any
+	if err := model.DecodeEvaluated("workflow inputs", callerJob.RawWith, callerEval.EvaluateYamlNode, &callerWith); err != nil {
+		return err
+	}
+	if !rc.Run.Workflow.IsWorkflowCall() {
+		logger.Warn("workflow_call key is not defined in the referenced workflow")
+	}
+	config := rc.Run.Workflow.WorkflowCallConfig()
+	var err error
+	if rc.workflowCallInputs, err = callerEval.ResolveWorkflowCallInputs(config, callerWith); err != nil {
+		logger.Warn(err)
+	}
+
+	if callerJob.InheritSecrets() {
+		rc.workflowCallSecrets = getWorkflowSecrets(rc.caller.runContext)
+		return nil
+	}
+	secrets := callerJob.Secrets()
+	if err := config.ValidateSecrets(secrets); err != nil {
+		logger.Warn(err)
+	}
+	if rc.workflowCallSecrets, err = callerEval.EvaluateCallerSecrets(secrets); err != nil {
+		return fmt.Errorf("unable to interpolate %w", err)
+	}
+	return nil
 }
 
-func getWorkflowSecrets(ctx context.Context, rc *RunContext) map[string]string {
+func getWorkflowSecrets(rc *RunContext) map[string]string {
 	if rc.caller != nil {
-		job := rc.caller.runContext.Run.Job()
-		secrets := job.Secrets()
-
-		if secrets == nil && job.InheritSecrets() {
-			secrets = rc.caller.runContext.Config.Secrets
-		}
-
-		// Interpolate into a new map. secrets may be the shared Config.Secrets (or the job's
-		// map), which other parallel jobs read concurrently (e.g. log masking), so mutating it
-		// in place is a data race.
-		interpolated := make(map[string]string, len(secrets))
-		for k, v := range secrets {
-			interpolated[k] = rc.caller.runContext.ExprEval.Interpolate(ctx, v)
-		}
-
-		return interpolated
+		return rc.workflowCallSecrets
 	}
-
 	return rc.Config.Secrets
 }
 

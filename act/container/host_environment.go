@@ -26,6 +26,7 @@ import (
 	"gitea.com/gitea/runner/act/lookpath"
 	"gitea.com/gitea/runner/internal/pkg/process"
 
+	"github.com/creack/pty"
 	"github.com/go-git/go-billy/v5/helper/polyfill"
 	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
@@ -71,12 +72,6 @@ func (e *HostEnvironment) Create(_, _ []string) common.Executor {
 	}
 }
 
-func (e *HostEnvironment) ConnectToNetwork(name string) common.Executor {
-	return func(ctx context.Context) error {
-		return nil
-	}
-}
-
 func (e *HostEnvironment) Close() common.Executor {
 	return func(ctx context.Context) error {
 		return nil
@@ -97,34 +92,7 @@ func (e *HostEnvironment) Copy(destPath string, files ...*FileEntry) common.Exec
 	}
 }
 
-func (e *HostEnvironment) CopyTarStream(ctx context.Context, destPath string, tarStream io.Reader) error {
-	if err := os.RemoveAll(destPath); err != nil {
-		return err
-	}
-	tr := tar.NewReader(tarStream)
-	cp := &filecollector.CopyCollector{
-		DstDir: destPath,
-	}
-	for {
-		ti, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			return nil
-		} else if err != nil {
-			return err
-		}
-		if ti.FileInfo().IsDir() {
-			continue
-		}
-		if ctx.Err() != nil {
-			return errors.New("CopyTarStream has been cancelled")
-		}
-		if err := cp.WriteFile(ti.Name, ti.FileInfo(), ti.Linkname, tr); err != nil {
-			return err
-		}
-	}
-}
-
-func (e *HostEnvironment) CopyDir(destPath, srcPath string, useGitIgnore bool) common.Executor {
+func (e *HostEnvironment) CopyDir(destPath, srcPath string, useGitIgnore, skipGitDir bool) common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
 		srcPrefix := filepath.Dir(srcPath)
@@ -142,16 +110,24 @@ func (e *HostEnvironment) CopyDir(destPath, srcPath string, useGitIgnore bool) c
 			ignorer = gitignore.NewMatcher(ps)
 		}
 		fc := &filecollector.FileCollector{
-			Fs:        &filecollector.DefaultFs{},
-			Ignorer:   ignorer,
-			SrcPath:   srcPath,
-			SrcPrefix: srcPrefix,
+			Ignorer:    ignorer,
+			SrcPath:    srcPath,
+			SrcPrefix:  srcPrefix,
+			SkipGitDir: skipGitDir,
 			Handler: &filecollector.CopyCollector{
 				DstDir: destPath,
 			},
 		}
 		return filepath.Walk(srcPath, fc.CollectFiles(ctx, []string{}))
 	}
+}
+
+func (e *HostEnvironment) DumpLogs(_ context.Context) error {
+	return nil
+}
+
+func (e *HostEnvironment) Inspect(_ context.Context) (*Info, error) {
+	return &Info{Health: HealthNone, Ports: map[string]string{}}, nil
 }
 
 func (e *HostEnvironment) GetContainerArchive(ctx context.Context, srcPath string) (io.ReadCloser, error) {
@@ -172,7 +148,6 @@ func (e *HostEnvironment) GetContainerArchive(ctx context.Context, srcPath strin
 			srcPrefix += string(filepath.Separator)
 		}
 		fc := &filecollector.FileCollector{
-			Fs:        &filecollector.DefaultFs{},
 			SrcPath:   srcPath,
 			SrcPrefix: srcPrefix,
 			Handler:   tc,
@@ -238,24 +213,8 @@ func (w *ptyWriter) Write(buf []byte) (int, error) {
 	return w.Out.Write(buf)
 }
 
-type localEnv struct {
-	env map[string]string
-}
-
-func (l *localEnv) Getenv(name string) string {
-	if runtime.GOOS == "windows" {
-		for k, v := range l.env {
-			if strings.EqualFold(name, k) {
-				return v
-			}
-		}
-		return ""
-	}
-	return l.env[name]
-}
-
 func lookupPathHost(cmd string, env map[string]string, writer io.Writer) (string, error) {
-	f, err := lookpath.LookPath2(cmd, &localEnv{env: env})
+	f, err := lookpath.LookPath2(cmd, env)
 	if err != nil {
 		err := "Cannot find: " + cmd + " in PATH"
 		if _, _err := writer.Write([]byte(err + "\n")); _err != nil {
@@ -267,7 +226,7 @@ func lookupPathHost(cmd string, env map[string]string, writer io.Writer) (string
 }
 
 func setupPty(cmd *exec.Cmd, cmdline string) (*os.File, *os.File, error) {
-	ppty, tty, err := openPty()
+	ppty, tty, err := pty.Open()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -330,6 +289,10 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 	} else {
 		wd = e.Path
 	}
+	// Flush any buffered, not-yet-newline-terminated trailing line, as the docker backend
+	// does in waitForCommand, so the final line of a command's output is not lost.
+	defer common.FlushWriter(e.StdOut)
+
 	f, err := lookupPathHost(command[0], env, e.StdOut)
 	if err != nil {
 		return err
@@ -389,8 +352,7 @@ func (e *HostEnvironment) exec(ctx context.Context, command []string, cmdline st
 	}
 	err = cmd.Wait()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			return ExitCodeError(exitErr.ExitCode())
 		}
 		return err
@@ -668,8 +630,11 @@ func (*HostEnvironment) JoinPathVariable(paths ...string) string {
 func goArchToActionArch(arch string) string {
 	archMapper := map[string]string{
 		"x86_64":  "X64",
+		"amd64":   "X64",
 		"386":     "X86",
+		"arm":     "ARM",
 		"aarch64": "ARM64",
+		"arm64":   "ARM64",
 	}
 	if arch, ok := archMapper[arch]; ok {
 		return arch
@@ -679,7 +644,9 @@ func goArchToActionArch(arch string) string {
 
 func goOsToActionOs(os string) string {
 	osMapper := map[string]string{
-		"darwin": "macOS",
+		"linux":   "Linux",
+		"darwin":  "macOS",
+		"windows": "Windows",
 	}
 	if os, ok := osMapper[os]; ok {
 		return os

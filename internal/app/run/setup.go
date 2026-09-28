@@ -5,15 +5,18 @@ package run
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
 	"gitea.com/gitea/runner/internal/pkg/report"
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
-	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
+	runnerv1 "gitea.dev/actionslib/runner/v1"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // osReleasePath describes the host distribution on Linux; absent elsewhere, where the platform
@@ -46,9 +49,29 @@ func (r *Runner) setupLines(task *runnerv1.Task) []string {
 		"Repository: "+fields["repository"].GetStringValue(),
 		"Triggered by event: "+fields["event_name"].GetStringValue(),
 		"::endgroup::",
-		"::group::Operating System",
 	)
+	lines = append(lines, inputLines(fields)...)
+	lines = append(lines, "::group::Operating System")
 	lines = append(lines, osInfo()...)
+	return append(lines, "::endgroup::")
+}
+
+// inputLines lists the inputs of the job: those Gitea resolved for a called workflow's job,
+// or the ones a workflow_dispatch event carries in its payload. Empty when there are none.
+func inputLines(fields map[string]*structpb.Value) []string {
+	inputs := fields["event"].GetStructValue().GetFields()["inputs"].GetStructValue().GetFields()
+	// For a called workflow's job, restore its inputs from `gitea_workflow_call`.
+	// See https://github.com/go-gitea/gitea/pull/39452.
+	if workflowCall := fields["gitea_workflow_call"].GetStructValue(); workflowCall != nil {
+		inputs = workflowCall.GetFields()["inputs"].GetStructValue().GetFields()
+	}
+	if len(inputs) == 0 {
+		return nil
+	}
+	lines := []string{"::group::Inputs"}
+	for _, name := range slices.Sorted(maps.Keys(inputs)) {
+		lines = append(lines, fmt.Sprintf("%s: %v", name, inputs[name].AsInterface()))
+	}
 	return append(lines, "::endgroup::")
 }
 

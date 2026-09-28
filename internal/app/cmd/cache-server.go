@@ -6,10 +6,9 @@ package cmd
 import (
 	"errors"
 	"fmt"
-	"os"
-	"os/signal"
 
 	"gitea.com/gitea/runner/act/artifactcache"
+	"gitea.com/gitea/runner/internal/app/run"
 	"gitea.com/gitea/runner/internal/pkg/config"
 
 	log "github.com/sirupsen/logrus"
@@ -31,6 +30,9 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 		}
 
 		initLogging(cfg)
+		if cfg.Cache.S3 != nil {
+			return errors.New("cache-server does not support cache.s3; set cache.s3 on the runners instead")
+		}
 
 		var (
 			dir         = cfg.Cache.Dir
@@ -55,26 +57,25 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
 
 		secret := cfg.Cache.ExternalSecret
 		if secret == "" {
-			return errors.New("cache.external_secret must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
+			return errors.New("cache.external_secret (or cache.external_secret_file) must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
 		}
-		cacheHandler, err := artifactcache.StartHandler(
-			dir,
-			host,
-			port,
-			secret,
-			externalURL,
-			log.StandardLogger().WithField("module", "cache_request"),
-		)
+		cacheHandler, err := artifactcache.StartHandler(artifactcache.Options{
+			Dir:            dir,
+			OutboundIP:     host,
+			Port:           port,
+			InternalSecret: secret,
+			ExternalURL:    externalURL,
+			Policy:         run.CachePolicy(cfg),
+			Logger:         log.StandardLogger().WithField("module", "cache_request"),
+		})
 		if err != nil {
 			return err
 		}
 
 		log.Infof("cache server is listening on %v, external URL advertised as %v", cacheHandler.BoundHostURL(), cacheHandler.ExternalURL())
 
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt)
-		<-c
+		<-cmd.Context().Done()
 
-		return nil
+		return cacheHandler.Close()
 	}
 }

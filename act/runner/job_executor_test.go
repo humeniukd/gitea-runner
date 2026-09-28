@@ -22,8 +22,8 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/act/model"
 
+	"gitea.dev/actionslib/pkg/model"
 	log "github.com/sirupsen/logrus"
 	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
@@ -33,6 +33,7 @@ import (
 )
 
 func TestJobExecutor(t *testing.T) {
+	t.Parallel()
 	// Dryrun only checks syntax/planning; all cases resolve locally, so this runs offline.
 	tables := []TestJobFileInfo{
 		{workdir, "uses-and-run-in-one-step", "push", "Invalid run/uses syntax for job:test step:Test", platforms, secrets},
@@ -46,6 +47,7 @@ func TestJobExecutor(t *testing.T) {
 	ctx := common.WithDryrun(context.Background(), true)
 	for _, table := range tables {
 		t.Run(table.workflowPath, func(t *testing.T) {
+			t.Parallel()
 			table.runTest(ctx, t, &Config{})
 		})
 	}
@@ -297,6 +299,9 @@ func TestNewJobExecutor(t *testing.T) {
 		executedSteps []string
 		result        string
 		hasError      bool
+		output        string
+		startError    error
+		cancelOnStart bool
 	}{
 		{
 			name:          "zeroSteps",
@@ -317,8 +322,8 @@ func TestNewJobExecutor(t *testing.T) {
 			executedSteps: []string{
 				"startContainer",
 				"step1",
-				"stopContainer",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "success",
@@ -335,6 +340,7 @@ func TestNewJobExecutor(t *testing.T) {
 				"startContainer",
 				"step1",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "failure",
@@ -351,8 +357,8 @@ func TestNewJobExecutor(t *testing.T) {
 				"startContainer",
 				"pre1",
 				"step1",
-				"stopContainer",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "success",
@@ -369,8 +375,8 @@ func TestNewJobExecutor(t *testing.T) {
 				"startContainer",
 				"step1",
 				"post1",
-				"stopContainer",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "success",
@@ -388,8 +394,8 @@ func TestNewJobExecutor(t *testing.T) {
 				"pre1",
 				"step1",
 				"post1",
-				"stopContainer",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "success",
@@ -415,12 +421,36 @@ func TestNewJobExecutor(t *testing.T) {
 				"step3",
 				"post3",
 				"post2",
-				"stopContainer",
 				"interpolateOutputs",
+				"stopContainer",
 				"closeContainer",
 			},
 			result:   "success",
 			hasError: false,
+		},
+		{
+			name:          "jobOutputExpressionFailure",
+			steps:         []*model.Step{{ID: "1"}},
+			preSteps:      []bool{false},
+			postSteps:     []bool{false},
+			executedSteps: []string{"startContainer", "step1", "interpolateOutputs", "stopContainer", "closeContainer"},
+			result:        "failure",
+			output:        "${{ 'test' != test }}",
+		},
+		{
+			name:          "start failure",
+			steps:         []*model.Step{{ID: "1"}},
+			executedSteps: []string{"startContainer", "closeContainer"},
+			startError:    errors.New("start failed"),
+		},
+		{
+			name:          "cancelled at startup boundary",
+			steps:         []*model.Step{{ID: "1"}},
+			preSteps:      []bool{false},
+			postSteps:     []bool{true},
+			executedSteps: []string{"startContainer", "step1", "post1", "interpolateOutputs", "stopContainer", "closeContainer"},
+			result:        "cancelled",
+			cancelOnStart: true,
 		},
 	}
 
@@ -432,7 +462,8 @@ func TestNewJobExecutor(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fmt.Printf("::group::%s\n", tt.name) //nolint:forbidigo // pre-existing issue from nektos/act
 
-			ctx := common.WithJobErrorContainer(context.Background())
+			ctx, cancel := context.WithCancel(common.WithJobErrorContainer(context.Background()))
+			defer cancel()
 			jim := &jobInfoMock{}
 			sfm := &stepFactoryMock{}
 			rc := &RunContext{
@@ -447,15 +478,21 @@ func TestNewJobExecutor(t *testing.T) {
 				},
 				Config: &Config{},
 			}
+			if tt.output != "" {
+				require.NoError(t, rc.Run.Job().RawOutputs.Encode(map[string]string{"bad": tt.output}))
+			}
 			rc.ExprEval = rc.NewExpressionEvaluator(ctx)
 			executorOrder := make([]string, 0)
 
 			jim.On("steps").Return(tt.steps)
 
 			if len(tt.steps) > 0 {
-				jim.On("startContainer").Return(func(ctx context.Context) error {
+				jim.On("startContainer").Return(func(_ context.Context) error {
 					executorOrder = append(executorOrder, "startContainer")
-					return nil
+					if tt.cancelOnStart {
+						cancel()
+					}
+					return tt.startError
 				})
 			}
 
@@ -489,23 +526,31 @@ func TestNewJobExecutor(t *testing.T) {
 				defer sm.AssertExpectations(t)
 			}
 
-			if len(tt.steps) > 0 {
+			if len(tt.steps) > 0 && tt.startError == nil {
 				jim.On("matrix").Return(map[string]any{})
 
 				jim.On("interpolateOutputs").Return(func(ctx context.Context) error {
 					executorOrder = append(executorOrder, "interpolateOutputs")
+					if tt.output != "" {
+						return rc.interpolateOutputs()(ctx)
+					}
 					return nil
 				})
 
 				if contains("stopContainer", tt.executedSteps) {
 					jim.On("stopContainer").Return(func(ctx context.Context) error {
 						executorOrder = append(executorOrder, "stopContainer")
+						require.NoError(t, ctx.Err())
+						_, bounded := ctx.Deadline()
+						require.True(t, bounded)
 						return nil
 					})
 				}
 
 				jim.On("result", tt.result)
+			}
 
+			if len(tt.steps) > 0 {
 				jim.On("closeContainer").Return(func(ctx context.Context) error {
 					executorOrder = append(executorOrder, "closeContainer")
 					return nil
@@ -514,7 +559,15 @@ func TestNewJobExecutor(t *testing.T) {
 
 			executor := newJobExecutor(jim, sfm, rc)
 			err := executor(ctx)
-			assert.NoError(t, err) //nolint:testifylint // pre-existing issue from nektos/act
+			switch {
+			case tt.startError != nil:
+				require.ErrorIs(t, err, tt.startError)
+			case tt.cancelOnStart:
+				require.ErrorIs(t, err, context.Canceled)
+			default:
+				require.NoError(t, err)
+			}
+			assert.Empty(t, rc.Run.Job().Outputs["bad"])
 			assert.Equal(t, tt.executedSteps, executorOrder)
 
 			jim.AssertExpectations(t)
@@ -525,18 +578,39 @@ func TestNewJobExecutor(t *testing.T) {
 	}
 }
 
+type controllableDeadlineContext struct {
+	context.Context
+	done chan struct{}
+}
+
+func newControllableDeadlineContext(parent context.Context) *controllableDeadlineContext {
+	return &controllableDeadlineContext{Context: parent, done: make(chan struct{})}
+}
+
+func (ctx *controllableDeadlineContext) Done() <-chan struct{} {
+	return ctx.done
+}
+
+func (ctx *controllableDeadlineContext) Err() error {
+	select {
+	case <-ctx.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (ctx *controllableDeadlineContext) expire() {
+	close(ctx.done)
+}
+
 // TestNewJobExecutorRunsPostStepsAfterTimeout guards the timeout-minutes cleanup
 // path: when a job exceeds its timeout the job context is DeadlineExceeded, but
 // the post steps (cleanup hooks like actions/checkout post and cache save) must
 // still run against a fresh, non-expired context, and the job must still be
 // reported as failed.
 func TestNewJobExecutorRunsPostStepsAfterTimeout(t *testing.T) {
-	ctx := common.WithJobErrorContainer(context.Background())
-	// The timeout is generous so the main step (which blocks on ctx.Done below) is
-	// always reached before the deadline fires; otherwise the pipeline would
-	// short-circuit before the step runs and the job error would never be set.
-	ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
-	defer cancel()
+	ctx := newControllableDeadlineContext(common.WithJobErrorContainer(context.Background()))
 
 	jim := &jobInfoMock{}
 	sfm := &stepFactoryMock{}
@@ -560,19 +634,16 @@ func TestNewJobExecutorRunsPostStepsAfterTimeout(t *testing.T) {
 	jim.On("startContainer").Return(func(ctx context.Context) error { return nil })
 	jim.On("interpolateOutputs").Return(func(ctx context.Context) error { return nil })
 	jim.On("closeContainer").Return(func(ctx context.Context) error { return nil })
-	// The job timed out, so it must be reported as failed. stopContainer is left
-	// unexpected on purpose: a timed-out (failed) job preserves its error state, so
-	// the graceful stop is skipped exactly like any other failure without AutoRemove.
+	// The job timed out, so it must be reported as failed and still cleaned up.
+	jim.On("stopContainer").Return(func(context.Context) error { return nil })
 	jim.On("result", "failure")
 
 	sm := &stepMock{}
 	sfm.On("newStep", stepModel, rc).Return(sm, nil)
 	sm.On("pre").Return(func(ctx context.Context) error { return nil })
-	// The main step runs past the job timeout: it blocks until the job context is
-	// done, mirroring a step that overruns timeout-minutes.
-	sm.On("main").Return(func(ctx context.Context) error {
-		<-ctx.Done()
-		return ctx.Err()
+	sm.On("main").Return(func(stepCtx context.Context) error {
+		ctx.expire()
+		return stepCtx.Err()
 	})
 
 	var postRan bool
@@ -982,12 +1053,7 @@ func tarArchive(t *testing.T, entries ...tarEntry) []byte {
 
 func newTestRC(wf *model.Workflow, matrix map[string]any) *RunContext {
 	return &RunContext{
-		Config: &Config{
-			Workdir: ".",
-			Platforms: map[string]string{
-				"ubuntu-latest": "ubuntu-latest",
-			},
-		},
+		Config:      &Config{Workdir: ".", PlatformPicker: func([]string) string { return "ubuntu-latest" }},
 		StepResults: map[string]*model.StepResult{},
 		Env:         map[string]string{},
 		Matrix:      matrix,
@@ -1015,6 +1081,7 @@ func TestApplyJobTimeout(t *testing.T) {
 	}{
 		{"empty", "runs-on: ubuntu-latest", false},
 		{"integer", "timeout-minutes: 5\nruns-on: ubuntu-latest", true},
+		{"zero ignored", "timeout-minutes: 0\nruns-on: ubuntu-latest", false},
 		{"non-numeric ignored", "timeout-minutes: abc\nruns-on: ubuntu-latest", false},
 	}
 	for _, tc := range cases {
@@ -1079,4 +1146,38 @@ func TestJobSetContinueOnError(t *testing.T) {
 		j.SetContinueOnError(true)
 		assert.True(t, j.ContinueOnError)
 	})
+}
+
+func TestTryUploadJobSummaryMasksSecrets(t *testing.T) {
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		got = string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	cm := &containerMock{}
+	cm.On("GetContainerArchive", mock.Anything, "/var/run/act/workflow/step-summary-0.md").Return(
+		io.NopCloser(bytes.NewReader(tarArchive(t, tarEntry{
+			name: "step-summary-0.md", body: "deployed true with s3cr3t and runtime-added via pr0xypw",
+		}))),
+		nil,
+	).Once()
+
+	rc := newJobSummaryRC(map[string]string{
+		"GITEA_ACTIONS_CAPABILITIES": "job-summary",
+		"ACTIONS_RUNTIME_URL":        server.URL,
+		"ACTIONS_RUNTIME_TOKEN":      fakeRuntimeToken(34),
+		"GITEA_RUN_ID":               "12",
+	}, cm, 1)
+	rc.Config.Secrets = map[string]string{"TOK": "s3cr3t", "ACTIONS_STEP_DEBUG": "true"}
+	rc.Config.ExtraMasks = []string{"pr0xypw"}
+	rc.Masks = []string{"runtime-added"}
+
+	tryUploadJobSummary(context.Background(), rc)
+
+	assert.Equal(t, "deployed true with *** and *** via ***", got)
+	cm.AssertExpectations(t)
 }

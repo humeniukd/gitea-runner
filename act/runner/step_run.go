@@ -7,6 +7,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"io"
 	"maps"
 	"runtime"
 	"slices"
@@ -15,11 +16,14 @@ import (
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/lookpath"
-	"gitea.com/gitea/runner/act/model"
 
+	"gitea.dev/actionslib/pkg/model"
 	"github.com/kballard/go-shellquote"
+	"github.com/sirupsen/logrus"
 	yaml "go.yaml.in/yaml/v4"
 )
+
+var builtinShells = []string{"bash", "sh", "pwsh", "powershell", "cmd", "python"}
 
 type stepRun struct {
 	Step               *model.Step
@@ -32,11 +36,7 @@ type stepRun struct {
 	shellCommand       string
 }
 
-func (sr *stepRun) pre() common.Executor {
-	return func(ctx context.Context) error {
-		return nil
-	}
-}
+func (sr *stepRun) pre() common.Executor { return common.NewPipelineExecutor() }
 
 func (sr *stepRun) main() common.Executor {
 	sr.env = map[string]string{}
@@ -63,7 +63,7 @@ func (sr *stepRun) printRunScriptActionDetails(ctx context.Context) {
 
 	normalized := strings.TrimRight(strings.ReplaceAll(sr.interpolatedScript, "\r\n", "\n"), "\n")
 
-	rawLogger.Infof("::group::Run %s", sr.runScriptGroupTitle(normalized))
+	rawLogger.Infof("::group::Run %s", EscapeCommandData(sr.runScriptGroupTitle(normalized)))
 
 	if normalized != "" {
 		for line := range strings.SplitSeq(normalized, "\n") {
@@ -90,12 +90,12 @@ func printRunActionHeader(ctx context.Context, step *model.Step, env map[string]
 	if step.Name != "" {
 		title = step.Name
 	}
-	rawLogger.Infof("::group::Run %s", title)
+	rawLogger.Infof("::group::Run %s", EscapeCommandData(title))
 
 	if len(step.With) > 0 {
 		rawLogger.Infof("with:")
 		for _, k := range slices.Sorted(maps.Keys(step.With)) {
-			rawLogger.Infof("  %s: %s", k, step.With[k])
+			logKeyedValue(rawLogger, k, step.With[k])
 		}
 	}
 
@@ -129,7 +129,17 @@ func printStepEnvBlock(ctx context.Context, step *model.Step, env map[string]str
 		if caseInsensitive {
 			lookupKey = strings.ToUpper(k)
 		}
-		rawLogger.Infof("  %s: %s", k, envLookup[lookupKey])
+		logKeyedValue(rawLogger, k, envLookup[lookupKey])
+	}
+}
+
+// logKeyedValue prints one row per line of value: Gitea stores one log row per line, so an
+// embedded newline would reach the user as a literal "\n".
+func logKeyedValue(rawLogger *logrus.Entry, key, value string) {
+	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	rawLogger.Infof("  %s: %s", key, lines[0])
+	for _, line := range lines[1:] {
+		rawLogger.Infof("    %s", line)
 	}
 }
 
@@ -191,11 +201,7 @@ func stepDeclaredEnvKeysInOrder(step *model.Step) []string {
 	return keys
 }
 
-func (sr *stepRun) post() common.Executor {
-	return func(ctx context.Context) error {
-		return nil
-	}
-}
+func (sr *stepRun) post() common.Executor { return common.NewPipelineExecutor() }
 
 func (sr *stepRun) getRunContext() *RunContext {
 	return sr.RunContext
@@ -248,15 +254,35 @@ func getScriptName(rc *RunContext, step *model.Step) string {
 // OCI runtime exec failed: exec failed: container_linux.go:380: starting container process caused: exec: "${{": executable file not found in $PATH: unknown
 func (sr *stepRun) setupShellCommand(ctx context.Context) (name, script string, err error) {
 	logger := common.Logger(ctx)
-	sr.setupShell(ctx)
-	sr.setupWorkingDirectory(ctx)
+	eval := sr.RunContext.NewStepExpressionEvaluator(ctx, sr)
+	implicitShell, err := sr.setupShell(ctx, eval)
+	if err != nil {
+		return "", "", err
+	}
+	if err := sr.setupWorkingDirectory(ctx, eval); err != nil {
+		return "", "", err
+	}
 
 	step := sr.Step
 
-	script = sr.RunContext.NewStepExpressionEvaluator(ctx, sr).Interpolate(ctx, step.Run)
+	script, err = eval.Interpolate(ctx, step.Run)
+	if err != nil {
+		return "", "", fmt.Errorf("unable to interpolate the run script: %w", err)
+	}
 	sr.interpolatedScript = script
 
+	// GitHub matches the built-in names case-insensitively, so `shell: PWSH` is valid
+	if slices.Contains(builtinShells, strings.ToLower(step.Shell)) {
+		step.Shell = strings.ToLower(step.Shell)
+	}
+
 	scCmd := step.ShellCommand()
+	if implicitShell && (step.Shell == "bash" || step.Shell == "sh") {
+		scCmd = step.Shell + " -e {0}"
+	}
+	if !strings.Contains(scCmd, "{0}") {
+		return "", "", fmt.Errorf("invalid shell option %q: format must contain {0}", step.Shell)
+	}
 	sr.shellCommand = scCmd
 
 	name = getScriptName(sr.RunContext, step)
@@ -265,7 +291,8 @@ func (sr *stepRun) setupShellCommand(ctx context.Context) (name, script string, 
 	// Reference: https://github.com/actions/runner/blob/8109c962f09d9acc473d92c595ff43afceddb347/src/Runner.Worker/Handlers/ScriptHandlerHelpers.cs#L19-L27
 	runPrepend := ""
 	runAppend := ""
-	switch step.Shell {
+	shellCommand, _, _ := strings.Cut(step.Shell, " ")
+	switch shellCommand {
 	case "bash", "sh":
 		name += ".sh"
 	case "pwsh", "powershell":
@@ -289,81 +316,78 @@ func (sr *stepRun) setupShellCommand(ctx context.Context) (name, script string, 
 
 	rc := sr.getRunContext()
 	scriptPath := fmt.Sprintf("%s/%s", rc.JobContainer.GetActPath(), name)
-	sr.cmdline = strings.Replace(scCmd, `{0}`, scriptPath, 1)
+	sr.cmdline = strings.ReplaceAll(scCmd, `{0}`, scriptPath)
 	sr.cmd, err = shellquote.Split(sr.cmdline)
 
 	return name, script, err
 }
 
-type localEnv struct {
-	env map[string]string
-}
-
-func (l *localEnv) Getenv(name string) string {
-	if runtime.GOOS == "windows" {
-		for k, v := range l.env {
-			if strings.EqualFold(name, k) {
-				return v
-			}
-		}
-		return ""
-	}
-	return l.env[name]
-}
-
-func (sr *stepRun) setupShell(ctx context.Context) {
+func (sr *stepRun) setupShell(ctx context.Context, eval *expressionEvaluator) (bool, error) {
 	rc := sr.RunContext
 	step := sr.Step
 
-	if step.Shell == "" {
-		step.Shell = rc.Run.Job().Defaults.Run.Shell
+	shell, err := eval.Interpolate(ctx, step.Shell)
+	if err != nil {
+		return false, fmt.Errorf("unable to interpolate the shell: %w", err)
 	}
-
-	step.Shell = rc.NewExpressionEvaluator(ctx).Interpolate(ctx, step.Shell)
-
-	if step.Shell == "" {
-		step.Shell = rc.Run.Workflow.Defaults.Run.Shell
+	if shell == "" {
+		shell = rc.jobRunDefaults.Shell
 	}
+	if shell == "" {
+		shell = rc.Run.Workflow.Defaults.Run.Shell
+	}
+	step.Shell = shell
 
-	if step.Shell == "" {
+	implicitShell := step.Shell == ""
+	if implicitShell {
+		shellWithFallback := []string{"bash", "sh"}
+		env := maps.Clone(sr.env)
+		rc.ApplyExtraPath(ctx, &env)
 		if _, ok := rc.JobContainer.(*container.HostEnvironment); ok {
-			shellWithFallback := []string{"bash", "sh"}
 			// Don't use bash on windows by default, if not using a docker container
 			if runtime.GOOS == "windows" {
 				shellWithFallback = []string{"pwsh", "powershell"}
 			}
 			step.Shell = shellWithFallback[0]
-			lenv := &localEnv{env: map[string]string{}}
-			maps.Copy(lenv.env, sr.env)
-			sr.getRunContext().ApplyExtraPath(ctx, &lenv.env)
-			_, err := lookpath.LookPath2(shellWithFallback[0], lenv)
+			_, err := lookpath.LookPath2(shellWithFallback[0], env)
 			if err != nil {
 				step.Shell = shellWithFallback[1]
 			}
-		} else if containerImage := rc.containerImage(ctx); containerImage != "" {
-			// Currently only linux containers are supported, use sh by default like actions/runner
-			step.Shell = "sh"
+		} else {
+			step.Shell = shellWithFallback[0]
+			if !rc.containerHasBash(ctx, env) {
+				step.Shell = shellWithFallback[1]
+			}
 		}
 	}
+	return implicitShell, nil
 }
 
-func (sr *stepRun) setupWorkingDirectory(ctx context.Context) {
-	rc := sr.RunContext
-	step := sr.Step
-	var workingdirectory string
-
-	if step.WorkingDirectory == "" {
-		workingdirectory = rc.Run.Job().Defaults.Run.WorkingDirectory
-	} else {
-		workingdirectory = step.WorkingDirectory
+// containerHasBash probes once per job, else every implicit-shell step pays for an exec.
+func (rc *RunContext) containerHasBash(ctx context.Context, env map[string]string) bool {
+	top := rc.topLevelRunContext()
+	if top.hasBash == nil {
+		stdout, stderr := rc.JobContainer.ReplaceLogWriter(io.Discard, io.Discard)
+		found := rc.JobContainer.Exec([]string{"sh", "-c", "command -v bash >/dev/null 2>&1"}, env, "", "")(ctx) == nil
+		rc.JobContainer.ReplaceLogWriter(stdout, stderr)
+		top.hasBash = &found
 	}
+	return *top.hasBash
+}
 
-	// jobs can receive context values, so we interpolate
-	workingdirectory = rc.NewExpressionEvaluator(ctx).Interpolate(ctx, workingdirectory)
-
-	// but top level keys in workflow file like `defaults` or `env` can't
+func (sr *stepRun) setupWorkingDirectory(ctx context.Context, eval *expressionEvaluator) error {
+	rc := sr.RunContext
+	workingdirectory, err := eval.Interpolate(ctx, sr.Step.WorkingDirectory)
+	if err != nil {
+		return fmt.Errorf("unable to interpolate the working directory: %w", err)
+	}
+	if workingdirectory == "" {
+		workingdirectory = rc.jobRunDefaults.WorkingDirectory
+	}
+	// top level keys in workflow file like `defaults` or `env` can't hold expressions
 	if workingdirectory == "" {
 		workingdirectory = rc.Run.Workflow.Defaults.Run.WorkingDirectory
 	}
 	sr.WorkingDirectory = workingdirectory
+	return nil
 }

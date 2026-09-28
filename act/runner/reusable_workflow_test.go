@@ -5,7 +5,7 @@ package runner
 
 import (
 	"context"
-	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"gitea.com/gitea/runner/act/common/git"
-	"gitea.com/gitea/runner/act/model"
 
+	"gitea.dev/actionslib/pkg/model"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,18 +77,10 @@ func TestReusableWorkflowCachedBranchRefRefreshes(t *testing.T) {
 
 func TestNewReusableWorkflowExecutorHoldsCloneLock(t *testing.T) {
 	workflowDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workflowDir, "reusable.yml"), []byte(":"), 0o644))
 
 	unlockOnce := sync.OnceFunc(git.AcquireCloneLock(workflowDir))
 	defer unlockOnce()
-
-	plannerCalled := make(chan struct{})
-
-	origPlanner := modelNewWorkflowPlanner
-	modelNewWorkflowPlanner = func(string, bool) (model.WorkflowPlanner, error) {
-		close(plannerCalled)
-		return nil, errors.New("stop")
-	}
-	defer func() { modelNewWorkflowPlanner = origPlanner }()
 
 	rc := &RunContext{
 		Config: &Config{},
@@ -100,26 +92,34 @@ func TestNewReusableWorkflowExecutorHoldsCloneLock(t *testing.T) {
 	go func() { done <- exec(context.Background()) }()
 
 	select {
-	case <-plannerCalled:
-		t.Fatal("planner ran while clone lock was held")
 	case err := <-done:
-		t.Fatalf("executor returned before planner was reached: %v", err)
+		t.Fatalf("executor returned while clone lock was held: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
 	unlockOnce()
 
 	select {
-	case <-plannerCalled:
-	case <-time.After(time.Second):
-		t.Fatal("planner not called after lock was released")
-	}
-
-	select {
 	case err := <-done:
 		require.Error(t, err)
 	case <-time.After(time.Second):
-		t.Fatal("executor did not return after planner ran")
+		t.Fatal("executor did not return after lock was released")
+	}
+}
+
+func TestNewLocalReusableWorkflowExecutorFindsSameRepositoryPaths(t *testing.T) {
+	workdir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(workdir, ".gitea", "workflows"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, ".gitea", "workflows", "reusable.yml"), []byte(":"), 0o644))
+
+	for _, uses := range []string{"./.gitea/workflows/reusable.yml", "$/.gitea/workflows/reusable.yml"} {
+		rc := &RunContext{
+			Config: &Config{Workdir: workdir},
+			Run:    &model.Run{JobID: "job", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"job": {Uses: uses}}}},
+		}
+		err := newLocalReusableWorkflowExecutor(rc)(t.Context())
+		require.Error(t, err)
+		require.NotErrorIs(t, err, fs.ErrNotExist)
 	}
 }
 
