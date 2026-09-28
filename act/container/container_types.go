@@ -9,7 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	"gitea.com/gitea/runner/act/common"
 
@@ -82,6 +85,11 @@ type DockerProxy struct {
 	close     func(context.Context) error
 	closeOnce sync.Once
 	closeErr  error
+	mounts    atomic.Value
+}
+
+func (p *DockerProxy) SetMounts(mounts map[string]string) {
+	p.mounts.Store(mounts)
 }
 
 func (p *DockerProxy) Close(ctx context.Context) error {
@@ -99,6 +107,16 @@ type Info struct {
 	HealthOutput string
 	Ports        map[string]string // container port ("5432") to the host port it is published on
 	Mounts       map[string]string // container path to its source on the daemon
+}
+
+// DaemonPath maps target to its daemon path through the nearest mount with a source, empty without one.
+func (info *Info) DaemonPath(target string) string {
+	for dir := target; dir != "/" && dir != "."; dir = path.Dir(dir) {
+		if source := info.Mounts[dir]; source != "" {
+			return path.Join(source, strings.TrimPrefix(target, dir))
+		}
+	}
+	return ""
 }
 
 // Container for managing docker run containers

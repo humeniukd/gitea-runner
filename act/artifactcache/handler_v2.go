@@ -40,6 +40,7 @@ const (
 	blobUploadURLTTL = time.Hour
 
 	twirpInternal        = "internal"
+	twirpUnavailable     = "unavailable"
 	twirpUnauthenticated = "unauthenticated"
 )
 
@@ -111,7 +112,7 @@ func (h *Handler) v2CreateCacheEntry(w http.ResponseWriter, r *http.Request, _ h
 		CreatedAt: now,
 		UsedAt:    now,
 	}
-	if err := insertCache(db, cache); err != nil {
+	if err := h.insertCache(db, cache); err != nil {
 		h.twirpError(w, r, twirpInternal, err)
 		return
 	}
@@ -261,6 +262,8 @@ func (h *Handler) twirpError(w http.ResponseWriter, r *http.Request, code string
 	switch code {
 	case twirpInternal:
 		status = http.StatusInternalServerError
+	case twirpUnavailable:
+		status = http.StatusServiceUnavailable
 	case twirpUnauthenticated:
 		status = http.StatusUnauthorized
 	}

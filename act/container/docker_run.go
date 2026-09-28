@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -27,13 +28,13 @@ import (
 	"gitea.com/gitea/runner/act/filecollector"
 
 	"dario.cat/mergo"
+	"github.com/bmatcuk/doublestar/v4"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/cli/cli/compose/loader"
 	"github.com/docker/cli/cli/connhelper"
 	"github.com/go-git/go-billy/v5/helper/polyfill"
 	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
-	"github.com/gobwas/glob"
 	"github.com/joho/godotenv"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
@@ -256,6 +257,27 @@ func containerInfoFromInspect(inspect container.InspectResponse) *Info {
 	}
 	for _, mountPoint := range inspect.Mounts {
 		info.Mounts[mountPoint.Destination] = mountPoint.Source
+	}
+	if hostConfig := inspect.HostConfig; hostConfig != nil { // Mounts omits --tmpfs targets and subpaths
+		for target := range hostConfig.Tmpfs {
+			info.Mounts[path.Clean(target)] = ""
+		}
+		for _, spec := range hostConfig.Mounts {
+			subpath := ""
+			if spec.VolumeOptions != nil {
+				subpath = spec.VolumeOptions.Subpath
+			} else if spec.ImageOptions != nil {
+				subpath = spec.ImageOptions.Subpath
+			}
+			if target := path.Clean(spec.Target); subpath != "" && info.Mounts[target] != "" {
+				info.Mounts[target] = path.Join(info.Mounts[target], subpath)
+			}
+		}
+	}
+	for _, target := range []string{"/etc/hosts", "/etc/hostname", "/etc/resolv.conf"} { // specific to the job's network namespace
+		if _, mounted := info.Mounts[target]; !mounted {
+			info.Mounts[target] = ""
+		}
 	}
 
 	if state := inspect.State; state != nil {
@@ -571,7 +593,8 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 
 	// If the `privileged` config has been disabled, `copts.privileged` need to be forced to false,
 	// even if the user specifies `--privileged` in the options string.
-	if !hostConfig.Privileged {
+	if !hostConfig.Privileged && copts.privileged {
+		logger.Warnf("container option %q is not allowed when privileged mode is disabled and will be ignored", "--privileged")
 		copts.privileged = false
 	}
 
@@ -607,6 +630,7 @@ func (cr *containerReference) mergeContainerConfigs(ctx context.Context, config 
 
 	logger.Debugf("Custom container.HostConfig from options ==> %+v", containerConfig.HostConfig)
 
+	cr.sanitizeConfig(ctx, nil, containerConfig.HostConfig) // a dropped volume must not displace the runner's own
 	overlayVolumes(hostConfig, containerConfig.HostConfig)
 	binds := hostConfig.Binds
 	mounts := hostConfig.Mounts
@@ -1239,6 +1263,12 @@ func (cr *containerReference) sanitizeConfig(ctx context.Context, config *contai
 	return config, hostConfig
 }
 
+func SanitizeBinds(ctx context.Context, validVolumes, binds []string) []string {
+	cr := &containerReference{input: &NewContainerInput{ValidVolumes: validVolumes}}
+	_, hostConfig := cr.sanitizeConfig(ctx, nil, &container.HostConfig{Binds: binds})
+	return hostConfig.Binds
+}
+
 // bindTarget returns the container path a bind mounts onto, empty if it cannot be parsed.
 func bindTarget(bind string) string {
 	parsed, err := loader.ParseVolume(bind)
@@ -1269,15 +1299,15 @@ func overlayVolumes(dst, src *container.HostConfig) {
 
 type validVolumeMatcher struct {
 	allowAll bool
-	named    []*glob.Pattern
-	host     []*glob.Pattern
+	named    []string
+	host     []string
 }
 
 func newValidVolumeMatcher(ctx context.Context, validVolumes []string) validVolumeMatcher {
 	logger := common.Logger(ctx)
 	ret := validVolumeMatcher{
-		named: make([]*glob.Pattern, 0, len(validVolumes)),
-		host:  make([]*glob.Pattern, 0, len(validVolumes)),
+		named: make([]string, 0, len(validVolumes)),
+		host:  make([]string, 0, len(validVolumes)),
 	}
 
 	for _, v := range validVolumes {
@@ -1286,10 +1316,10 @@ func newValidVolumeMatcher(ctx context.Context, validVolumes []string) validVolu
 			continue
 		}
 		if !isHostVolumePattern(v) {
-			if g, err := glob.Compile(v); err != nil {
-				logger.Errorf("create glob from %s error: %v", v, err)
+			if doublestar.ValidatePattern(v) {
+				ret.named = append(ret.named, v)
 			} else {
-				ret.named = append(ret.named, g)
+				logger.Errorf("invalid volume pattern %s", v)
 			}
 			continue
 		}
@@ -1298,10 +1328,10 @@ func newValidVolumeMatcher(ctx context.Context, validVolumes []string) validVolu
 			logger.Errorf("normalize volume pattern %s error: %v", v, err)
 			continue
 		}
-		if g, err := glob.Compile(normalized); err != nil {
-			logger.Errorf("create glob from %s error: %v", normalized, err)
+		if doublestar.ValidatePathPattern(normalized) {
+			ret.host = append(ret.host, normalized)
 		} else {
-			ret.host = append(ret.host, g)
+			logger.Errorf("invalid volume pattern %s", normalized)
 		}
 	}
 
@@ -1317,15 +1347,15 @@ func (m validVolumeMatcher) isValid(source string, sourceType mount.Type) bool {
 		if err != nil {
 			return false
 		}
-		for _, g := range m.host {
-			if g.Match(normalized) {
+		for _, pattern := range m.host {
+			if doublestar.PathMatchUnvalidated(pattern, normalized) {
 				return true
 			}
 		}
 		return false
 	}
-	for _, g := range m.named {
-		if g.Match(source) {
+	for _, pattern := range m.named {
+		if doublestar.MatchUnvalidated(pattern, source) {
 			return true
 		}
 	}

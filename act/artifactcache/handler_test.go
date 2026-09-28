@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,55 @@ func signArtifactURL(h *Handler, id int64) string {
 
 func TestHandler_ExternalURL(t *testing.T) {
 	assert.Equal(t, "http://[2001:db8::1]:8080", (&Handler{outboundIP: "2001:db8::1", port: 8080}).ExternalURL())
+}
+
+func TestHandler_Upstream(t *testing.T) {
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPut, r.Method)
+		assert.Equal(t, "/cache%20server"+blobPath+"/%34%32", r.URL.EscapedPath())
+		assert.Equal(t, "sig=opaque%2Fvalue&raw=a;b", r.URL.RawQuery)
+		assert.Equal(t, strings.TrimPrefix(upstream.URL, "http://"), r.Host)
+		assert.Equal(t, "Bearer unregistered", r.Header.Get("Authorization"))
+		_, err := io.Copy(w, r.Body)
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(upstream.Close)
+	dir := filepath.Join(t.TempDir(), "artifactcache")
+	handler, err := StartHandler(Options{
+		Dir:        dir,
+		OutboundIP: "127.0.0.1",
+		Upstream:   upstream.URL + "/cache%20server//",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handler.Close()) })
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut,
+		handler.ExternalURL()+blobPath+"/%34%32?sig=opaque%2Fvalue&raw=a;b", strings.NewReader("cache content"))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer unregistered")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	forwarded, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.NoError(t, err)
+	assert.Equal(t, "cache content", string(forwarded))
+
+	resp, err = http.Post(handler.ExternalURL()+internalPath+"/register", "application/json", nil)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	upstream.Close()
+	resp, err = http.Post(handler.ExternalURL()+cacheServiceV2Path+"/CreateCacheEntry", "application/json", strings.NewReader(`{}`))
+	require.NoError(t, err)
+	var failure map[string]string
+	err = json.UnmarshalRead(resp.Body, &failure)
+	resp.Body.Close()
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Equal(t, map[string]string{"code": "unavailable", "msg": "cache upstream is unavailable"}, failure)
+	assert.NoDirExists(t, dir)
 }
 
 func TestHandler(t *testing.T) {
@@ -771,7 +821,7 @@ func TestHandler_gcCache(t *testing.T) {
 				Key:       "test_key_3",
 				Version:   "test_version",
 				Complete:  true,
-				UsedAt:    now.Add(-(testRetention + time.Second)).Unix(),
+				UsedAt:    now.Add(-(testRetention + touchStale + time.Second)).Unix(),
 				CreatedAt: now.Add(-(testRetention + time.Hour)).Unix(),
 			},
 			Kept: false,
@@ -814,7 +864,7 @@ func TestHandler_gcCache(t *testing.T) {
 	db, err := handler.openDB()
 	require.NoError(t, err)
 	for _, c := range cases {
-		require.NoError(t, insertCache(db, c.Cache))
+		require.NoError(t, handler.insertCache(db, c.Cache))
 	}
 	require.NoError(t, db.Close())
 
@@ -986,7 +1036,7 @@ func TestHandler_SweepKeepsEntryWhenBlobSurvives(t *testing.T) {
 	handler := newTestHandler(t, Policy{Retention: testRetention}, cache)
 
 	// A non-empty directory where the blob belongs makes os.Remove fail on every platform.
-	blob := handler.storage.filename(cache.ID)
+	blob := handler.storage.(*Storage).filename(cache.ID)
 	require.NoError(t, os.MkdirAll(blob, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(blob, "held"), []byte("x"), 0o600))
 
@@ -1046,24 +1096,48 @@ func TestHandler_gcCacheInterval(t *testing.T) {
 	assert.Empty(t, keptKeys(t, handler, []*Cache{cache}))
 }
 
+func TestHandler_touchCacheSkipsFreshCompletedEntries(t *testing.T) {
+	fresh := &Cache{Repo: testRepo, Key: "fresh", Version: "v", Complete: true, UsedAt: time.Now().Unix()}
+	pending := &Cache{Repo: testRepo, Key: "pending", Version: "v", UsedAt: time.Now().Add(-time.Second).Unix()}
+	handler := newTestHandler(t, Policy{}, fresh, pending)
+	txID := func() int {
+		db, err := handler.openDB()
+		require.NoError(t, err)
+		defer db.Close()
+		var id int
+		require.NoError(t, db.Bolt().View(func(tx *bbolt.Tx) error { id = tx.ID(); return nil }))
+		return id
+	}
+
+	before := txID()
+	require.NoError(t, handler.touchCache(fresh.ID, false))
+	assert.Equal(t, before, txID())
+	require.NoError(t, handler.touchCache(pending.ID, false))
+	assert.Greater(t, txID(), before)
+}
+
 // newTestHandler starts a handler with testToken registered, seeded with entries.
 func newTestHandler(t *testing.T, policy Policy, entries ...*Cache) *Handler {
 	t.Helper()
-	handler, err := StartHandler(Options{
-		Dir:        filepath.Join(t.TempDir(), "artifactcache"),
-		OutboundIP: "127.0.0.1",
-		Policy:     policy,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, handler.Close()) })
-	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
+	handler := startTestHandler(t, Options{Policy: policy})
 
 	db, err := handler.openDB()
 	require.NoError(t, err)
 	for _, e := range entries {
-		require.NoError(t, insertCache(db, e))
+		require.NoError(t, handler.insertCache(db, e))
 	}
 	require.NoError(t, db.Close())
+	return handler
+}
+
+func startTestHandler(t *testing.T, opts Options) *Handler {
+	t.Helper()
+	opts.Dir = filepath.Join(t.TempDir(), "artifactcache")
+	opts.OutboundIP = "127.0.0.1"
+	handler, err := StartHandler(opts)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handler.Close()) })
+	handler.RegisterJob(testToken, JobCredential{Repo: testRepo})
 	return handler
 }
 
@@ -1407,8 +1481,8 @@ func TestHandler_GC_PerRepoDedup(t *testing.T) {
 	stale := time.Now().Add(-inUseGrace - time.Minute).Unix()
 	a := &Cache{Repo: "owner/repoA", Key: key, Version: version, Complete: true, CreatedAt: stale, UsedAt: stale, Size: 1}
 	b := &Cache{Repo: "owner/repoB", Key: key, Version: version, Complete: true, CreatedAt: now, UsedAt: now, Size: 1}
-	require.NoError(t, insertCache(db, a))
-	require.NoError(t, insertCache(db, b))
+	require.NoError(t, handler.insertCache(db, a))
+	require.NoError(t, handler.insertCache(db, b))
 	// Write the backing blobs so the dedup deletion has something to remove.
 	require.NoError(t, handler.storage.Write(a.ID, 0, strings.NewReader("a")))
 	_, err = handler.storage.Commit(a.ID, 1)
@@ -1502,7 +1576,10 @@ func TestHandler_InternalAPI_AuthAndUsage(t *testing.T) {
 		}
 
 		assert.Equal(t, http.StatusUnauthorized, probe("via-internal-api"))
-		assert.Equal(t, http.StatusOK, post("/_internal/register", secret, `{"token":"via-internal-api","repo":"owner/repo"}`))
+		assert.Equal(t, http.StatusOK, post("/_internal/register", secret, `{"token":"via-internal-api","repo":"owner/repo","public_url":"http://runner.example","results":"https://gitea.example","insecure_tls":true}`))
+		cred, ok := handler.lookupCredential("via-internal-api")
+		require.True(t, ok)
+		assert.Equal(t, JobCredential{Repo: testRepo, PublicURL: "http://runner.example"}, cred)
 		assert.NotEqual(t, http.StatusUnauthorized, probe("via-internal-api"))
 		assert.Equal(t, http.StatusOK, post("/_internal/revoke", secret, `{"token":"via-internal-api"}`))
 		assert.Equal(t, http.StatusUnauthorized, probe("via-internal-api"))

@@ -18,7 +18,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -282,8 +281,8 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 // finished main-pipeline context. Cleanup has to run even when the run was interrupted, so the
 // returned context always carries a fresh bounded deadline and is never itself cancelled.
 //
-//   - context.Canceled (server cancel): detach from the cancelled context via a fresh root so
-//     the post steps can run.
+//   - context.Canceled (server cancel): detach with WithoutCancel under a fresh job-error
+//     container, so a failing post step cannot turn the cancellation into a failure.
 //   - context.DeadlineExceeded (job timeout): detach the deadline with WithoutCancel, which
 //     keeps the original values — including the job-error container — so the timeout failure and
 //     any post-step error are preserved and the job is still reported as failed.
@@ -291,10 +290,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 func postStepsContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	switch ctx.Err() {
 	case context.Canceled:
-		// The cancelled context is abandoned for a fresh root, which drops the job-error
-		// container installed at the job root. Re-attach a fresh one so a failing post step
-		// records its error via SetJobError instead of panicking on a nil container.
-		return context.WithTimeout(common.WithJobErrorContainer(common.WithLogger(context.Background(), common.Logger(ctx))), 5*time.Minute)
+		return context.WithTimeout(common.WithJobErrorContainer(context.WithoutCancel(ctx)), 5*time.Minute)
 	case context.DeadlineExceeded:
 		return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 	default:
@@ -414,41 +410,41 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 	logger.WithField("jobResult", jobResult).Infof("Job %s", jobResultMessage)
 }
 
-// evaluateJobEnvAndDefaults resolves the job's env and defaults.run once, as GitHub does at job setup.
+// evaluateJobEnvAndDefaults resolves the job's env, defaults.run and container env once, as GitHub does at job setup.
 func evaluateJobEnvAndDefaults(ctx context.Context, rc *RunContext) error {
 	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
+	env := rc.GetEnv()
+	var workflowEnv map[string]string
+	if rc.Run.Workflow.Env == nil {
+		if err := model.DecodeEvaluated("workflow env", rc.Run.Workflow.RawEnv, rc.ExprEval.shared(ctx).EvaluateYamlNode, &workflowEnv); err != nil {
+			return err
+		}
+	}
+	if workflowEnv != nil {
+		rc.Env = mergeMaps(workflowEnv, env)
+		rc.ExprEval = rc.NewExpressionEvaluator(ctx)
+	}
 	var err error
-	for k, v := range rc.GetEnv() {
+	for k, v := range env {
 		if rc.Env[k], err = rc.ExprEval.Interpolate(ctx, v); err != nil {
 			return fmt.Errorf("unable to interpolate env %s: %w", k, err)
 		}
 	}
-	defaults := rc.Run.Job().Defaults.Run
-	if rc.jobRunDefaults.Shell, err = rc.ExprEval.Interpolate(ctx, defaults.Shell); err != nil {
-		return fmt.Errorf("unable to interpolate defaults.run.shell: %w", err)
+	var defaults model.Defaults
+	if err := model.DecodeEvaluated("defaults", rc.Run.Job().RawDefaults, rc.ExprEval.shared(ctx).EvaluateYamlNode, &defaults); err != nil {
+		return err
 	}
-	if rc.jobRunDefaults.WorkingDirectory, err = rc.ExprEval.Interpolate(ctx, defaults.WorkingDirectory); err != nil {
-		return fmt.Errorf("unable to interpolate defaults.run.working-directory: %w", err)
-	}
-	return nil
+	rc.jobRunDefaults = defaults.Run
+	return model.DecodeEvaluated("container env", rc.containerEnv, rc.ExprEval.shared(ctx).EvaluateYamlNode, &rc.containerSpec.Env)
 }
 
 func setJobOutputs(ctx context.Context, rc *RunContext) error {
 	if rc.caller == nil {
 		return nil
 	}
-	outputs := rc.Run.Workflow.WorkflowCallConfig().Outputs
-	callerOutputs := make(map[string]string, len(outputs))
-	ee := sync.OnceValue(func() *expressionEvaluator { return rc.NewExpressionEvaluator(ctx) })
-	for k, v := range outputs {
-		value := v.Value
-		for range 2 { // two passes, the value resolves through a job output
-			var err error
-			if value, err = ee().Interpolate(ctx, value); err != nil {
-				return fmt.Errorf("unable to interpolate workflow output %s: %w", k, err)
-			}
-		}
-		callerOutputs[k] = value
+	callerOutputs, err := rc.NewExpressionEvaluator(ctx).shared(ctx).EvaluateWorkflowCallOutputs(rc.Run.Workflow.WorkflowCallConfig())
+	if err != nil {
+		return fmt.Errorf("unable to interpolate workflow %w", err)
 	}
 
 	// Matrix combinations of a reusable-workflow caller share the caller's *model.Job;
@@ -466,7 +462,7 @@ func applyJobTimeout(ctx context.Context, rc *RunContext, job *model.Job) (conte
 	if err != nil {
 		common.Logger(ctx).Errorf("An error occurred when attempting to determine the job timeout: %s", err)
 	} else if timeout != "" {
-		if timeoutMinutes, err := strconv.ParseInt(timeout, 10, 64); err == nil {
+		if timeoutMinutes, err := strconv.ParseInt(timeout, 10, 64); err == nil && timeoutMinutes > 0 {
 			return context.WithTimeout(ctx, time.Duration(timeoutMinutes)*time.Minute)
 		}
 	}

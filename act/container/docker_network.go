@@ -10,11 +10,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
 	"gitea.com/gitea/runner/act/common"
 
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 )
 
@@ -32,17 +35,17 @@ const (
 // had an endpoint on it at the time. Each one holds a subnet of the daemon's address pool
 // until it is removed. Networks created after createdBefore are left alone, so a job starting
 // while this runs cannot lose the network it has created but not yet attached a container to.
-func RemoveOrphanNetworks(ctx context.Context, runnerUUID string, createdBefore time.Time) error {
+func RemoveOrphanNetworks(ctx context.Context, runnerUUID, detach string, createdBefore time.Time) error {
 	cli, err := GetDockerClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to connect to the docker daemon: %w", err)
 	}
 	defer cli.Close()
 
-	return removeOrphanNetworks(ctx, cli, runnerUUID, createdBefore)
+	return removeOrphanNetworks(ctx, cli, runnerUUID, detach, createdBefore)
 }
 
-func removeOrphanNetworks(ctx context.Context, cli client.APIClient, runnerUUID string, createdBefore time.Time) error {
+func removeOrphanNetworks(ctx context.Context, cli client.APIClient, runnerUUID, detach string, createdBefore time.Time) error {
 	networks, err := cli.NetworkList(ctx, client.NetworkListOptions{
 		Filters: make(client.Filters).Add("label", runnerUUIDLabel+"="+runnerUUID),
 	})
@@ -51,6 +54,7 @@ func removeOrphanNetworks(ctx context.Context, cli client.APIClient, runnerUUID 
 	}
 
 	var errs []error
+networks:
 	for _, n := range networks.Items {
 		result, err := cli.NetworkInspect(ctx, n.ID, client.NetworkInspectOptions{})
 		if err != nil {
@@ -59,8 +63,17 @@ func removeOrphanNetworks(ctx context.Context, cli client.APIClient, runnerUUID 
 		}
 		// the emptiness check, not the label, is what keeps a live job of another process
 		// sharing this registration safe
-		if len(result.Network.Containers) != 0 || result.Network.Created.After(createdBefore) {
+		if len(result.Network.Containers) > 1 || result.Network.Created.After(createdBefore) {
 			continue
+		}
+		for containerID := range result.Network.Containers {
+			if detach == "" || !strings.HasPrefix(containerID, detach) {
+				continue networks
+			}
+			if err := disconnectNetwork(ctx, cli, n.ID, containerID); err != nil {
+				errs = append(errs, fmt.Errorf("failed to disconnect container from network %s: %w", n.Name, err))
+				continue networks
+			}
 		}
 		if _, err := cli.NetworkRemove(ctx, n.ID, client.NetworkRemoveOptions{}); err != nil {
 			errs = append(errs, fmt.Errorf("failed to remove network %s: %w", n.Name, err))
@@ -134,6 +147,50 @@ func isAddressPoolExhausted(err error) bool {
 		strings.Contains(msg, "could not find an available, non-overlapping IPv4 address pool among the defaults") // docker 24 and older
 }
 
+func NewDockerNetworkConnectExecutor(networkName, container string) common.Executor {
+	return func(ctx context.Context) error {
+		cli, err := GetDockerClient(ctx)
+		if err != nil {
+			return err
+		}
+		defer cli.Close()
+		if err := connectNetwork(ctx, cli, networkName, container); err != nil {
+			common.Logger(ctx).Warnf("cannot connect %s to network %s, so jobs on it cannot reach the cache: %v", container, networkName, err)
+		}
+		return nil
+	}
+}
+
+func connectNetwork(ctx context.Context, cli client.APIClient, networkName, container string) error {
+	_, err := cli.NetworkConnect(ctx, networkName, client.NetworkConnectOptions{
+		Container:      container,
+		EndpointConfig: &network.EndpointSettings{Aliases: []string{container}},
+	})
+	if err != nil && (strings.Contains(err.Error(), "already exists in network") || strings.Contains(err.Error(), "already connected")) {
+		return nil
+	}
+	return err
+}
+
+func NewDockerNetworkDisconnectExecutor(networkName, container string) common.Executor {
+	return func(ctx context.Context) error {
+		cli, err := GetDockerClient(ctx)
+		if err != nil {
+			return err
+		}
+		defer cli.Close()
+		return disconnectNetwork(ctx, cli, networkName, container)
+	}
+}
+
+func disconnectNetwork(ctx context.Context, cli client.APIClient, networkName, container string) error {
+	_, err := cli.NetworkDisconnect(ctx, networkName, client.NetworkDisconnectOptions{Container: container, Force: true})
+	if cerrdefs.IsNotFound(err) || (err != nil && strings.Contains(err.Error(), "is not connected")) {
+		return nil
+	}
+	return err
+}
+
 func NewDockerNetworkRemoveExecutor(name string) common.Executor {
 	return func(ctx context.Context) error {
 		cli, err := GetDockerClient(ctx)
@@ -171,4 +228,50 @@ func NewDockerNetworkRemoveExecutor(name string) common.Executor {
 
 		return errors.Join(errs...)
 	}
+}
+
+// IsolatedCacheContainer returns the container holding addr, when jobs on jobNetwork cannot reach it there.
+func IsolatedCacheContainer(ctx context.Context, addr netip.Addr, jobNetwork string) (string, error) {
+	cli, err := GetDockerClient(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer cli.Close()
+	return isolatedCacheContainer(ctx, cli, addr, jobNetwork)
+}
+
+func isolatedCacheContainer(ctx context.Context, cli client.APIClient, addr netip.Addr, jobNetwork string) (string, error) {
+	if jobNetwork == "host" || strings.HasPrefix(jobNetwork, "container:") {
+		return "", nil
+	}
+	containers, err := cli.ContainerList(ctx, client.ContainerListOptions{})
+	if err != nil {
+		return "", err
+	}
+	var holderID, holderContainer string
+	for _, summary := range containers.Items {
+		if summary.NetworkSettings == nil {
+			continue
+		}
+		for _, endpoint := range summary.NetworkSettings.Networks {
+			if endpoint != nil && (endpoint.IPAddress == addr || endpoint.GlobalIPv6Address == addr) {
+				holderID = endpoint.NetworkID
+				holderContainer = summary.ID[:12]
+			}
+		}
+	}
+	if holderID == "" {
+		return "", nil
+	}
+	holder, err := cli.NetworkInspect(ctx, holderID, client.NetworkInspectOptions{})
+	if err != nil || holder.Network.Driver != "bridge" {
+		return "", err
+	}
+	if jobNetwork != "" {
+		job, err := cli.NetworkInspect(ctx, jobNetwork, client.NetworkInspectOptions{})
+		if err != nil || job.Network.ID == holderID {
+			return "", err
+		}
+	}
+	return holderContainer, nil
 }
