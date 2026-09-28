@@ -10,6 +10,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
@@ -17,10 +18,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -58,10 +59,9 @@ type JobCredential struct {
 	Repo string `json:"repo"`
 
 	// Results is the instance whose artifact service this server forwards for the job, and
-	// InsecureTLS how the runner reaches it; see results.go. The tags are the wire format a
-	// remote runner registers with.
-	Results     string `json:"results"`
-	InsecureTLS bool   `json:"insecure_tls"`
+	// InsecureTLS how the runner reaches it; see results.go.
+	Results     string `json:"-"`
+	InsecureTLS bool   `json:"-"`
 
 	// PublicURL is this server as a reverse proxy makes the job reach it, not the listen address.
 	PublicURL string `json:"public_url"`
@@ -79,7 +79,8 @@ type credEntry struct {
 
 type Handler struct {
 	dir      string
-	storage  *Storage
+	storage  cacheStorage
+	s3       *s3Storage
 	router   *httprouter.Router
 	listener net.Listener
 	port     int
@@ -88,6 +89,9 @@ type Handler struct {
 
 	gcing atomic.Bool
 	gcAt  time.Time
+
+	stopSync context.CancelFunc
+	syncing  sync.WaitGroup
 
 	outboundIP string
 
@@ -118,6 +122,8 @@ type Options struct {
 	Dir        string
 	OutboundIP string
 	Port       uint16
+	S3         *S3Options
+	Upstream   string
 
 	// InternalSecret, when non-empty, enables a control-plane API at
 	// /_internal/{register,revoke} that lets a remote runner pre-register the
@@ -130,7 +136,7 @@ type Options struct {
 	Logger logrus.FieldLogger
 }
 
-// StartHandler opens the on-disk cache store and starts the HTTP server.
+// StartHandler starts an embedded cache or forwards cache requests to Upstream.
 func StartHandler(opts Options) (*Handler, error) {
 	dir, logger := opts.Dir, opts.Logger
 	h := &Handler{
@@ -147,6 +153,25 @@ func StartHandler(opts Options) (*Handler, error) {
 	}
 	logger = logger.WithField("module", "artifactcache")
 	h.logger = logger
+
+	if opts.OutboundIP != "" {
+		h.outboundIP = opts.OutboundIP
+	} else if ip := common.GetOutboundIP(); ip == nil {
+		return nil, errors.New("unable to determine outbound IP address")
+	} else {
+		h.outboundIP = ip.String()
+	}
+
+	if opts.Upstream != "" {
+		handler, err := h.cacheForwarder(opts.Upstream)
+		if err != nil {
+			return nil, err
+		}
+		if err := h.serve(opts.Port, handler); err != nil {
+			return nil, err
+		}
+		return h, nil
+	}
 
 	if dir == "" {
 		home, err := os.UserHomeDir()
@@ -166,13 +191,11 @@ func StartHandler(opts Options) (*Handler, error) {
 		return nil, err
 	}
 	h.storage = storage
-
-	if opts.OutboundIP != "" {
-		h.outboundIP = opts.OutboundIP
-	} else if ip := common.GetOutboundIP(); ip == nil {
-		return nil, errors.New("unable to determine outbound IP address")
-	} else {
-		h.outboundIP = ip.String()
+	if opts.S3 != nil {
+		if h.s3, err = newS3Storage(storage, *opts.S3); err != nil {
+			return nil, err
+		}
+		h.storage = h.s3
 	}
 
 	secret, err := loadOrCreateSecret(dir)
@@ -202,34 +225,74 @@ func StartHandler(opts Options) (*Handler, error) {
 
 	h.gcCache()
 
+	if err := h.serve(opts.Port, router); err != nil {
+		return nil, err
+	}
+	if h.s3 != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		h.stopSync = cancel
+		h.syncing.Go(func() { h.syncMetadata(ctx) })
+	}
+	return h, nil
+}
+
+func (h *Handler) serve(port uint16, handler http.Handler) error {
 	// Listen on all interfaces. Binding to outboundIP only would give no real
 	// security benefit (it is the LAN/internet-facing address either way) and
 	// can break Docker Desktop variants where the host's outbound IP is not
 	// routable from inside the container network. Authentication is enforced
 	// by the bearer middleware and per-repo scoping, not by reachability.
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", opts.Port))
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	addr, ok := listener.Addr().(*net.TCPAddr)
 	if !ok {
 		listener.Close()
-		return nil, fmt.Errorf("cache server listens on %T, want a TCP address", listener.Addr())
+		return fmt.Errorf("cache server listens on %T, want a TCP address", listener.Addr())
 	}
 	h.port = addr.Port
 	server := &http.Server{
 		ReadHeaderTimeout: 2 * time.Second,
-		Handler:           router,
+		Handler:           handler,
 	}
 	go func() {
 		if err := server.Serve(listener); err != nil && errors.Is(err, net.ErrClosed) {
-			logger.Errorf("http serve: %v", err)
+			h.logger.Errorf("http serve: %v", err)
 		}
 	}()
 	h.listener = listener
 	h.server = server
 
-	return h, nil
+	return nil
+}
+
+func (h *Handler) cacheForwarder(upstream string) (http.Handler, error) {
+	target, err := url.Parse(strings.TrimRight(upstream, "/"))
+	if err != nil {
+		return nil, fmt.Errorf("parse cache upstream: %w", err)
+	}
+	transport, _ := http.DefaultTransport.(*http.Transport)
+	transport = transport.Clone()
+	transport.MaxIdleConnsPerHost = 64 // parallel block uploads would otherwise redial past the default 2
+	proxy := &httputil.ReverseProxy{
+		Transport: transport,
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(target)
+			r.Out.URL.RawQuery = r.In.URL.RawQuery // Rewrite drops unparsable query params, and signed URLs must pass verbatim.
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			h.logger.Warnf("cache forward %s %s: %v", r.Method, r.URL.Path, err)
+			h.twirpError(w, r, twirpUnavailable, errors.New("cache upstream is unavailable"))
+		},
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, apiPath+"/") || strings.HasPrefix(r.URL.Path, cacheServiceV2Path+"/") {
+			proxy.ServeHTTP(w, r)
+		} else {
+			h.forwardOrNotFound(w, r)
+		}
+	}), nil
 }
 
 func (h *Handler) ExternalURL() string {
@@ -334,6 +397,10 @@ func (h *Handler) Close() error {
 	if h == nil {
 		return nil
 	}
+	if h.stopSync != nil {
+		h.stopSync()
+		h.syncing.Wait()
+	}
 	var retErr error
 	if h.server != nil {
 		err := h.server.Close()
@@ -364,6 +431,72 @@ func (h *Handler) openDB() (*bolthold.Store, error) {
 			NoGrowSync:   bbolt.DefaultOptions.NoGrowSync,
 			FreelistType: bbolt.DefaultOptions.FreelistType,
 		},
+	})
+}
+
+// syncMetadata mirrors the bucket into the store until ctx ends, so no request waits on S3 for it.
+func (h *Handler) syncMetadata(ctx context.Context) {
+	ticker := time.NewTicker(metadataSyncInterval)
+	defer ticker.Stop()
+	for {
+		if err := h.importMetadata(ctx); err != nil && ctx.Err() == nil {
+			h.logger.Warnf("sync S3 cache: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// importMetadata lists after snapshotting the store, so an entry committed meanwhile, published before it is stored, stays.
+func (h *Handler) importMetadata(ctx context.Context) error {
+	db, err := h.openDB()
+	if err != nil {
+		return err
+	}
+	local := h.caches(db, bolthold.Where("Complete").Eq(true).Index("Complete"))
+	db.Close()
+
+	published, err := h.s3.published(ctx)
+	if err != nil {
+		return err
+	}
+	var gone []*Cache
+	for _, cache := range local {
+		if !published[cache.ID] {
+			gone = append(gone, cache)
+		}
+		delete(published, cache.ID)
+	}
+	added := make([]*Cache, 0, len(published))
+	for id := range published {
+		cache, err := h.s3.fetch(ctx, id)
+		if err != nil {
+			return err
+		}
+		added = append(added, cache)
+	}
+
+	db, err = h.openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.Bolt().Update(func(tx *bbolt.Tx) error {
+		for _, cache := range added {
+			if err := db.TxUpsert(tx, cache.ID, cache); err != nil {
+				return err
+			}
+		}
+		for _, cache := range gone {
+			_ = h.s3.Storage.Remove(cache.ID) // a blob kept on disk before the runner used S3
+			if err := db.TxDelete(tx, cache.ID, cache); err != nil && !errors.Is(err, bolthold.ErrNotFound) {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -409,7 +542,7 @@ func (h *Handler) lookupCache(db *bolthold.Store, repo string, keys []string, ve
 		return nil, err
 	}
 	if !ok {
-		_ = db.Delete(cache.ID, cache)
+		h.deleteCache(db, cache)
 		return nil, nil //nolint:nilnil // absence is not an error here
 	}
 	// Handing out a download URL counts as access, or eviction could drop the entry between
@@ -441,7 +574,7 @@ func (h *Handler) reserve(w http.ResponseWriter, r *http.Request, _ httprouter.P
 	now := time.Now().Unix()
 	cache.CreatedAt = now
 	cache.UsedAt = now
-	if err := insertCache(db, cache); err != nil {
+	if err := h.insertCache(db, cache); err != nil {
 		h.responseJSON(w, r, 500, err)
 		return
 	}
@@ -555,6 +688,12 @@ func (h *Handler) commitCache(cache *Cache) error {
 	cache.Size = written
 	cache.Complete = true
 	cache.UsedAt = time.Now().Unix() // a just-written entry counts as accessed, so it cannot be its own eviction victim
+	if h.s3 != nil {
+		if err := h.s3.publish(cache); err != nil {
+			_ = h.storage.Remove(cache.ID)
+			return err
+		}
+	}
 
 	db, err := h.openDB()
 	if err != nil {
@@ -563,6 +702,9 @@ func (h *Handler) commitCache(cache *Cache) error {
 	defer db.Close()
 	if err := db.Update(cache.ID, cache); err != nil {
 		return err
+	}
+	if h.s3 != nil {
+		return nil // lifecycle rules on the bucket bound its size
 	}
 	// A commit is the only thing that grows the store, so the only thing that can push the
 	// volume under the floor.
@@ -709,8 +851,7 @@ func (h *Handler) internalRegister(w http.ResponseWriter, r *http.Request, _ htt
 		return
 	}
 	h.RegisterJob(body.Token, body.JobCredential)
-	// A server too old to forward answers without this, which is how the caller knows.
-	h.responseJSON(w, r, http.StatusOK, map[string]any{"results_url": h.ResultsURL(body.JobCredential)})
+	h.responseJSON(w, r, http.StatusOK)
 }
 
 // POST /_internal/revoke
@@ -784,14 +925,9 @@ func findCache(db *bolthold.Store, repo string, keys []string, version string) (
 		if exact != nil {
 			return exact, nil
 		}
-		prefixPattern := "^" + regexp.QuoteMeta(prefix)
-		re, err := regexp.Compile(prefixPattern)
-		if err != nil {
-			continue
-		}
 		if err := db.FindOne(cache,
-			bolthold.Where("Repo").Eq(repo).
-				And("Key").RegExp(re).
+			bolthold.Where("Repo").Eq(repo).Index("Repo").
+				And("Key").MatchFunc(func(key string) (bool, error) { return strings.HasPrefix(key, prefix), nil }).
 				And("Version").Eq(version).
 				And("Complete").Eq(true).
 				SortBy("CreatedAt").Reverse()); err != nil {
@@ -833,15 +969,23 @@ func findExactCache(db *bolthold.Store, repo, key, version string, complete bool
 	return cache, nil
 }
 
-func insertCache(db *bolthold.Store, cache *Cache) error {
-	if err := db.Insert(bolthold.NextSequence(), cache); err != nil {
-		return fmt.Errorf("insert cache: %w", err)
+func (h *Handler) insertCache(db *bolthold.Store, cache *Cache) error {
+	if h.s3 != nil {
+		var id [8]byte
+		_, _ = rand.Read(id[:])
+		cache.ID = binary.BigEndian.Uint64(id[:]) >> 11 // IDs must be unique across runners, and v1 clients parse an ID as a JS number
+		return db.Insert(cache.ID, cache)
 	}
-	// write back id to db
-	if err := db.Update(cache.ID, cache); err != nil {
-		return fmt.Errorf("write back id to db: %w", err)
-	}
-	return nil
+	return db.Bolt().Update(func(tx *bbolt.Tx) error {
+		if err := db.TxInsert(tx, bolthold.NextSequence(), cache); err != nil {
+			return fmt.Errorf("insert cache: %w", err)
+		}
+		// write back id to db
+		if err := db.TxUpdate(tx, cache.ID, cache); err != nil {
+			return fmt.Errorf("write back id to db: %w", err)
+		}
+		return nil
+	})
 }
 
 // touchCache stamps UsedAt so gcCache does not reap an entry mid-upload. With requireIncomplete
@@ -866,6 +1010,9 @@ func (h *Handler) touchCache(id uint64, requireIncomplete bool) error {
 	if requireIncomplete && cache.Complete {
 		return fmt.Errorf("cache %d: already complete", id)
 	}
+	if !touchNeeded(cache) {
+		return nil
+	}
 	cache.UsedAt = time.Now().Unix()
 	return db.Update(cache.ID, cache)
 }
@@ -875,14 +1022,18 @@ const (
 
 	defaultSweepInterval = time.Hour
 
-	// inUseGrace matches artifactURLTTL so an entry outlives every signed URL still usable
-	// for it, and no sweep cuts off a download in progress.
-	inUseGrace = artifactURLTTL
+	touchStale = time.Minute // how stale a completed entry's UsedAt may get before an access rewrites it, sparing hits the fsync
+
+	// inUseGrace covers artifactURLTTL plus the touchStale lag so an entry outlives every signed URL
+	// still usable for it, and no sweep cuts off a download in progress.
+	inUseGrace = artifactURLTTL + touchStale
 
 	// uploadStallTimeout is how long a reservation may sit without a chunk before it counts
 	// as abandoned. Widening it also widens the window for findExactCache to hand a finalize
 	// a stale reservation.
 	uploadStallTimeout = 5 * time.Minute
+
+	metadataSyncInterval = 30 * time.Second
 
 	defaultMinFreeDisk = 1024 * miB
 )
@@ -931,6 +1082,9 @@ func (h *Handler) gcCache() {
 	defer db.Close()
 
 	h.evictIncomplete(db)
+	if h.s3 != nil {
+		return // lifecycle rules on the bucket expire its entries
+	}
 	h.evictExpired(db)
 	h.evictSuperseded(db)
 	h.evictOversized(db)
@@ -971,7 +1125,7 @@ func (h *Handler) evictExpired(db *bolthold.Store) {
 		return
 	}
 	// Never below inUseGrace, or a short retention would outrun a signed URL already issued.
-	window := max(h.policy.Retention, inUseGrace)
+	window := max(h.policy.Retention+touchStale, inUseGrace)
 	h.sweep(db, bolthold.Where("UsedAt").Lt(time.Now().Add(-window).Unix()).Index("UsedAt"))
 }
 
@@ -1072,10 +1226,18 @@ func inUse(cache *Cache) bool {
 	return time.Since(time.Unix(cache.UsedAt, 0)) < inUseGrace
 }
 
+// touchNeeded skips a write that would not change the second, and completed entries fresher than touchStale.
+func touchNeeded(cache *Cache) bool {
+	return cache.UsedAt < time.Now().Unix() && (!cache.Complete || time.Since(time.Unix(cache.UsedAt, 0)) >= touchStale)
+}
+
 // touch stamps UsedAt through the caller's store, a bolt write on the read path. It cannot
 // go through touchCache, which opens its own store and would block on the exclusive lock
 // for as long as the caller holds one.
 func (h *Handler) touch(db *bolthold.Store, cache *Cache) {
+	if !touchNeeded(cache) {
+		return
+	}
 	cache.UsedAt = time.Now().Unix()
 	if err := db.Update(cache.ID, cache); err != nil {
 		h.logger.Warnf("touch cache: %v", err)
@@ -1120,7 +1282,11 @@ func totalSize(caches []*Cache) int64 {
 // deleteCache drops an entry and its bytes, reporting whether it went fully. The blob goes
 // first, so a failed unlink leaves the row for the next sweep instead of orphaning bytes.
 func (h *Handler) deleteCache(db *bolthold.Store, cache *Cache) bool {
-	if err := h.storage.Remove(cache.ID); err != nil {
+	storage := h.storage
+	if h.s3 != nil && !cache.Complete {
+		storage = h.s3.Storage // an upload not yet committed has nothing in the bucket
+	}
+	if err := storage.Remove(cache.ID); err != nil {
 		h.logger.Warnf("remove cache blob: %v", err)
 		return false
 	}

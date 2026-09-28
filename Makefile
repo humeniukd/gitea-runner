@@ -6,7 +6,12 @@ SHASUM ?= shasum -a 256
 HAS_GO = $(shell hash $(GO) > /dev/null 2>&1 && echo "GO" || echo "NOGO" )
 XGO_PACKAGE ?= src.techknowlogick.com/xgo@v1.9.0 # renovate: datasource=go
 XGO_VERSION := go-1.27.x
-GXZ_PACKAGE ?= github.com/ulikunitz/xz/cmd/gxz@v0.5.16 # renovate: datasource=go
+GXZ_PACKAGE ?= github.com/ulikunitz/xz/cmd/gxz@v0.5.17 # renovate: datasource=go
+
+PODMAN_TEST_IMAGE ?= quay.io/containers/podman:v5.8.4-immutable@sha256:90405e3c6a86f33c5a6f8dbdfa8e02a98143a8ba4337b84bdaec5336d2ef008a # renovate: datasource=docker
+E2E_JOB_IMAGE ?= node:24-bookworm@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # renovate: datasource=docker
+SERVICE_IMAGE ?= nginx:1.31.4-alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913 # renovate: datasource=docker
+E2E_GITEA_IMAGE ?= gitea/gitea:main-nightly
 
 LINUX_ARCHS ?= linux/amd64,linux/arm64
 DARWIN_ARCHS ?= darwin-12/amd64,darwin-12/arm64
@@ -19,7 +24,7 @@ DOCKER_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)
 DOCKER_ROOTLESS_REF := $(DOCKER_IMAGE):$(DOCKER_TAG)-dind-rootless
 
 GOLANGCI_LINT_PACKAGE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 # renovate: datasource=go
-GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.7.0 # renovate: datasource=go
+GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1.8.0 # renovate: datasource=go
 
 GOTEST_FLAGS ?= -race -timeout 20m -parallel 8
 
@@ -178,12 +183,9 @@ coverage-report: ## turn coverage.txt from `make test` into .tmp/coverage.md
 	@echo "Wrote .tmp/coverage.md"
 
 .PHONY: test-dind
-test-dind: ## run the daemon-facing tests against the built dind image (TARGET=dind|dind-rootless)
-	@./scripts/test-dind.sh $(TARGET)
+test-dind: ## run the daemon-facing tests against the built dind image or podman (TARGET=dind|dind-rootless|podman)
+	@PODMAN_TEST_IMAGE=$(PODMAN_TEST_IMAGE) ./scripts/test-dind.sh $(TARGET)
 
-E2E_JOB_IMAGE ?= node:24-bookworm@sha256:be23f54a88d34e8824c741b19b91064094f92c1c97b194144bfc8b50d67258e2 # renovate: datasource=docker
-SERVICE_IMAGE ?= nginx:1.31.4-alpine@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913 # renovate: datasource=docker
-E2E_GITEA_IMAGE ?= gitea/gitea:main-nightly
 E2E_CONCURRENCY ?= 8
 
 .PHONY: test-e2e

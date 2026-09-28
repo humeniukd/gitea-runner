@@ -268,7 +268,7 @@ Unlike GitHub, a job whose steps run on the host (a `host` label without `contai
 
 #### Docker from a job (`GITEA_DOCKER_WORKSPACE`)
 
-A container a job starts through the Docker socket cannot bind-mount the workspace by the job's own path, the daemon does not have it. `GITEA_DOCKER_WORKSPACE` holds the path the daemon sees. Use it as the prefix of workspace binds, with `.` as the fallback for local use, here in a `docker-compose.yaml`:
+Containers a job starts through the Docker socket can bind-mount the workspace by the job's own path, as on a host, for example `docker run -v "$PWD:/src"`. Without the Docker proxy, for example with a remote `DOCKER_HOST`, use `GITEA_DOCKER_WORKSPACE`, the path the daemon sees, as the prefix of workspace binds, with `.` as the fallback for local use:
 
 ```yaml
 volumes:
@@ -298,7 +298,7 @@ These hosts are added to `no_proxy` for jobs, so they are always reached directl
 
 Gitea is not added. Add it to `no_proxy` yourself if it should be reached directly.
 
-To change a value for one job, set it in a step's `env:` or in the job's `container.env`. Setting it at workflow or job level has no effect. To change it for the whole runner, set it in `runner.envs`. A `no_proxy` set there is added to the list above instead of replacing it.
+For one step, set it in the step's `env:`, for the rest of a job, write it to `$GITHUB_ENV`. Setting it at workflow or job level or in `container.env` has no effect. To change it for the whole runner, set it in `runner.envs`. A `no_proxy` set there is added to the list above instead of replacing it.
 
 Images are pulled by the Docker daemon, which needs its own proxy setting. In the `dind` images the daemon runs in the same container and reads the variables above. For any other daemon, see [the Docker documentation](https://docs.docker.com/engine/daemon/proxy/). The runner logs a warning at startup if it has a proxy and the daemon does not.
 
@@ -306,65 +306,68 @@ Dockerfile actions are built with these variables as build arguments, so their `
 
 A password in a proxy URL is hidden in job logs. Any step can still read it, because the step is given the proxy URL in its environment.
 
+#### Built-in actions (`uses: builtin:<name>`)
+
+Use `uses: builtin:checkout` to check out a repository without downloading `actions/checkout` or needing Node in the job image, see **[docs/builtin-actions.md](docs/builtin-actions.md)**.
+
 #### Caching (`actions/cache`)
 
-Each runner starts its own cache server automatically. Cache entries are local to that runner — runners do not share a cache by default.
+Each runner starts its own cache server, so runners do not share cached entries. A runner in a container on the jobs' Docker daemon attaches itself to each job network, so jobs reach its cache without extra setup.
 
-**Eviction**
+**Sharing a cache between runners**
 
-An entry nothing has read or written for `retention` is removed, and a repository past `repo_size_limit` loses its least recently accessed entries until it fits; `size_limit` caps the whole cache the same way. Age alone never retires an entry still in use, and whatever these allow, the cache keeps free space above `health_check.min_free_disk_space_mb` when health checks are enabled.
+Run one `gitea-runner cache-server` and point every runner at it, using the same secret everywhere, for example from `openssl rand -hex 32`:
 
-These apply where the cache server runs, so on a shared server they belong in *its* config, not the runners'. See `retention`, `repo_size_limit`, `size_limit` and `sweep_interval` in [config.example.yaml](internal/pkg/config/config.example.yaml) for units and defaults.
+```yaml
+# cache-server.yaml
+cache:
+  dir: /data/actcache
+  port: 8088
+  external_secret: "<secret>" # or external_secret_file: /path/to/secret
+```
 
-**Cache service v2**
+```bash
+gitea-runner -c cache-server.yaml cache-server
+```
 
-`actions/cache@v4.2` and later can use the *cache service v2* API. The runner serves it from the same store as v1, on by default, and it works with `external_server`. Turn it off with:
+```yaml
+# each runner's config
+cache:
+  external_server: "http://<cache-server-host>:8088/"
+  external_secret: "<secret>"
+```
+
+`--dir`, `--host` and `--port` override the matching `cache` keys. Eviction settings take effect on the cache server, not on the runners.
+
+Runners can also share one `cache.dir` on a file system with working file locks, at the cost of slower cache requests.
+
+**Storing the cache in an S3-compatible bucket**
+
+The cache can also be stored in an S3-compatible bucket such as AWS S3, MinIO or RustFS, with no cache server. Runners with the same settings use the same cache:
 
 ```yaml
 cache:
-  v2: false
+  s3:
+    endpoint: "http://minio:9000"
+    region: "us-east-1"
+    bucket: "runner-cache"
+    prefix: "gitea-runner-cache"
+    path_style: true
+    access_key_file: "/run/secrets/cache-s3-access-key"
+    secret_key_file: "/run/secrets/cache-s3-secret-key"
 ```
 
-Those actions refuse any host they do not take for GitHub, so the runner edits that check out of the bundle on its way into the job and puts the shared copy back afterwards. A bundle it does not recognise is left alone. The same edit lets the stock `actions/upload-artifact` and `actions/download-artifact` work from `v4.4.0` on, without the `gitea-upload-artifact` fork, so it is made whatever `v2` says. Set `runner.patch_actions: false` to leave bundles as shipped; the artifact actions then refuse and the cache client keeps to v1.
+A cache saved on one runner can be restored on the others within 30 seconds. The eviction settings below do not apply to the bucket, so add lifecycle rules to it that expire old caches and abort incomplete multipart uploads.
 
-With v2 the job's artifact calls go via the cache server, so jobs need to reach it to upload artifacts, not just to cache. `v2: false` sends them to Gitea directly.
+**Eviction**
 
-**Shared cache across multiple runners**
+Entries not read or written within `retention` (default `168h`) are removed. A repository over `repo_size_limit` (default `10GB`) loses its least recently used entries, and `size_limit` (off by default) caps the whole cache the same way. Entries in use are never removed. The cache also keeps 1024 MiB free on its volume, or `health_check.min_free_disk_space_mb` when health checks are enabled. See [config.example.yaml](internal/pkg/config/config.example.yaml) for all options.
 
-Run one dedicated `gitea-runner cache-server` that all runners point at.
+**Cache service v2**
 
-1. Create a config file for the cache server host:
+`actions/cache` v3.4.0, v4.2.0 and later use the cache service v2 API, which the runner serves by default. These actions fall back to v1 on hosts they do not recognize as GitHub, so the runner removes that check from them while a job runs. This also lets the stock `actions/upload-artifact` v4.4.0 and `actions/download-artifact` v4.1.8 and later work without the `gitea-upload-artifact` fork. With `runner.patch_actions: false`, the cache stays on v1 and the artifact actions fail.
 
-   ```yaml
-   cache:
-     dir: /data/actcache
-     port: 8088
-     external_secret: "replace-with-a-strong-random-secret"
-     # external_secret_file: /path/to/secret # secret can also be passed via a file
-   ```
-
-2. Start the server:
-
-   ```bash
-   gitea-runner -c cache-server-config.yaml cache-server
-   ```
-
-3. On every runner:
-
-   ```yaml
-   cache:
-     external_server: "http://<cache-server-host>:8088/"
-     external_secret: "replace-with-a-strong-random-secret"  # must match the server
-     # external_secret_file: /path/to/secret # secret can also be passed via a file
-   ```
-
-Jobs reach the cache server at `external_server`, so when a reverse proxy fronts the server, point `external_server` at the proxy. The cache server itself needs no extra configuration.
-
-Alternatively, mount the same NFS/CIFS share on every runner and point `cache.dir` at it — simpler, but with weaker isolation between repositories.
-
-**S3 / MinIO** — mount object storage as a FUSE filesystem (e.g. [s3fs](https://github.com/s3fs-fuse/s3fs-fuse) or [goofys](https://github.com/kahing/goofys)) and set `cache.dir` to the mount point.
-
-Flags `--dir`, `--host`, and `--port` on `cache-server` override the corresponding `cache.*` YAML keys; all other settings, including `external_secret`, require the config file.
+With v2, artifact calls also go through the cache server, so jobs must be able to reach it. `cache.v2: false` sends them to Gitea directly, unless the Gitea URL has a path or `runner.insecure` is set with HTTPS.
 
 #### Official Docker image
 
@@ -398,6 +401,10 @@ Because they run where the steps run and see the job's environment, they are the
 Both hooks are synchronous and block the job while they run. Either one exiting non-zero fails the job, and there is no per-hook timeout.
 
 See **[docs/job-hooks.md](docs/job-hooks.md)** for the execution order, environment, and platform notes.
+
+#### OpenTelemetry (`OTEL_*`)
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` in the runner's environment to send a trace of every job to an OpenTelemetry collector. See **[docs/telemetry.md](docs/telemetry.md)**.
 
 #### Local job logs (`log.job.dir`)
 

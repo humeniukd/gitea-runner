@@ -12,18 +12,21 @@ import (
 	"gitea.dev/actionslib/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.yaml.in/yaml/v4"
 )
 
 func TestCompositeActionParity(t *testing.T) {
 	t.Run("inherits contexts without leaking inputs", func(t *testing.T) {
 		ctx := t.Context()
-		strategy := &model.Strategy{MaxParallel: 3}
+		strategy := &model.Strategy{MaxParallelString: "3", RawMatrix: yaml.Node{Kind: yaml.MappingNode}}
 		parent := &RunContext{
 			Config:        &Config{},
 			Matrix:        map[string]any{"os": "linux"},
 			Run:           &model.Run{JobID: "job", Workflow: &model.Workflow{Name: "workflow", Jobs: map[string]*model.Job{"job": {Strategy: strategy}}}},
 			JobContainer:  &jobContainerMock{},
 			platformImage: "-self-hosted",
+			jobIndex:      1,
+			jobTotal:      4,
 		}
 		composite, err := newCompositeRunContext(ctx, parent, &stepActionRemote{
 			Step:       &model.Step{With: map[string]string{"SHARED": "outer"}},
@@ -36,9 +39,9 @@ func TestCompositeActionParity(t *testing.T) {
 		assert.Same(t, strategy, composite.Run.Job().Strategy)
 		assert.True(t, composite.IsHostEnv())
 		interpolated, err := composite.NewExpressionEvaluator(ctx).Interpolate(ctx,
-			"${{ matrix.os }}|${{ strategy.max-parallel }}|${{ inputs.shared }}")
+			"${{ matrix.os }}|${{ strategy.max-parallel }}|${{ strategy.job-index }}|${{ inputs.shared }}")
 		require.NoError(t, err)
-		assert.Equal(t, "linux|3|outer", interpolated)
+		assert.Equal(t, "linux|3|1|outer", interpolated)
 		assert.NotContains(t, composite.Env, "INPUT_SHARED")
 
 		nestedEnv := composite.GetEnv()
@@ -116,4 +119,52 @@ func TestAppendUniqueMasksNoExponentialGrowth(t *testing.T) {
 	}
 
 	assert.Equal(t, []string{"secret"}, parentMasks)
+}
+
+func TestCompositeStepIfReadsJobStatusExceptInItsOwnMainSteps(t *testing.T) {
+	failStep := func(rc *RunContext) {
+		rc.StepResults["failed"] = &model.StepResult{Conclusion: model.StepStatusFailure}
+	}
+	tests := []struct {
+		name   string
+		setup  func(job, composite *RunContext)
+		nested bool
+		stage  stepStage
+		want   map[string]bool
+	}{
+		{"post-if reads the failed job", func(job, _ *RunContext) { failStep(job) }, false, stepStagePost, map[string]bool{"success()": false, "failure()": true, "job.status == 'failure'": true}},
+		{"main if ignores the failed job", func(job, _ *RunContext) { failStep(job) }, false, stepStageMain, map[string]bool{"success()": true, "failure()": false}},
+		{"main if reads the composite's own failure", func(_, composite *RunContext) { failStep(composite) }, false, stepStageMain, map[string]bool{"success()": false, "failure()": true}},
+		{"nested main if ignores the outer composite's failure", func(_, composite *RunContext) { failStep(composite) }, true, stepStageMain, map[string]bool{"success()": true}},
+		{"main if sees the cancelled job", func(job, _ *RunContext) { job.markCancelled() }, false, stepStageMain, map[string]bool{"cancelled()": true, "success()": false}},
+		{"post-if sees the cancelled job", func(job, _ *RunContext) { job.markCancelled() }, false, stepStagePost, map[string]bool{"cancelled()": true, "success()": false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := makeTestRC(t, "runs-on: ubuntu-latest")
+			composite := newTestCompositeRunContext(t, job)
+			rc := composite
+			if tt.nested {
+				rc = newTestCompositeRunContext(t, composite)
+			}
+			tt.setup(job, composite)
+			step := &stepRun{RunContext: rc}
+			for expr, want := range tt.want {
+				enabled, err := isStepEnabled(t.Context(), expr, step, tt.stage)
+				require.NoError(t, err)
+				assert.Equal(t, want, enabled, expr)
+			}
+		})
+	}
+}
+
+func newTestCompositeRunContext(t *testing.T, parent *RunContext) *RunContext {
+	composite, err := newCompositeRunContext(t.Context(), parent, &stepActionRemote{
+		Step:       &model.Step{},
+		RunContext: parent,
+		action:     &model.Action{},
+		env:        map[string]string{},
+	}, "/action")
+	require.NoError(t, err)
+	return composite
 }

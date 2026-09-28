@@ -8,17 +8,24 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/internal/pkg/telemetry"
 
 	"gitea.dev/actionslib/pkg/model"
+	runnerv1 "gitea.dev/actionslib/runner/v1"
 	log "github.com/sirupsen/logrus"
 	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	yaml "go.yaml.in/yaml/v4"
 )
 
@@ -148,11 +155,8 @@ func TestSetupEnv(t *testing.T) {
 		},
 		JobContainer: cm,
 	}
-	step := &model.Step{
-		With: map[string]string{
-			"STEP_WITH": "with-value",
-		},
-	}
+	step := &model.Step{}
+	require.NoError(t, step.RawWith.Encode(map[string]string{"STEP_WITH": "with-value", "ID": "${{ fromJSON('1234567') }}"}))
 	env := map[string]string{}
 
 	sm.On("getRunContext").Return(rc)
@@ -161,6 +165,7 @@ func TestSetupEnv(t *testing.T) {
 	sm.On("getEnv").Return(&env)
 
 	require.NoError(t, setupEnv(context.Background(), sm))
+	require.NoError(t, setupInputs(context.Background(), sm))
 
 	// These are commit or system specific
 	delete(env, "GITHUB_REF")
@@ -197,6 +202,7 @@ func TestSetupEnv(t *testing.T) {
 		"GITHUB_RUN_NUMBER":        "1",
 		"GITHUB_SERVER_URL":        "https://",
 		"GITHUB_WORKFLOW":          "",
+		"INPUT_ID":                 "1234567",
 		"INPUT_STEP_WITH":          "with-value",
 		"RC_KEY":                   "rcvalue",
 		"RUNNER_ENVIRONMENT":       "self-hosted",
@@ -205,6 +211,67 @@ func TestSetupEnv(t *testing.T) {
 	}, env)
 
 	cm.AssertExpectations(t)
+
+	for _, expression := range []string{"inputs.args", "env.ARGS"} {
+		t.Run("deferred inputs from "+expression, func(t *testing.T) {
+			workflow, err := model.ReadWorkflow(strings.NewReader(`
+env: ${{ fromJSON(matrix.env) }}
+jobs:
+  test:
+    env:
+      PRIORITY: ${{ matrix.priority }}
+    defaults:
+      run: ${{ fromJSON(matrix.defaults) }}
+    container:
+      image: node:20
+      env:
+        CONTAINER: ${{ env.PRIORITY }}
+    steps:
+      - uses: ./act
+        env:
+          ARGS: ${{ inputs.args }}
+        with: ${{ fromJSON(` + expression + `) }}
+`))
+			require.NoError(t, err)
+			job := workflow.GetJob("test")
+			rawEnv := model.CloneYamlNode(workflow.RawEnv)
+			rawWith := model.CloneYamlNode(job.Steps[0].RawWith)
+			for _, value := range []string{"first", "second"} {
+				t.Run(value, func(t *testing.T) {
+					t.Parallel()
+					rc, err := (&runnerImpl{config: &Config{}}).newRunContext(t.Context(), &model.Run{Workflow: workflow, JobID: "test"}, map[string]any{"env": `{"WORKFLOW":"` + value + `${{ github.job }}","PRIORITY":"workflow"}`, "priority": "${{ github.job }}", "defaults": `{"shell":"` + value + `"}`})
+					require.NoError(t, err)
+					rc.workflowCallInputs = map[string]any{"args": `{"name":"` + value + `${{ github.job }}","fetch-depth":1234567}`}
+					enabled, err := rc.isEnabled(t.Context())
+					require.NoError(t, err)
+					require.True(t, enabled)
+					require.NoError(t, evaluateJobEnvAndDefaults(t.Context(), rc))
+					assert.Equal(t, model.RunDefaults{Shell: value}, rc.jobRunDefaults)
+					step := &stepRun{RunContext: rc, Step: job.Steps[0].Clone(), env: map[string]string{}}
+					require.NoError(t, setupEnv(t.Context(), step))
+					require.NoError(t, setupInputs(t.Context(), step))
+					assert.Equal(t, map[string]string{"ARGS": `${{ inputs.args }}`, "INPUT_NAME": value + "${{ github.job }}", "INPUT_FETCH-DEPTH": "1234567"}, step.Step.GetEnv())
+					assert.Equal(t, value+"${{ github.job }}", step.env["INPUT_NAME"])
+					assert.Equal(t, value+"${{ github.job }}", step.env["WORKFLOW"])
+					assert.Equal(t, "${{ github.job }}", step.env["PRIORITY"])
+					assert.Equal(t, "${{ github.job }}", step.env["CONTAINER"])
+					assert.Equal(t, rawEnv, workflow.RawEnv)
+					assert.Equal(t, rawWith, job.Steps[0].RawWith)
+					assert.Nil(t, workflow.Env)
+					assert.Nil(t, job.Steps[0].With)
+				})
+			}
+		})
+	}
+
+	t.Run("rejects inputs that still contain an expression", func(t *testing.T) {
+		workflow, err := model.ReadWorkflow(strings.NewReader("jobs:\n  test:\n    steps:\n      - uses: ./act\n        with: ${{ inputs.args }}\n"))
+		require.NoError(t, err)
+		rc, err := (&runnerImpl{config: &Config{}}).newRunContext(t.Context(), &model.Run{Workflow: workflow, JobID: "test"}, nil)
+		require.NoError(t, err)
+		rc.workflowCallInputs = map[string]any{"args": "${{ inputs.unresolved }}"}
+		require.ErrorContains(t, setupInputs(t.Context(), &stepRun{RunContext: rc, Step: workflow.Jobs["test"].Steps[0].Clone(), env: map[string]string{}}), "with:")
+	})
 }
 
 func TestIsStepEnabled(t *testing.T) {
@@ -484,6 +551,29 @@ func TestRunStepExecutorParity(t *testing.T) {
 		assert.Equal(t, map[string]string{"declared": "child", "undeclared": "leak"}, childRC.StepResults[child.Step.ID].Outputs)
 		assert.Empty(t, outer.RunContext.IntraActionState)
 		assert.Equal(t, "child", childRC.IntraActionState[child.Step.ID]["saved"])
+	})
+
+	t.Run("stages and composite steps are traced under Gitea's step names", func(t *testing.T) {
+		spans := tracetest.NewSpanRecorder()
+		telemetry.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+		t.Cleanup(func() { telemetry.SetTracerProvider(tracenoop.NewTracerProvider()) })
+		ctx, _ := telemetry.StartJob(t.Context(), &runnerv1.Task{Id: 7})
+		outer := newStep(t, &model.Step{ID: "outer", Uses: "actions/cache@v4", Number: 3})
+		child := newStep(t, &model.Step{ID: "child", Name: "Restore", Number: 1})
+		skipped := newStep(t, &model.Step{ID: "skipped", Name: "Deploy", Number: 4, If: yaml.Node{Value: "false"}})
+		broken := newStep(t, &model.Step{ID: "broken", Name: "Broken", Number: 5, If: yaml.Node{Value: badExpression}})
+
+		require.NoError(t, runStepExecutor(outer, stepStagePost, runStepExecutor(child, stepStageMain, noopExecutor))(ctx))
+		require.NoError(t, runStepExecutor(skipped, stepStageMain, noopExecutor)(ctx))
+		require.Error(t, runStepExecutor(broken, stepStageMain, noopExecutor)(ctx))
+
+		ended := spans.Ended()
+		require.Len(t, ended, 4)
+		assert.Equal(t, []string{"Restore", "Post Run actions/cache@v4", "Deploy", "Broken"}, []string{ended[0].Name(), ended[1].Name(), ended[2].Name(), ended[3].Name()})
+		assert.Equal(t, ended[1].SpanContext().SpanID(), ended[0].Parent().SpanID())
+		assert.Contains(t, ended[0].Attributes(), semconv.CICDPipelineTaskRunID("7.3.post.1"))
+		assert.Contains(t, ended[2].Attributes(), semconv.CICDPipelineTaskRunResultSkip)
+		assert.Contains(t, ended[3].Attributes(), semconv.CICDPipelineTaskRunResultFailure)
 	})
 
 	t.Run("timeout must be positive", func(t *testing.T) {

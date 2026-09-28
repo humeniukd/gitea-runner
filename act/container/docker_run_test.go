@@ -560,11 +560,14 @@ func TestCheckVolumes(t *testing.T) {
 				"shared_volume",
 				"/home/test/data",
 				"/etc/conf.d/*.json",
+				"/opt/**",
 			},
 			binds: []string{
 				"shared_volume:/shared_volume",
 				"/home/test/data:/test_data",
 				"/etc/conf.d/base.json:/config/base.json",
+				"/etc/conf.d/sub/nested.json:/config/nested.json",
+				"/opt/app/cache:/cache",
 				"sql_data:/sql_data",
 				"/secrets/keys:/keys",
 			},
@@ -572,6 +575,7 @@ func TestCheckVolumes(t *testing.T) {
 				"shared_volume:/shared_volume",
 				"/home/test/data:/test_data",
 				"/etc/conf.d/base.json:/config/base.json",
+				"/opt/app/cache:/cache",
 			},
 		},
 	}
@@ -678,6 +682,7 @@ func mergeOptions(t *testing.T, runnerOptions, workflowOptions string, privilege
 		WorkflowOptions: workflowOptions,
 		NetworkMode:     "bridge",
 		UsernsMode:      "private",
+		ValidVolumes:    []string{"**"},
 	}}
 
 	_, hostConfig, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{
@@ -814,12 +819,23 @@ func TestContainerInfoFromInspect(t *testing.T) {
 			Mounts: []container.MountPoint{
 				{Type: mount.TypeVolume, Name: "job", Source: "/var/lib/docker/volumes/job/_data", Destination: "/workspace/owner/repo"},
 				{Type: mount.TypeBind, Source: "/var/run/docker.sock", Destination: "/var/run/docker.sock"},
+				{Type: mount.TypeVolume, Name: "cache", Source: "/var/lib/docker/volumes/cache/_data", Destination: "/cache"},
+				{Type: mount.TypeBind, Source: "/custom/resolv.conf", Destination: "/etc/resolv.conf"},
+			},
+			HostConfig: &container.HostConfig{
+				Tmpfs:  map[string]string{"/workspace/owner/repo//tmp/": "size=1m"},
+				Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: "cache", Target: "/cache/", VolumeOptions: &mount.VolumeOptions{Subpath: "project"}}},
 			},
 		})
 
 		assert.Equal(t, map[string]string{
-			"/workspace/owner/repo": "/var/lib/docker/volumes/job/_data",
-			"/var/run/docker.sock":  "/var/run/docker.sock",
+			"/workspace/owner/repo":     "/var/lib/docker/volumes/job/_data",
+			"/workspace/owner/repo/tmp": "",
+			"/var/run/docker.sock":      "/var/run/docker.sock",
+			"/cache":                    "/var/lib/docker/volumes/cache/_data/project",
+			"/etc/resolv.conf":          "/custom/resolv.conf",
+			"/etc/hosts":                "",
+			"/etc/hostname":             "",
 		}, info.Mounts)
 	})
 }
@@ -829,8 +845,10 @@ func TestMergeContainerConfigsVolumesReplaceRunnerMounts(t *testing.T) {
 	ctx := common.WithLogger(context.Background(), logger)
 	cr := &containerReference{
 		input: &NewContainerInput{
-			NetworkMode:   "bridge",
-			RunnerOptions: "--volume /host/tools:/opt/hostedtoolcache",
+			NetworkMode:     "bridge",
+			RunnerOptions:   "--volume /host/tools:/opt/hostedtoolcache",
+			WorkflowOptions: "--volume /unapproved:/var/run/docker.sock",
+			ValidVolumes:    []string{"/host/tools"},
 		},
 	}
 
@@ -852,6 +870,7 @@ func TestMergeContainerConfigsWarnsOnlyAboutOptionsThatWereGiven(t *testing.T) {
 	assert.Zero(t, warnings("--volume /host/tools:/opt/hostedtoolcache", ""))
 	assert.Zero(t, warnings("", "--shm-size 1g"))
 	assert.Equal(t, 1, warnings("--network host", ""))
+	assert.Equal(t, 1, warnings("", "--privileged"))
 }
 
 func TestMergeContainerConfigsKeepsNetworkAliasesFromOptions(t *testing.T) {

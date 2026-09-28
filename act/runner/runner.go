@@ -7,7 +7,6 @@ package runner
 import (
 	"context"
 	"fmt"
-	"maps"
 	"os"
 	"runtime"
 	"sync"
@@ -15,10 +14,12 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
+	"gitea.com/gitea/runner/act/ghcontext"
 
 	"gitea.dev/actionslib/pkg/model"
 	docker_container "github.com/moby/moby/api/types/container"
 	log "github.com/sirupsen/logrus"
+	"go.yaml.in/yaml/v4"
 )
 
 // Config contains the config for a new runner
@@ -56,10 +57,12 @@ type Config struct {
 	DisableActEnv                 bool                                          // do not inject the ACT=true environment variable into jobs
 	ContainerNetworkMode          docker_container.NetworkMode                  // the network mode of job containers (the value of --network)
 	ContainerNetworkCreateOptions container.NewDockerNetworkCreateExecutorInput // the default network create options
+	CacheContainer                string                                        // let jobs reach an otherwise isolated cache
 	ProxyEnv                      map[string]string                             // the proxy variables the job runs with, also given to service containers and image builds
 	NoActionPatch                 bool                                          // run actions exactly as published, applying no compatibility patches, see patch_actions.go
 
 	PresetGitHubContext   *model.GithubContext // overrides actor, ref, repository, token and related context fields
+	WorkflowCallInputs    map[string]any       // the `inputs` Gitea resolved for a called workflow's job, nil for other jobs
 	EventJSON             string               // the content of JSON file to use for event.json in containers, overrides EventPath
 	ContainerNamePrefix   string               // the prefix of container name
 	ContainerMaxLifetime  time.Duration        // the max lifetime of job containers
@@ -155,6 +158,18 @@ func (runner *runnerImpl) configure() (*runnerImpl, error) {
 	return runner, nil
 }
 
+func maxParallelFor(strategy *model.Strategy, combinations int) int {
+	maxParallel := 4 // actionslib has no default for an undeclared max-parallel
+	if strategy != nil {
+		if limit, err := strategy.MaxParallel(); err != nil {
+			log.Errorf("Ignoring invalid max-parallel: %v", err)
+		} else if limit > 0 {
+			maxParallel = limit
+		}
+	}
+	return min(maxParallel, combinations)
+}
+
 // NewPlanExecutor ...
 func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 	maxJobNameLen := 0
@@ -191,21 +206,29 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 				log.Debugf("Job.With: %v", job.With)
 				log.Debugf("Job.Result: %v", job.Result)
 
-				if job.Strategy != nil {
-					log.Debugf("Job.Strategy.FailFast: %v", job.Strategy.FailFast)
-					log.Debugf("Job.Strategy.MaxParallel: %v", job.Strategy.MaxParallel)
-					log.Debugf("Job.Strategy.FailFastString: %v", job.Strategy.FailFastString)
-					log.Debugf("Job.Strategy.MaxParallelString: %v", job.Strategy.MaxParallelString)
-					log.Debugf("Job.Strategy.RawMatrix: %v", job.Strategy.RawMatrix)
-
+				if job.Strategy != nil || job.RawStrategy.Kind == yaml.ScalarNode {
 					strategyRc, err := runner.newRunContext(ctx, run, nil)
 					if err != nil {
 						return err
 					}
-					// Resolve template expressions in the matrix node before Matrix() is called.
-					// On failure the literal string is kept and normalizeMatrixValue wraps it as a fallback.
-					if err := strategyRc.NewExpressionEvaluator(ctx).EvaluateYamlNode(ctx, &job.Strategy.RawMatrix); err != nil {
-						log.Errorf("Error while evaluating matrix: %v", err)
+					if job.RawStrategy.Kind == yaml.ScalarNode {
+						if err := model.DecodeEvaluated("job strategy", job.RawStrategy, strategyRc.ExprEval.shared(ctx).EvaluateYamlNode, &job.Strategy); err != nil {
+							return err
+						}
+					} else {
+						log.Debugf("Job.Strategy.FailFast: %v", job.Strategy.GetFailFast())
+						log.Debugf("Job.Strategy.FailFastString: %v", job.Strategy.FailFastString)
+						log.Debugf("Job.Strategy.MaxParallelString: %v", job.Strategy.MaxParallelString)
+						log.Debugf("Job.Strategy.RawMatrix: %v", job.Strategy.RawMatrix)
+						// An unevaluated expression is left in place, which GetMatrixes below rejects.
+						if err := strategyRc.NewExpressionEvaluator(ctx).EvaluateYamlNode(ctx, &job.Strategy.RawMatrix); err != nil {
+							log.Errorf("Error while evaluating matrix: %v", err)
+						}
+						for _, value := range []*string{&job.Strategy.FailFastString, &job.Strategy.MaxParallelString} {
+							if evaluated, err := strategyRc.ExprEval.Interpolate(ctx, *value); err == nil {
+								*value = evaluated
+							}
+						}
 					}
 				}
 
@@ -215,25 +238,21 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 				}
 				log.Debugf("Job Matrices: %v", matrixes)
 
-				maxParallel := 4
-				if job.Strategy != nil {
-					// Ensure GetMaxParallel() is called if MaxParallel is still 0
-					if job.Strategy.MaxParallel == 0 {
-						job.Strategy.MaxParallel = job.Strategy.GetMaxParallel()
-					}
-					maxParallel = job.Strategy.MaxParallel
-					log.Debugf("Using job.Strategy.MaxParallel: %d", maxParallel)
-				}
-
-				if len(matrixes) < maxParallel {
-					log.Debugf("Adjusting maxParallel from %d to %d (number of matrix combinations)", maxParallel, len(matrixes))
-					maxParallel = len(matrixes)
-				}
+				maxParallel := maxParallelFor(job.Strategy, len(matrixes))
 
 				log.Infof("Running job with maxParallel=%d for %d matrix combinations", maxParallel, len(matrixes))
 
 				for i, matrix := range matrixes {
-					rc, err := runner.newRunContext(ctx, run, matrix)
+					index, total := i, len(matrixes)
+					if runner.caller == nil && runner.config.PresetGitHubContext != nil && len(matrix) > 0 {
+						var expanded struct {
+							Index int `yaml:"job-index"`
+							Total int `yaml:"job-total"`
+						}
+						_ = job.RawStrategy.Decode(&expanded) // Gitea expanded the combination, a version writing neither leaves them unknown
+						index, total = expanded.Index, expanded.Total
+					}
+					rc, err := runner.newCombinationRunContext(ctx, run, matrix, index, total)
 					if err != nil {
 						return err
 					}
@@ -305,7 +324,8 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 		})
 	}
 
-	return common.NewPipelineExecutor(stagePipeline...).Then(handleFailure(plan))
+	executor := common.NewPipelineExecutor(stagePipeline...).Then(handleFailure(plan))
+	return func(ctx context.Context) error { return executor(ghcontext.WithPinnedCheckout(ctx)) }
 }
 
 func handleFailure(plan *model.Plan) common.Executor {
@@ -322,6 +342,10 @@ func handleFailure(plan *model.Plan) common.Executor {
 }
 
 func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, matrix map[string]any) (*RunContext, error) {
+	return runner.newCombinationRunContext(ctx, run, matrix, 0, 1)
+}
+
+func (runner *runnerImpl) newCombinationRunContext(ctx context.Context, run *model.Run, matrix map[string]any, index, total int) (*RunContext, error) {
 	rc := &RunContext{
 		Config:      runner.config,
 		Run:         run,
@@ -329,16 +353,16 @@ func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, mat
 		StepResults: make(map[string]*model.StepResult),
 		Matrix:      matrix,
 		caller:      runner.caller,
+		jobIndex:    index,
+		jobTotal:    total,
 	}
 	if err := rc.resolveWorkflowCall(ctx); err != nil {
 		return nil, err
 	}
 	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
 	rc.Name = rc.maskSecrets(rc.ExprEval.InterpolateName(ctx, run.String()))
-	// Snapshot the job's pristine output expressions now, before any matrix combo runs and
-	// rewrites the shared Job.Outputs (see interpolateOutputs).
-	if job := run.Job(); job != nil {
-		rc.outputTemplate = maps.Clone(job.Outputs)
+	if job := run.Job(); job != nil && job.RawOutputs.Kind != 0 {
+		job.Outputs = nil // a job no combination ran for reads "" as on GitHub, a Gitea needs placeholder has no RawOutputs and keeps its outputs
 	}
 
 	return rc, nil

@@ -24,6 +24,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"connectrpc.com/connect"
+	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -250,15 +251,19 @@ func TestNewRunnerLeavesProxyToTheTask(t *testing.T) {
 
 	cfg := &config.Config{}
 	cfg.Cache.ExternalServer = "http://cache.local:8088/"
+	cfg.Cache.Host = "runner.local"
 	reg := &config.Registration{Name: "runner"}
 	cli := clientmocks.NewClient(t)
 	cli.AddressValue = "https://gitea.example/"
 
 	r := NewRunner(cfg, reg, cli)
+	t.Cleanup(func() { _ = r.Close() })
 
 	require.NotContains(t, r.envs, "http_proxy")
 	require.NotContains(t, r.envs, "no_proxy")
-	assert.Empty(t, r.builtInCacheURL(), "an external cache server is the operator's to exempt, not ours")
+	proxyEnv := JobProxyEnv(r.envs, r.builtInCacheURL(), nil)
+	assert.Contains(t, proxyEnv["no_proxy"], "runner.local")
+	assert.NotContains(t, proxyEnv["no_proxy"], "cache.local")
 }
 
 func taskWithDefaultActionsURL(url string) *runnerv1.Task {
@@ -288,7 +293,7 @@ func TestNewRunnerCacheServiceV2(t *testing.T) {
 
 	// The registration is what makes it true: the cache server takes the results service over,
 	// having been told which instance to forward the artifact half to.
-	revoke, resultsURL := r.registerCacheForTask(token, "owner/repo", nil)
+	revoke, resultsURL := r.registerCacheForTask(token, "owner/repo", r.cacheHandler.ExternalURL(), nil)
 	defer revoke()
 	require.Equal(t, r.cacheHandler.ExternalURL(), resultsURL)
 
@@ -337,21 +342,64 @@ func TestNewRunnerCacheServiceV2(t *testing.T) {
 		assert.Equal(t, resultsURL, envs["ACTIONS_RESULTS_URL"], instance)
 		assert.Empty(t, envs[runner.CacheServiceV2Env])
 	}
+
+	workflow, err := model.ReadWorkflow(strings.NewReader(`jobs: {native: {runs-on: native}, linux: {runs-on: linux}, containerized: {runs-on: native, container: alpine}, empty: {runs-on: native, container: ""}}`))
+	require.NoError(t, err)
+	r.isolatedCacheContainer = func() string { return "a1b2c3d4e5f6" }
+	pickPlatform := func(runsOn []string) string { return map[string]string{"native": labels.SelfHostedPlatform}[runsOn[0]] }
+	for job, isolated := range map[string]bool{"native": false, "linux": true, "containerized": true, "empty": false} {
+		cacheURL, cacheContainer := r.cacheForJob(workflow.GetJob(job), pickPlatform)
+		if isolated {
+			assert.Equal(t, "a1b2c3d4e5f6", cacheContainer, job)
+			assert.Equal(t, strings.Replace(r.cacheHandler.ExternalURL(), "127.0.0.1", cacheContainer, 1), cacheURL, job)
+		} else {
+			assert.Empty(t, cacheContainer, job)
+			assert.Equal(t, r.cacheHandler.ExternalURL(), cacheURL, job)
+		}
+	}
 }
 
-// The v1 cache client appends its path to ACTIONS_CACHE_URL without a separator, so a configured
-// server that is missing the slash would send it to a URL whose port swallows the path.
-func TestNewRunnerNormalizesTheExternalCacheServer(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Cache.ExternalServer = "http://cache.local:8088//"
-	cli := clientmocks.NewClient(t)
-	cli.AddressValue = "https://gitea.example/"
+func TestRestoreCalledWorkflowContext(t *testing.T) {
+	newTask := func(workflowCall map[string]any) *runnerv1.Task {
+		values := map[string]any{
+			"event_name": "workflow_call",
+			"event":      map[string]any{"ref": "refs/heads/main", "inputs": map[string]any{"env": "leaf"}},
+		}
+		if workflowCall != nil {
+			values["gitea_workflow_call"] = workflowCall
+		}
+		taskCtx, err := structpb.NewStruct(values)
+		require.NoError(t, err)
+		return &runnerv1.Task{Context: taskCtx}
+	}
 
-	r := NewRunner(cfg, &config.Registration{Name: "runner"}, cli)
+	t.Run("dispatched run", func(t *testing.T) {
+		task := newTask(map[string]any{
+			"original_event_name":   "workflow_dispatch",
+			"original_event_inputs": map[string]any{"target": "prod"},
+			"inputs":                map[string]any{"target": "prod", "env": "leaf"},
+		})
+		assert.Equal(t, map[string]any{"target": "prod", "env": "leaf"}, restoreCalledWorkflowContext(task))
+		taskCtx := task.Context.AsMap()
+		assert.Equal(t, "workflow_dispatch", taskCtx["event_name"])
+		assert.Equal(t, map[string]any{"ref": "refs/heads/main", "inputs": map[string]any{"target": "prod"}}, taskCtx["event"])
+		assert.Equal(t, []string{"::group::Inputs", "env: leaf", "target: prod", "::endgroup::"}, inputLines(task.Context.Fields))
+	})
 
-	assert.Equal(t, "http://cache.local:8088/", r.envs["ACTIONS_CACHE_URL"])
-	// Nothing to front the results service with, so the variable stays unset and the client keeps
-	// to v1, which reads the cache URL first.
-	assert.Equal(t, "https://gitea.example", r.envs["ACTIONS_RESULTS_URL"])
-	assert.Empty(t, r.envs[runner.CacheServiceV2Env])
+	t.Run("event without inputs", func(t *testing.T) {
+		task := newTask(map[string]any{
+			"original_event_name": "push",
+			"inputs":              map[string]any{"env": "leaf"},
+		})
+		assert.Equal(t, map[string]any{"env": "leaf"}, restoreCalledWorkflowContext(task))
+		taskCtx := task.Context.AsMap()
+		assert.Equal(t, "push", taskCtx["event_name"])
+		assert.Equal(t, map[string]any{"ref": "refs/heads/main"}, taskCtx["event"])
+	})
+
+	t.Run("not a called workflow's job", func(t *testing.T) {
+		task := newTask(nil)
+		assert.Nil(t, restoreCalledWorkflowContext(task))
+		assert.Equal(t, "workflow_call", task.Context.AsMap()["event_name"])
+	})
 }
