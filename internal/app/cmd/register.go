@@ -80,6 +80,7 @@ type registerArgs struct {
 	RunnerName    string
 	Labels        string
 	Ephemeral     bool
+	RunnerFile    string
 }
 
 type registerStage int8
@@ -253,6 +254,9 @@ func registerInteractive(ctx context.Context, configFile string, regArgs *regist
 	if err != nil {
 		return fmt.Errorf("failed to load config: %v", err)
 	}
+	if regArgs.RunnerFile != "" {
+		cfg.Runner.File = regArgs.RunnerFile
+	}
 	if f, err := os.Stat(cfg.Runner.File); err == nil && !f.IsDir() {
 		stage = StageOverwriteLocalConfig
 	}
@@ -315,6 +319,9 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
 	cfg, err := config.LoadDefault(configFile)
 	if err != nil {
 		return err
+	}
+	if regArgs.RunnerFile != "" {
+		cfg.Runner.File = regArgs.RunnerFile
 	}
 	inputs, err := initInputs(regArgs)
 	if err != nil {

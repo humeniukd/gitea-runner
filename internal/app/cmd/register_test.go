@@ -5,9 +5,11 @@ package cmd
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"gitea.com/gitea/runner/internal/pkg/config"
+	"gitea.com/gitea/runner/internal/pkg/lock"
 
 	"github.com/stretchr/testify/require"
 	"gotest.tools/v3/assert"
@@ -245,4 +247,21 @@ func TestInitInputs(t *testing.T) {
 		})
 		require.Nil(t, inputs.Labels)
 	})
+}
+
+func TestRunnerFileOverrideUsesTheSelectedRegistrationLock(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(file, []byte("runner:\n  file: ignored.json\n"), 0o600))
+	selected := filepath.Join(t.TempDir(), "selected.json")
+	release, err := lock.TryLock(selected)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, release()) })
+	err = registerNoInteractive(t.Context(), file, &registerArgs{
+		RunnerFile: selected, Labels: "host:host", Token: "token", InstanceAddr: "http://localhost:3000",
+	})
+	require.ErrorContains(t, err, "another process is already using")
+	require.ErrorContains(t, err, selected)
+	require.NoError(t, config.SaveRegistration(selected, &config.Registration{}))
+	err = runDaemon(t.Context(), &daemonArgs{RunnerFile: selected}, &file)(nil, nil)
+	require.ErrorIs(t, err, lock.ErrLocked)
 }

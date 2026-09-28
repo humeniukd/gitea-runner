@@ -21,7 +21,7 @@ func Execute(ctx context.Context) {
 		SilenceUsage: true,
 	}
 	configFile := ""
-	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path. `config` subcommands fall back to config.yaml in the working directory or next to the executable")
+	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path. Config editing subcommands fall back to config.yaml in the working directory or next to the executable")
 
 	// ./gitea-runner register
 	var regArgs registerArgs
@@ -37,6 +37,7 @@ func Execute(ctx context.Context) {
 	registerCmd.Flags().StringVar(&regArgs.TokenFile, "token-file", "", "Path to a file containing the runner token")
 	registerCmd.Flags().StringVar(&regArgs.RunnerName, "name", "", "Runner name")
 	registerCmd.Flags().StringVar(&regArgs.Labels, "labels", "", "Runner tags, comma separated")
+	registerCmd.Flags().StringVar(&regArgs.RunnerFile, "runner-file", "", "Registration file path. Overrides runner.file")
 	registerCmd.Flags().BoolVar(&regArgs.Ephemeral, "ephemeral", false, "Configure the runner to be ephemeral and only ever be able to pick a single job (stricter than --once)")
 	rootCmd.AddCommand(registerCmd)
 
@@ -48,6 +49,7 @@ func Execute(ctx context.Context) {
 		Args:  cobra.MaximumNArgs(0),
 		RunE:  runDaemon(ctx, &daemArgs, &configFile),
 	}
+	daemonCmd.Flags().StringVar(&daemArgs.RunnerFile, "runner-file", "", "Registration file path. Overrides runner.file")
 	daemonCmd.Flags().BoolVar(&daemArgs.Once, "once", false, "Run one job then exit")
 	daemonCmd.Flags().StringVar(&daemArgs.Labels, "labels", os.Getenv("GITEA_RUNNER_LABELS"), "Runner labels, comma separated. Overrides the labels of an already registered runner")
 	rootCmd.AddCommand(daemonCmd)

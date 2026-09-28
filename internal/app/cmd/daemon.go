@@ -41,6 +41,10 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			return fmt.Errorf("invalid configuration: %w", err)
 		}
 
+		if daemArgs.RunnerFile != "" {
+			cfg.Runner.File = daemArgs.RunnerFile
+		}
+
 		initLogging(cfg)
 		log.Infoln("Starting runner daemon")
 
@@ -253,8 +257,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 }
 
 type daemonArgs struct {
-	Once   bool
-	Labels string
+	RunnerFile string
+	Once       bool
+	Labels     string
 }
 
 // resolveLabels picks the labels to run with: --labels/GITEA_RUNNER_LABELS > config > .runner.
