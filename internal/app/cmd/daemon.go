@@ -244,6 +244,12 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			log.Warnf("runner: %s cancelled in progress jobs during shutdown", resp.Msg.Runner.Name)
 		}
 
+		if reg.Ephemeral && (poller.TaskConsumed() || poller.Unregistered()) {
+			if err := os.Remove(cfg.Runner.File); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove consumed ephemeral registration: %w", err)
+			}
+		}
+
 		if poller.Unregistered() {
 			return errors.New("runner is no longer registered with the server; please register it again")
 		}

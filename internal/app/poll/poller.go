@@ -39,6 +39,7 @@ type AvailabilityRunner interface {
 }
 
 type Poller struct {
+	consumedTask atomic.Bool
 	client       client.Client
 	runner       TaskRunner
 	cfg          *config.Config
@@ -187,6 +188,11 @@ func (p *Poller) Done() <-chan struct{} {
 
 // Unregistered reports whether polling stopped because the server rejected the
 // runner as unregistered (an Unauthenticated response).
+// TaskConsumed reports whether this daemon has fetched a task, even if it failed or was cancelled.
+func (p *Poller) TaskConsumed() bool {
+	return p.consumedTask.Load()
+}
+
 func (p *Poller) Unregistered() bool {
 	return p.unregistered.Load()
 }
@@ -325,6 +331,7 @@ func addJitter(d time.Duration) time.Duration {
 }
 
 func (p *Poller) runTaskWithRecover(ctx context.Context, task *runnerv1.Task) {
+	p.consumedTask.Store(true)
 	defer func() {
 		if r := recover(); r != nil {
 			err := fmt.Errorf("panic: %v", r)
