@@ -1590,20 +1590,23 @@ func TestHandler_InternalAPI_AuthAndUsage(t *testing.T) {
 // to advertise the cache server's URL, and that it overrides the default host
 // and port.
 func TestHandler_CustomExternalURL(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := StartHandler(Options{Dir: dir, ExternalURL: "https://example.com:1234/"})
-	require.NoError(t, err)
-
-	defer func() {
-		require.NoError(t, handler.Close())
-	}()
-
-	t.Run("strips tailing slashes", func(t *testing.T) {
-		assert.Equal(t, "https://example.com:1234", handler.ExternalURL())
-	})
-
-	t.Run("returns error on invalid URL", func(t *testing.T) {
-		_, err := StartHandler(Options{Dir: dir, ExternalURL: "invalid-url"})
-		require.Error(t, err)
-	})
+	for _, raw := range []string{"http://example.com", "https://example.com:1234/", "https://example.com/cache///"} {
+		t.Run(raw, func(t *testing.T) {
+			handler, err := StartHandler(Options{Dir: t.TempDir(), ExternalURL: raw})
+			require.NoError(t, err)
+			defer func() { require.NoError(t, handler.Close()) }()
+			expected := strings.TrimRight(raw, "/")
+			assert.Equal(t, expected, handler.ExternalURL())
+			assert.True(t, strings.HasPrefix(signArtifactURL(handler, 1), expected+apiPath+"/artifacts/"))
+		})
+	}
+	for _, raw := range []string{"invalid-url", "/cache", "ftp://example.com", "https://", "https://example.com?region=eu", "https://example.com?", "https://example.com#fragment", "https://example.com#"} {
+		t.Run(raw, func(t *testing.T) {
+			handler, err := StartHandler(Options{Dir: t.TempDir(), ExternalURL: raw})
+			if handler != nil {
+				defer handler.Close()
+			}
+			require.Error(t, err)
+		})
+	}
 }

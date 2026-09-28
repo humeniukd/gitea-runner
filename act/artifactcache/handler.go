@@ -157,10 +157,16 @@ func StartHandler(opts Options) (*Handler, error) {
 	h.logger = logger
 
 	if opts.ExternalURL != "" {
-		parsedURL, err := url.ParseRequestURI(strings.TrimSuffix(opts.ExternalURL, "/"))
+		parsedURL, err := url.Parse(opts.ExternalURL)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("parse cache external URL: %w", err)
 		}
+		if (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Hostname() == "" ||
+			parsedURL.RawQuery != "" || parsedURL.ForceQuery || strings.Contains(opts.ExternalURL, "#") {
+			return nil, errors.New("cache external URL must be an absolute HTTP(S) URL without a query or fragment")
+		}
+		parsedURL.Path = strings.TrimRight(parsedURL.Path, "/")
+		parsedURL.RawPath = strings.TrimRight(parsedURL.RawPath, "/")
 		h.externalURL = parsedURL
 	}
 

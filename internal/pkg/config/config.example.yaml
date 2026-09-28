@@ -156,6 +156,9 @@ cache:
   # Set on every runner that should share a cache pool. A trailing slash is optional.
   # Example: "http://cache-host:8088/"
   # Requires external_secret (below) to match the value on the cache-server.
+  # On cache-server, this sets the advertised fallback URL for cache downloads.
+  # --external-url overrides it. Per-job URLs supplied by runners take precedence.
+  # Use an absolute HTTP(S) URL without a query or fragment; path prefixes are allowed.
   #external_server: ""
   # Shared secret between this runner and the external cache-server.
   # Required when external_server is set. Must be identical on every runner and the cache-server.

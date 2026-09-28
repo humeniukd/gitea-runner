@@ -339,6 +339,8 @@ cache:
 
 `--dir`, `--host` and `--port` override the matching `cache` keys. Eviction settings take effect on the cache server, not on the runners.
 
+On `cache-server`, `cache.external_server` sets the advertised fallback URL for cache downloads; `--external-url` overrides it. See [cache server URLs](docs/cache-server.md) for URL requirements and precedence.
+
 Runners can also share one `cache.dir` on a file system with working file locks, at the cost of slower cache requests.
 
 **Storing the cache in an S3-compatible bucket**
