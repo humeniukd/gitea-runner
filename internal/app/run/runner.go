@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -464,6 +465,8 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	}
 	telemetry.AddJobEnv(ctx, envs)
 
+	logTaskInfo(task, jobID)
+
 	log.Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
 		r.getDefaultActionsURL(task),
 		r.client.Address())
@@ -895,4 +898,29 @@ func (r *Runner) detectIsolatedCacheContainer() string {
 		log.Warnf("cannot check whether jobs reach the cache server: %v", err)
 	}
 	return cacheContainer
+}
+
+func logTaskInfo(task *runnerv1.Task, job string) {
+	fields := log.Fields{"task_id": task.Id, "job": job}
+	context := task.GetContext().GetFields()
+	for _, key := range []string{"repository", "run_id", "run_number"} {
+		if value := context[key].GetStringValue(); value != "" {
+			fields[key] = value
+		}
+	}
+	// Decode only identifiers for observability; this does not authenticate the token.
+	parts := strings.Split(context["gitea_runtime_token"].GetStringValue(), ".")
+	if len(parts) == 3 {
+		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+		var claims struct{ TaskID, RunID, JobID int64 }
+		if err == nil && json.Unmarshal(payload, &claims) == nil && claims.TaskID == task.Id {
+			if claims.JobID > 0 {
+				fields["job_id"] = claims.JobID
+			}
+			if claims.RunID > 0 && fields["run_id"] == nil {
+				fields["run_id"] = strconv.FormatInt(claims.RunID, 10)
+			}
+		}
+	}
+	log.WithFields(fields).Info("task started")
 }

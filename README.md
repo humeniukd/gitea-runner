@@ -419,3 +419,7 @@ A job's secrets and its `::add-mask::` values are hidden from what the runner wr
 ### Example Deployments
 
 Check out the [examples](examples) directory for sample deployment types.
+
+#### Task identifiers in daemon logs
+
+When a task starts, the runner writes a `task started` log entry with `task_id`, the workflow's `job` key, and the `repository`, `run_id`, and `run_number` supplied by Gitea. It also includes the numeric `job_id` when the task's runtime token contains matching task identifiers. These fields let external runner supervisors correlate a running task with the Gitea UI/API without logging its tokens, secrets, or full event payload.
