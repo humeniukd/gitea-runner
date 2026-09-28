@@ -19,7 +19,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/process"
 	"gitea.com/gitea/runner/internal/pkg/report"
 
-	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
+	runnerv1 "gitea.dev/actionslib/runner/v1"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -74,8 +74,7 @@ func (r *Runner) runPostTaskScript(ctx context.Context, reporter *report.Reporte
 			log.Warnf("post-task script %q for task %d: %v", script, task.Id, err)
 			return
 		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			log.Warnf("post-task script %q for task %d exited with code %d", script, task.Id, exitErr.ExitCode())
 			return
 		}

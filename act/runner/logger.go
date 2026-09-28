@@ -7,8 +7,12 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -75,7 +79,7 @@ type JobLoggerFactory interface {
 
 type jobLoggerFactoryContextKey string
 
-var jobLoggerFactoryContextKeyVal = (jobLoggerFactoryContextKey)("jobloggerkey")
+var jobLoggerFactoryContextKeyVal = jobLoggerFactoryContextKey("jobloggerkey")
 
 func WithJobLoggerFactory(ctx context.Context, factory JobLoggerFactory) context.Context {
 	return context.WithValue(ctx, jobLoggerFactoryContextKeyVal, factory)
@@ -96,10 +100,7 @@ func WithJobLogger(ctx context.Context, jobID, jobName string, config *Config, m
 			mux.Lock()
 			defer mux.Unlock()
 			nextColor++
-			formatter = &jobLogFormatter{
-				color:          colors[nextColor%len(colors)],
-				logPrefixJobID: config.LogPrefixJobID,
-			}
+			formatter = &jobLogFormatter{color: colors[nextColor%len(colors)]}
 		}
 
 		logger = logrus.New()
@@ -121,7 +122,7 @@ func WithJobLogger(ctx context.Context, jobID, jobName string, config *Config, m
 
 	logger.SetFormatter(&maskedFormatter{
 		Formatter: logger.Formatter,
-		masker:    valueMasker(config.InsecureSecrets, config.Secrets),
+		masker:    valueMasker(config.InsecureSecrets, config.maskers()),
 	})
 	rtn := logger.WithFields(logrus.Fields{
 		"job":    jobName,
@@ -167,29 +168,159 @@ func withStepLogger(ctx context.Context, stepNumber int, stepID, stepName, stage
 
 type entryProcessor func(entry *logrus.Entry) *logrus.Entry
 
-func AppendSecretMasker(oldnew []string, v string) []string {
-	ret := oldnew
+var secretValueEncoders = []func(string) string{
+	func(v string) string { return base64.StdEncoding.EncodeToString([]byte(v)) },
+	base64ShiftEncoder(1),
+	base64ShiftEncoder(2),
+	base64InteriorEncoder(0),
+	base64InteriorEncoder(1),
+	base64InteriorEncoder(2),
+	expressionStringEscape,
+	jsonStringEscape,
+	jsonStringEscapeNoHTML,
+	uriDataEscape,
+	url.QueryEscape, // the form-encoded twin of uriDataEscape, which spells a space "+"
+	url.PathEscape,
+	xmlDataEscape,
+	trimDoubleQuotes,
+}
 
-	for l := range strings.SplitSeq(v, "\n") {
-		tm := strings.TrimSpace(l)
-		// formatted JSON secrets could otherwise mask {,[,],} everywhere
-		if len(tm) > 1 {
-			ret = append(ret, tm, "***")
+// base64ShiftEncoder reproduces the 3-byte alignments of `Basic base64("user:token")`, and
+// its padded tail only matches a secret that ends the payload.
+func base64ShiftEncoder(shift int) func(string) string {
+	return func(v string) string {
+		value := []byte(v)
+		if len(value) > shift {
+			value = value[shift:]
+		}
+		return base64.StdEncoding.EncodeToString(value)
+	}
+}
+
+const minInteriorBase64Len = 8 // below this a fragment matches unrelated output
+
+// base64InteriorEncoder keeps the aligned middle, so a secret with data after it still matches.
+func base64InteriorEncoder(shift int) func(string) string {
+	return func(v string) string {
+		buf := make([]byte, shift+len(v))
+		copy(buf[shift:], v)
+		encoded := base64.StdEncoding.EncodeToString(buf)
+		if len(encoded) < 8+minInteriorBase64Len {
+			return ""
+		}
+		return encoded[4 : len(encoded)-4]
+	}
+}
+
+func expressionStringEscape(v string) string {
+	return strings.ReplaceAll(v, "'", "''")
+}
+
+func uriDataEscape(v string) string {
+	return strings.ReplaceAll(url.QueryEscape(v), "+", "%20")
+}
+
+var xmlDataEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	`"`, "&quot;",
+	"'", "&apos;",
+)
+
+func xmlDataEscape(v string) string {
+	return xmlDataEscaper.Replace(v)
+}
+
+func trimDoubleQuotes(v string) string {
+	if len(v) > 8 && strings.HasPrefix(v, `"`) && strings.HasSuffix(v, `"`) {
+		return v[1 : len(v)-1]
+	}
+	return ""
+}
+
+// jsonStringEscape returns v as it appears inside a JSON string, without the quotes,
+// which is what `toJSON(secrets)` or any action logging a JSON body produces. Go's encoder
+// escapes <, >, & (as act's own toJSON does); the non-HTML variant below covers the runtimes
+// that do not. When v has none of those characters both forms are equal and deduplicated.
+func jsonStringEscape(v string) string {
+	encoded, err := json.Marshal(v, jsontext.EscapeForHTML(true))
+	if err != nil {
+		return v
+	}
+	return string(encoded[1 : len(encoded)-1])
+}
+
+// jsonStringEscapeNoHTML is jsonStringEscape without HTML escaping, matching the JSON a
+// JavaScript (JSON.stringify) or .NET action emits, so a secret containing < > or & is
+// masked in that form too.
+func jsonStringEscapeNoHTML(v string) string {
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	return string(encoded[1 : len(encoded)-1])
+}
+
+// AppendSecretMaskers skips the debug settings, as GitHub does: they arrive as secrets, but
+// masking "true" would corrupt unrelated log lines and drop job outputs that say it.
+func AppendSecretMaskers(oldnew []string, secrets map[string]string) []string {
+	for k, v := range secrets {
+		if k != "ACTIONS_STEP_DEBUG" && k != "ACTIONS_RUNNER_DEBUG" {
+			oldnew = AppendSecretMasker(oldnew, v)
 		}
 	}
+	return oldnew
+}
 
+// AppendSecretMasker registers v and each of its lines, as GitHub does.
+func AppendSecretMasker(oldnew []string, v string) []string {
+	ret := appendMaskedValue(oldnew, v)
+	for l := range strings.FieldsFuncSeq(v, func(r rune) bool { return r == '\r' || r == '\n' }) {
+		ret = appendMaskedValue(ret, strings.TrimSpace(l))
+	}
+	return ret
+}
+
+// appendMaskedValue registers one value and every shape it takes on its way into a log.
+func appendMaskedValue(ret []string, v string) []string {
+	// formatted JSON secrets could otherwise mask {,[,],} everywhere
+	if len(strings.TrimSpace(v)) <= 1 || slices.Contains(ret, v) {
+		return ret
+	}
+	ret = append(ret, v, "***")
+	// command data reaches the log escaped, so "pass%word" also arrives as "pass%25word"
+	if strings.ContainsAny(v, "%\r\n") {
+		ret = append(ret, EscapeCommandData(v), "***")
+	}
+	for _, encode := range secretValueEncoders {
+		encoded := encode(v)
+		// An encoding that leaves the value unchanged is already masked above.
+		if encoded == v || len(encoded) <= 1 || slices.Contains(ret, encoded) {
+			continue
+		}
+		ret = append(ret, encoded, "***")
+	}
 	return ret
 }
 
 // valueMasker applies secrets and ::add-mask:: patterns to every log entry, including
 // raw_output (command/stream) lines; there is no bypass by field.
-func valueMasker(insecureSecrets bool, secrets map[string]string) entryProcessor {
-	var oldnew []string
-	for _, v := range secrets {
-		oldnew = AppendSecretMasker(oldnew, v)
-	}
+func valueMasker(insecureSecrets bool, oldnew []string) entryProcessor {
 	oldnew = slices.Clip(oldnew)
-	defReplacer := strings.NewReplacer(oldnew...)
+	defReplacer := NewSecretReplacer(oldnew)
+
+	// A ::add-mask:: only ever appends to the job's mask slice, so the replacer built for
+	// it stays valid until the slice grows. Cache it, keyed by the slice itself and its
+	// length, instead of encoding every secret and mask again for each log line.
+	var (
+		mu       sync.Mutex
+		masksRef *[]string
+		pairs    []string
+		masked   int
+		replacer *strings.Replacer
+	)
+
 	return func(entry *logrus.Entry) *logrus.Entry {
 		if insecureSecrets {
 			return entry
@@ -199,15 +330,26 @@ func valueMasker(insecureSecrets bool, secrets map[string]string) entryProcessor
 
 		if len(*masks) == 0 {
 			entry.Message = defReplacer.Replace(entry.Message)
-		} else {
-			cmasker := oldnew
-
-			for _, v := range *masks {
-				cmasker = AppendSecretMasker(cmasker, v)
-			}
-
-			entry.Message = strings.NewReplacer(cmasker...).Replace(entry.Message)
+			return entry
 		}
+
+		mu.Lock()
+		// A composite action logs through the same masker with its own mask slice, so a
+		// different slice starts the cache over.
+		if masksRef != masks {
+			masksRef, pairs, masked, replacer = masks, oldnew, 0, nil
+		}
+		if replacer == nil || masked != len(*masks) {
+			for _, v := range (*masks)[masked:] {
+				pairs = AppendSecretMasker(pairs, v)
+			}
+			masked = len(*masks)
+			replacer = NewSecretReplacer(pairs)
+		}
+		cmasker := replacer
+		mu.Unlock()
+
+		entry.Message = cmasker.Replace(entry.Message)
 
 		return entry
 	}
@@ -223,12 +365,16 @@ func (f *maskedFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 }
 
 type jobLogFormatter struct {
-	color          int
-	logPrefixJobID bool
+	color int
 }
 
 func (f *jobLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	b := &bytes.Buffer{}
+
+	// the web renderer decodes command data, so this local view has to as well
+	if _, _, _, ok := tryParseRawActionCommand(entry.Message + "\n"); ok {
+		entry.Message = UnescapeCommandData(entry.Message)
+	}
 
 	if f.isColored(entry) {
 		f.printColored(b, entry)
@@ -243,27 +389,23 @@ func (f *jobLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 func (f *jobLogFormatter) printColored(b *bytes.Buffer, entry *logrus.Entry) {
 	entry.Message = strings.TrimSuffix(entry.Message, "\n")
 
-	var job any
-	if f.logPrefixJobID {
-		job = entry.Data["jobID"]
-	} else {
-		job = entry.Data["job"]
-	}
+	job := entry.Data["job"]
 
 	debugFlag := ""
 	if entry.Level == logrus.DebugLevel {
 		debugFlag = "[DEBUG] "
 	}
 
-	if entry.Data[rawOutputField] == true {
+	switch {
+	case entry.Data[rawOutputField] == true:
 		if entry.Data[scriptLineCyanField] == true {
 			fmt.Fprintf(b, "\x1b[%dm|\x1b[0m \x1b[36;1m%s\x1b[0m", f.color, entry.Message)
 		} else {
 			fmt.Fprintf(b, "\x1b[%dm|\x1b[0m %s", f.color, entry.Message)
 		}
-	} else if entry.Data["dryrun"] == true {
+	case entry.Data["dryrun"] == true:
 		fmt.Fprintf(b, "\x1b[1m\x1b[%dm\x1b[7m*DRYRUN*\x1b[0m \x1b[%dm[%s] \x1b[0m%s%s", gray, f.color, job, debugFlag, entry.Message)
-	} else {
+	default:
 		fmt.Fprintf(b, "\x1b[%dm[%s] \x1b[0m%s%s", f.color, job, debugFlag, entry.Message)
 	}
 }
@@ -271,23 +413,19 @@ func (f *jobLogFormatter) printColored(b *bytes.Buffer, entry *logrus.Entry) {
 func (f *jobLogFormatter) print(b *bytes.Buffer, entry *logrus.Entry) {
 	entry.Message = strings.TrimSuffix(entry.Message, "\n")
 
-	var job any
-	if f.logPrefixJobID {
-		job = entry.Data["jobID"]
-	} else {
-		job = entry.Data["job"]
-	}
+	job := entry.Data["job"]
 
 	debugFlag := ""
 	if entry.Level == logrus.DebugLevel {
 		debugFlag = "[DEBUG] "
 	}
 
-	if entry.Data[rawOutputField] == true {
+	switch {
+	case entry.Data[rawOutputField] == true:
 		fmt.Fprintf(b, "[%s]   | %s", job, entry.Message)
-	} else if entry.Data["dryrun"] == true {
+	case entry.Data["dryrun"] == true:
 		fmt.Fprintf(b, "*DRYRUN* [%s] %s%s", job, debugFlag, entry.Message)
-	} else {
+	default:
 		fmt.Fprintf(b, "[%s] %s%s", job, debugFlag, entry.Message)
 	}
 }
@@ -313,4 +451,40 @@ func checkIfTerminal(w io.Writer) bool {
 	default:
 		return false
 	}
+}
+
+// maskSecrets hides this job's secrets in a value that reaches somewhere the log maskers cannot,
+// such as a container name or a job summary. Masks added at runtime count, so a summary written
+// after ::add-mask:: is covered too.
+func (rc *RunContext) maskSecrets(value string) string {
+	oldnew := rc.Config.maskers()
+	for _, mask := range rc.Masks {
+		oldnew = AppendSecretMasker(oldnew, mask)
+	}
+	return NewSecretReplacer(oldnew).Replace(value)
+}
+
+// maskers is every value this job's configuration says to hide, whatever the sink.
+func (c *Config) maskers() []string {
+	oldnew := AppendSecretMaskers(nil, c.Secrets)
+	for _, mask := range c.ExtraMasks {
+		oldnew = AppendSecretMasker(oldnew, mask)
+	}
+	return oldnew
+}
+
+// NewSecretReplacer masks the longest secret first. Replacer matches in argument order, so a
+// secret that prefixes another would otherwise mask only that prefix and print the rest.
+func NewSecretReplacer(oldnew []string) *strings.Replacer {
+	pairs := make([][2]string, 0, len(oldnew)/2)
+	for i := 0; i+1 < len(oldnew); i += 2 {
+		pairs = append(pairs, [2]string{oldnew[i], oldnew[i+1]})
+	}
+	slices.SortFunc(pairs, func(a, b [2]string) int { return len(b[0]) - len(a[0]) })
+
+	sorted := make([]string, 0, len(pairs)*2)
+	for _, pair := range pairs {
+		sorted = append(sorted, pair[0], pair[1])
+	}
+	return strings.NewReplacer(sorted...)
 }

@@ -44,7 +44,27 @@ func TestParse(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			args:    "ubuntu:vm:ubuntu-18.04",
+			args: "pool:e57e18d4-10d4-406f-93bf-60f127221bdd",
+			want: &Label{
+				Name:   "pool:e57e18d4-10d4-406f-93bf-60f127221bdd",
+				Schema: "host",
+				Arg:    "",
+				Opaque: true,
+			},
+			wantErr: false,
+		},
+		{
+			args: "ubuntu:vm:ubuntu-18.04",
+			want: &Label{
+				Name:   "ubuntu:vm:ubuntu-18.04",
+				Schema: "host",
+				Arg:    "",
+				Opaque: true,
+			},
+			wantErr: false,
+		},
+		{
+			args:    "",
 			want:    nil,
 			wantErr: true,
 		},
@@ -103,10 +123,10 @@ func TestPickPlatform(t *testing.T) {
 		want   string
 	}{
 		{"docker strips leading slashes", []string{"ubuntu"}, "node:18"},
-		{"host maps to self-hosted marker", []string{"self-hosted"}, "-self-hosted"},
-		{"first match wins", []string{"self-hosted", "ubuntu"}, "-self-hosted"},
-		{"unknown falls back to default", []string{"windows"}, "docker.gitea.com/runner-images:ubuntu-latest"},
-		{"no runsOn falls back to default", nil, "docker.gitea.com/runner-images:ubuntu-latest"},
+		{"host maps to self-hosted marker", []string{"self-hosted"}, SelfHostedPlatform},
+		{"first match wins", []string{"self-hosted", "ubuntu"}, SelfHostedPlatform},
+		{"unknown label picks nothing", []string{"windows"}, ""},
+		{"no runsOn picks nothing", nil, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -116,8 +136,8 @@ func TestPickPlatform(t *testing.T) {
 }
 
 func TestNames(t *testing.T) {
-	ls := mustParse(t, "ubuntu:docker://node:18", "self-hosted:host")
-	require.Equal(t, []string{"ubuntu", "self-hosted"}, ls.Names())
+	ls := mustParse(t, "ubuntu:docker://node:18", "self-hosted:host", "pool:e57e18d4")
+	require.Equal(t, []string{"ubuntu", "self-hosted", "pool:e57e18d4"}, ls.Names())
 	require.Empty(t, Labels{}.Names())
 }
 
@@ -126,10 +146,26 @@ func TestToStrings(t *testing.T) {
 		"ubuntu:docker://node:18",
 		"self-hosted:host",
 		"bare",
+		"pool:e57e18d4",
 	)
 	require.Equal(t, []string{
 		"ubuntu:docker://node:18",
 		"self-hosted:host",
 		"bare:host",
+		"pool:e57e18d4",
 	}, ls.ToStrings())
+}
+
+// a colon-containing name must survive a write to and read back from the .runner file
+func TestOpaqueLabelRoundTrip(t *testing.T) {
+	const raw = "pool:e57e18d4-10d4-406f-93bf-60f127221bdd"
+
+	ls := mustParse(t, raw)
+	require.Equal(t, []string{raw}, ls.ToStrings())
+
+	again := mustParse(t, ls.ToStrings()...)
+	require.Equal(t, ls, again)
+	require.Equal(t, []string{raw}, again.Names())
+	require.False(t, again.RequireDocker())
+	require.Equal(t, SelfHostedPlatform, again.PickPlatform([]string{raw}))
 }

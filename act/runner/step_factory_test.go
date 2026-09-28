@@ -7,8 +7,7 @@ package runner
 import (
 	"testing"
 
-	"gitea.com/gitea/runner/act/model"
-
+	"gitea.dev/actionslib/pkg/model"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -58,6 +57,16 @@ func TestStepFactoryNewStep(t *testing.T) {
 				return ok
 			},
 		},
+		{
+			name: "StepBuiltinAction",
+			model: &model.Step{
+				Uses: "builtin:checkout",
+			},
+			check: func(s step) bool {
+				_, ok := s.(*stepActionBuiltin)
+				return ok
+			},
+		},
 	}
 
 	for _, tt := range table {
@@ -66,21 +75,18 @@ func TestStepFactoryNewStep(t *testing.T) {
 
 			step, err := sf.newStep(tt.model, &RunContext{})
 
-			assert.True(t, tt.check((step)))
+			assert.True(t, tt.check(step))
 			assert.NoError(t, err)
 		})
 	}
 }
 
 func TestStepFactoryInvalidStep(t *testing.T) {
-	model := &model.Step{
-		Uses: "remote/action@v1",
-		Run:  "cmd",
+	for _, stepModel := range []*model.Step{
+		{Uses: "remote/action@v1", Run: "cmd"},
+		{Uses: "builtin:unknown"},
+	} {
+		_, err := (&stepFactoryImpl{}).newStep(stepModel, &RunContext{})
+		assert.Error(t, err, stepModel.Uses)
 	}
-
-	sf := &stepFactoryImpl{}
-
-	_, err := sf.newStep(model, &RunContext{})
-
-	assert.Error(t, err)
 }

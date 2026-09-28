@@ -16,13 +16,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"gitea.com/gitea/runner/act/common"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
 	mobyclient "github.com/moby/moby/client"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
@@ -76,6 +77,11 @@ type mockDockerClient struct {
 	mock.Mock
 }
 
+func (m *mockDockerClient) ServerVersion(ctx context.Context, opts mobyclient.ServerVersionOptions) (mobyclient.ServerVersionResult, error) {
+	args := m.Called(ctx, opts)
+	return args.Get(0).(mobyclient.ServerVersionResult), args.Error(1)
+}
+
 func (m *mockDockerClient) ExecCreate(ctx context.Context, id string, opts mobyclient.ExecCreateOptions) (mobyclient.ExecCreateResult, error) {
 	args := m.Called(ctx, id, opts)
 	return args.Get(0).(mobyclient.ExecCreateResult), args.Error(1)
@@ -116,12 +122,42 @@ func (m *mockDockerClient) ContainerList(ctx context.Context, opts mobyclient.Co
 	return args.Get(0).(mobyclient.ContainerListResult), args.Error(1)
 }
 
-type endlessReader struct {
-	io.Reader
+func (m *mockDockerClient) ContainerRemove(ctx context.Context, id string, opts mobyclient.ContainerRemoveOptions) (mobyclient.ContainerRemoveResult, error) {
+	args := m.Called(ctx, id, opts)
+	return args.Get(0).(mobyclient.ContainerRemoveResult), args.Error(1)
 }
 
-func (r endlessReader) Read(_ []byte) (n int, err error) {
-	return 1, nil
+func (m *mockDockerClient) ContainerKill(ctx context.Context, id string, opts mobyclient.ContainerKillOptions) (mobyclient.ContainerKillResult, error) {
+	args := m.Called(ctx, id, opts)
+	return args.Get(0).(mobyclient.ContainerKillResult), args.Error(1)
+}
+
+func (m *mockDockerClient) NetworkList(ctx context.Context, opts mobyclient.NetworkListOptions) (mobyclient.NetworkListResult, error) {
+	args := m.Called(ctx, opts)
+	return args.Get(0).(mobyclient.NetworkListResult), args.Error(1)
+}
+
+func (m *mockDockerClient) NetworkInspect(ctx context.Context, id string, opts mobyclient.NetworkInspectOptions) (mobyclient.NetworkInspectResult, error) {
+	args := m.Called(ctx, id, opts)
+	return args.Get(0).(mobyclient.NetworkInspectResult), args.Error(1)
+}
+
+func (m *mockDockerClient) NetworkRemove(ctx context.Context, id string, opts mobyclient.NetworkRemoveOptions) (mobyclient.NetworkRemoveResult, error) {
+	args := m.Called(ctx, id, opts)
+	return args.Get(0).(mobyclient.NetworkRemoveResult), args.Error(1)
+}
+
+type interruptReader struct {
+	started     chan struct{}
+	interrupted chan struct{}
+	stopped     chan struct{}
+}
+
+func (r *interruptReader) Read(_ []byte) (int, error) {
+	close(r.started)
+	<-r.interrupted
+	close(r.stopped)
+	return 0, io.EOF
 }
 
 type mockConn struct {
@@ -141,16 +177,17 @@ func (m *mockConn) Close() (err error) {
 func TestDockerExecAbort(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	reader := &interruptReader{started: make(chan struct{}), interrupted: make(chan struct{}), stopped: make(chan struct{})}
 	conn := &mockConn{}
-	conn.On("Write", mock.AnythingOfType("[]uint8")).Return(1, nil)
+	conn.On("Write", []byte{3}).
+		Run(func(mock.Arguments) { close(reader.interrupted) }).
+		Return(1, nil)
 
 	client := &mockDockerClient{}
 	client.On("ExecCreate", ctx, "123", mock.AnythingOfType("client.ExecCreateOptions")).Return(mobyclient.ExecCreateResult{ID: "id"}, nil)
 	client.On("ExecAttach", ctx, "id", mock.AnythingOfType("client.ExecAttachOptions")).Return(mobyclient.ExecAttachResult{
-		HijackedResponse: mobyclient.HijackedResponse{
-			Conn:   conn,
-			Reader: bufio.NewReader(endlessReader{}),
-		},
+		Conn:   conn,
+		Reader: bufio.NewReader(reader),
 	}, nil)
 
 	cr := &containerReference{
@@ -167,11 +204,11 @@ func TestDockerExecAbort(t *testing.T) {
 		channel <- cr.exec([]string{""}, map[string]string{}, "user", "workdir")(ctx)
 	}()
 
-	time.Sleep(500 * time.Millisecond)
-
+	<-reader.started
 	cancel()
 
 	err := <-channel
+	<-reader.stopped
 	assert.ErrorIs(t, err, context.Canceled) //nolint:testifylint // pre-existing issue from nektos/act
 
 	conn.AssertExpectations(t)
@@ -186,10 +223,8 @@ func TestDockerExecFailure(t *testing.T) {
 	client := &mockDockerClient{}
 	client.On("ExecCreate", ctx, "123", mock.AnythingOfType("client.ExecCreateOptions")).Return(mobyclient.ExecCreateResult{ID: "id"}, nil)
 	client.On("ExecAttach", ctx, "id", mock.AnythingOfType("client.ExecAttachOptions")).Return(mobyclient.ExecAttachResult{
-		HijackedResponse: mobyclient.HijackedResponse{
-			Conn:   conn,
-			Reader: bufio.NewReader(strings.NewReader("output")),
-		},
+		Conn:   conn,
+		Reader: bufio.NewReader(strings.NewReader("output")),
 	}, nil)
 	client.On("ExecInspect", ctx, "id", mobyclient.ExecInspectOptions{}).Return(mobyclient.ExecInspectResult{
 		ExitCode: 1,
@@ -241,10 +276,8 @@ func TestDockerAttachFlushesTrailingLine(t *testing.T) {
 	client := &mockDockerClient{}
 	client.On("ContainerAttach", ctx, "123", mock.AnythingOfType("client.ContainerAttachOptions")).
 		Return(mobyclient.ContainerAttachResult{
-			HijackedResponse: mobyclient.HijackedResponse{
-				Conn:   &mockConn{},
-				Reader: bufio.NewReader(framed),
-			},
+			Conn:   &mockConn{},
+			Reader: bufio.NewReader(framed),
 		}, nil)
 
 	statusCh := make(chan container.WaitResponse, 1)
@@ -309,75 +342,68 @@ func TestDockerWaitFailure(t *testing.T) {
 	client.AssertExpectations(t)
 }
 
-func TestDockerCopyTarStream(t *testing.T) {
-	ctx := context.Background()
+// A remove that raced the daemon's AutoRemove teardown is not a failure and must not
+// be logged as one.
+func TestRemoveIgnoresAutoRemoveRace(t *testing.T) {
+	removeFailure := errors.New("driver failed to remove root filesystem")
+	removeOpts := mobyclient.ContainerRemoveOptions{RemoveVolumes: true, Force: true}
+	killOpts := mobyclient.ContainerKillOptions{Signal: "SIGKILL"}
+	for _, tc := range []struct {
+		name     string
+		err      error
+		wantWait bool
+		waitErr  error
+		wantErr  error
+	}{
+		{name: "removal in progress", err: cerrdefs.ErrConflict.WithMessage("removal of container abc is already in progress"), wantWait: true},
+		{name: "wait canceled", err: cerrdefs.ErrConflict, wantWait: true, waitErr: context.Canceled, wantErr: context.Canceled},
+		{name: "removed during wait", err: cerrdefs.ErrConflict, wantWait: true, waitErr: cerrdefs.ErrNotFound},
+		{name: "already removed", err: cerrdefs.ErrNotFound.WithMessage("No such container: abc")},
+		{name: "removed cleanly", err: nil},
+		{name: "real failure", err: removeFailure, wantErr: removeFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, hook := test.NewNullLogger()
+			ctx := common.WithLogger(context.Background(), logger)
+			client := &mockDockerClient{}
+			client.On("ContainerKill", ctx, "abc", killOpts).Return(mobyclient.ContainerKillResult{}, nil)
+			client.On("ContainerRemove", ctx, "abc", removeOpts).Return(mobyclient.ContainerRemoveResult{}, tc.err)
+			if tc.wantWait {
+				removed := make(chan container.WaitResponse, 1)
+				waitErrors := make(chan error, 1)
+				if tc.waitErr == nil {
+					removed <- container.WaitResponse{}
+				} else {
+					waitErrors <- tc.waitErr
+				}
+				client.On("ContainerWait", mock.Anything, "abc", mobyclient.ContainerWaitOptions{Condition: container.WaitConditionRemoved}).
+					Return(mobyclient.ContainerWaitResult{Result: removed, Error: waitErrors})
+			}
+			cr := &containerReference{id: "abc", cli: client}
 
-	client := &mockDockerClient{}
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		return opts.DestinationPath == "/" && opts.Content != nil
-	})).Return(mobyclient.CopyToContainerResult{}, nil)
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		return opts.DestinationPath == "/var/run/act" && opts.Content != nil
-	})).Return(mobyclient.CopyToContainerResult{}, nil)
-	cr := &containerReference{
-		id:  "123",
-		cli: client,
-		input: &NewContainerInput{
-			Image: "image",
-		},
+			require.ErrorIs(t, cr.remove()(ctx), tc.wantErr)
+			if tc.wantErr != nil {
+				assert.Equal(t, "abc", cr.id)
+			} else {
+				assert.Empty(t, cr.id)
+			}
+			assert.Empty(t, hook.AllEntries())
+			client.AssertExpectations(t)
+		})
 	}
-
-	_ = cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
-
-	client.AssertExpectations(t)
 }
 
-func TestDockerCopyTarStreamErrorInCopyFiles(t *testing.T) {
+// A container whose id was never learned, because find() could not reach the daemon or
+// create() lost its reply, must still be removed rather than leaking with its network. It
+// was never started here, so it is not worth a kill of its own.
+func TestRemoveWithoutIDUsesName(t *testing.T) {
 	ctx := context.Background()
-
-	merr := errors.New("Failure")
-
 	client := &mockDockerClient{}
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		return opts.DestinationPath == "/" && opts.Content != nil
-	})).Return(mobyclient.CopyToContainerResult{}, merr)
-	cr := &containerReference{
-		id:  "123",
-		cli: client,
-		input: &NewContainerInput{
-			Image: "image",
-		},
-	}
+	client.On("ContainerRemove", ctx, "job-1", mobyclient.ContainerRemoveOptions{RemoveVolumes: true, Force: true}).
+		Return(mobyclient.ContainerRemoveResult{}, nil)
+	cr := &containerReference{cli: client, input: &NewContainerInput{Name: "job-1"}}
 
-	err := cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
-	assert.ErrorIs(t, err, merr) //nolint:testifylint // pre-existing issue from nektos/act
-
-	client.AssertExpectations(t)
-}
-
-func TestDockerCopyTarStreamErrorInMkdir(t *testing.T) {
-	ctx := context.Background()
-
-	merr := errors.New("Failure")
-
-	client := &mockDockerClient{}
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		return opts.DestinationPath == "/" && opts.Content != nil
-	})).Return(mobyclient.CopyToContainerResult{}, nil)
-	client.On("CopyToContainer", ctx, "123", mock.MatchedBy(func(opts mobyclient.CopyToContainerOptions) bool {
-		return opts.DestinationPath == "/var/run/act" && opts.Content != nil
-	})).Return(mobyclient.CopyToContainerResult{}, merr)
-	cr := &containerReference{
-		id:  "123",
-		cli: client,
-		input: &NewContainerInput{
-			Image: "image",
-		},
-	}
-
-	err := cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
-	assert.ErrorIs(t, err, merr) //nolint:testifylint // pre-existing issue from nektos/act
-
+	require.NoError(t, cr.remove()(ctx))
 	client.AssertExpectations(t)
 }
 
@@ -448,15 +474,23 @@ func TestRejectsMissingContainer(t *testing.T) {
 	cr := &containerReference{cli: client, input: &NewContainerInput{Name: "job-1"}}
 	check := func(op string, err error) {
 		t.Helper()
-		require.Error(t, err, op)
+		require.ErrorIs(t, err, ErrContainerNotFound, op)
 		assert.Contains(t, err.Error(), `container "job-1" does not exist`, op)
 	}
 	check("copyContent", cr.copyContent("/var/run/act", &FileEntry{Name: "x", Mode: 0o644})(ctx))
-	check("copyDir", cr.copyDir("/var/run/act", "/src", false)(ctx))
-	check("CopyTarStream", cr.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{}))
+	check("copyDir", cr.copyDir("/var/run/act", "/src", false, false)(ctx))
 	check("exec", cr.exec([]string{"echo"}, nil, "", "")(ctx))
 	_, err := cr.GetContainerArchive(ctx, "/var/run/act/x")
 	check("GetContainerArchive", err)
+	_, err = cr.Inspect(ctx)
+	check("Inspect", err)
+
+	// a known id the daemon has since dropped
+	client.On("ContainerInspect", ctx, "gone", mobyclient.ContainerInspectOptions{}).
+		Return(mobyclient.ContainerInspectResult{}, cerrdefs.ErrNotFound)
+	removed := &containerReference{id: "gone", cli: client, input: &NewContainerInput{Name: "job-1"}}
+	_, err = removed.Inspect(ctx)
+	check("Inspect after removal", err)
 }
 
 // End-to-end: a stale cr.id is cleared, repopulated from name lookup,
@@ -478,35 +512,6 @@ func TestPublicCopyPipelineHandlesStaleID(t *testing.T) {
 	require.NoError(t, cr.Copy("/var/run/act", &FileEntry{Name: "x", Mode: 0o644})(ctx))
 	assert.Equal(t, "fresh", cr.id)
 	client.AssertExpectations(t)
-}
-
-// TestDockerCopyToSymlinkPath is a regression test for gitea/runner#981. Most base images
-// symlink /var/run to /run, so copying into /var/run/act traverses that symlink. The broken
-// docker 29.5.1 daemon fails the extraction with "mkdirat var/run: file exists" (fixed in
-// 29.5.2). Running against the daemon shipped in the dind image, this catches a bad bump.
-func TestDockerCopyToSymlinkPath(t *testing.T) {
-	requireDocker(t)
-	ctx := context.Background()
-
-	rc := NewContainer(&NewContainerInput{
-		Image:      "alpine:latest",
-		Entrypoint: []string{"sleep", "30"},
-		Name:       "act-test-symlink-" + time.Now().Format("20060102150405.000000"),
-		AutoRemove: true,
-	})
-	require.NoError(t, rc.Pull(false)(ctx))
-	require.NoError(t, rc.Create(nil, nil)(ctx))
-	require.NoError(t, rc.Start(false)(ctx))
-	t.Cleanup(func() {
-		_ = rc.Remove()(ctx)
-		_ = rc.Close()(ctx)
-	})
-
-	// CopyTarStream first creates the destination directory by extracting a tar at "/",
-	// which makes the daemon mkdir var, then var/run (the symlink), then act — the exact
-	// step that fails on the broken daemon.
-	err := rc.CopyTarStream(ctx, "/var/run/act", &bytes.Buffer{})
-	require.NoError(t, err)
 }
 
 // Type assert containerReference implements ExecutionsEnvironment
@@ -555,11 +560,14 @@ func TestCheckVolumes(t *testing.T) {
 				"shared_volume",
 				"/home/test/data",
 				"/etc/conf.d/*.json",
+				"/opt/**",
 			},
 			binds: []string{
 				"shared_volume:/shared_volume",
 				"/home/test/data:/test_data",
 				"/etc/conf.d/base.json:/config/base.json",
+				"/etc/conf.d/sub/nested.json:/config/nested.json",
+				"/opt/app/cache:/cache",
 				"sql_data:/sql_data",
 				"/secrets/keys:/keys",
 			},
@@ -567,12 +575,13 @@ func TestCheckVolumes(t *testing.T) {
 				"shared_volume:/shared_volume",
 				"/home/test/data:/test_data",
 				"/etc/conf.d/base.json:/config/base.json",
+				"/opt/app/cache:/cache",
 			},
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			logger, _ := test.NewNullLogger()
+			logger, hook := test.NewNullLogger()
 			ctx := common.WithLogger(context.Background(), logger)
 			cr := &containerReference{
 				input: &NewContainerInput{
@@ -581,8 +590,139 @@ func TestCheckVolumes(t *testing.T) {
 			}
 			_, hostConf := cr.sanitizeConfig(ctx, &container.Config{}, &container.HostConfig{Binds: tc.binds})
 			assert.Equal(t, tc.expectedBinds, hostConf.Binds)
+			assert.Len(t, hook.AllEntries(), len(tc.binds)-len(tc.expectedBinds)) // every drop is warned about
 		})
 	}
+}
+
+// A volume driver decides for itself what it mounts, e.g. the local driver with device= binds
+// any host path, which valid_volumes never gets to see.
+func TestMergeContainerConfigsDropsVolumeDriversFromWorkflows(t *testing.T) {
+	const escape = "--mount type=volume,src=job-escape,dst=/host,volume-driver=local,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/"
+
+	hostConfig, _ := mergeOptions(t, "", escape+" --mount type=volume,src=job-plain,dst=/cache", false)
+	require.Len(t, hostConfig.Mounts, 1)
+	assert.Equal(t, "job-plain", hostConfig.Mounts[0].Source)
+
+	// the same mount from the runner's own options is the administrator's to make
+	hostConfig, _ = mergeOptions(t, escape, "", false)
+	require.Len(t, hostConfig.Mounts, 1)
+	assert.Equal(t, "job-escape", hostConfig.Mounts[0].Source)
+}
+
+// Both of these are read here, on the runner, so a workflow could read the runner's files
+// and environment with them.
+func TestMergeContainerConfigsKeepsTheRunnersFilesAndEnvToItself(t *testing.T) {
+	hostFile := filepath.Join(t.TempDir(), "host.env")
+	require.NoError(t, os.WriteFile(hostFile, []byte("STOLEN=from-the-host\n"), 0o600))
+	t.Setenv("RUNNER_SECRET", "s3cr3t")
+
+	for _, option := range []string{"--env-file " + hostFile, "--label-file " + hostFile} {
+		logger, _ := test.NewNullLogger()
+		cr := &containerReference{input: &NewContainerInput{NetworkMode: "bridge", WorkflowOptions: option}}
+
+		_, _, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{})
+		require.ErrorContains(t, err, "not allowed in a workflow")
+
+		// the runner reading its own files is what those options are for
+		cr = &containerReference{input: &NewContainerInput{NetworkMode: "bridge", RunnerOptions: option}}
+		_, _, err = cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{})
+		require.NoError(t, err)
+	}
+
+	// a bare name is no longer resolved from the runner's environment, for either source
+	logger, _ := test.NewNullLogger()
+	cr := &containerReference{input: &NewContainerInput{
+		NetworkMode:     "bridge",
+		RunnerOptions:   "--env RUNNER_SECRET",
+		WorkflowOptions: "--env RUNNER_SECRET --env GIVEN=value",
+	}}
+
+	config, _, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"RUNNER_SECRET", "RUNNER_SECRET", "GIVEN=value"}, config.Env)
+}
+
+func TestSanitizeOptionsHostConfig(t *testing.T) {
+	logger, _ := test.NewNullLogger()
+
+	// every field the sanitizer resets, so a reset dropped in a refactor fails here
+	hostConfig := &container.HostConfig{
+		PidMode:           "host",
+		IpcMode:           "host",
+		UTSMode:           "host",
+		CgroupnsMode:      "host",
+		UsernsMode:        "host",
+		CapAdd:            []string{"ALL"},
+		SecurityOpt:       []string{"seccomp=unconfined", "apparmor=unconfined"},
+		VolumesFrom:       []string{"other"},
+		Runtime:           "runc",
+		Isolation:         "process",
+		VolumeDriver:      "rogue",
+		MaskedPaths:       []string{},
+		ReadonlyPaths:     []string{},
+		CgroupParent:      "/custom",
+		Devices:           []container.DeviceMapping{{PathOnHost: "/dev/sda", PathInContainer: "/dev/sda", CgroupPermissions: "rwm"}},
+		DeviceCgroupRules: []string{"a *:* rwm"},
+		DeviceRequests:    []container.DeviceRequest{{Count: -1, Capabilities: [][]string{{"gpu"}}}},
+		Sysctls:           map[string]string{"net.ipv4.ip_forward": "1"},
+	}
+
+	sanitizeOptionsHostConfig(logger, hostConfig, &container.HostConfig{})
+
+	assert.Equal(t, &container.HostConfig{}, hostConfig)
+}
+
+// mergeOptions merges both option sources into a bare container, returning the result and its log.
+func mergeOptions(t *testing.T, runnerOptions, workflowOptions string, privileged bool) (*container.HostConfig, *test.Hook) {
+	t.Helper()
+	logger, hook := test.NewNullLogger()
+	cr := &containerReference{input: &NewContainerInput{
+		RunnerOptions:   runnerOptions,
+		WorkflowOptions: workflowOptions,
+		NetworkMode:     "bridge",
+		UsernsMode:      "private",
+		ValidVolumes:    []string{"**"},
+	}}
+
+	_, hostConfig, err := cr.mergeContainerConfigs(common.WithLogger(context.Background(), logger), &container.Config{}, &container.HostConfig{
+		Privileged:  privileged,
+		UsernsMode:  container.UsernsMode("private"),
+		NetworkMode: container.NetworkMode("bridge"),
+	})
+	require.NoError(t, err)
+	return hostConfig, hook
+}
+
+func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.T) {
+	// OS-independent options only, --device and --gpus need a linux/windows server OS
+	const dangerousOptions = "--pid=host --ipc=host --uts=host --cgroupns=host " +
+		"--userns=host --cap-add=ALL --security-opt seccomp=unconfined " +
+		"--security-opt apparmor=unconfined --volumes-from other --isolation process " +
+		"--runtime runc --cgroup-parent /custom --sysctl net.ipv4.ip_forward=1"
+
+	// whatever the workflow adds, an unprivileged container comes out exactly as the runner's
+	// own options alone describe it, field for field
+	for _, runnerOptions := range []string{"--shm-size 1g", dangerousOptions, "--cap-add SYS_ADMIN --security-opt seccomp=unconfined"} {
+		runnerOnly, _ := mergeOptions(t, runnerOptions, "", false)
+		withWorkflow, _ := mergeOptions(t, runnerOptions, dangerousOptions, false)
+
+		assert.Equal(t, runnerOnly, withWorkflow, "runner options: %q", runnerOptions)
+	}
+
+	// the same options from the runner reach the daemon, even --userns, which no workflow may set
+	kept, _ := mergeOptions(t, dangerousOptions, "", false)
+	assert.Equal(t, "host", string(kept.PidMode))
+	assert.Equal(t, []string{"ALL"}, kept.CapAdd)
+	assert.Equal(t, "runc", kept.Runtime)
+	assert.Equal(t, "host", string(kept.UsernsMode))
+	assert.False(t, kept.Privileged)
+
+	// privileged is the administrator opting in, so the workflow's options are honored
+	privileged, _ := mergeOptions(t, "", dangerousOptions, true)
+	assert.Equal(t, "host", string(privileged.PidMode))
+	assert.Equal(t, []string{"ALL"}, privileged.CapAdd)
+	assert.Equal(t, []string{"seccomp=unconfined", "apparmor=unconfined"}, privileged.SecurityOpt)
 }
 
 func TestCheckVolumesRejectsEscapingHostPaths(t *testing.T) {
@@ -620,4 +760,138 @@ func TestCheckVolumesRejectsEscapingHostPaths(t *testing.T) {
 		Binds: []string{filepath.Join(linkPath, "missing") + ":/mnt"},
 	})
 	assert.Empty(t, hostConf.Binds)
+}
+
+func TestContainerInfoFromInspect(t *testing.T) {
+	t.Run("reports no healthcheck when the image declares none", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{
+			ID:    "abc123",
+			State: &container.State{Status: "running", Running: true},
+		})
+
+		assert.Equal(t, "abc123", info.ID)
+		assert.Equal(t, "running", info.State)
+		assert.Equal(t, HealthNone, info.Health)
+		assert.Empty(t, info.Ports)
+	})
+
+	t.Run("reports the health status and the last probe output", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{
+			State: &container.State{
+				Status: "running",
+				Health: &container.Health{
+					Status: container.Unhealthy,
+					Log: []*container.HealthcheckResult{
+						{Output: "first\n"},
+						{Output: "connection refused\n"},
+					},
+				},
+			},
+		})
+
+		assert.Equal(t, HealthUnhealthy, info.Health)
+		assert.Equal(t, "connection refused", info.HealthOutput)
+	})
+
+	t.Run("reports the published ports", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{
+			State: &container.State{Status: "running"},
+			NetworkSettings: &container.NetworkSettings{
+				Ports: network.PortMap{
+					network.MustParsePort("5432/tcp"): []network.PortBinding{{HostPort: "49153"}},
+					network.MustParsePort("6379/tcp"): nil,
+				},
+			},
+		})
+
+		assert.Equal(t, map[string]string{"5432": "49153"}, info.Ports)
+	})
+
+	t.Run("tolerates a container without state", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{ID: "abc123"})
+
+		assert.Equal(t, "abc123", info.ID)
+		assert.Equal(t, HealthNone, info.Health)
+	})
+
+	t.Run("reports the mount sources by container path", func(t *testing.T) {
+		info := containerInfoFromInspect(container.InspectResponse{
+			Mounts: []container.MountPoint{
+				{Type: mount.TypeVolume, Name: "job", Source: "/var/lib/docker/volumes/job/_data", Destination: "/workspace/owner/repo"},
+				{Type: mount.TypeBind, Source: "/var/run/docker.sock", Destination: "/var/run/docker.sock"},
+				{Type: mount.TypeVolume, Name: "cache", Source: "/var/lib/docker/volumes/cache/_data", Destination: "/cache"},
+				{Type: mount.TypeBind, Source: "/custom/resolv.conf", Destination: "/etc/resolv.conf"},
+			},
+			HostConfig: &container.HostConfig{
+				Tmpfs:  map[string]string{"/workspace/owner/repo//tmp/": "size=1m"},
+				Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: "cache", Target: "/cache/", VolumeOptions: &mount.VolumeOptions{Subpath: "project"}}},
+			},
+		})
+
+		assert.Equal(t, map[string]string{
+			"/workspace/owner/repo":     "/var/lib/docker/volumes/job/_data",
+			"/workspace/owner/repo/tmp": "",
+			"/var/run/docker.sock":      "/var/run/docker.sock",
+			"/cache":                    "/var/lib/docker/volumes/cache/_data/project",
+			"/etc/resolv.conf":          "/custom/resolv.conf",
+			"/etc/hosts":                "",
+			"/etc/hostname":             "",
+		}, info.Mounts)
+	})
+}
+
+func TestMergeContainerConfigsVolumesReplaceRunnerMounts(t *testing.T) {
+	logger, _ := test.NewNullLogger()
+	ctx := common.WithLogger(context.Background(), logger)
+	cr := &containerReference{
+		input: &NewContainerInput{
+			NetworkMode:     "bridge",
+			RunnerOptions:   "--volume /host/tools:/opt/hostedtoolcache",
+			WorkflowOptions: "--volume /unapproved:/var/run/docker.sock",
+			ValidVolumes:    []string{"/host/tools"},
+		},
+	}
+
+	_, hostConf, err := cr.mergeContainerConfigs(ctx, &container.Config{}, &container.HostConfig{
+		Binds:  []string{"/var/run/docker.sock:/var/run/docker.sock"},
+		Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: "act-toolcache", Target: "/opt/hostedtoolcache"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/var/run/docker.sock:/var/run/docker.sock", "/host/tools:/opt/hostedtoolcache"}, hostConf.Binds)
+	assert.Empty(t, hostConf.Mounts)
+}
+
+func TestMergeContainerConfigsWarnsOnlyAboutOptionsThatWereGiven(t *testing.T) {
+	warnings := func(runnerOptions, workflowOptions string) int {
+		_, hook := mergeOptions(t, runnerOptions, workflowOptions, false)
+		return len(hook.AllEntries())
+	}
+
+	assert.Zero(t, warnings("--volume /host/tools:/opt/hostedtoolcache", ""))
+	assert.Zero(t, warnings("", "--shm-size 1g"))
+	assert.Equal(t, 1, warnings("--network host", ""))
+	assert.Equal(t, 1, warnings("", "--privileged"))
+}
+
+func TestMergeContainerConfigsKeepsNetworkAliasesFromOptions(t *testing.T) {
+	logger, _ := test.NewNullLogger()
+	cr := &containerReference{input: &NewContainerInput{
+		NetworkMode: "job-network", NetworkAliases: []string{"redis"}, WorkflowOptions: "--network-alias redis-primary",
+	}}
+
+	_, _, err := cr.mergeContainerConfigs(common.WithLogger(t.Context(), logger), &container.Config{}, &container.HostConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"redis", "redis-primary"}, cr.input.NetworkAliases)
+}
+
+// A dead daemon must fail the job, not panic through logrus and not silently
+// drop the requested platform.
+func TestSupportsContainerImagePlatformDaemonError(t *testing.T) {
+	cli := &mockDockerClient{}
+	cli.On("ServerVersion", mock.Anything, mock.Anything).
+		Return(mobyclient.ServerVersionResult{}, errors.New("cannot connect to the Docker daemon"))
+
+	supported, err := supportsContainerImagePlatform(t.Context(), cli)
+	require.ErrorContains(t, err, "cannot connect to the Docker daemon")
+	assert.False(t, supported)
 }

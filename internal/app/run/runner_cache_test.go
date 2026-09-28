@@ -5,14 +5,17 @@ package run
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"gitea.com/gitea/runner/act/artifactcache"
+	clientmocks "gitea.com/gitea/runner/internal/pkg/client/mocks"
 	"gitea.com/gitea/runner/internal/pkg/config"
 
 	"github.com/stretchr/testify/assert"
@@ -21,68 +24,28 @@ import (
 
 func emptyCfg() *config.Config { return &config.Config{} }
 
-func TestRunner_registerCacheForTask(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, "", nil)
-	require.NoError(t, err)
-	defer handler.Close()
-
-	r := &Runner{cfg: emptyCfg(), cacheHandler: handler}
-	token := "run-token-123"
-	unregister := r.registerCacheForTask(token, "owner/repo", nil)
-
-	base := handler.ExternalURL() + "/_apis/artifactcache"
-	probe := func() int {
-		req, err := http.NewRequest(http.MethodGet, base+"/cache?keys=x&version=v", nil)
-		require.NoError(t, err)
-		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		resp.Body.Close()
-		return resp.StatusCode
-	}
-
-	assert.NotEqual(t, http.StatusUnauthorized, probe(),
-		"token should be accepted while task is registered")
-
-	unregister()
-	assert.Equal(t, http.StatusUnauthorized, probe(),
-		"token must be rejected after the revoker runs")
-}
-
 func TestRunner_registerCacheForTask_NoOps(t *testing.T) {
-	t.Run("nil cacheHandler", func(t *testing.T) {
-		r := &Runner{cfg: emptyCfg()}
-		unregister := r.registerCacheForTask("tok", "owner/repo", nil)
-		require.NotNil(t, unregister)
-		unregister()
-	})
-
-	t.Run("empty token", func(t *testing.T) {
-		dir := filepath.Join(t.TempDir(), "artifactcache")
-		handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, "", nil)
-		require.NoError(t, err)
-		defer handler.Close()
-
+	for token, handler := range map[string]*artifactcache.Handler{"tok": nil, "": {}} {
 		r := &Runner{cfg: emptyCfg(), cacheHandler: handler}
-		unregister := r.registerCacheForTask("", "owner/repo", nil)
-		require.NotNil(t, unregister)
+		unregister, _ := r.registerCacheForTask(token, "owner/repo", "", nil)
+		require.NotNil(t, unregister, token)
 		unregister()
-	})
+	}
 }
 
 // Locks in @actions/cache's wire protocol: bearer on reserve/upload/commit
 // /find, no auth on the signed archiveLocation download.
 func TestRunner_CacheFullFlow_MatchesToolkit(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifactcache")
-	handler, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, "", nil)
+	handler, err := artifactcache.StartHandler(artifactcache.Options{Dir: dir, OutboundIP: "127.0.0.1"})
 	require.NoError(t, err)
 	defer handler.Close()
 
-	r := &Runner{cfg: emptyCfg(), cacheHandler: handler}
+	r := &Runner{cfg: emptyCfg(), cacheHandler: handler, envs: map[string]string{"ACTIONS_RESULTS_URL": "https://gitea.example"}}
+	const publicURL = "http://a1b2c3d4e5f6:8088"
 	token := "full-flow-token"
-	unregister := r.registerCacheForTask(token, "owner/repo", nil)
-	defer unregister()
+	unregister, resultsURL := r.registerCacheForTask(token, "owner/repo", publicURL, nil)
+	assert.Equal(t, publicURL, resultsURL)
 
 	base := handler.ExternalURL() + "/_apis/artifactcache"
 	do := func(method, url, contentType, contentRange, body string) *http.Response {
@@ -135,41 +98,61 @@ func TestRunner_CacheFullFlow_MatchesToolkit(t *testing.T) {
 	}
 	require.NoError(t, decodeJSON(resp, &hit))
 	require.Equal(t, key, hit.CacheKey)
-	require.NotEmpty(t, hit.ArchiveLocation)
+	require.True(t, strings.HasPrefix(hit.ArchiveLocation, publicURL+"/"), hit.ArchiveLocation)
 
 	// download — toolkit does NOT attach Authorization here; the signature
 	// in the URL must be enough.
-	dl, err := http.Get(hit.ArchiveLocation)
+	dl, err := http.Get(strings.Replace(hit.ArchiveLocation, publicURL, handler.ExternalURL(), 1))
 	require.NoError(t, err)
 	defer dl.Body.Close()
 	require.Equal(t, http.StatusOK, dl.StatusCode)
 	got := make([]byte, 64)
 	n, _ := dl.Body.Read(got)
 	assert.Equal(t, body, string(got[:n]))
+
+	unregister()
+	resp = do(http.MethodGet, fmt.Sprintf("%s/cache?keys=%s&version=%s", base, key, version), "", "", "")
+	resp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
 func decodeJSON(resp *http.Response, v any) error {
 	defer resp.Body.Close()
-	return json.NewDecoder(resp.Body).Decode(v)
+	return json.UnmarshalRead(resp.Body, v)
 }
 
-// End-to-end against a remote cache-server: token unknown → 401, register →
+// End-to-end through a runner to a remote cache-server: token unknown → 401, register →
 // reserve/upload/commit/find/download all OK, revoke → 401 again.
 func TestRunner_ExternalCacheServer_RegisterRevoke(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "remote-cache")
 	const secret = "shared-secret-for-tests"
-	remote, err := artifactcache.StartHandler(dir, "127.0.0.1", 0, secret, nil)
+	remote, err := artifactcache.StartHandler(artifactcache.Options{Dir: t.TempDir(), OutboundIP: "127.0.0.1", InternalSecret: secret})
 	require.NoError(t, err)
 	defer remote.Close()
+	gitea := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		assert.Equal(t, "/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact", req.URL.Path)
+		assert.Equal(t, "Bearer external-task-token", req.Header.Get("Authorization"))
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer gitea.Close()
 
-	r := &Runner{cfg: &config.Config{Cache: config.Cache{
-		ExternalServer: remote.ExternalURL(),
-		ExternalSecret: secret,
-	}}}
+	cli := clientmocks.NewClient(t)
+	cli.AddressValue = gitea.URL
+	r := NewRunner(&config.Config{
+		Runner: config.Runner{Insecure: true},
+		Cache: config.Cache{
+			Host:           "127.0.0.1",
+			ExternalServer: remote.ExternalURL() + "//",
+			ExternalSecret: secret,
+		},
+	}, &config.Registration{}, cli)
+	t.Cleanup(func() { _ = r.Close() })
+	require.NotNil(t, r.cacheHandler)
+	require.Equal(t, r.cacheHandler.ExternalURL()+"/", r.envs["ACTIONS_CACHE_URL"])
 
+	const publicURL = "http://a1b2c3d4e5f6:8088"
 	token := "external-task-token"
 	repo := "owner/repoX"
-	base := remote.ExternalURL() + "/_apis/artifactcache"
+	base := r.envs["ACTIONS_CACHE_URL"] + "_apis/artifactcache"
 	probe := func() int {
 		req, _ := http.NewRequest(http.MethodGet, base+"/cache?keys=k&version=v", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -182,12 +165,24 @@ func TestRunner_ExternalCacheServer_RegisterRevoke(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, probe(),
 		"token must be unknown to the remote server before registration")
 
-	unregister := r.registerCacheForTask(token, repo, nil)
+	unregister, resultsURL := r.registerCacheForTask(token, repo, publicURL, nil)
 	require.NotEqual(t, http.StatusUnauthorized, probe(),
 		"token must be accepted after registerCacheForTask")
 
+	require.Equal(t, publicURL, resultsURL)
+	artifact, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		r.cacheHandler.ExternalURL()+"/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact", nil)
+	require.NoError(t, err)
+	artifact.Header.Set("Authorization", "Bearer "+token)
+	forwarded, err := http.DefaultClient.Do(artifact)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, forwarded.StatusCode)
+	var artifactResult map[string]bool
+	require.NoError(t, decodeJSON(forwarded, &artifactResult))
+	assert.True(t, artifactResult["ok"])
+
 	// Full reserve→upload→commit→find→download cycle, identical to what
-	// @actions/cache does, against the remote (external) server.
+	// @actions/cache does, through the runner to the remote server.
 	body := []byte("payload-from-task")
 	reserveBody, _ := json.Marshal(&artifactcache.Request{Key: "ext-key", Version: "v", Size: int64(len(body))})
 	req, _ := http.NewRequest(http.MethodPost, base+"/caches", bytes.NewReader(reserveBody))
@@ -226,14 +221,22 @@ func TestRunner_ExternalCacheServer_RegisterRevoke(t *testing.T) {
 		ArchiveLocation string `json:"archiveLocation"`
 	}
 	require.NoError(t, decodeJSON(resp, &hit))
-	require.NotEmpty(t, hit.ArchiveLocation)
+	require.True(t, strings.HasPrefix(hit.ArchiveLocation, publicURL+"/"), hit.ArchiveLocation)
 
-	dl, err := http.Get(hit.ArchiveLocation)
+	dl, err := http.Get(strings.Replace(hit.ArchiveLocation, publicURL, r.cacheHandler.ExternalURL(), 1))
 	require.NoError(t, err)
 	defer dl.Body.Close()
 	require.Equal(t, http.StatusOK, dl.StatusCode)
+	downloaded, err := io.ReadAll(dl.Body)
+	require.NoError(t, err)
+	assert.Equal(t, body, downloaded)
 
 	unregister()
 	assert.Equal(t, http.StatusUnauthorized, probe(),
 		"token must be rejected after the revoker runs")
+
+	forwarded, err = http.DefaultClient.Do(artifact)
+	require.NoError(t, err)
+	forwarded.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, forwarded.StatusCode)
 }

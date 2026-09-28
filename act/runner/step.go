@@ -15,8 +15,10 @@ import (
 
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
-	"gitea.com/gitea/runner/act/exprparser"
-	"gitea.com/gitea/runner/act/model"
+	"gitea.com/gitea/runner/internal/pkg/telemetry"
+
+	"gitea.dev/actionslib/pkg/exprparser"
+	"gitea.dev/actionslib/pkg/model"
 )
 
 type step interface {
@@ -57,57 +59,66 @@ func (s stepStage) String() string {
 func processRunnerEnvFileCommand(ctx context.Context, fileName string, rc *RunContext, setter func(context.Context, map[string]string, string)) error {
 	env := map[string]string{}
 	err := rc.JobContainer.UpdateFromEnv(path.Join(rc.JobContainer.GetActPath(), fileName), &env)(ctx)
-	if err != nil {
-		return err
-	}
 	for k, v := range env {
 		setter(ctx, map[string]string{"name": k}, v)
 	}
-	return nil
+	return err
 }
 
 func runStepExecutor(step step, stage stepStage, executor common.Executor) common.Executor {
-	return func(ctx context.Context) error {
+	return func(ctx context.Context) (err error) {
 		logger := common.Logger(ctx)
 		rc := step.getRunContext()
 		stepModel := step.getStepModel()
-
-		ifExpression := step.getIfExpression(ctx, stage)
-		rc.CurrentStep = stepModel.ID
 
 		stepResult := &model.StepResult{
 			Outcome:    model.StepStatusSuccess,
 			Conclusion: model.StepStatusSuccess,
 			Outputs:    make(map[string]string),
 		}
+		ctx, endStep := telemetry.StartStep(ctx, stepModel, stage.String())
+		defer func() { endStep(err, stepResult) }()
+
+		ifExpression := step.getIfExpression(ctx, stage)
+		rc.CurrentStep = stepModel.ID
+
 		if stage == stepStageMain {
 			rc.StepResults[rc.CurrentStep] = stepResult
 		}
 
-		err := setupEnv(ctx, step)
-		if err != nil {
-			return err
+		err = setupEnv(ctx, step)
+		var runStep bool
+		if err == nil {
+			runStep, err = isStepEnabled(ctx, ifExpression, step, stage)
 		}
-
-		runStep, err := isStepEnabled(ctx, ifExpression, step, stage)
+		if err == nil && runStep {
+			err = setupInputs(ctx, step)
+		}
 		if err != nil {
 			stepResult.Conclusion = model.StepStatusFailure
 			stepResult.Outcome = model.StepStatusFailure
+			logger.WithField("stepResult", stepResult.Conclusion).Infof("Failure - %s %s", stage, stepModel)
 			return err
 		}
 
 		if !runStep {
 			stepResult.Conclusion = model.StepStatusSkipped
 			stepResult.Outcome = model.StepStatusSkipped
-			logger.WithField("stepResult", stepResult.Outcome).Debugf("Skipping step '%s' due to '%s'", stepModel, ifExpression)
+			logger.WithField("stepResult", stepResult.Conclusion).Debugf("Skipping step '%s' due to '%s'", stepModel, ifExpression)
 			return nil
 		}
 
-		stepString := rc.ExprEval.Interpolate(ctx, stepModel.String())
+		stepString := rc.ExprEval.InterpolateName(ctx, stepModel.String())
 		if strings.Contains(stepString, "::add-mask::") {
 			stepString = "add-mask command"
 		}
-		logger.Infof("Run %s %s", stage, stepString)
+		if stage == stepStageMain {
+			// Main steps print their own raw "Run <title>" header, so this line is redundant and
+			// only leaks into the "Set up job" section for the first step; keep it as a debug trace.
+			logger.Debugf("Run %s %s", stage, stepString)
+		} else {
+			logger.Infof("Run %s %s", stage, stepString)
+		}
 
 		// Prepare and clean Runner File Commands
 		actPath := rc.JobContainer.GetActPath()
@@ -153,29 +164,56 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		if topRC.summaryFileInitialized == nil {
 			topRC.summaryFileInitialized = map[int]bool{}
 		}
+		_ = rc.JobContainer.Copy(actPath, files...)(ctx)
 		if !topRC.summaryFileInitialized[stepSummaryIndex] {
-			files = append(files, &container.FileEntry{Name: summaryFileCommand, Mode: 0o666})
+			_ = rc.JobContainer.Copy(actPath, &container.FileEntry{Name: summaryFileCommand, Mode: 0o666})(ctx)
 			topRC.summaryFileInitialized[stepSummaryIndex] = true
 		}
-		_ = rc.JobContainer.Copy(actPath, files...)(ctx)
+
+		// The command handler needs the step's env to judge ACTIONS_ALLOW_UNSECURE_COMMANDS.
+		// Cloned: the step executor keeps writing to its own env map after this point, on a
+		// different goroutine from the command handler that reads it.
+		rc.setCurrentStepEnv(maps0.Clone(*step.getEnv()))
+		defer rc.setCurrentStepEnv(nil)
+		_ = rc.takeUnsecureCommandError() // a refusal from before any step belongs to no step
 
 		timeoutctx, cancelTimeOut := evaluateStepTimeout(ctx, rc.ExprEval, stepModel)
 		defer cancelTimeOut()
 		err = executor(timeoutctx)
+		// Always take it, so the job-scoped error cannot leak onto a later step. A refusal
+		// fails the step as it does on GitHub, but the executor's own error wins.
+		insecureErr := rc.takeUnsecureCommandError()
+		if err == nil {
+			err = insecureErr
+		}
+		if fileErr := processRunnerEnvFileCommand(ctx, envFileCommand, rc, rc.setEnvFile); fileErr != nil && err == nil {
+			err = fileErr
+		}
+		if fileErr := processRunnerEnvFileCommand(ctx, stateFileCommand, rc, rc.saveState); fileErr != nil && err == nil {
+			err = fileErr
+		}
+		if fileErr := processRunnerEnvFileCommand(ctx, outputFileCommand, rc, rc.setOutput); fileErr != nil && err == nil {
+			err = fileErr
+		}
+		if fileErr := rc.UpdateExtraPath(ctx, path.Join(actPath, pathFileCommand)); fileErr != nil && err == nil {
+			err = fileErr
+		}
+		_ = rc.JobContainer.Copy(actPath, files...)(ctx)
 
 		if err == nil {
-			logger.WithField("stepResult", stepResult.Outcome).Infof("Success - %s %s", stage, stepString)
+			logger.WithField("stepResult", stepResult.Conclusion).Infof("Success - %s %s", stage, stepString)
 		} else {
 			stepResult.Outcome = model.StepStatusFailure
 
 			continueOnError, parseErr := isContinueOnError(ctx, stepModel.RawContinueOnError, step, stage)
 			if parseErr != nil {
 				stepResult.Conclusion = model.StepStatusFailure
+				logger.WithField("stepResult", stepResult.Conclusion).Infof("Failure - %s %s", stage, stepString)
 				return parseErr
 			}
 
 			if continueOnError {
-				logger.Errorf("##[error]%v", err)
+				logger.Errorf("##[error]%s", EscapeCommandData(err.Error()))
 				logger.Infof("Failed but continue next step")
 				err = nil
 				stepResult.Conclusion = model.StepStatusSuccess
@@ -185,82 +223,61 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 
 			// Infof: Errorf entries are promoted to the user log by the reporter,
 			// which would duplicate the ##[error] annotation emitted elsewhere.
-			logger.WithField("stepResult", stepResult.Outcome).Infof("Failure - %s %s", stage, stepString)
-		}
-		// Process Runner File Commands
-		orgerr := err
-		err = processRunnerEnvFileCommand(ctx, envFileCommand, rc, rc.setEnv)
-		if err != nil {
-			return err
-		}
-		err = processRunnerEnvFileCommand(ctx, stateFileCommand, rc, rc.saveState)
-		if err != nil {
-			return err
-		}
-		err = processRunnerEnvFileCommand(ctx, outputFileCommand, rc, rc.setOutput)
-		if err != nil {
-			return err
-		}
-		err = rc.UpdateExtraPath(ctx, path.Join(actPath, pathFileCommand))
-		if err != nil {
-			return err
-		}
-		if orgerr != nil {
-			return orgerr
+			logger.WithField("stepResult", stepResult.Conclusion).Infof("Failure - %s %s", stage, stepString)
 		}
 		return err
 	}
 }
 
-func evaluateStepTimeout(ctx context.Context, exprEval ExpressionEvaluator, stepModel *model.Step) (context.Context, context.CancelFunc) {
-	timeout := exprEval.Interpolate(ctx, stepModel.TimeoutMinutes)
-	if timeout != "" {
-		if timeOutMinutes, err := strconv.ParseInt(timeout, 10, 64); err == nil {
+func evaluateStepTimeout(ctx context.Context, exprEval *expressionEvaluator, stepModel *model.Step) (context.Context, context.CancelFunc) {
+	timeout, err := exprEval.Interpolate(ctx, stepModel.TimeoutMinutes)
+	if err != nil {
+		common.Logger(ctx).Errorf("An error occurred when attempting to determine the step timeout: %s", err)
+	} else if timeout != "" {
+		if timeOutMinutes, err := strconv.ParseInt(timeout, 10, 64); err == nil && timeOutMinutes > 0 {
 			return context.WithTimeout(ctx, time.Duration(timeOutMinutes)*time.Minute)
 		}
 	}
 	return ctx, func() {}
 }
 
-func setupEnv(ctx context.Context, step step) error { //nolint:unparam // pre-existing issue from nektos/act
+func setupEnv(ctx context.Context, step step) error {
 	rc := step.getRunContext()
 
 	mergeEnv(ctx, step)
-	// merge step env last, since it should not be overwritten
-	mergeIntoMap(step, step.getEnv(), step.getStepModel().GetEnv())
 
+	var err error
 	exprEval := rc.NewExpressionEvaluator(ctx)
-	for k, v := range *step.getEnv() {
-		if !strings.HasPrefix(k, "INPUT_") {
-			(*step.getEnv())[k] = exprEval.Interpolate(ctx, v)
+	stepEnv := step.getStepModel().Environment()
+	for k, v := range stepEnv {
+		if stepEnv[k], err = exprEval.Interpolate(ctx, v); err != nil {
+			return fmt.Errorf("unable to interpolate env %s: %w", k, err)
 		}
 	}
-	// after we have an evaluated step context, update the expressions evaluator with a new env context
-	// you can use step level env in the with property of a uses construct
-	exprEval = rc.NewExpressionEvaluatorWithEnv(ctx, *step.getEnv())
-	for k, v := range *step.getEnv() {
-		if strings.HasPrefix(k, "INPUT_") {
-			(*step.getEnv())[k] = exprEval.Interpolate(ctx, v)
-		}
+	// merge step env last, since it should not be overwritten
+	mergeIntoMap(step, step.getEnv(), stepEnv)
+	return nil
+}
+
+// setupInputs evaluates `with` once the condition passed, as GitHub does, so every consumer reads the evaluated With.
+func setupInputs(ctx context.Context, step step) error {
+	stepModel := step.getStepModel()
+	if stepModel.RawWith.Kind == 0 {
+		return nil
 	}
-
-	// For Gitea, reduce log noise
-	// common.Logger(ctx).Debugf("setupEnv => %v", *step.getEnv())
-
+	if err := model.DecodeEvaluated("with", stepModel.RawWith, step.getRunContext().NewStepExpressionEvaluator(ctx, step).shared(ctx).EvaluateYamlNode, &stepModel.With); err != nil {
+		return err
+	}
+	mergeIntoMap(step, step.getEnv(), (&model.Step{With: stepModel.With}).GetEnv())
 	return nil
 }
 
 func mergeEnv(ctx context.Context, step step) {
 	env := step.getEnv()
 	rc := step.getRunContext()
-	job := rc.Run.Job()
 
-	c := job.Container()
-	if c != nil {
-		mergeIntoMap(step, env, rc.GetEnv(), c.Env)
-	} else {
-		mergeIntoMap(step, env, rc.GetEnv())
-	}
+	// container env is the image's baseline, which job env and $GITHUB_ENV override
+	mergeIntoMap(step, env, rc.containerSpec.Env, rc.GetEnv())
 
 	rc.withGithubEnv(ctx, step.getGithubContext(ctx), *env)
 }
@@ -275,7 +292,12 @@ func isStepEnabled(ctx context.Context, expr string, step step, stage stepStage)
 		defaultStatusCheck = exprparser.DefaultStatusCheckSuccess
 	}
 
-	runStep, err := EvalBool(ctx, rc.NewStepExpressionEvaluator(ctx, step), expr, defaultStatusCheck)
+	// success() and failure() in a composite's own main steps read the composite's result, other stages the job's
+	jobContext := rc.getJobContext()
+	if rc.Parent != nil && stage == stepStageMain && jobContext.Status != "cancelled" {
+		jobContext.Status = rc.ownStatus()
+	}
+	runStep, err := EvalBool(ctx, rc.newStepExpressionEvaluator(ctx, step, rc.actionInputs, jobContext), expr, defaultStatusCheck)
 	if err != nil {
 		return false, fmt.Errorf("if-expression %q evaluation failed: %s", expr, err)
 	}

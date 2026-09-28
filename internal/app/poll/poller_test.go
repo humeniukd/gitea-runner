@@ -15,7 +15,8 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/config"
 
 	connect_go "connectrpc.com/connect"
-	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
+	runnerv1 "gitea.dev/actionslib/runner/v1"
+	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -61,11 +62,7 @@ func TestPoller_WorkerStateCounters(t *testing.T) {
 // increments only the per-worker error counter, not the empty counter.
 func TestPoller_FetchErrorIncrementsErrorsOnly(t *testing.T) {
 	client := mocks.NewClient(t)
-	client.On("FetchTask", mock.Anything, mock.Anything).Return(
-		func(_ context.Context, _ *connect_go.Request[runnerv1.FetchTaskRequest]) (*connect_go.Response[runnerv1.FetchTaskResponse], error) {
-			return nil, errors.New("network unreachable")
-		},
-	)
+	client.On("FetchTask", mock.Anything, mock.Anything).Return(nil, errors.New("network unreachable"))
 
 	cfg, err := config.LoadDefault("")
 	require.NoError(t, err)
@@ -76,6 +73,63 @@ func TestPoller_FetchErrorIncrementsErrorsOnly(t *testing.T) {
 	require.False(t, ok)
 	assert.Equal(t, int64(1), s.consecutiveErrors)
 	assert.Equal(t, int64(0), s.consecutiveEmpty)
+}
+
+// A deadline is the idle path once the server holds the request open, and a
+// symptom before then, so it must neither reset the error count nor assert that
+// the server is reachable.
+func TestPoller_FetchTimeoutIsNoSignal(t *testing.T) {
+	client := mocks.NewClient(t)
+	client.On("FetchTask", mock.Anything, mock.Anything).Return(nil, context.DeadlineExceeded)
+
+	cfg, err := config.LoadDefault("")
+	require.NoError(t, err)
+	p := &Poller{client: client, cfg: cfg}
+	p.lastPollFailed.Store(true)
+
+	hook := test.NewGlobal()
+	defer hook.Reset()
+
+	s := &workerState{consecutiveErrors: 2}
+	_, ok := p.fetchTask(context.Background(), s)
+	require.False(t, ok)
+	assert.Equal(t, int64(2), s.consecutiveErrors)
+	assert.Equal(t, int64(1), s.consecutiveEmpty)
+	assert.True(t, p.lastPollFailed.Load(), "a timeout must not clear a known failure")
+
+	// An idle runner against a server holding the request open must not flood.
+	_, _ = p.fetchTask(context.Background(), s)
+	assert.Len(t, hook.AllEntries(), 1)
+}
+
+// TestPoller_FetchUnauthenticatedStopsPolling verifies that an Unauthenticated
+// response marks the runner as unregistered and cancels the polling context so
+// the daemon can exit instead of retrying forever.
+func TestPoller_FetchUnauthenticatedStopsPolling(t *testing.T) {
+	for name, fetchErr := range map[string]error{
+		"connect": connect_go.NewError(connect_go.CodeUnauthenticated, errors.New("unregistered runner")),
+		"gitea":   connect_go.NewWireError(connect_go.CodeUnknown, errors.New("rpc error: code = Unauthenticated desc = unregistered runner")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := mocks.NewClient(t)
+			client.On("FetchTask", mock.Anything, mock.Anything).Return(nil, fetchErr)
+
+			cfg, err := config.LoadDefault("")
+			require.NoError(t, err)
+			p := New(cfg, client, nil)
+			s := &workerState{}
+			_, ok := p.fetchTask(context.Background(), s)
+			require.False(t, ok)
+
+			assert.True(t, p.Unregistered(), "runner should be marked unregistered")
+			assert.Equal(t, int64(0), s.consecutiveErrors, "unauthenticated must not drive error backoff")
+			select {
+			case <-p.pollingCtx.Done():
+			default:
+				t.Fatal("expected polling context to be cancelled after an Unauthenticated response")
+			}
+		})
+	}
 }
 
 // TestPoller_CalculateInterval verifies the exponential backoff math is
@@ -128,6 +182,81 @@ type mockRunner struct {
 type idleAwareRunner struct {
 	mockRunner
 	idleCalls atomic.Int64
+}
+
+type availabilityRunner struct {
+	mockRunner
+	ready  atomic.Bool
+	reason string
+}
+
+func (r *availabilityRunner) CanAcceptTask(_ context.Context) (bool, string) {
+	if r.ready.Load() {
+		return true, "ok"
+	}
+	return false, r.reason
+}
+
+func TestPollerReady(t *testing.T) {
+	cfg, err := config.LoadDefault("")
+	require.NoError(t, err)
+	poller := New(cfg, nil, &availabilityRunner{})
+
+	// /readyz reuses the availability the poll loop last recorded.
+	ready, reason := poller.Ready(time.Second)
+	assert.True(t, ready)
+	assert.Equal(t, "ok", reason)
+
+	poller.reportAvailability(false, "low disk space")
+	ready, reason = poller.Ready(time.Second)
+	assert.False(t, ready)
+	assert.Equal(t, "low disk space", reason)
+
+	poller.reportAvailability(true, "ok")
+	poller.lastPollFailed.Store(true)
+	poller.lastHealthyPoll.Store(time.Now().UnixNano())
+	ready, _ = poller.Ready(time.Second)
+	assert.True(t, ready, "transient polling errors should remain ready during grace")
+
+	poller.lastHealthyPoll.Store(time.Now().Add(-2 * time.Second).UnixNano())
+	ready, reason = poller.Ready(time.Second)
+	assert.False(t, ready)
+	assert.Equal(t, "unable to poll Gitea", reason)
+
+	poller.unregistered.Store(true)
+	ready, reason = poller.Ready(time.Second)
+	assert.False(t, ready)
+	assert.Equal(t, "runner is no longer registered", reason)
+}
+
+func TestPollerPausesAndResumesForLocalAvailability(t *testing.T) {
+	var fetches atomic.Int64
+	cli := mocks.NewClient(t)
+	cli.On("FetchTask", mock.Anything, mock.Anything).Maybe().Run(func(mock.Arguments) {
+		fetches.Add(1)
+	}).Return(connect_go.NewResponse(&runnerv1.FetchTaskResponse{}), nil)
+
+	cfg, err := config.LoadDefault("")
+	require.NoError(t, err)
+	cfg.Runner.FetchInterval = 10 * time.Millisecond
+	cfg.Runner.FetchIntervalMax = 10 * time.Millisecond
+	runner := &availabilityRunner{reason: "low disk space"}
+	poller := New(cfg, cli, runner)
+
+	var wg sync.WaitGroup
+	wg.Go(poller.Poll)
+	time.Sleep(40 * time.Millisecond)
+	assert.Zero(t, fetches.Load(), "an unavailable runner must not fetch a task")
+
+	runner.ready.Store(true)
+	require.Eventually(t, func() bool {
+		return fetches.Load() > 0
+	}, time.Second, 10*time.Millisecond, "polling should resume after local recovery")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, poller.Shutdown(shutdownCtx))
+	wg.Wait()
 }
 
 func (m *mockRunner) Run(ctx context.Context, _ *runnerv1.Task) error {

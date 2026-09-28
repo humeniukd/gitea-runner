@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/mock"
 )
 
+var noopExecutor = func(context.Context) error { return nil }
+
 type containerMock struct {
 	mock.Mock
 	container.Container
@@ -50,18 +52,13 @@ func (cm *containerMock) UpdateFromEnv(srcPath string, env *map[string]string) c
 	return args.Get(0).(func(context.Context) error)
 }
 
-func (cm *containerMock) UpdateFromImageEnv(env *map[string]string) common.Executor {
-	args := cm.Called(env)
-	return args.Get(0).(func(context.Context) error)
-}
-
 func (cm *containerMock) Copy(destPath string, files ...*container.FileEntry) common.Executor {
 	args := cm.Called(destPath, files)
 	return args.Get(0).(func(context.Context) error)
 }
 
-func (cm *containerMock) CopyDir(destPath, srcPath string, useGitIgnore bool) common.Executor {
-	args := cm.Called(destPath, srcPath, useGitIgnore)
+func (cm *containerMock) CopyDir(destPath, srcPath string, useGitIgnore, skipGitDir bool) common.Executor {
+	args := cm.Called(destPath, srcPath, useGitIgnore, skipGitDir)
 	return args.Get(0).(func(context.Context) error)
 }
 
@@ -77,4 +74,15 @@ func (cm *containerMock) GetContainerArchive(ctx context.Context, srcPath string
 		err = nil
 	}
 	return args.Get(0).(io.ReadCloser), err
+}
+
+func (cm *containerMock) DumpLogs(ctx context.Context) error {
+	return cm.Called(ctx).Error(0)
+}
+
+func (cm *containerMock) Inspect(ctx context.Context) (*container.Info, error) {
+	args := cm.Called(ctx)
+	info, _ := args.Get(0).(*container.Info)
+	err, _ := args.Get(1).(error)
+	return info, err
 }

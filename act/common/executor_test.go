@@ -9,9 +9,9 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,81 +45,45 @@ func TestNewWorkflow(t *testing.T) {
 	assert.Equal(2, runcount)
 }
 
-func TestNewConditionalExecutor(t *testing.T) {
-	assert := assert.New(t)
+// concurrencyProbe returns an executor recording the peak number of concurrent copies. Copies
+// block until wantActive are in flight so the peak is exact without sleeping, and later copies
+// find the gate already open so the last one still finishes with no partner left.
+func concurrencyProbe(wantActive int32) (exec Executor, count, maxActive *atomic.Int32) {
+	var counted, active, peak atomic.Int32
+	var once sync.Once
+	reached := make(chan struct{})
 
-	ctx := context.Background()
-
-	trueCount := 0
-	falseCount := 0
-
-	err := NewConditionalExecutor(func(ctx context.Context) bool {
-		return false
-	}, func(ctx context.Context) error {
-		trueCount++
-		return nil
-	}, func(ctx context.Context) error {
-		falseCount++
-		return nil
-	})(ctx)
-
-	assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
-	assert.Equal(0, trueCount)
-	assert.Equal(1, falseCount)
-
-	err = NewConditionalExecutor(func(ctx context.Context) bool {
-		return true
-	}, func(ctx context.Context) error {
-		trueCount++
-		return nil
-	}, func(ctx context.Context) error {
-		falseCount++
-		return nil
-	})(ctx)
-
-	assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
-	assert.Equal(1, trueCount)
-	assert.Equal(1, falseCount)
-}
-
-func TestNewParallelExecutor(t *testing.T) {
-	assert := assert.New(t)
-
-	ctx := context.Background()
-
-	var count, activeCount, maxCount atomic.Int32
-	emptyWorkflow := NewPipelineExecutor(func(ctx context.Context) error {
-		count.Add(1)
-
-		active := activeCount.Add(1)
+	return func(ctx context.Context) error {
+		counted.Add(1)
+		running := active.Add(1)
 		for {
-			m := maxCount.Load()
-			if active <= m || maxCount.CompareAndSwap(m, active) {
+			seen := peak.Load()
+			if running <= seen || peak.CompareAndSwap(seen, running) {
 				break
 			}
 		}
-		time.Sleep(2 * time.Second)
-		activeCount.Add(-1)
-
+		if running >= wantActive {
+			once.Do(func() { close(reached) })
+		}
+		<-reached
+		active.Add(-1)
 		return nil
-	})
+	}, &counted, &peak
+}
 
-	err := NewParallelExecutor(2, emptyWorkflow, emptyWorkflow, emptyWorkflow)(ctx)
+func TestNewParallelExecutor(t *testing.T) {
+	ctx := context.Background()
 
-	assert.Equal(int32(3), count.Load(), "should run all 3 executors")
-	assert.Equal(int32(2), maxCount.Load(), "should run at most 2 executors in parallel")
-	assert.NoError(err) //nolint:testifylint // pre-existing issue from nektos/act
+	exec, count, maxActive := concurrencyProbe(2)
+	require.NoError(t, NewParallelExecutor(2, exec, exec, exec)(ctx))
+	assert.Equal(t, int32(3), count.Load(), "should run all 3 executors")
+	assert.Equal(t, int32(2), maxActive.Load(), "should run at most 2 executors in parallel")
 
-	// Reset to test running the executor with 0 parallelism
-	count.Store(0)
-	activeCount.Store(0)
-	maxCount.Store(0)
-
-	errSingle := NewParallelExecutor(0, emptyWorkflow, emptyWorkflow, emptyWorkflow)(ctx)
-
-	assert.Equal(int32(3), count.Load(), "should run all 3 executors")
-	assert.Equal(int32(1), maxCount.Load(), "should run at most 1 executors in parallel")
-	assert.NoError(errSingle)
+	// parallelism below 1 falls back to a single worker
+	exec, count, maxActive = concurrencyProbe(1)
+	require.NoError(t, NewParallelExecutor(0, exec, exec, exec)(ctx))
+	assert.Equal(t, int32(3), count.Load(), "should run all 3 executors")
+	assert.Equal(t, int32(1), maxActive.Load(), "should run at most 1 executor in parallel")
 }
 
 func TestNewParallelExecutorEmpty(t *testing.T) {
@@ -173,6 +137,23 @@ func TestNewParallelExecutorCanceled(t *testing.T) {
 	assert.Error(errExpected, err) //nolint:testifylint // pre-existing issue from nektos/act
 }
 
+func TestNewParallelExecutorRunsRemainingAfterFailure(t *testing.T) {
+	var successCount atomic.Int32
+	executors := make([]Executor, 5)
+	for i := range executors {
+		executors[i] = func(ctx context.Context) error {
+			if i == 2 {
+				return errors.New("fake error")
+			}
+			successCount.Add(1)
+			return nil
+		}
+	}
+
+	require.Error(t, NewParallelExecutor(2, executors...)(context.Background()))
+	assert.Equal(t, int32(4), successCount.Load(), "a failing executor must not stop the others")
+}
+
 func TestExecutorConditionalsAndFinally(t *testing.T) {
 	ctx := context.Background()
 	var calls []string
@@ -203,12 +184,5 @@ func TestExecutorFinallyReturnsFinallyErrorWithOriginal(t *testing.T) {
 	require.Error(t, err)
 	if !strings.Contains(err.Error(), "cleanup failed") || !strings.Contains(err.Error(), "main failed") {
 		t.Fatalf("finally error = %q, want both cleanup and original error", err)
-	}
-}
-
-func TestConditionalNot(t *testing.T) {
-	cond := Conditional(func(context.Context) bool { return false })
-	if !cond.Not()(context.Background()) {
-		t.Fatal("inverted conditional should be true")
 	}
 }
