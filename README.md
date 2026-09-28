@@ -89,6 +89,10 @@ Mount a volume on `/data` if you want the registration file and optional config 
 
 ### Image flavours
 
+Prefer a Docker-in-Docker (`dind` or `dind-rootless`) flavour for container jobs so they use a dedicated daemon instead of the host daemon. Mounting the host Docker socket gives workflows control over the host daemon and can let them modify the host. Use it only for workflows you trust.
+
+DinD is an isolation improvement, not a sandbox for untrusted code: `dind` requires a privileged container, while `dind-rootless` has rootless Docker limitations and may still require host configuration. The default image remains the `basic` flavour; select a DinD tag explicitly.
+
 The image is published in three flavours, all built from the single multi-stage [Dockerfile](Dockerfile) in this repository. They differ only in how a Docker daemon is made available to the jobs the runner executes; the `gitea-runner` binary inside them is identical.
 
 | Tag | Build target | Base image | Docker daemon | Process supervisor | Runs as |
