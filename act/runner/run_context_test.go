@@ -1761,3 +1761,11 @@ func TestRunContextWithGithubEnvRunnerValues(t *testing.T) {
 	assert.Equal(t, "1", env["RUNNER_DEBUG"])
 	assert.Equal(t, "http://[2001:db8::1]:8080/", env["ACTIONS_RUNTIME_URL"])
 }
+
+func TestStartJobContainerFindsSleepOnPath(t *testing.T) {
+	inputs := startJobContainerInputs(t, "jobs:\n  job:\n    container: nixos/nix:latest\n", &Config{
+		ContainerMaxLifetime: time.Minute,
+	})
+	require.Len(t, inputs, 1)
+	require.Equal(t, []string{"sleep", "60"}, inputs[0].Entrypoint)
+}

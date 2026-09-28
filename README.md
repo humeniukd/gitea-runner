@@ -266,6 +266,8 @@ A job in a container reaches a service by its id on the job network, on the port
 
 Unlike GitHub, a job whose steps run on the host (a `host` label without `container:`) starts no service containers, so `job.services` and `job.container` stay empty. Give such a job a `container:` when it needs services.
 
+Job images must provide `sleep` on their `PATH` so the runner can keep the container alive while executing steps. The binary does not need to be installed at `/bin/sleep`.
+
 #### Docker from a job (`GITEA_DOCKER_WORKSPACE`)
 
 Containers a job starts through the Docker socket can bind-mount the workspace by the job's own path, as on a host, for example `docker run -v "$PWD:/src"`. Without the Docker proxy, for example with a remote `DOCKER_HOST`, use `GITEA_DOCKER_WORKSPACE`, the path the daemon sees, as the prefix of workspace binds, with `.` as the fallback for local use:
