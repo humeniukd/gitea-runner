@@ -165,7 +165,7 @@ func (p *KubernetesPod) manifest(secret string, secretData map[string]string, me
 	defaults := map[string]any{"spec": map[string]any{
 		"automountServiceAccountToken":  false,
 		"enableServiceLinks":            false,
-		"terminationGracePeriodSeconds": 0, // the job container's sleep ignores SIGTERM
+		"terminationGracePeriodSeconds": 0, // the job container's tail ignores SIGTERM
 	}}
 	pod := map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": metadata, "spec": spec}
 	return mergeManifest(mergeManifest(defaults, p.options.PodTemplate), pod), nil

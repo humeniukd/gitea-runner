@@ -463,7 +463,7 @@ func (rc *RunContext) startKubernetesPod() common.Executor {
 
 		logWriter := rc.commandLogWriter(ctx)
 		rc.JobContainer = pod.JobContainer(&container.NewContainerInput{
-			Entrypoint: []string{"/bin/sleep", fmt.Sprint(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds())},
+			Entrypoint: []string{"tail", "-f", "/dev/null"},
 			WorkingDir: (&container.LinuxContainerEnvironmentExtensions{}).ToContainerPath(rc.Config.Workdir),
 			Image:      rc.platformImage,
 			Name:       rc.jobContainerName(),
