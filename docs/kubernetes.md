@@ -1,12 +1,12 @@
 # Jobs as Kubernetes pods
 
-A label with the `kubernetes` schema runs each of its jobs as a pod, without a Docker daemon:
+A `kubernetes` label runs each job as a pod, without a Docker daemon:
 
 ```text
 ubuntu-latest:kubernetes://docker.gitea.com/runner-images:ubuntu-latest
 ```
 
-The pod holds a `job` container from the label's image or the job's `container.image`, plus one container per service. It is deleted when the job ends, or with the runner's pod.
+The pod has a `job` container from the label's image or the job's `container.image`, plus one container per service.
 
 ## Setup
 
@@ -38,12 +38,12 @@ kubernetes:
               memory: 4Gi
 ```
 
-Job pods get no service account token or service links unless the template sets `automountServiceAccountToken` or `enableServiceLinks`.
+Job pods mount no service account token unless the template sets `automountServiceAccountToken: true`.
 
 ## Services
 
-Services share the pod's network, so a step reaches one by its id or `localhost` on the port it listens on, and two services cannot use the same port. Service `env` goes into a per-job secret, so pass secrets that way, as `command` and `options` are visible in the pod spec. Of `options`, only `--health-*` is accepted, and `--health-cmd` becomes a readiness probe the job waits for.
+Services share the pod's network, so a step reaches one by its id or `localhost`, and two services cannot listen on the same port. Pass secrets to services through `env`, as `command` is visible in the pod spec. Of `options`, only `--health-*` is supported, and `--health-cmd` becomes a readiness probe.
 
 ## Unsupported
 
-`docker://` steps, `runs.using: docker` actions, the job container's `options`, `volumes` and `credentials`, and services' `volumes` and `credentials` fail the job. Pull private images with `imagePullSecrets` in `pod_template`. Docker settings such as `container.options` and `container.network` do not apply.
+Docker actions, `docker://` steps, and the `options`, `volumes` and `credentials` of the job container fail the job, as do `volumes` and `credentials` of services. Run such workflows on a [Docker in Docker](../examples/kubernetes/README.md) runner. Pull private images with `imagePullSecrets` in `pod_template`.
