@@ -76,7 +76,7 @@ func startK3s(t *testing.T) (string, *config.Kubernetes) {
 	created, err := cli.ContainerCreate(ctx, mobyclient.ContainerCreateOptions{
 		Config: &apicontainer.Config{
 			Image:        os.Getenv("E2E_K3S_IMAGE"),
-			Cmd:          []string{"server", "--disable=traefik,metrics-server,servicelb,local-storage,coredns", "--tls-san=" + name},
+			Cmd:          []string{"server", "--disable=traefik,metrics-server,servicelb,local-storage,coredns", "--tls-san=" + name, "--kubelet-arg=fail-cgroupv1=false"},
 			ExposedPorts: network.PortSet{apiPort: struct{}{}},
 		},
 		HostConfig:       hostConfig,
