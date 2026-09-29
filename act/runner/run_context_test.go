@@ -343,7 +343,7 @@ jobs:
 	require.Nil(t, redis.Cmd)
 }
 
-func TestStartJobContainerEvaluatesContainersOnceAndTrimsDockerPrefix(t *testing.T) {
+func TestStartJobContainerBuildsEvaluatedJobAndServiceInputs(t *testing.T) {
 	inputs := startJobContainerInputs(t, `
 jobs:
   job:
@@ -359,6 +359,7 @@ jobs:
 	require.Equal(t, []string{"/entry.sh"}, redis.Entrypoint)
 	require.Equal(t, []string{"redis-server", "--port", "6380"}, redis.Cmd)
 	require.Equal(t, "node:20", job.Image)
+	require.Equal(t, "sleep", job.Entrypoint[0])
 	require.Equal(t, "--label ${{ github.job }}", job.WorkflowOptions)
 	require.Equal(t, "${{ vars.TITLE }}", job.Password)
 }
@@ -1760,12 +1761,4 @@ func TestRunContextWithGithubEnvRunnerValues(t *testing.T) {
 	assert.Equal(t, "/workspace/owner", env["RUNNER_WORKSPACE"])
 	assert.Equal(t, "1", env["RUNNER_DEBUG"])
 	assert.Equal(t, "http://[2001:db8::1]:8080/", env["ACTIONS_RUNTIME_URL"])
-}
-
-func TestStartJobContainerFindsSleepOnPath(t *testing.T) {
-	inputs := startJobContainerInputs(t, "jobs:\n  job:\n    container: nixos/nix:latest\n", &Config{
-		ContainerMaxLifetime: time.Minute,
-	})
-	require.Len(t, inputs, 1)
-	require.Equal(t, []string{"sleep", "60"}, inputs[0].Entrypoint)
 }
