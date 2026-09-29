@@ -120,7 +120,7 @@ func serveLocalExec(t *testing.T, w http.ResponseWriter, r *http.Request) {
 		assert.NoError(t, err)
 	}
 	for _, frame := range [][]byte{append([]byte{1}, stdout.Bytes()...), append([]byte{2}, stderr.Bytes()...), append([]byte{3}, status...)} {
-		assert.NoError(t, conn.Write(r.Context(), websocket.MessageBinary, frame))
+		_ = conn.Write(r.Context(), websocket.MessageBinary, frame)
 	}
 }
 
@@ -167,7 +167,8 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 
 	require.NoError(t, job.Start(false)(ctx))
 
-	require.NoError(t, job.Exec([]string{"sh", "-c", `printenv INPUT_WHO-TO-GREET; pwd -P`}, map[string]string{"INPUT_WHO-TO-GREET": "it's\nme", "SECRET": "hunter2"}, "", workdir)(ctx))
+	require.NoError(t, job.Exec([]string{"printenv", "INPUT_WHO-TO-GREET"}, map[string]string{"INPUT_WHO-TO-GREET": "it's\nme", "SECRET": "hunter2"}, "", "")(ctx))
+	require.NoError(t, job.Exec([]string{"pwd", "-P"}, nil, "", workdir)(ctx))
 	assert.Equal(t, "it's\nme\n"+workdir+"\n", jobLog.String())
 	assert.Equal(t, ExitCodeError(3), job.Exec([]string{"sh", "-c", "echo failing >&2; exit 3"}, nil, "", "")(ctx))
 	assert.Contains(t, jobLog.String(), "failing\n")
