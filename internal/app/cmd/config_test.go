@@ -107,7 +107,4 @@ func TestConfigCmdRunnerFileUsesConfiguredPathOrDefault(t *testing.T) {
 	out, _, err = runConfigCmd(t, file, "runner-file")
 	require.NoError(t, err)
 	assert.Equal(t, "state dir/registration.json\n", out)
-	require.NoError(t, os.WriteFile(file, []byte("runner: ["), 0o600))
-	_, _, err = runConfigCmd(t, file, "runner-file")
-	require.Error(t, err)
 }

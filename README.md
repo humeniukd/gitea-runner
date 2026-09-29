@@ -373,8 +373,6 @@ With v2, artifact calls also go through the cache server, so jobs must be able t
 
 Besides `GITEA_INSTANCE_URL` and `GITEA_RUNNER_REGISTRATION_TOKEN`, the image entrypoint supports optional variables such as `CONFIG_FILE` (passed through as `-c`), `GITEA_RUNNER_LABELS`, `GITEA_RUNNER_EPHEMERAL`, `GITEA_RUNNER_ONCE`, `GITEA_RUNNER_NAME`, `GITEA_MAX_REG_ATTEMPTS`, `RUNNER_STATE_FILE`, and `GITEA_RUNNER_REGISTRATION_TOKEN_FILE`. See [scripts/run.sh](scripts/run.sh) for exact behavior.
 
-The entrypoint checks the path in `runner.file` from `CONFIG_FILE`, defaulting to `.runner` in `/data`. `RUNNER_STATE_FILE`, when set, overrides that path for both registration and the daemon. Paths containing spaces are supported. Outside the image, `register --runner-file` and `daemon --runner-file` also override `runner.file`; `config runner-file` prints the configured path or its default.
-
 For a fuller container-oriented walkthrough, see [examples/docker](examples/docker/README.md).
 
 While the runner is idle it cleans up after earlier jobs:

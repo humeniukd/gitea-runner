@@ -6,28 +6,25 @@ fi
 
 cd /data
 
-CONFIG_ARGS=()
-if [[ -n "${CONFIG_FILE}" ]]; then
-  CONFIG_ARGS=(--config "$CONFIG_FILE")
+CONFIG_ARG=""
+if [[ ! -z "${CONFIG_FILE}" ]]; then
+  CONFIG_ARG="--config ${CONFIG_FILE}"
 fi
-if [[ -z "${RUNNER_STATE_FILE}" ]]; then
-  RUNNER_STATE_FILE=$(gitea-runner "${CONFIG_ARGS[@]}" config runner-file) || exit 1
+RUNNER_STATE_FILE=${RUNNER_STATE_FILE:-$(gitea-runner ${CONFIG_ARG} config runner-file)}
+LABEL_ARGS=""
+if [[ ! -z "${GITEA_RUNNER_LABELS}" ]]; then
+  LABEL_ARGS="--labels ${GITEA_RUNNER_LABELS}"
 fi
-FILE_ARGS=(--runner-file "$RUNNER_STATE_FILE")
-LABEL_ARGS=()
-if [[ -n "${GITEA_RUNNER_LABELS}" ]]; then
-  LABEL_ARGS=(--labels "$GITEA_RUNNER_LABELS")
-fi
-EXTRA_ARGS=("${LABEL_ARGS[@]}")
-if [[ -n "${GITEA_RUNNER_EPHEMERAL}" ]]; then
-  EXTRA_ARGS+=(--ephemeral)
+EXTRA_ARGS="${LABEL_ARGS}"
+if [[ ! -z "${GITEA_RUNNER_EPHEMERAL}" ]]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --ephemeral"
 fi
 # Also pass the labels to the daemon, so that an already registered runner
 # picks up changes to GITEA_RUNNER_LABELS instead of keeping the labels it
 # was first registered with.
-RUN_ARGS=("${LABEL_ARGS[@]}")
-if [[ -n "${GITEA_RUNNER_ONCE}" ]]; then
-  RUN_ARGS+=(--once)
+RUN_ARGS="${LABEL_ARGS}"
+if [[ ! -z "${GITEA_RUNNER_ONCE}" ]]; then
+  RUN_ARGS="${RUN_ARGS} --once"
 fi
 
 # In case no token is set, it's possible to read the token from a file, i.e. a Docker Secret
@@ -51,7 +48,7 @@ if [[ ! -s "$RUNNER_STATE_FILE" ]]; then
       --instance "${GITEA_INSTANCE_URL}" \
       --token    "${GITEA_RUNNER_REGISTRATION_TOKEN}" \
       --name     "${GITEA_RUNNER_NAME:-`hostname`}" \
-      "${CONFIG_ARGS[@]}" "${FILE_ARGS[@]}" "${EXTRA_ARGS[@]}" --no-interactive 2>&1 | tee /tmp/reg.log
+      ${CONFIG_ARG} ${EXTRA_ARGS} --no-interactive 2>&1 | tee /tmp/reg.log
 
     cat /tmp/reg.log | grep 'Runner registered successfully' > /dev/null
     if [[ $? -eq 0 ]]; then
@@ -67,4 +64,4 @@ fi
 unset GITEA_RUNNER_REGISTRATION_TOKEN
 unset GITEA_RUNNER_REGISTRATION_TOKEN_FILE
 
-exec gitea-runner daemon "${CONFIG_ARGS[@]}" "${FILE_ARGS[@]}" "${RUN_ARGS[@]}"
+exec gitea-runner daemon ${CONFIG_ARG} ${RUN_ARGS}

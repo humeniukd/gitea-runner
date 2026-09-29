@@ -30,15 +30,14 @@ func loadConfigCmd(configFile *string) *cobra.Command {
 	configCmd.AddCommand(&cobra.Command{
 		Use:   "runner-file",
 		Short: "Print the registration file path used by the runner",
-		Long:  "Print runner.file from --config, or .runner without a config, matching register and daemon.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.LoadDefault(*configFile)
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), cfg.Runner.File)
-			return err
+			fmt.Fprintln(cmd.OutOrStdout(), cfg.Runner.File)
+			return nil
 		},
 	})
 
