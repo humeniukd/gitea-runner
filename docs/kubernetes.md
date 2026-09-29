@@ -6,11 +6,11 @@ A label with the `kubernetes` schema runs each of its jobs as a pod, without a D
 ubuntu-latest:kubernetes://docker.gitea.com/runner-images:ubuntu-latest
 ```
 
-The pod holds a `job` container, created from the label's image or the job's `container.image`, and one container per service. The pod is deleted when the job ends, and with the runner's pod when the runner runs as a pod in the same namespace.
+The pod holds a `job` container from the label's image or the job's `container.image`, plus one container per service. It is deleted when the job ends, or with the runner's pod.
 
 ## Setup
 
-The runner talks to the Kubernetes API as the service account of its pod, and creates job pods in that account's namespace. [`examples/kubernetes/kubernetes-pods.yaml`](../examples/kubernetes/kubernetes-pods.yaml) deploys a runner with the permissions it needs:
+In a cluster, the runner uses its pod's service account and namespace. [`examples/kubernetes/kubernetes-pods.yaml`](../examples/kubernetes/kubernetes-pods.yaml) deploys a runner with these permissions:
 
 | Resource | Verbs |
 | --- | --- |
@@ -19,21 +19,15 @@ The runner talks to the Kubernetes API as the service account of its pod, and cr
 | `pods/log` | `get` |
 | `secrets` | `create`, `delete` |
 
-The `env` of a job's services goes into a secret the runner deletes with the pod.
-
-Outside a cluster, the runner uses the current context of the first file in `$KUBECONFIG`, or of `~/.kube/config`, with a token or a client certificate. `gitea-runner exec --image kubernetes://<image>` runs a workflow the same way.
-
-The cluster must run Kubernetes 1.30 or later. Job images need `sh`, `tar` and coreutils such as `sleep` and `env`, which the [runner images](https://gitea.com/gitea/runner-images) have.
+Outside a cluster, it uses the current context of `$KUBECONFIG` or `~/.kube/config`. The cluster must run Kubernetes 1.30 or later, and job images need `sh`, `tar`, `sleep` and `env`.
 
 ## Configuration
 
 ```yaml
 kubernetes:
-  # Kubeconfig to use instead of the service account of the runner's pod.
-  kubeconfig: ""
-  # Namespace of job pods. Empty uses the service account's, else the kubeconfig context's, else default.
-  namespace: ""
-  pod_template:
+  kubeconfig: "" # instead of the service account
+  namespace: "" # defaults to the service account's, the kubeconfig context's, or default
+  pod_template: # merged under each job pod, a container named job merges into the job container
     spec:
       nodeSelector:
         kubernetes.io/arch: amd64
@@ -44,19 +38,12 @@ kubernetes:
               memory: 4Gi
 ```
 
-The runner merges its pod onto `pod_template` map key by map key, replacing list items of the same `name`, except that a container named `job` is merged into the job container. Job pods mount no service account token and get no environment variables for the namespace's services unless the template sets `automountServiceAccountToken` or `enableServiceLinks`.
+Job pods get no service account token or service links unless the template sets `automountServiceAccountToken` or `enableServiceLinks`.
 
 ## Services
 
-A step reaches a service by its id or `localhost`, on the port the service listens on, so two services cannot listen on the same port. A service id must be a valid DNS label other than `job`. `job.services.<id>.ports` maps each declared port to itself.
-
-A service's `options` may only hold `--health-cmd`, `--health-interval`, `--health-timeout`, `--health-retries` and `--health-start-period`, of which the last two are ignored. `--health-cmd` becomes a readiness probe the job waits for. A `HEALTHCHECK` in the service's image is not used. A service's `command`, `entrypoint` and `--health-cmd` are readable in the pod spec, so pass secrets to services through `env`.
+Services share the pod's network, so a step reaches one by its id or `localhost` on the port it listens on, and two services cannot use the same port. Service `env` goes into a per-job secret, so pass secrets that way, as `command` and `options` are visible in the pod spec. Of `options`, only `--health-*` is accepted, and `--health-cmd` becomes a readiness probe the job waits for.
 
 ## Unsupported
 
-These fail the job:
-
-- `docker://` steps and actions with `runs.using: docker`
-- `options`, `volumes` and `credentials` of the job container, `volumes` and `credentials` of services. Pull private images with `imagePullSecrets` in `pod_template`.
-
-Docker settings of the runner config, such as `container.options`, `container.network` and `runner.tool_cache_mode`, do not apply to pods.
+`docker://` steps, `runs.using: docker` actions, the job container's `options`, `volumes` and `credentials`, and services' `volumes` and `credentials` fail the job. Pull private images with `imagePullSecrets` in `pod_template`. Docker settings such as `container.options` and `container.network` do not apply.
