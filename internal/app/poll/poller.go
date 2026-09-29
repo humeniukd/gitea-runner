@@ -39,7 +39,6 @@ type AvailabilityRunner interface {
 }
 
 type Poller struct {
-	consumedTask atomic.Bool
 	client       client.Client
 	runner       TaskRunner
 	cfg          *config.Config
@@ -52,6 +51,9 @@ type Poller struct {
 	shutdownJobs context.CancelFunc
 
 	done chan struct{}
+
+	taskFetched          atomic.Bool
+	registrationRejected atomic.Bool
 
 	// unregistered is set when the server rejects the runner with an
 	// Unauthenticated response, meaning the runner is no longer registered.
@@ -188,13 +190,18 @@ func (p *Poller) Done() <-chan struct{} {
 
 // Unregistered reports whether polling stopped because the server rejected the
 // runner as unregistered (an Unauthenticated response).
-// TaskConsumed reports whether this daemon has fetched a task, even if it failed or was cancelled.
-func (p *Poller) TaskConsumed() bool {
-	return p.consumedTask.Load()
-}
-
 func (p *Poller) Unregistered() bool {
 	return p.unregistered.Load()
+}
+
+// RegistrationRejected reports whether polling stopped on an error matching IsRegistrationRejected.
+func (p *Poller) RegistrationRejected() bool {
+	return p.registrationRejected.Load()
+}
+
+// TaskFetched reports whether polling received a task, which uses up an ephemeral registration.
+func (p *Poller) TaskFetched() bool {
+	return p.taskFetched.Load()
 }
 
 // Ready reports whether the daemon can currently communicate with Gitea and
@@ -331,7 +338,6 @@ func addJitter(d time.Duration) time.Duration {
 }
 
 func (p *Poller) runTaskWithRecover(ctx context.Context, task *runnerv1.Task) {
-	p.consumedTask.Store(true)
 	defer func() {
 		if r := recover(); r != nil {
 			err := fmt.Errorf("panic: %v", r)
@@ -375,9 +381,11 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 		// An Unauthenticated response means the server no longer knows this
 		// runner (e.g. it was deleted). Retrying forever is pointless, so stop
 		// polling and let the daemon exit with an error instead of spinning.
-		if isUnregistered(err) {
+		rejected := IsRegistrationRejected(err)
+		if rejected || connect.CodeOf(err) == connect.CodeUnauthenticated {
 			log.WithError(err).Error("server rejected the runner as unregistered, stopping poller")
 			p.unregistered.Store(true)
+			p.registrationRejected.Store(rejected)
 			p.shutdownPolling()
 			return nil, false
 		}
@@ -418,13 +426,15 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 	// got a task, set `tasksVersion` to zero to force query db in next request.
 	p.tasksVersion.CompareAndSwap(resp.Msg.TasksVersion, 0)
 
+	p.taskFetched.Store(true)
 	metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultTask).Inc()
 	return resp.Msg.Task, true
 }
 
-func isUnregistered(err error) bool {
+// IsRegistrationRejected reports whether Gitea itself answered "unregistered runner", unlike a proxy's bare 401.
+func IsRegistrationRejected(err error) bool {
 	var connectErr *connect.Error
-	return errors.As(err, &connectErr) && (connectErr.Code() == connect.CodeUnauthenticated ||
+	return errors.As(err, &connectErr) && (connectErr.Code() == connect.CodeUnauthenticated && connectErr.Message() == "unregistered runner" ||
 		connectErr.Code() == connect.CodeUnknown && connect.IsWireError(err) && connectErr.Message() == "rpc error: code = Unauthenticated desc = unregistered runner")
 }
 

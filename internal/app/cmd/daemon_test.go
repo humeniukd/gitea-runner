@@ -21,7 +21,6 @@ import (
 	"gitea.dev/actionslib/runner/v1/runnerv1connect"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
-	"go.yaml.in/yaml/v4"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -83,24 +82,29 @@ func TestInitLoggingSetsLevelAndCaller(t *testing.T) {
 	require.IsType(t, report.MaskingFormatter(nil), log.StandardLogger().Formatter)
 }
 
+var errUnregisteredRunner = errors.New("rpc error: code = Unauthenticated desc = unregistered runner")
+
 type daemonTestService struct {
 	runnerv1connect.UnimplementedRunnerServiceHandler
-	beforeTask   bool
-	unregistered bool
-	cancel       context.CancelFunc
+	declareErr, fetchErr error
+	beforeTask           bool
+	cancel               context.CancelFunc
 }
 
-func (*daemonTestService) Declare(context.Context, *connect.Request[runnerv1.DeclareRequest]) (*connect.Response[runnerv1.DeclareResponse], error) {
+func (s *daemonTestService) Declare(context.Context, *connect.Request[runnerv1.DeclareRequest]) (*connect.Response[runnerv1.DeclareResponse], error) {
+	if s.declareErr != nil {
+		return nil, s.declareErr
+	}
 	return connect.NewResponse(&runnerv1.DeclareResponse{Runner: &runnerv1.Runner{Name: "test"}}), nil
 }
 
 func (s *daemonTestService) FetchTask(context.Context, *connect.Request[runnerv1.FetchTaskRequest]) (*connect.Response[runnerv1.FetchTaskResponse], error) {
-	if s.unregistered {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("unregistered runner"))
+	if s.fetchErr != nil {
+		return nil, s.fetchErr
 	}
 	if s.beforeTask {
 		s.cancel()
-		return nil, connect.NewError(connect.CodeCanceled, errors.New("interrupted before task"))
+		return nil, context.Canceled
 	}
 	return connect.NewResponse(&runnerv1.FetchTaskResponse{Task: &runnerv1.Task{Id: 1, Context: &structpb.Struct{}, WorkflowPayload: []byte("invalid: [")}}), nil
 }
@@ -114,43 +118,41 @@ func (*daemonTestService) UpdateLog(_ context.Context, req *connect.Request[runn
 }
 
 func TestDaemonRemovesOnlyConsumedEphemeralRegistration(t *testing.T) {
-	t.Setenv("OTEL_SDK_DISABLED", "true")
 	for _, tc := range []struct {
-		name                                string
-		ephemeral, beforeTask, unregistered bool
+		name                  string
+		ephemeral, beforeTask bool
+		declareErr, fetchErr  error
+		removed               bool
 	}{
-		{"ephemeral failed task", true, false, false},
-		{"ephemeral interrupted before task", true, true, false},
-		{"persistent once", false, false, false},
-		{"ephemeral unregistered", true, false, true},
+		{"ephemeral failed task", true, false, nil, nil, true},
+		{"ephemeral interrupted before task", true, true, nil, nil, false},
+		{"persistent once", false, false, nil, nil, false},
+		{"ephemeral rejected on fetch", true, false, nil, errUnregisteredRunner, true},
+		{"ephemeral proxy 401 on fetch", true, false, nil, connect.NewError(connect.CodeUnauthenticated, errors.New("HTTP status 401 Unauthorized")), false},
+		{"ephemeral rejected on declare", true, false, errUnregisteredRunner, nil, true},
+		{"persistent rejected on declare", false, false, errUnregisteredRunner, nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			_, handler := runnerv1connect.NewRunnerServiceHandler(&daemonTestService{beforeTask: tc.beforeTask, unregistered: tc.unregistered, cancel: cancel})
+			_, handler := runnerv1connect.NewRunnerServiceHandler(&daemonTestService{declareErr: tc.declareErr, fetchErr: tc.fetchErr, beforeTask: tc.beforeTask, cancel: cancel})
 			server := httptest.NewServer(http.StripPrefix("/api/actions", handler))
 			defer server.Close()
-			cfg, err := config.LoadDefault("")
-			require.NoError(t, err)
-			cfg.Runner.File = filepath.Join(t.TempDir(), "registration.json")
-			cfg.Runner.Labels = []string{"host:host"}
-			cfg.Cache.Enabled = new(false)
-			cfg.Runner.ReportCloseTimeout = time.Second
-			file := filepath.Join(t.TempDir(), "config.yaml")
-			content, err := yaml.Marshal(cfg)
-			require.NoError(t, err)
-			require.NoError(t, os.WriteFile(file, content, 0o600))
-			require.NoError(t, config.SaveRegistration(cfg.Runner.File, &config.Registration{Address: server.URL, UUID: "test", Name: "test", Token: "test", Labels: cfg.Runner.Labels, Ephemeral: tc.ephemeral}))
-			err = runDaemon(ctx, &daemonArgs{Once: true}, &file)(nil, nil)
-			if tc.unregistered {
-				require.ErrorContains(t, err, "no longer registered")
-			} else {
+			dir := t.TempDir()
+			regFile := filepath.Join(dir, "registration.json")
+			configFile := filepath.Join(dir, "config.yaml")
+			require.NoError(t, os.WriteFile(configFile, []byte("runner:\n  file: "+regFile+"\ncache:\n  enabled: false\n"), 0o600))
+			require.NoError(t, config.SaveRegistration(regFile, &config.Registration{Address: server.URL, UUID: "test", Name: "test", Token: "test", Labels: []string{"host:host"}, Ephemeral: tc.ephemeral}))
+			err := runDaemon(ctx, &daemonArgs{Once: true}, &configFile)(nil, nil)
+			if tc.declareErr == nil && tc.fetchErr == nil {
 				require.NoError(t, err)
-			}
-			if tc.ephemeral && !tc.beforeTask {
-				require.NoFileExists(t, cfg.Runner.File)
 			} else {
-				require.FileExists(t, cfg.Runner.File)
+				require.Error(t, err)
+			}
+			if tc.removed {
+				require.NoFileExists(t, regFile)
+			} else {
+				require.FileExists(t, regFile)
 			}
 		})
 	}

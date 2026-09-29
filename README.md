@@ -371,8 +371,6 @@ With v2, artifact calls also go through the cache server, so jobs must be able t
 
 #### Official Docker image
 
-After an ephemeral runner consumes its task, the daemon removes its registration file so a restarted container can register a fresh runner. A startup failure or interruption before a task is fetched preserves the registration unless the server confirms that it has been unregistered. Persistent runners keep their registration, including when run with `--once`.
-
 Besides `GITEA_INSTANCE_URL` and `GITEA_RUNNER_REGISTRATION_TOKEN`, the image entrypoint supports optional variables such as `CONFIG_FILE` (passed through as `-c`), `GITEA_RUNNER_LABELS`, `GITEA_RUNNER_EPHEMERAL`, `GITEA_RUNNER_ONCE`, `GITEA_RUNNER_NAME`, `GITEA_MAX_REG_ATTEMPTS`, `RUNNER_STATE_FILE`, and `GITEA_RUNNER_REGISTRATION_TOKEN_FILE`. See [scripts/run.sh](scripts/run.sh) for exact behavior.
 
 For a fuller container-oriented walkthrough, see [examples/docker](examples/docker/README.md).

@@ -106,13 +106,17 @@ func TestPoller_FetchTimeoutIsNoSignal(t *testing.T) {
 // response marks the runner as unregistered and cancels the polling context so
 // the daemon can exit instead of retrying forever.
 func TestPoller_FetchUnauthenticatedStopsPolling(t *testing.T) {
-	for name, fetchErr := range map[string]error{
-		"connect": connect_go.NewError(connect_go.CodeUnauthenticated, errors.New("unregistered runner")),
-		"gitea":   connect_go.NewWireError(connect_go.CodeUnknown, errors.New("rpc error: code = Unauthenticated desc = unregistered runner")),
+	for name, tc := range map[string]struct {
+		fetchErr error
+		rejected bool
+	}{
+		"connect": {connect_go.NewError(connect_go.CodeUnauthenticated, errors.New("unregistered runner")), true},
+		"gitea":   {connect_go.NewWireError(connect_go.CodeUnknown, errors.New("rpc error: code = Unauthenticated desc = unregistered runner")), true},
+		"proxy":   {connect_go.NewError(connect_go.CodeUnauthenticated, errors.New("HTTP status 401 Unauthorized")), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			client := mocks.NewClient(t)
-			client.On("FetchTask", mock.Anything, mock.Anything).Return(nil, fetchErr)
+			client.On("FetchTask", mock.Anything, mock.Anything).Return(nil, tc.fetchErr)
 
 			cfg, err := config.LoadDefault("")
 			require.NoError(t, err)
@@ -122,6 +126,7 @@ func TestPoller_FetchUnauthenticatedStopsPolling(t *testing.T) {
 			require.False(t, ok)
 
 			assert.True(t, p.Unregistered(), "runner should be marked unregistered")
+			assert.Equal(t, tc.rejected, p.RegistrationRejected())
 			assert.Equal(t, int64(0), s.consecutiveErrors, "unauthenticated must not drive error backoff")
 			select {
 			case <-p.pollingCtx.Done():
