@@ -191,8 +191,8 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			return err
 		case err != nil:
 			log.WithError(err).Error("fail to invoke Declare")
-			if reg.Ephemeral && poll.IsRegistrationRejected(err) {
-				removeRegistration(cfg.Runner.File)
+			if client.IsRegistrationRejected(err) {
+				removeEphemeralRegistration(reg, cfg.Runner.File)
 			}
 			return err
 		default:
@@ -218,7 +218,7 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				poller.PollOnce()
+				poller.PollOnce(func() { removeEphemeralRegistration(reg, cfg.Runner.File) })
 			}()
 
 			// shutdown when we complete a job or cancel is requested
@@ -247,8 +247,8 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			log.Warnf("runner: %s cancelled in progress jobs during shutdown", resp.Msg.Runner.Name)
 		}
 
-		if reg.Ephemeral && (poller.TaskFetched() || poller.RegistrationRejected()) {
-			removeRegistration(cfg.Runner.File)
+		if poller.RegistrationRejected() {
+			removeEphemeralRegistration(reg, cfg.Runner.File)
 		}
 
 		if poller.Unregistered() {
@@ -259,8 +259,13 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 	}
 }
 
-func removeRegistration(file string) {
-	if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+func removeEphemeralRegistration(reg *config.Registration, file string) {
+	if !reg.Ephemeral {
+		return
+	}
+	if err := os.Remove(file); err == nil {
+		log.Infof("removed the spent ephemeral registration %q", file)
+	} else if !os.IsNotExist(err) {
 		log.WithError(err).Warn("failed to remove the spent ephemeral registration")
 	}
 }

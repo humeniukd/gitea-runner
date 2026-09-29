@@ -141,7 +141,7 @@ func TestDaemonRemovesOnlyConsumedEphemeralRegistration(t *testing.T) {
 			dir := t.TempDir()
 			regFile := filepath.Join(dir, "registration.json")
 			configFile := filepath.Join(dir, "config.yaml")
-			require.NoError(t, os.WriteFile(configFile, []byte("runner:\n  file: "+regFile+"\ncache:\n  enabled: false\n"), 0o600))
+			require.NoError(t, os.WriteFile(configFile, []byte("runner:\n  file: "+regFile+"\n  idle_cleanup_interval: 0s\ncache:\n  enabled: false\n"), 0o600))
 			require.NoError(t, config.SaveRegistration(regFile, &config.Registration{Address: server.URL, UUID: "test", Name: "test", Token: "test", Labels: []string{"host:host"}, Ephemeral: tc.ephemeral}))
 			err := runDaemon(ctx, &daemonArgs{Once: true}, &configFile)(nil, nil)
 			if tc.declareErr == nil && tc.fetchErr == nil {

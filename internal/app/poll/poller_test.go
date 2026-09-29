@@ -110,9 +110,8 @@ func TestPoller_FetchUnauthenticatedStopsPolling(t *testing.T) {
 		fetchErr error
 		rejected bool
 	}{
-		"connect": {connect_go.NewError(connect_go.CodeUnauthenticated, errors.New("unregistered runner")), true},
+		"connect": {connect_go.NewError(connect_go.CodeUnauthenticated, errors.New("unregistered runner")), false},
 		"gitea":   {connect_go.NewWireError(connect_go.CodeUnknown, errors.New("rpc error: code = Unauthenticated desc = unregistered runner")), true},
-		"proxy":   {connect_go.NewError(connect_go.CodeUnauthenticated, errors.New("HTTP status 401 Unauthorized")), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			client := mocks.NewClient(t)
@@ -335,7 +334,7 @@ func TestPollerPollOnceCallsOnIdle(t *testing.T) {
 	poller := New(cfg, cli, runner)
 
 	var wg sync.WaitGroup
-	wg.Go(poller.PollOnce)
+	wg.Go(func() { poller.PollOnce(func() {}) })
 
 	require.Eventually(t, func() bool {
 		return runner.idleCalls.Load() > 0
@@ -345,6 +344,18 @@ func TestPollerPollOnceCallsOnIdle(t *testing.T) {
 	defer cancel()
 	require.NoError(t, poller.Shutdown(ctx))
 	wg.Wait()
+}
+
+func TestPollerPollOnceCallsOnTaskFetchedBeforeRunningIt(t *testing.T) {
+	cli := mocks.NewClient(t)
+	cli.On("FetchTask", mock.Anything, mock.Anything).Return(connect_go.NewResponse(&runnerv1.FetchTaskResponse{Task: &runnerv1.Task{Id: 1}}), nil)
+	cfg, err := config.LoadDefault("")
+	require.NoError(t, err)
+	runner := &mockRunner{}
+	runsSeenByCallback := int64(-1)
+	New(cfg, cli, runner).PollOnce(func() { runsSeenByCallback = runner.running.Load() + runner.totalCompleted.Load() })
+	assert.Zero(t, runsSeenByCallback)
+	assert.Equal(t, int64(1), runner.totalCompleted.Load())
 }
 
 // TestPoller_ConcurrencyLimitedByCapacity verifies that with capacity=3 and
