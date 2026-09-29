@@ -404,7 +404,12 @@ func (r *Runner) requiresDocker() bool {
 // fallbackPlatform is where a job runs whose runs-on matches no label, as any job without a
 // runs-on does, since Gitea sends those to every runner.
 func (r *Runner) fallbackPlatform(ctx context.Context) string {
-	if r.requiresDocker() || dockerReachable(ctx) {
+	switch {
+	case r.requiresDocker():
+		return r.cfg.Runner.DefaultImage
+	case slices.ContainsFunc(r.labels, func(label *labels.Label) bool { return label.Schema == labels.SchemeKubernetes }):
+		return labels.SchemeKubernetes + "://" + r.cfg.Runner.DefaultImage
+	case dockerReachable(ctx):
 		return r.cfg.Runner.DefaultImage
 	}
 	return labels.SelfHostedPlatform
@@ -584,6 +589,11 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		SharedToolCache:                   r.cfg.Runner.ToolCacheMode == config.ToolCacheModeShared,
 		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
 		RunnerName:                        r.name,
+		Kubernetes: container.KubernetesOptions{
+			Kubeconfig:  r.cfg.Kubernetes.Kubeconfig,
+			Namespace:   r.cfg.Kubernetes.Namespace,
+			PodTemplate: r.cfg.Kubernetes.PodTemplate,
+		},
 	}
 
 	rr, err := runner.New(runnerConfig)
@@ -868,8 +878,9 @@ func warnIgnoredCacheSecret(cfg *config.Config) {
 // cacheForJob returns the cache address for the job, and the container to attach to its network to reach it there.
 func (r *Runner) cacheForJob(job *model.Job, pickPlatform func([]string) string) (string, string) {
 	jobContainer := job.Container()
+	platform := pickPlatform(job.RunsOn())
 	cacheContainer := ""
-	if jobContainer != nil && jobContainer.Image != "" || pickPlatform(job.RunsOn()) != labels.SelfHostedPlatform {
+	if !strings.HasPrefix(platform, labels.SchemeKubernetes+"://") && (jobContainer != nil && jobContainer.Image != "" || platform != labels.SelfHostedPlatform) {
 		cacheContainer = r.isolatedCacheContainer()
 	}
 	if cacheContainer == "" {

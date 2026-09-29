@@ -1,0 +1,226 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+package container
+
+import (
+	"archive/tar"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/coder/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+type podManifest struct {
+	Metadata struct{ Labels map[string]string }
+	Spec     struct {
+		AutomountServiceAccountToken bool
+		EnableServiceLinks           bool
+		HostAliases                  []struct{ Hostnames []string }
+		Containers                   []struct {
+			Resources      map[string]any
+			ReadinessProbe *struct{ PeriodSeconds int }
+		}
+	}
+}
+
+type fakeCluster struct {
+	mu       sync.Mutex
+	manifest podManifest
+	requests map[string][]string
+}
+
+func (f *fakeCluster) record(request, content string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests[request] = append(f.requests[request], content)
+}
+
+func fakeKubernetes(t *testing.T, podStatus string) (string, *fakeCluster) {
+	cluster := &fakeCluster{requests: map[string][]string{}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		cluster.record(r.Method+" "+r.URL.Path, string(body))
+		pods := "/api/v1/namespaces/ci/pods"
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == pods:
+			assert.NoError(t, json.Unmarshal(body, &cluster.manifest))
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			cluster.record("exec", r.URL.RawQuery)
+			serveLocalExec(t, w, r)
+		case strings.HasSuffix(r.URL.Path, "/log"):
+			_, _ = io.WriteString(w, "log of "+r.URL.Query().Get("container"))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, pods+"/"):
+			_, _ = io.WriteString(w, podStatus)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/ci/secrets", r.Method == http.MethodDelete:
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+	require.NoError(t, os.WriteFile(kubeconfig, fmt.Appendf(nil, `
+current-context: test
+contexts: [{name: test, context: {cluster: test, user: test, namespace: ci}}]
+clusters: [{name: test, cluster: {server: %q}}]
+users: [{name: test, user: {token: test-token}}]
+`, server.URL), 0o600))
+	return kubeconfig, cluster
+}
+
+func serveLocalExec(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{execProtocol}})
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer func() { _ = conn.CloseNow() }()
+	conn.SetReadLimit(-1)
+	command := r.URL.Query()["command"]
+	var stdin bytes.Buffer
+	for r.URL.Query().Get("stdin") == "true" {
+		_, frame, err := conn.Read(r.Context())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if frame[0] == 255 {
+			break
+		}
+		stdin.Write(frame[1:])
+	}
+	cmd := exec.Command(command[0], command[1:]...)
+	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = &stdin, &stdout, &stderr
+	status := `{"status":"Success"}`
+	var exitErr *exec.ExitError
+	if err := cmd.Run(); errors.As(err, &exitErr) {
+		status = fmt.Sprintf(`{"status":"Failure","reason":"NonZeroExitCode","details":{"causes":[{"reason":"ExitCode","message":"%d"}]}}`, exitErr.ExitCode())
+	} else {
+		assert.NoError(t, err)
+	}
+	for _, frame := range [][]byte{append([]byte{1}, stdout.Bytes()...), append([]byte{2}, stderr.Bytes()...), append([]byte{3}, status...)} {
+		assert.NoError(t, conn.Write(r.Context(), websocket.MessageBinary, frame))
+	}
+}
+
+func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell")
+	}
+	ctx := t.Context()
+	kubeconfig, cluster := fakeKubernetes(t, `{"spec":{"containers":[{},{}]},"status":{"phase":"Running","containerStatuses":[
+		{"name":"job","ready":true,"state":{"running":{}}},
+		{"name":"db","ready":true,"state":{"running":{}}}]}}`)
+	manifest := &cluster.manifest
+	workdir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	pod, err := NewKubernetesPod(KubernetesOptions{Kubeconfig: kubeconfig, PodTemplate: map[string]any{
+		"spec": map[string]any{
+			"automountServiceAccountToken": true,
+			"containers":                   []any{map[string]any{"name": "job", "resources": map[string]any{"limits": map[string]any{"cpu": "2"}}}},
+		},
+	}})
+	require.NoError(t, err)
+	var jobLog, serviceLog bytes.Buffer
+	job := pod.JobContainer(&NewContainerInput{Name: "Job-Name", Image: "node", WorkingDir: workdir, Stdout: &jobLog, Stderr: &jobLog})
+	service := pod.ServiceContainer("DB", &NewContainerInput{
+		Image:           "postgres",
+		Cmd:             []string{"postgres", "-D", "$(PGDATA)"},
+		Env:             []string{"POSTGRES_PASSWORD=service-secret"},
+		WorkflowOptions: "--health-cmd pg_isready --health-interval 2s",
+		Stdout:          &serviceLog,
+	})
+
+	require.NoError(t, job.Create(nil, nil)(ctx))
+	assert.Equal(t, "gitea-runner", manifest.Metadata.Labels["app.kubernetes.io/managed-by"])
+	assert.True(t, manifest.Spec.AutomountServiceAccountToken)
+	assert.False(t, manifest.Spec.EnableServiceLinks)
+	assert.Equal(t, []string{"db"}, manifest.Spec.HostAliases[0].Hostnames)
+	require.Len(t, manifest.Spec.Containers, 2)
+	assert.Equal(t, map[string]any{"limits": map[string]any{"cpu": "2"}}, manifest.Spec.Containers[0].Resources)
+	assert.Equal(t, 2, manifest.Spec.Containers[1].ReadinessProbe.PeriodSeconds)
+	assert.NotContains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], "service-secret")
+	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/secrets"][0], "service-secret")
+	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], `"secretKeyRef":{"key":"db.0","name":"`+pod.secretName+`"}`)
+	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], `"args":["postgres","-D","$$(PGDATA)"]`)
+
+	require.NoError(t, job.Start(false)(ctx))
+
+	require.NoError(t, job.Exec([]string{"sh", "-c", `printenv INPUT_WHO-TO-GREET; pwd -P`}, map[string]string{"INPUT_WHO-TO-GREET": "it's\nme", "SECRET": "hunter2"}, "", workdir)(ctx))
+	assert.Equal(t, "it's\nme\n"+workdir+"\n", jobLog.String())
+	assert.Equal(t, ExitCodeError(3), job.Exec([]string{"sh", "-c", "echo failing >&2; exit 3"}, nil, "", "")(ctx))
+	assert.Contains(t, jobLog.String(), "failing\n")
+	for _, query := range cluster.requests["exec"] {
+		assert.NotContains(t, query, "hunter2")
+	}
+
+	require.NoError(t, job.Copy(workdir+"/act/", &FileEntry{Name: "workflow/event.json", Mode: 0o644, Body: `{"ref":"main"}`})(ctx))
+	archive, err := job.GetContainerArchive(ctx, workdir+"/act/workflow/event.json")
+	require.NoError(t, err)
+	reader := tar.NewReader(archive)
+	header, err := reader.Next()
+	require.NoError(t, err)
+	content, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "event.json", header.Name)
+	assert.JSONEq(t, `{"ref":"main"}`, string(content))
+	require.NoError(t, archive.Close())
+	_, err = job.GetContainerArchive(ctx, workdir+"/missing")
+	require.Error(t, err)
+
+	pathEnv := map[string]string{}
+	require.NoError(t, job.UpdateFromImageEnv(&pathEnv)(ctx))
+	assert.Equal(t, os.Getenv("PATH"), pathEnv["PATH"])
+
+	info, err := service.Inspect(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, HealthHealthy, info.Health)
+	require.NoError(t, service.DumpLogs(ctx))
+	assert.Equal(t, "log of db", serviceLog.String())
+
+	require.NoError(t, job.Remove()(ctx))
+	assert.Len(t, cluster.requests["DELETE /api/v1/namespaces/ci/pods/"+pod.name], 1)
+	assert.Len(t, cluster.requests["DELETE /api/v1/namespaces/ci/secrets/"+pod.secretName], 1)
+}
+
+func TestKubernetesPodFailsBeforeSteps(t *testing.T) {
+	kubeconfig, _ := fakeKubernetes(t, `{"spec":{"containers":[{}]},"status":{"containerStatuses":[
+		{"name":"job","state":{"waiting":{"reason":"ErrImagePull","message":"no such image"}}}]}}`)
+	template := map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "sidecar"}}}}
+	for _, service := range []struct{ name, options, err string }{
+		{"db", "--hostname db", "only --health-* options are supported"},
+		{"sidecar", "", "named like another container"},
+	} {
+		pod, err := NewKubernetesPod(KubernetesOptions{Kubeconfig: kubeconfig, Namespace: "ci", PodTemplate: template})
+		require.NoError(t, err)
+		job := pod.JobContainer(&NewContainerInput{Image: "node"})
+		pod.ServiceContainer(service.name, &NewContainerInput{Image: "postgres", WorkflowOptions: service.options})
+		require.ErrorContains(t, job.Create(nil, nil)(t.Context()), service.err)
+	}
+	pod, err := NewKubernetesPod(KubernetesOptions{Kubeconfig: kubeconfig, Namespace: "ci"})
+	require.NoError(t, err)
+	job := pod.JobContainer(&NewContainerInput{Image: "missing"})
+	require.NoError(t, job.Create(nil, nil)(t.Context()))
+	require.ErrorContains(t, job.Start(false)(t.Context()), "ErrImagePull: no such image")
+}

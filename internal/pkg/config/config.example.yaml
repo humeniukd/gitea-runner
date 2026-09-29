@@ -106,8 +106,7 @@ runner:
   # terminal; tools like `docker build` emit redrawing progress frames into the captured log
   # when a TTY is present.
   #allocate_pty: false
-  # Image for a job whose runs-on matches none of the labels above. A runner without a
-  # docker daemon runs such a job on the host instead.
+  # Image for a job whose runs-on matches none of the labels above, see the Labels section of the README for where it runs.
   #default_image: "docker.gitea.com/runner-images:ubuntu-latest"
   # What to mount at RUNNER_TOOL_CACHE (/opt/hostedtoolcache), where setup actions install tools:
   #   none:   nothing. A docker job sees what its image ships there, a host job an empty dir, and
@@ -279,6 +278,12 @@ host:
   # The parent directory of a job's working directory.
   # If it's empty, $HOME/.cache/act/ will be used.
   #workdir_parent:
+
+# Jobs that run as Kubernetes pods, see docs/kubernetes.md.
+kubernetes:
+  #kubeconfig: ""
+  #namespace: ""
+  #pod_template: {}
 
 # Optional local task-admission checks. Disabled by default. When enabled, low
 # disk space or a failing script pauses new task fetching; existing jobs continue.

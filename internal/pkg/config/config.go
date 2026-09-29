@@ -194,6 +194,13 @@ type Host struct {
 	WorkdirParent string `yaml:"workdir_parent"` // WorkdirParent specifies the parent directory for the host's working directory.
 }
 
+// Kubernetes configures the pods jobs run in.
+type Kubernetes struct {
+	Kubeconfig  string         `yaml:"kubeconfig"`   // Kubeconfig to use instead of the in-cluster service account.
+	Namespace   string         `yaml:"namespace"`    // Namespace of job pods, empty uses the service account's, else the kubeconfig context's, else default.
+	PodTemplate map[string]any `yaml:"pod_template"` // PodTemplate is a pod manifest the runner merges its own onto.
+}
+
 // Metrics represents the configuration for the Prometheus metrics endpoint.
 type Metrics struct {
 	Enabled        bool          `yaml:"enabled"`         // Enabled indicates whether the metrics endpoint is exposed.
@@ -220,6 +227,7 @@ type Config struct {
 	Host        Host        `yaml:"host"`         // Host represents the configuration for the host.
 	Metrics     Metrics     `yaml:"metrics"`      // Metrics represents the configuration for the Prometheus metrics endpoint.
 	HealthCheck HealthCheck `yaml:"health_check"` // HealthCheck controls opt-in local task-admission checks.
+	Kubernetes  Kubernetes  `yaml:"kubernetes"`
 }
 
 // LoadDefault returns the default configuration.
