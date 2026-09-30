@@ -416,10 +416,10 @@ A job's secrets and its `::add-mask::` values are hidden from what the runner wr
 
 `log.job.retention` (default `168h`) is how long a log is kept, expired ones being deleted as new tasks start, and `log.job.max_size` (default `1GB`) caps one log. Keep `retention` above `runner.timeout` so a long job cannot outlive its own log, and prefer local disk, the file is written while the job runs. Only the runner's own user can read it.
 
+#### Task identifiers in the runner log
+
+As each task begins, the runner logs `task started` with its `task_id`, `job_id`, `run_id`, `run_number`, `repository` and the workflow's `job` key, so a supervisor reading the log can match it to the job in Gitea.
+
 ### Example Deployments
 
 Check out the [examples](examples) directory for sample deployment types.
-
-#### Task identifiers in daemon logs
-
-When a task starts, the runner writes a `task started` log entry with `task_id`, the workflow's `job` key, and the `repository`, `run_id`, and `run_number` supplied by Gitea. It also includes the numeric `job_id` when the task's runtime token contains matching task identifiers. These fields let external runner supervisors correlate a running task with the Gitea UI/API without logging its tokens, secrets, or full event payload.

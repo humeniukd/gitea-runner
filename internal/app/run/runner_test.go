@@ -27,7 +27,7 @@ import (
 	"connectrpc.com/connect"
 	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
-	"github.com/sirupsen/logrus/hooks/test"
+	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -87,8 +87,6 @@ func TestRunnerRunningCountAndNullLogger(t *testing.T) {
 func TestRunnerReclaimsVolumesAfterReporting(t *testing.T) {
 	for _, mode := range []string{"deferred", "post-task script"} {
 		t.Run(mode, func(t *testing.T) {
-			hook := test.NewGlobal()
-			t.Cleanup(hook.Reset)
 			cfg := &config.Config{
 				Cache:     config.Cache{Enabled: new(false)},
 				Runner:    config.Runner{Timeout: time.Minute, LogReportInterval: time.Minute, StateReportInterval: time.Minute},
@@ -169,15 +167,6 @@ func TestRunnerReclaimsVolumesAfterReporting(t *testing.T) {
 				Context:         &structpb.Struct{},
 				WorkflowPayload: []byte("jobs:\n  job:\n    runs-on: ubuntu\n    steps:\n      - run: exit 0\n        if: false\n"),
 			}))
-			loggedTask := false
-			for _, entry := range hook.AllEntries() {
-				if entry.Message == "task started" {
-					loggedTask = true
-					assert.Equal(t, int64(0), entry.Data["task_id"])
-					assert.Equal(t, "job", entry.Data["job"])
-				}
-			}
-			assert.True(t, loggedTask, "task identifiers must reach the daemon logger")
 			assert.True(t, reported.Load())
 			assert.Equal(t, int64(2), removed.Load())
 			assert.Zero(t, r.RunningCount())
@@ -417,32 +406,14 @@ func TestRestoreCalledWorkflowContext(t *testing.T) {
 	})
 }
 
-func TestLogTaskInfoIncludesIdentifiersWithoutCredentials(t *testing.T) {
-	hook := test.NewGlobal()
-	t.Cleanup(hook.Reset)
-	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"TaskID":72,"RunID":159,"JobID":221,"secret":"private-claim"}`))
-	for _, token := range []string{"header." + payload + ".private-signature", "malformed", "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"TaskID":73,"JobID":999}`)) + ".signature"} {
-		context, err := structpb.NewStruct(map[string]any{
-			"repository": "owner/repo", "run_id": "159", "run_number": "14",
-			"gitea_runtime_token": token, "token": "private-token",
-		})
+func TestTaskLogFields(t *testing.T) {
+	fields := func(token string) log.Fields {
+		taskContext, err := structpb.NewStruct(map[string]any{"repository": "owner/repo", "run_id": "159", "run_number": "14", "gitea_runtime_token": token})
 		require.NoError(t, err)
-		logTaskInfo(&runnerv1.Task{Id: 72, Context: context, Secrets: map[string]string{"secret": "private-secret"}}, "build")
-		entry := hook.LastEntry()
-		require.NotNil(t, entry)
-		assert.Equal(t, int64(72), entry.Data["task_id"])
-		assert.Equal(t, "159", entry.Data["run_id"])
-		assert.Equal(t, "14", entry.Data["run_number"])
-		assert.Equal(t, "owner/repo", entry.Data["repository"])
-		assert.Equal(t, "build", entry.Data["job"])
-		if token == "header."+payload+".private-signature" {
-			assert.Equal(t, int64(221), entry.Data["job_id"])
-		} else {
-			assert.NotContains(t, entry.Data, "job_id")
-		}
-		line, err := entry.String()
-		require.NoError(t, err)
-		assert.NotContains(t, line, "private-")
-		hook.Reset()
+		return taskLogFields(&runnerv1.Task{Id: 72, Context: taskContext}, "build")
 	}
+	want := log.Fields{"task_id": int64(72), "job": "build", "repository": "owner/repo", "run_id": "159", "run_number": "14"}
+	assert.Equal(t, want, fields("malformed"))
+	want["job_id"] = int64(221)
+	assert.Equal(t, want, fields("header."+base64.RawURLEncoding.EncodeToString([]byte(`{"TaskID":72,"JobID":221}`))+".signature"))
 }

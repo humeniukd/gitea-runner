@@ -425,6 +425,10 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 	if err != nil {
 		return err
 	}
+	log.WithFields(taskLogFields(task, jobID)).
+		WithField("actions_url", r.getDefaultActionsURL(task)).
+		WithField("address", r.client.Address()).
+		Info("task started")
 
 	plan, err := model.CombineWorkflowPlanner(workflow).PlanJob(jobID)
 	if err != nil {
@@ -464,12 +468,6 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		envs["GITEA_RUN_ID"] = v
 	}
 	telemetry.AddJobEnv(ctx, envs)
-
-	logTaskInfo(task, jobID)
-
-	log.Infof("task %v repo is %v %v %v", task.Id, taskContext["repository"].GetStringValue(),
-		r.getDefaultActionsURL(task),
-		r.client.Address())
 
 	preset := model.GithubContextFromMap(task.Context.AsMap())
 	if t := task.Secrets["GITEA_TOKEN"]; t != "" {
@@ -900,27 +898,21 @@ func (r *Runner) detectIsolatedCacheContainer() string {
 	return cacheContainer
 }
 
-func logTaskInfo(task *runnerv1.Task, job string) {
-	fields := log.Fields{"task_id": task.Id, "job": job}
-	context := task.GetContext().GetFields()
-	for _, key := range []string{"repository", "run_id", "run_number"} {
-		if value := context[key].GetStringValue(); value != "" {
-			fields[key] = value
-		}
+func taskLogFields(task *runnerv1.Task, job string) log.Fields {
+	taskContext := task.GetContext().GetFields()
+	fields := log.Fields{
+		"task_id":    task.Id,
+		"job":        job,
+		"repository": taskContext["repository"].GetStringValue(),
+		"run_id":     taskContext["run_id"].GetStringValue(),
+		"run_number": taskContext["run_number"].GetStringValue(),
 	}
-	// Decode only identifiers for observability; this does not authenticate the token.
-	parts := strings.Split(context["gitea_runtime_token"].GetStringValue(), ".")
-	if len(parts) == 3 {
+	if parts := strings.Split(taskContext["gitea_runtime_token"].GetStringValue(), "."); len(parts) == 3 {
+		var claims struct{ JobID int64 } // Gitea's actionsClaims fields are untagged, so the claim key is "JobID"
 		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-		var claims struct{ TaskID, RunID, JobID int64 }
-		if err == nil && json.Unmarshal(payload, &claims) == nil && claims.TaskID == task.Id {
-			if claims.JobID > 0 {
-				fields["job_id"] = claims.JobID
-			}
-			if claims.RunID > 0 && fields["run_id"] == nil {
-				fields["run_id"] = strconv.FormatInt(claims.RunID, 10)
-			}
+		if err == nil && json.Unmarshal(payload, &claims) == nil && claims.JobID > 0 {
+			fields["job_id"] = claims.JobID
 		}
 	}
-	log.WithFields(fields).Info("task started")
+	return fields
 }
