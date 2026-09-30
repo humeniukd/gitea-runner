@@ -38,7 +38,7 @@ kubernetes:
               memory: 4Gi
 ```
 
-Job pods mount no service account token unless the template sets `automountServiceAccountToken: true`.
+Job pods mount no service account token unless the template sets `automountServiceAccountToken: true`. Job pods and their Secrets are labeled `app.kubernetes.io/managed-by: gitea-runner` and `com.gitea.runner.uuid: <runner UUID>`.
 
 ## Services
 

@@ -446,6 +446,7 @@ func (rc *RunContext) startKubernetesPod() common.Executor {
 		}
 		options := rc.Config.Kubernetes
 		options.MaxLifetime, options.ForcePull = rc.Config.ContainerMaxLifetime, rc.Config.ForcePull
+		options.RunnerUUID = rc.Config.ContainerNetworkCreateOptions.RunnerUUID
 		pod, err := container.NewKubernetesPod(options)
 		if err != nil {
 			return err

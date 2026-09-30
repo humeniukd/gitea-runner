@@ -75,6 +75,10 @@ const (
 	HealthUnhealthy = string(container.Unhealthy)
 )
 
+// marks the networks, volumes and pods a runner creates for its jobs, so it can tell its own
+// leftovers from those of another runner sharing the daemon or cluster
+const runnerUUIDLabel = "com.gitea.runner.uuid"
+
 // ErrContainerNotFound reports a container the daemon no longer knows. Its text is a
 // fragment, missingContainerError composes it into the message every operation shares.
 var ErrContainerNotFound = errors.New("does not exist")

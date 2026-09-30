@@ -135,7 +135,7 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	manifest := &cluster.manifest
 	workdir, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
-	pod, err := NewKubernetesPod(KubernetesOptions{Kubeconfig: kubeconfig, PodTemplate: map[string]any{
+	pod, err := NewKubernetesPod(KubernetesOptions{Kubeconfig: kubeconfig, RunnerUUID: "runner-uuid", PodTemplate: map[string]any{
 		"spec": map[string]any{
 			"automountServiceAccountToken": true,
 			"containers":                   []any{map[string]any{"name": "job", "resources": map[string]any{"limits": map[string]any{"cpu": "2"}}}},
@@ -154,6 +154,7 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 
 	require.NoError(t, job.Create(nil, nil)(ctx))
 	assert.Equal(t, "gitea-runner", manifest.Metadata.Labels["app.kubernetes.io/managed-by"])
+	assert.Equal(t, "runner-uuid", manifest.Metadata.Labels[runnerUUIDLabel])
 	assert.True(t, manifest.Spec.AutomountServiceAccountToken)
 	assert.False(t, manifest.Spec.EnableServiceLinks)
 	assert.Equal(t, []string{"my-db"}, manifest.Spec.HostAliases[0].Hostnames)
@@ -162,6 +163,7 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	assert.Equal(t, 2, manifest.Spec.Containers[1].ReadinessProbe.PeriodSeconds)
 	assert.NotContains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], "service-secret")
 	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/secrets"][0], "service-secret")
+	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/secrets"][0], `"com.gitea.runner.uuid":"runner-uuid"`)
 	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], `"secretKeyRef":{"key":"my-db.0","name":"`+pod.secretName+`"}`)
 	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], `"args":["postgres","-D","$$(PGDATA)"]`)
 

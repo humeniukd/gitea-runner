@@ -34,6 +34,7 @@ type KubernetesOptions struct {
 	PodTemplate map[string]any
 	MaxLifetime time.Duration
 	ForcePull   bool
+	RunnerUUID  string
 }
 
 // KubernetesPod runs a job container and its service containers as one pod.
@@ -105,7 +106,11 @@ func (p *KubernetesPod) create(ctx context.Context) error {
 	prefix := strings.Trim(strings.ToLower(p.job.input.Name), "-")
 	prefix = cmp.Or(strings.TrimRight(prefix[:min(40, len(prefix))], "-"), "gitea-runner") + "-"
 	name := prefix + strings.ToLower(rand.Text()[:8]) // chosen here, so cleanup knows it even when a create response is lost
-	metadata := map[string]any{"name": name, "labels": map[string]any{"app.kubernetes.io/managed-by": "gitea-runner"}}
+	labels := map[string]any{"app.kubernetes.io/managed-by": "gitea-runner"}
+	if p.options.RunnerUUID != "" {
+		labels[runnerUUIDLabel] = p.options.RunnerUUID
+	}
+	metadata := map[string]any{"name": name, "labels": labels}
 	if hostname, err := os.Hostname(); p.client.tokenFile != "" && err == nil {
 		var runner struct{ Metadata struct{ Name, UID string } }
 		if err := p.client.do(ctx, http.MethodGet, p.client.path("pods/"+hostname), nil, &runner); err == nil {
