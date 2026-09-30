@@ -43,7 +43,6 @@ type podManifest struct {
 
 type fakeCluster struct {
 	mu       sync.Mutex
-	manifest podManifest
 	requests map[string][]string
 }
 
@@ -65,8 +64,6 @@ func fakeKubernetes(t *testing.T, podStatus string) (string, *fakeCluster) {
 		cluster.record(r.Method+" "+r.URL.Path, string(body))
 		pods, secrets := "/api/v1/namespaces/ci/pods", "/api/v1/namespaces/ci/secrets"
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == pods:
-			assert.NoError(t, json.Unmarshal(body, &cluster.manifest))
 		case r.Method == http.MethodGet && (r.URL.Path == pods || r.URL.Path == secrets):
 			cluster.record("list", r.URL.Query().Get("labelSelector"))
 			_, _ = io.WriteString(w, `{"items":[{"metadata":{"name":"old","creationTimestamp":"2020-01-01T00:00:00Z"}},{"metadata":{"name":"new","creationTimestamp":"2999-01-01T00:00:00Z"}}]}`)
@@ -77,7 +74,7 @@ func fakeKubernetes(t *testing.T, podStatus string) (string, *fakeCluster) {
 			_, _ = io.WriteString(w, "log of "+r.URL.Query().Get("container"))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, pods+"/"):
 			_, _ = io.WriteString(w, podStatus)
-		case r.Method == http.MethodPost && r.URL.Path == secrets, r.Method == http.MethodDelete:
+		case r.Method == http.MethodPost && (r.URL.Path == pods || r.URL.Path == secrets), r.Method == http.MethodDelete:
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -138,7 +135,6 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	kubeconfig, cluster := fakeKubernetes(t, `{"spec":{"containers":[{},{}]},"status":{"phase":"Running","containerStatuses":[
 		{"name":"job","ready":true,"state":{"running":{}}},
 		{"name":"my-db","ready":true,"state":{"running":{}}}]}}`)
-	manifest := &cluster.manifest
 	workdir, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
 	options := KubernetesOptions{Kubeconfig: kubeconfig, RunnerUUID: "runner-uuid", PodTemplates: []map[string]any{
@@ -167,6 +163,8 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	})
 
 	require.NoError(t, job.Create(nil, nil)(ctx))
+	var manifest podManifest
+	require.NoError(t, json.Unmarshal([]byte(cluster.requests["POST /api/v1/namespaces/ci/pods"][0]), &manifest))
 	assert.Equal(t, "gitea-runner", manifest.Metadata.Labels["app.kubernetes.io/managed-by"])
 	assert.Equal(t, "runner-uuid", manifest.Metadata.Labels[runnerUUIDLabel])
 	assert.True(t, manifest.Spec.AutomountServiceAccountToken)

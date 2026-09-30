@@ -244,17 +244,11 @@ func TestRunnerFallbackPlatform(t *testing.T) {
 }
 
 func TestRunnerKubernetesOptionsLayerTheLabelPodTemplatesInRunsOnOrder(t *testing.T) {
-	var runnerLabels labels.Labels
-	for _, raw := range []string{"linux:kubernetes://node", "gpu:host", "large:host"} {
-		label, err := labels.Parse(raw)
-		require.NoError(t, err)
-		runnerLabels = append(runnerLabels, label)
-	}
 	cfg := &config.Config{Kubernetes: config.Kubernetes{
 		PodTemplate:  map[string]any{"base": true},
 		PodTemplates: map[string]map[string]any{"gpu": {"gpu": true}, "large": {"large": true}, "other": {"other": true}},
 	}}
-	r := &Runner{cfg: cfg, labels: runnerLabels}
+	r := &Runner{cfg: cfg, labels: labels.Labels{{Name: "linux"}, {Name: "gpu"}, {Name: "large"}}}
 
 	require.Equal(t, []map[string]any{{"base": true}, {"large": true}, {"gpu": true}}, r.kubernetesOptions([]string{"linux", "large", "other", "gpu", "large"}).PodTemplates)
 }
