@@ -131,7 +131,7 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	ctx := t.Context()
 	kubeconfig, cluster := fakeKubernetes(t, `{"spec":{"containers":[{},{}]},"status":{"phase":"Running","containerStatuses":[
 		{"name":"job","ready":true,"state":{"running":{}}},
-		{"name":"db","ready":true,"state":{"running":{}}}]}}`)
+		{"name":"my-db","ready":true,"state":{"running":{}}}]}}`)
 	manifest := &cluster.manifest
 	workdir, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
@@ -144,7 +144,7 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	require.NoError(t, err)
 	var jobLog, serviceLog bytes.Buffer
 	job := pod.JobContainer(&NewContainerInput{Name: "Job-Name", Image: "node", WorkingDir: workdir, Stdout: &jobLog, Stderr: &jobLog})
-	service := pod.ServiceContainer("DB", &NewContainerInput{
+	service := pod.ServiceContainer("My_DB", &NewContainerInput{
 		Image:           "postgres",
 		Cmd:             []string{"postgres", "-D", "$(PGDATA)"},
 		Env:             []string{"POSTGRES_PASSWORD=service-secret"},
@@ -156,13 +156,13 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	assert.Equal(t, "gitea-runner", manifest.Metadata.Labels["app.kubernetes.io/managed-by"])
 	assert.True(t, manifest.Spec.AutomountServiceAccountToken)
 	assert.False(t, manifest.Spec.EnableServiceLinks)
-	assert.Equal(t, []string{"db"}, manifest.Spec.HostAliases[0].Hostnames)
+	assert.Equal(t, []string{"my-db"}, manifest.Spec.HostAliases[0].Hostnames)
 	require.Len(t, manifest.Spec.Containers, 2)
 	assert.Equal(t, map[string]any{"limits": map[string]any{"cpu": "2"}}, manifest.Spec.Containers[0].Resources)
 	assert.Equal(t, 2, manifest.Spec.Containers[1].ReadinessProbe.PeriodSeconds)
 	assert.NotContains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], "service-secret")
 	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/secrets"][0], "service-secret")
-	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], `"secretKeyRef":{"key":"db.0","name":"`+pod.secretName+`"}`)
+	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], `"secretKeyRef":{"key":"my-db.0","name":"`+pod.secretName+`"}`)
 	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], `"args":["postgres","-D","$$(PGDATA)"]`)
 
 	require.NoError(t, job.Start(false)(ctx))
@@ -198,7 +198,7 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, HealthHealthy, info.Health)
 	require.NoError(t, service.DumpLogs(ctx))
-	assert.Equal(t, "log of db", serviceLog.String())
+	assert.Equal(t, "log of my-db", serviceLog.String())
 
 	require.NoError(t, job.Remove()(ctx))
 	assert.Len(t, cluster.requests["DELETE /api/v1/namespaces/ci/pods/"+pod.name], 1)
@@ -209,15 +209,21 @@ func TestKubernetesPodFailsBeforeSteps(t *testing.T) {
 	kubeconfig, _ := fakeKubernetes(t, `{"spec":{"containers":[{}]},"status":{"containerStatuses":[
 		{"name":"job","state":{"waiting":{"reason":"ErrImagePull","message":"no such image"}}}]}}`)
 	template := map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "sidecar"}}}}
-	for _, service := range []struct{ name, options, err string }{
-		{"db", "--hostname db", "only --health-* options are supported"},
-		{"sidecar", "", "named like another container"},
+	for _, test := range []struct {
+		services     []string
+		options, err string
+	}{
+		{[]string{"db"}, "--hostname db", "only --health-* options are supported"},
+		{[]string{"sidecar"}, "", "named like another container"},
+		{[]string{"my_db", "My-DB"}, "", `service My-DB maps to container "my-db"`},
 	} {
 		pod, err := NewKubernetesPod(KubernetesOptions{Kubeconfig: kubeconfig, Namespace: "ci", PodTemplate: template})
 		require.NoError(t, err)
 		job := pod.JobContainer(&NewContainerInput{Image: "node"})
-		pod.ServiceContainer(service.name, &NewContainerInput{Image: "postgres", WorkflowOptions: service.options})
-		require.ErrorContains(t, job.Create(nil, nil)(t.Context()), service.err)
+		for _, service := range test.services {
+			pod.ServiceContainer(service, &NewContainerInput{Image: "postgres", WorkflowOptions: test.options})
+		}
+		require.ErrorContains(t, job.Create(nil, nil)(t.Context()), test.err)
 	}
 	pod, err := NewKubernetesPod(KubernetesOptions{Kubeconfig: kubeconfig, Namespace: "ci"})
 	require.NoError(t, err)

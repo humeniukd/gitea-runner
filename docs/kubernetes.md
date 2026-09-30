@@ -42,7 +42,7 @@ Job pods mount no service account token unless the template sets `automountServi
 
 ## Services
 
-Services share the pod's network, so a step reaches one by its id or `localhost`, and two services cannot listen on the same port. Pass secrets to services through `env`, as `command` is visible in the pod spec. Of `options`, only `--health-*` is supported, and `--health-cmd` becomes a readiness probe.
+Services share the pod's network, so a step reaches one by its id or `localhost`, and two services cannot listen on the same port. An id is lowercased and has characters other than letters, digits and `-` replaced by `-`, so the service `my_db` is reached as `my-db`. Pass secrets to services through `env`, as `command` is visible in the pod spec. Of `options`, only `--health-*` is supported, and `--health-cmd` becomes a readiness probe.
 
 ## Unsupported
 

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -48,6 +49,7 @@ type KubernetesPod struct {
 type kubernetesContainer struct {
 	LinuxContainerEnvironmentExtensions
 	pod   *KubernetesPod
+	id    string // the workflow's service id, which name may differ from
 	name  string
 	input *NewContainerInput
 	probe map[string]any
@@ -89,9 +91,12 @@ func (p *KubernetesPod) JobContainer(input *NewContainerInput) ExecutionsEnviron
 	return p.job
 }
 
-// ServiceContainer returns a container of the pod the job reaches at hostname name.
-func (p *KubernetesPod) ServiceContainer(name string, input *NewContainerInput) ExecutionsEnvironment {
-	service := &kubernetesContainer{pod: p, name: strings.ToLower(name), input: input}
+var invalidLabelChars = regexp.MustCompile(`[^a-z0-9-]+`)
+
+// ServiceContainer returns a container of the pod the job reaches at hostname id, made a DNS label as container names and hostnames must be.
+func (p *KubernetesPod) ServiceContainer(id string, input *NewContainerInput) ExecutionsEnvironment {
+	name := strings.Trim(invalidLabelChars.ReplaceAllString(strings.ToLower(id), "-"), "-")
+	service := &kubernetesContainer{pod: p, id: id, name: strings.TrimRight(name[:min(63, len(name))], "-"), input: input}
 	p.services = append(p.services, service)
 	return service
 }
@@ -114,6 +119,11 @@ func (p *KubernetesPod) create(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	for _, service := range p.services {
+		if !strings.EqualFold(service.id, service.name) {
+			common.Logger(ctx).Warnf("Service %s is reachable as %s or localhost, as a Kubernetes hostname cannot be %q", service.id, service.name, service.id)
+		}
+	}
 	if len(secretData) > 0 {
 		p.secretName = name
 		if err := p.client.do(ctx, http.MethodPost, p.client.path("secrets"), map[string]any{"metadata": metadata, "stringData": secretData}, nil); err != nil {
@@ -131,14 +141,16 @@ func (p *KubernetesPod) manifest(secret string, secretData map[string]string, me
 	templateSpec, _ := p.options.PodTemplate["spec"].(map[string]any)
 	templateContainers, _ := templateSpec["containers"].([]any)
 	var containers, hostnames []any
+	names := map[string]bool{}
 	for _, c := range append([]*kubernetesContainer{p.job}, p.services...) {
 		var template any
 		if index := slices.IndexFunc(templateContainers, func(container any) bool { return manifestName(container) == c.name }); index >= 0 {
 			template = templateContainers[index]
 		}
-		if c != p.job && (c.name == p.job.name || template != nil) {
-			return nil, fmt.Errorf("service %s is named like another container of the pod", c.name)
+		if c != p.job && (c.name == "" || names[c.name] || template != nil) {
+			return nil, fmt.Errorf("service %s maps to container %q, which is empty or named like another container of the pod", c.id, c.name)
 		}
+		names[c.name] = true
 		spec, err := c.spec(secret, secretData)
 		if err != nil {
 			return nil, err
