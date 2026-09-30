@@ -80,8 +80,10 @@ If the registry succeed, it will run immediately. Next time, you could run the r
 ### Run with docker
 
 ```bash
-docker run -e GITEA_INSTANCE_URL=https://your_gitea.com -e GITEA_RUNNER_REGISTRATION_TOKEN=<your_token> -v /var/run/docker.sock:/var/run/docker.sock --name my_runner gitea/runner:nightly
+docker run --privileged -e GITEA_INSTANCE_URL=https://your_gitea.com -e GITEA_RUNNER_REGISTRATION_TOKEN=<your_token> --name my_runner gitea/runner:nightly-dind
 ```
+
+This image runs its own Docker daemon for jobs. To use the host's daemon instead, see [Image flavours](#image-flavours).
 
 Mount a volume on `/data` if you want the registration file and optional config to survive container recreation (see [scripts/run.sh](scripts/run.sh)).
 
@@ -89,17 +91,13 @@ Mount a volume on `/data` if you want the registration file and optional config 
 
 ### Image flavours
 
-Prefer a Docker-in-Docker (`dind` or `dind-rootless`) flavour for container jobs so they use a dedicated daemon instead of the host daemon. Mounting the host Docker socket gives workflows control over the host daemon and can let them modify the host. Use it only for workflows you trust.
-
-DinD is an isolation improvement, not a sandbox for untrusted code: `dind` requires a privileged container, while `dind-rootless` has rootless Docker limitations and may still require host configuration. The default image remains the `basic` flavour; select a DinD tag explicitly.
-
 The image is published in three flavours, all built from the single multi-stage [Dockerfile](Dockerfile) in this repository. They differ only in how a Docker daemon is made available to the jobs the runner executes; the `gitea-runner` binary inside them is identical.
 
 | Tag | Build target | Base image | Docker daemon | Process supervisor | Runs as |
 | --- | --- | --- | --- | --- | --- |
 | `latest` (and `<version>`) | `basic` | `alpine` | none — uses an external daemon you provide | [`tini`](https://github.com/krallin/tini) | `root` |
 | `latest-dind` | `dind` | `docker:dind` | bundled, started inside the container | [`s6`](https://skarnet.org/software/s6/) | `root` (privileged) |
-| `latest-dind-rootless` | `dind-rootless` | `docker:dind-rootless` | bundled, started rootless inside the container | [`s6`](https://skarnet.org/software/s6/) | `rootless` (UID 1000) |
+| `latest-dind-rootless` | `dind-rootless` | `docker:dind-rootless` | bundled, started rootless inside the container | [`s6`](https://skarnet.org/software/s6/) | `rootless` (UID 1000, privileged) |
 
 #### `latest` — basic
 
@@ -110,7 +108,7 @@ docker run -e GITEA_INSTANCE_URL=https://your_gitea.com -e GITEA_RUNNER_REGISTRA
   -v /var/run/docker.sock:/var/run/docker.sock --name my_runner gitea/runner:latest
 ```
 
-`tini` is the entrypoint (it reaps zombie processes), and it just runs [`scripts/run.sh`](scripts/run.sh), which registers the runner on first start and then execs `gitea-runner daemon`. This flavour does not need `--privileged`. The trade-off is that jobs share the host's daemon, so they can see other containers and images on that daemon.
+`tini` is the entrypoint (it reaps zombie processes), and it just runs [`scripts/run.sh`](scripts/run.sh), which registers the runner on first start and then execs `gitea-runner daemon`. This flavour does not need `--privileged`. The trade-off is that jobs share the host's daemon, which gives them control over it and, through it, over the host.
 
 #### `latest-dind` — Docker-in-Docker
 
@@ -125,7 +123,7 @@ Two processes have to run side by side here (the Docker daemon and the runner), 
 
 #### `latest-dind-rootless` — rootless Docker-in-Docker
 
-Same idea as `dind`, but built on `docker:dind-rootless` so the bundled daemon and the runner run as an unprivileged user (`rootless`, UID 1000) rather than `root`. `DOCKER_HOST` is preset to `unix:///run/user/1000/docker.sock` so the runner talks to the rootless daemon. This reduces the blast radius compared to the privileged `dind` flavour, but rootless Docker carries the usual rootless limitations (networking, cgroups, storage drivers, and some operations that need additional host configuration such as `/etc/subuid` / `/etc/subgid` mappings and unprivileged user-namespace support).
+Same idea as `dind`, but built on `docker:dind-rootless` so the bundled daemon and the runner run as an unprivileged user (`rootless`, UID 1000) rather than `root`. `DOCKER_HOST` is preset to `unix:///run/user/1000/docker.sock` so the runner talks to the rootless daemon. This reduces the blast radius compared to `dind`, but it still needs `--privileged`, and rootless Docker carries the usual rootless limitations (networking, cgroups, storage drivers, and some operations that need additional host configuration such as `/etc/subuid` / `/etc/subgid` mappings and unprivileged user-namespace support).
 
 > **The UID is fixed at 1000.** It comes from the `rootless` user baked into the upstream `docker:dind-rootless` base image, and the bundled daemon always listens on `/run/user/1000/docker.sock` inside the container, so running this flavour as a different user (`--user 1001`) does not work. If you need the runner to talk to a *host* rootless daemon that runs under some other UID, use the `basic` flavour instead and bind-mount that daemon's socket (see [examples/vm/rootless-docker.md](examples/vm/rootless-docker.md)); pointing `DOCKER_HOST` at a host socket from inside `dind-rootless` will not work. Changing the UID otherwise means rebuilding the image from a base with a different `rootless` user.
 
