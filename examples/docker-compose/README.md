@@ -1,5 +1,7 @@
 ### Running `gitea-runner` using `docker-compose`
 
+This uses the recommended Docker-in-Docker image, see [image flavours](../../README.md#image-flavours).
+
 ```yml
 ...
   gitea:
@@ -38,12 +40,9 @@
       - GITEA_RUNNER_REGISTRATION_TOKEN=<registration token>
 ```
 
-To use the host's Docker daemon instead, use the `gitea/runner` image, drop `privileged` and mount `/var/run/docker.sock:/var/run/docker.sock`. This gives jobs control over the host's daemon.
-
 ### Running `gitea-runner` using rootless Docker-in-Docker
 
-- `privileged` has to be set to `true` because in-container Docker daemon requires a lot of kernel capabilities and file system mounts like `procfs` and `sysfs`
-- `security_opt` sets the `apparmor` profile to `rootlesskit` for hosts running AppArmor (e.g. Ubuntu, Debian), where the kernel might otherwise block user namespace changes that Docker daemon requires for startup. The `rootlesskit` profile is provided by the `docker-ce-rootless-extras` package and is present on hosts where Docker was installed via the official installer or distro packages
+On AppArmor hosts such as Ubuntu and Debian, `security_opt` is needed for the daemon to start. Docker's `docker-ce-rootless-extras` package provides the `rootlesskit` profile.
 
 ```yml
 ...
