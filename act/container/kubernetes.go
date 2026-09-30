@@ -14,6 +14,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"regexp"
@@ -29,12 +30,12 @@ import (
 
 // KubernetesOptions configures the pod a job runs in.
 type KubernetesOptions struct {
-	Kubeconfig  string
-	Namespace   string
-	PodTemplate map[string]any
-	MaxLifetime time.Duration
-	ForcePull   bool
-	RunnerUUID  string
+	Kubeconfig   string
+	Namespace    string
+	PodTemplates []map[string]any // merged in order, a later one winning
+	MaxLifetime  time.Duration
+	ForcePull    bool
+	RunnerUUID   string
 }
 
 // KubernetesPod runs a job container and its service containers as one pod.
@@ -94,10 +95,15 @@ func (p *KubernetesPod) JobContainer(input *NewContainerInput) ExecutionsEnviron
 
 var invalidLabelChars = regexp.MustCompile(`[^a-z0-9-]+`)
 
-// ServiceContainer returns a container of the pod the job reaches at hostname id, made a DNS label as container names and hostnames must be.
-func (p *KubernetesPod) ServiceContainer(id string, input *NewContainerInput) ExecutionsEnvironment {
+// KubernetesServiceName returns the container name and hostname of service id, made a DNS label as both must be.
+func KubernetesServiceName(id string) string {
 	name := strings.Trim(invalidLabelChars.ReplaceAllString(strings.ToLower(id), "-"), "-")
-	service := &kubernetesContainer{pod: p, id: id, name: strings.TrimRight(name[:min(63, len(name))], "-"), input: input}
+	return strings.TrimRight(name[:min(63, len(name))], "-")
+}
+
+// ServiceContainer returns a container of the pod the job reaches at hostname KubernetesServiceName(id).
+func (p *KubernetesPod) ServiceContainer(id string, input *NewContainerInput) ExecutionsEnvironment {
+	service := &kubernetesContainer{pod: p, id: id, name: KubernetesServiceName(id), input: input}
 	p.services = append(p.services, service)
 	return service
 }
@@ -143,16 +149,29 @@ func (p *KubernetesPod) create(ctx context.Context) error {
 }
 
 func (p *KubernetesPod) manifest(secret string, secretData map[string]string, metadata map[string]any) (any, error) {
-	templateSpec, _ := p.options.PodTemplate["spec"].(map[string]any)
+	template := map[string]any{"spec": map[string]any{
+		"automountServiceAccountToken":  false,
+		"enableServiceLinks":            false,
+		"terminationGracePeriodSeconds": 0, // the job container's tail ignores SIGTERM
+	}}
+	for _, layer := range p.options.PodTemplates {
+		template, _ = mergeManifest(template, layer).(map[string]any)
+	}
+	templateSpec, _ := template["spec"].(map[string]any)
 	templateContainers, _ := templateSpec["containers"].([]any)
-	var containers, hostnames []any
+	templateVolumes, _ := templateSpec["volumes"].([]any)
+	var serviceTemplate any
+	if index := slices.IndexFunc(templateContainers, func(container any) bool { return manifestName(container) == "$services" }); index >= 0 {
+		serviceTemplate = templateContainers[index]
+		templateSpec["containers"] = slices.Delete(slices.Clone(templateContainers), index, index+1)
+	}
+	var containers, hostnames, volumes []any
 	names := map[string]bool{}
+	for _, container := range templateContainers {
+		names[manifestName(container)] = true
+	}
 	for _, c := range append([]*kubernetesContainer{p.job}, p.services...) {
-		var template any
-		if index := slices.IndexFunc(templateContainers, func(container any) bool { return manifestName(container) == c.name }); index >= 0 {
-			template = templateContainers[index]
-		}
-		if c != p.job && (c.name == "" || names[c.name] || template != nil) {
+		if c != p.job && (c.name == "" || names[c.name]) {
 			return nil, fmt.Errorf("service %s maps to container %q, which is empty or named like another container of the pod", c.id, c.name)
 		}
 		names[c.name] = true
@@ -160,35 +179,29 @@ func (p *KubernetesPod) manifest(secret string, secretData map[string]string, me
 		if err != nil {
 			return nil, err
 		}
-		containers = append(containers, mergeManifest(template, spec))
-		if c != p.job {
-			hostnames = append(hostnames, c.name)
+		if c == p.job {
+			containers = append(containers, spec)
+			continue
+		}
+		containers = append(containers, mergeManifest(serviceTemplate, spec))
+		hostnames = append(hostnames, c.name)
+	}
+	for _, name := range []string{"workspace", "act"} {
+		if !slices.ContainsFunc(templateVolumes, func(volume any) bool { return manifestName(volume) == name }) {
+			volumes = append(volumes, map[string]any{"name": name, "emptyDir": map[string]any{}})
 		}
 	}
-	spec := map[string]any{
-		"restartPolicy": "Never",
-		"containers":    containers,
-		"volumes": []any{
-			map[string]any{"name": "workspace", "emptyDir": map[string]any{}},
-			map[string]any{"name": "act", "emptyDir": map[string]any{}},
-		},
-	}
+	spec := map[string]any{"restartPolicy": "Never", "containers": containers, "volumes": volumes}
 	if len(hostnames) > 0 {
 		spec["hostAliases"] = []any{map[string]any{"ip": "127.0.0.1", "hostnames": hostnames}}
 	}
 	if p.options.MaxLifetime > 0 {
 		spec["activeDeadlineSeconds"] = max(1, int64(p.options.MaxLifetime.Seconds()))
 	}
-	defaults := map[string]any{"spec": map[string]any{
-		"automountServiceAccountToken":  false,
-		"enableServiceLinks":            false,
-		"terminationGracePeriodSeconds": 0, // the job container's tail ignores SIGTERM
-	}}
-	pod := map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": metadata, "spec": spec}
-	return mergeManifest(mergeManifest(defaults, p.options.PodTemplate), pod), nil
+	return mergeManifest(template, map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": metadata, "spec": spec}), nil
 }
 
-// mergeManifest merges over onto base: maps key by key, list items of the same name replaced, other values replaced.
+// mergeManifest merges over onto base like a strategic merge patch: maps key by key, list items by name, other values replaced.
 func mergeManifest(base, over any) any {
 	switch over := over.(type) {
 	case map[string]any:
@@ -209,7 +222,7 @@ func mergeManifest(base, over any) any {
 			if index < 0 {
 				merged = append(merged, item)
 			} else {
-				merged[index] = item
+				merged[index] = mergeManifest(merged[index], item)
 			}
 		}
 		return merged
@@ -237,7 +250,7 @@ func (c *kubernetesContainer) spec(secret string, secretData map[string]string) 
 	}
 	spec := map[string]any{
 		"name": c.name, "image": c.input.Image, "command": escapeExpansion(c.input.Entrypoint), "args": escapeExpansion(c.input.Cmd),
-		"workingDir": c.input.WorkingDir, "env": env, "imagePullPolicy": "IfNotPresent",
+		"workingDir": c.input.WorkingDir, "env": env,
 	}
 	if c.pod.options.ForcePull {
 		spec["imagePullPolicy"] = "Always"
@@ -252,7 +265,7 @@ func (c *kubernetesContainer) spec(secret string, secretData map[string]string) 
 		return nil, fmt.Errorf("service %s: %w", c.name, err)
 	}
 	if c.probe != nil {
-		spec["readinessProbe"] = c.probe
+		spec["startupProbe"] = c.probe
 	}
 	return spec, nil
 }
@@ -266,7 +279,7 @@ func escapeExpansion(args []string) []string {
 	return args
 }
 
-// parseOptions turns docker health options, the only ones a pod supports, into a readiness probe.
+// parseOptions turns docker health options, the only ones a pod supports, into a startup probe, which like docker gives up after the retries.
 func (c *kubernetesContainer) parseOptions() error {
 	args, err := shellquote.Split(c.input.WorkflowOptions)
 	if err != nil {
@@ -277,20 +290,20 @@ func (c *kubernetesContainer) parseOptions() error {
 	command := flags.String("health-cmd", "", "")
 	interval := flags.Duration("health-interval", 0, "")
 	timeout := flags.Duration("health-timeout", 0, "")
-	flags.Int("health-retries", 0, "")
-	flags.Duration("health-start-period", 0, "")
+	retries := flags.Int("health-retries", 0, "")
+	startPeriod := flags.Duration("health-start-period", 0, "")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("options %q: %w, only --health-* options are supported on Kubernetes", c.input.WorkflowOptions, err)
 	}
 	if *command == "" {
 		return nil
 	}
-	c.probe = map[string]any{"exec": map[string]any{"command": []string{"/bin/sh", "-c", *command}}}
-	if *interval > 0 {
-		c.probe["periodSeconds"] = max(1, int(interval.Seconds()))
-	}
-	if *timeout > 0 {
-		c.probe["timeoutSeconds"] = max(1, int(timeout.Seconds()))
+	period := max(1, int(cmp.Or(*interval, 30*time.Second).Seconds()))
+	c.probe = map[string]any{
+		"exec":             map[string]any{"command": []string{"/bin/sh", "-c", *command}},
+		"periodSeconds":    period,
+		"timeoutSeconds":   max(1, int(cmp.Or(*timeout, 30*time.Second).Seconds())),
+		"failureThreshold": max(1, cmp.Or(*retries, 3)) + int(startPeriod.Seconds())/period, // docker does not count failures in the start period
 	}
 	return nil
 }
@@ -489,18 +502,38 @@ func (c *kubernetesContainer) Remove() common.Executor {
 		if c != c.pod.job {
 			return nil
 		}
-		return errors.Join(c.pod.delete(ctx, "pods", c.pod.name), c.pod.delete(ctx, "secrets", c.pod.secretName))
+		return errors.Join(c.pod.client.delete(ctx, "pods", c.pod.name), c.pod.client.delete(ctx, "secrets", c.pod.secretName))
 	}
 }
 
-func (p *KubernetesPod) delete(ctx context.Context, resource, name string) error {
-	if name == "" {
-		return nil
+// RemoveOrphanKubernetesResources removes the job pods and Secrets of this runner created before createdBefore, which a teardown did not get to.
+func RemoveOrphanKubernetesResources(ctx context.Context, options KubernetesOptions, createdBefore time.Time) error {
+	client, err := newKubeClient(options.Kubeconfig, options.Namespace)
+	if err != nil {
+		return fmt.Errorf("connect to Kubernetes: %w", err)
 	}
-	if err := p.client.do(ctx, http.MethodDelete, p.client.path(resource+"/"+name), nil, nil); err != nil && !isNotFound(err) {
-		return fmt.Errorf("delete %s %s: %w", resource, name, err)
+	defer client.http.CloseIdleConnections()
+	var errs []error
+	for _, resource := range []string{"pods", "secrets"} {
+		var list struct {
+			Items []struct {
+				Metadata struct {
+					Name              string
+					CreationTimestamp time.Time
+				}
+			}
+		}
+		if err := client.do(ctx, http.MethodGet, client.path(resource+"?labelSelector="+url.QueryEscape(runnerUUIDLabel+"="+options.RunnerUUID)), nil, &list); err != nil {
+			errs = append(errs, fmt.Errorf("list %s: %w", resource, err))
+			continue
+		}
+		for _, item := range list.Items {
+			if item.Metadata.CreationTimestamp.Before(createdBefore) {
+				errs = append(errs, client.delete(ctx, resource, item.Metadata.Name))
+			}
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (c *kubernetesContainer) Close() common.Executor {

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
@@ -31,9 +32,11 @@ type podManifest struct {
 		AutomountServiceAccountToken bool
 		EnableServiceLinks           bool
 		HostAliases                  []struct{ Hostnames []string }
+		Volumes                      []map[string]any
 		Containers                   []struct {
-			Resources      map[string]any
-			ReadinessProbe *struct{ PeriodSeconds int }
+			Name, ImagePullPolicy string
+			Resources             map[string]any
+			StartupProbe          *struct{ PeriodSeconds, TimeoutSeconds, FailureThreshold int }
 		}
 	}
 }
@@ -60,10 +63,13 @@ func fakeKubernetes(t *testing.T, podStatus string) (string, *fakeCluster) {
 		body, err := io.ReadAll(r.Body)
 		assert.NoError(t, err)
 		cluster.record(r.Method+" "+r.URL.Path, string(body))
-		pods := "/api/v1/namespaces/ci/pods"
+		pods, secrets := "/api/v1/namespaces/ci/pods", "/api/v1/namespaces/ci/secrets"
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == pods:
 			assert.NoError(t, json.Unmarshal(body, &cluster.manifest))
+		case r.Method == http.MethodGet && (r.URL.Path == pods || r.URL.Path == secrets):
+			cluster.record("list", r.URL.Query().Get("labelSelector"))
+			_, _ = io.WriteString(w, `{"items":[{"metadata":{"name":"old","creationTimestamp":"2020-01-01T00:00:00Z"}},{"metadata":{"name":"new","creationTimestamp":"2999-01-01T00:00:00Z"}}]}`)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
 			cluster.record("exec", r.URL.RawQuery)
 			serveLocalExec(t, w, r)
@@ -71,7 +77,7 @@ func fakeKubernetes(t *testing.T, podStatus string) (string, *fakeCluster) {
 			_, _ = io.WriteString(w, "log of "+r.URL.Query().Get("container"))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, pods+"/"):
 			_, _ = io.WriteString(w, podStatus)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/ci/secrets", r.Method == http.MethodDelete:
+		case r.Method == http.MethodPost && r.URL.Path == secrets, r.Method == http.MethodDelete:
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -135,12 +141,20 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	manifest := &cluster.manifest
 	workdir, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
-	pod, err := NewKubernetesPod(KubernetesOptions{Kubeconfig: kubeconfig, RunnerUUID: "runner-uuid", PodTemplate: map[string]any{
-		"spec": map[string]any{
+	options := KubernetesOptions{Kubeconfig: kubeconfig, RunnerUUID: "runner-uuid", PodTemplates: []map[string]any{
+		{"spec": map[string]any{
 			"automountServiceAccountToken": true,
-			"containers":                   []any{map[string]any{"name": "job", "resources": map[string]any{"limits": map[string]any{"cpu": "2"}}}},
-		},
-	}})
+			"containers": []any{
+				map[string]any{"name": "job", "resources": map[string]any{"limits": map[string]any{"cpu": "2"}}},
+				map[string]any{"name": "$services", "imagePullPolicy": "Always", "resources": map[string]any{"limits": map[string]any{"memory": "256Mi"}}},
+			},
+		}},
+		{"spec": map[string]any{
+			"volumes":    []any{map[string]any{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": "1Gi"}}},
+			"containers": []any{map[string]any{"name": "job", "resources": map[string]any{"limits": map[string]any{"memory": "1Gi"}}}},
+		}},
+	}}
+	pod, err := NewKubernetesPod(options)
 	require.NoError(t, err)
 	var jobLog, serviceLog bytes.Buffer
 	job := pod.JobContainer(&NewContainerInput{Name: "Job-Name", Image: "node", WorkingDir: workdir, Stdout: &jobLog, Stderr: &jobLog})
@@ -148,7 +162,7 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 		Image:           "postgres",
 		Cmd:             []string{"postgres", "-D", "$(PGDATA)"},
 		Env:             []string{"POSTGRES_PASSWORD=service-secret"},
-		WorkflowOptions: "--health-cmd pg_isready --health-interval 2s",
+		WorkflowOptions: "--health-cmd pg_isready --health-interval 2s --health-start-period 4s",
 		Stdout:          &serviceLog,
 	})
 
@@ -159,8 +173,16 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	assert.False(t, manifest.Spec.EnableServiceLinks)
 	assert.Equal(t, []string{"my-db"}, manifest.Spec.HostAliases[0].Hostnames)
 	require.Len(t, manifest.Spec.Containers, 2)
-	assert.Equal(t, map[string]any{"limits": map[string]any{"cpu": "2"}}, manifest.Spec.Containers[0].Resources)
-	assert.Equal(t, 2, manifest.Spec.Containers[1].ReadinessProbe.PeriodSeconds)
+	assert.Equal(t, map[string]any{"limits": map[string]any{"cpu": "2", "memory": "1Gi"}}, manifest.Spec.Containers[0].Resources)
+	assert.Empty(t, manifest.Spec.Containers[0].ImagePullPolicy)
+	assert.Equal(t, "my-db", manifest.Spec.Containers[1].Name)
+	assert.Equal(t, "Always", manifest.Spec.Containers[1].ImagePullPolicy)
+	assert.Equal(t, map[string]any{"limits": map[string]any{"memory": "256Mi"}}, manifest.Spec.Containers[1].Resources)
+	assert.Equal(t, []map[string]any{
+		{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": "1Gi"}},
+		{"name": "act", "emptyDir": map[string]any{}},
+	}, manifest.Spec.Volumes)
+	assert.Equal(t, struct{ PeriodSeconds, TimeoutSeconds, FailureThreshold int }{2, 30, 5}, *manifest.Spec.Containers[1].StartupProbe)
 	assert.NotContains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], "service-secret")
 	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/secrets"][0], "service-secret")
 	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/secrets"][0], `"com.gitea.runner.uuid":"runner-uuid"`)
@@ -205,6 +227,12 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	require.NoError(t, job.Remove()(ctx))
 	assert.Len(t, cluster.requests["DELETE /api/v1/namespaces/ci/pods/"+pod.name], 1)
 	assert.Len(t, cluster.requests["DELETE /api/v1/namespaces/ci/secrets/"+pod.secretName], 1)
+
+	require.NoError(t, RemoveOrphanKubernetesResources(ctx, options, time.Now()))
+	assert.Equal(t, []string{runnerUUIDLabel + "=runner-uuid", runnerUUIDLabel + "=runner-uuid"}, cluster.requests["list"])
+	assert.Len(t, cluster.requests["DELETE /api/v1/namespaces/ci/pods/old"], 1)
+	assert.Len(t, cluster.requests["DELETE /api/v1/namespaces/ci/secrets/old"], 1)
+	assert.Empty(t, cluster.requests["DELETE /api/v1/namespaces/ci/pods/new"])
 }
 
 func TestKubernetesPodFailsBeforeSteps(t *testing.T) {
@@ -219,7 +247,7 @@ func TestKubernetesPodFailsBeforeSteps(t *testing.T) {
 		{[]string{"sidecar"}, "", "named like another container"},
 		{[]string{"my_db", "My-DB"}, "", `service My-DB maps to container "my-db"`},
 	} {
-		pod, err := NewKubernetesPod(KubernetesOptions{Kubeconfig: kubeconfig, Namespace: "ci", PodTemplate: template})
+		pod, err := NewKubernetesPod(KubernetesOptions{Kubeconfig: kubeconfig, Namespace: "ci", PodTemplates: []map[string]any{template}})
 		require.NoError(t, err)
 		job := pod.JobContainer(&NewContainerInput{Image: "node"})
 		for _, service := range test.services {
@@ -232,4 +260,14 @@ func TestKubernetesPodFailsBeforeSteps(t *testing.T) {
 	job := pod.JobContainer(&NewContainerInput{Image: "missing"})
 	require.NoError(t, job.Create(nil, nil)(t.Context()))
 	require.ErrorContains(t, job.Start(false)(t.Context()), "ErrImagePull: no such image")
+
+	plugin := filepath.Join(t.TempDir(), "kubeconfig")
+	require.NoError(t, os.WriteFile(plugin, []byte(`
+current-context: eks
+contexts: [{name: eks, context: {cluster: eks, user: eks}}]
+clusters: [{name: eks, cluster: {server: "https://eks.example"}}]
+users: [{name: eks, user: {exec: {command: aws}}}]
+`), 0o600))
+	_, err = NewKubernetesPod(KubernetesOptions{Kubeconfig: plugin})
+	require.ErrorContains(t, err, "credential plugin")
 }

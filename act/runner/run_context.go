@@ -419,11 +419,7 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 			AllocatePTY: rc.Config.AllocatePTY,
 		}
 		rc.cleanUpJobContainer = rc.JobContainer.Remove()
-		for k, v := range rc.getRunnerContext(ctx) {
-			if v, ok := v.(string); ok {
-				rc.Env["RUNNER_"+strings.ToUpper(k)] = v
-			}
-		}
+		rc.setRunnerContextEnv(ctx)
 		for _, env := range os.Environ() {
 			if k, v, ok := strings.Cut(env, "="); ok {
 				// don't override
@@ -437,6 +433,14 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 	}
 }
 
+func (rc *RunContext) setRunnerContextEnv(ctx context.Context) {
+	for k, v := range rc.getRunnerContext(ctx) {
+		if v, ok := v.(string); ok {
+			rc.Env["RUNNER_"+strings.ToUpper(k)] = v
+		}
+	}
+}
+
 var errKubernetesDocker = errors.New("docker actions and docker:// steps are not supported on Kubernetes")
 
 func (rc *RunContext) startKubernetesPod() common.Executor {
@@ -446,7 +450,6 @@ func (rc *RunContext) startKubernetesPod() common.Executor {
 		}
 		options := rc.Config.Kubernetes
 		options.MaxLifetime, options.ForcePull = rc.Config.ContainerMaxLifetime, rc.Config.ForcePull
-		options.RunnerUUID = rc.Config.ContainerNetworkCreateOptions.RunnerUUID
 		pod, err := container.NewKubernetesPod(options)
 		if err != nil {
 			return err
@@ -482,14 +485,7 @@ func (rc *RunContext) startKubernetesPod() common.Executor {
 			rc.JobContainer.Create(nil, nil),
 			rc.startServiceContainers(),
 			rc.JobContainer.Start(false),
-			func(ctx context.Context) error {
-				for k, v := range rc.getRunnerContext(ctx) {
-					if v, ok := v.(string); ok {
-						rc.Env["RUNNER_"+strings.ToUpper(k)] = v
-					}
-				}
-				return nil
-			},
+			func(ctx context.Context) error { rc.setRunnerContextEnv(ctx); return nil },
 			rc.captureJobContainerInfo(),
 			rc.copyWorkflowFiles(),
 			rc.reportUnstartedServices(),

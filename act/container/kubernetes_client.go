@@ -120,6 +120,8 @@ func (c *kubeClient) loadKubeconfig(path string, tlsConfig *tls.Config) error {
 				ClientCertificateData string `yaml:"client-certificate-data"`
 				ClientKey             string `yaml:"client-key"`
 				ClientKeyData         string `yaml:"client-key-data"`
+				Exec                  any
+				AuthProvider          any `yaml:"auth-provider"`
 			}
 		}
 	}
@@ -167,6 +169,9 @@ func (c *kubeClient) loadKubeconfig(path string, tlsConfig *tls.Config) error {
 	for _, user := range config.Users {
 		if user.Name != current.User {
 			continue
+		}
+		if user.User.Exec != nil || user.User.AuthProvider != nil {
+			return fmt.Errorf("kubeconfig %s: user %q authenticates through a credential plugin, which the runner does not support, use a token or client certificate", path, user.Name)
 		}
 		c.token = user.User.Token
 		cert, err := read(user.User.ClientCertificateData, user.User.ClientCertificate)
@@ -243,6 +248,16 @@ func (c *kubeClient) do(ctx context.Context, method, path string, in, out any) e
 		return err
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *kubeClient) delete(ctx context.Context, resource, name string) error {
+	if name == "" {
+		return nil
+	}
+	if err := c.do(ctx, http.MethodDelete, c.path(resource+"/"+name), nil, nil); err != nil && !isNotFound(err) {
+		return fmt.Errorf("delete %s %s: %w", resource, name, err)
+	}
+	return nil
 }
 
 func statusError(resp *http.Response) error {

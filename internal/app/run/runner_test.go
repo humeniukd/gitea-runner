@@ -243,6 +243,22 @@ func TestRunnerFallbackPlatform(t *testing.T) {
 	}
 }
 
+func TestRunnerKubernetesOptionsLayerTheLabelPodTemplatesInRunsOnOrder(t *testing.T) {
+	var runnerLabels labels.Labels
+	for _, raw := range []string{"linux:kubernetes://node", "gpu:host", "large:host"} {
+		label, err := labels.Parse(raw)
+		require.NoError(t, err)
+		runnerLabels = append(runnerLabels, label)
+	}
+	cfg := &config.Config{Kubernetes: config.Kubernetes{
+		PodTemplate:  map[string]any{"base": true},
+		PodTemplates: map[string]map[string]any{"gpu": {"gpu": true}, "large": {"large": true}, "other": {"other": true}},
+	}}
+	r := &Runner{cfg: cfg, labels: runnerLabels}
+
+	require.Equal(t, []map[string]any{{"base": true}, {"large": true}, {"gpu": true}}, r.kubernetesOptions([]string{"linux", "large", "other", "gpu", "large"}).PodTemplates)
+}
+
 // Proxy variables are assembled per task, because a job's service containers have to be
 // reached directly and they are only known once the workflow is parsed.
 func TestNewRunnerLeavesProxyToTheTask(t *testing.T) {
@@ -348,7 +364,7 @@ func TestNewRunnerCacheServiceV2(t *testing.T) {
 	r.isolatedCacheContainer = func() string { return "a1b2c3d4e5f6" }
 	pickPlatform := func(runsOn []string) string { return map[string]string{"native": labels.SelfHostedPlatform}[runsOn[0]] }
 	for job, isolated := range map[string]bool{"native": false, "linux": true, "containerized": true, "empty": false} {
-		cacheURL, cacheContainer := r.cacheForJob(workflow.GetJob(job), pickPlatform)
+		cacheURL, cacheContainer := r.cacheForJob(workflow.GetJob(job), pickPlatform(workflow.GetJob(job).RunsOn()))
 		if isolated {
 			assert.Equal(t, "a1b2c3d4e5f6", cacheContainer, job)
 			assert.Equal(t, strings.Replace(r.cacheHandler.ExternalURL(), "127.0.0.1", cacheContainer, 1), cacheURL, job)
