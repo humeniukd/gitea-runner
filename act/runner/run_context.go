@@ -561,7 +561,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		ext := container.LinuxContainerEnvironmentExtensions{}
 		containerInput := &container.NewContainerInput{
 			Cmd:             nil,
-			Entrypoint:      []string{"/bin/sleep", strconv.FormatInt(int64(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds()), 10)},
+			Entrypoint:      []string{"sleep", strconv.FormatInt(int64(rc.Config.ContainerMaxLifetime.Round(time.Second).Seconds()), 10)},
 			WorkingDir:      ext.ToContainerPath(rc.Config.Workdir),
 			Image:           image,
 			Username:        username,
