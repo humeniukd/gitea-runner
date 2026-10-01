@@ -1217,22 +1217,31 @@ func (rc *RunContext) Executor() (common.Executor, error) {
 }
 
 func (rc *RunContext) runsOnImage(ctx context.Context) (string, error) {
-	if rc.Run.Job().RunsOn() == nil && rc.containerSpec.Image == "" {
-		common.Logger(ctx).Errorf("'runs-on' key not defined in %s", rc.String())
-	}
-
 	runsOn := rc.Run.Job().RunsOn()
+	if err := requireRunsOn(rc.Run.JobID, runsOn); err != nil {
+		return "", err
+	}
 	for i, v := range runsOn {
 		var err error
 		if runsOn[i], err = rc.ExprEval.Interpolate(ctx, v); err != nil {
 			return "", fmt.Errorf("unable to interpolate runs-on: %w", err)
 		}
 	}
+	if err := requireRunsOn(rc.Run.JobID, runsOn); err != nil {
+		return "", err
+	}
 
 	if rc.Config.PlatformPicker != nil {
 		return rc.Config.PlatformPicker(runsOn), nil
 	}
 	return "", nil
+}
+
+func requireRunsOn(jobID string, runsOn []string) error {
+	if len(runsOn) == 0 || slices.ContainsFunc(runsOn, func(label string) bool { return strings.TrimSpace(label) == "" }) {
+		return fmt.Errorf("job %q requires a non-empty 'runs-on'", jobID)
+	}
+	return nil
 }
 
 func (rc *RunContext) runsOnPlatformNames(ctx context.Context) []string {
@@ -1316,6 +1325,11 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 	if jobType == model.JobTypeInvalid {
 		return false, jobTypeErr
 	}
+	if jobType == model.JobTypeDefault && rc.Parent == nil {
+		if err := requireRunsOn(rc.Run.JobID, job.RunsOn()); err != nil {
+			return false, err
+		}
+	}
 
 	if !runJob {
 		if rc.caller != nil { // For Gitea
@@ -1326,7 +1340,7 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	if jobType != model.JobTypeDefault {
+	if jobType != model.JobTypeDefault || rc.Parent != nil {
 		return true, nil
 	}
 

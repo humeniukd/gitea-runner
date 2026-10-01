@@ -186,6 +186,74 @@ func TestRunContext_EvalBool(t *testing.T) {
 	}
 }
 
+func TestIsEnabledRequiresRunsOnForDefaultJobs(t *testing.T) {
+	tests := []struct {
+		name    string
+		job     *model.Job
+		wantErr bool
+	}{
+		{"missing", &model.Job{}, true},
+		{"missing and skipped", jobWithIf(t, &model.Job{}, false), true},
+		{"empty list", jobWithRunsOn(t, []string{}), true},
+		{"empty scalar", jobWithRunsOn(t, ""), true},
+		{"empty expression", jobWithRunsOn(t, "${{ '' }}"), true},
+		{"present", jobWithRunsOn(t, "ubuntu-latest"), false},
+		{"reusable workflow", &model.Job{Uses: "./.gitea/workflows/reusable.yml"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workflow := &model.Workflow{Jobs: map[string]*model.Job{"test": tt.job}}
+
+			rc := &RunContext{
+				Config: &Config{PlatformPicker: func([]string) string { return "alpine" }},
+				Run:    &model.Run{JobID: "test", Workflow: workflow},
+			}
+			rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
+
+			enabled, err := rc.isEnabled(t.Context())
+			if tt.wantErr {
+				require.ErrorContains(t, err, "non-empty 'runs-on'")
+				assert.False(t, enabled)
+				return
+			}
+			require.NoError(t, err)
+			assert.True(t, enabled)
+		})
+	}
+}
+
+func jobWithRunsOn(t *testing.T, runsOn any) *model.Job {
+	t.Helper()
+	var rawRunsOn yaml.Node
+	require.NoError(t, rawRunsOn.Encode(runsOn))
+	return &model.Job{RawRunsOn: rawRunsOn}
+}
+
+func jobWithIf(t *testing.T, job *model.Job, condition bool) *model.Job {
+	t.Helper()
+	require.NoError(t, job.If.Encode(condition))
+	return job
+}
+
+func TestIsEnabledAllowsSyntheticCompositeJobWithoutRunsOn(t *testing.T) {
+	rc := &RunContext{
+		Config: &Config{},
+		Run: &model.Run{
+			JobID: "composite",
+			Workflow: &model.Workflow{Jobs: map[string]*model.Job{
+				"composite": {},
+			}},
+		},
+		Parent: &RunContext{},
+	}
+	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
+
+	enabled, err := rc.isEnabled(t.Context())
+	require.NoError(t, err)
+	assert.True(t, enabled)
+}
+
 // fakeContainer turns every container operation into a no-op, so startJobContainer
 // runs without a Docker daemon. The embedded interface is nil, so any method the
 // test does not exercise panics rather than silently doing the wrong thing.
