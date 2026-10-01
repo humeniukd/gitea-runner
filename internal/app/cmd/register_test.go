@@ -4,17 +4,15 @@
 package cmd
 
 import (
-	"context"
-	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
-	"time"
 
 	"gitea.com/gitea/runner/internal/pkg/config"
 
-	"connectrpc.com/connect"
-	pingv1 "gitea.dev/actionslib/ping/v1"
-	"gitea.dev/actionslib/ping/v1/pingv1connect"
 	"github.com/stretchr/testify/require"
 	"gotest.tools/v3/assert"
 )
@@ -253,29 +251,17 @@ func TestInitInputs(t *testing.T) {
 	})
 }
 
-type fakePingClient struct {
-	pingv1connect.PingServiceClient
-	calls int
-	errs  int
-}
+func TestDoRegisterReturnsPingErrorWithoutRetrying(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
 
-func (f *fakePingClient) Ping(_ context.Context, _ *connect.Request[pingv1.PingRequest]) (*connect.Response[pingv1.PingResponse], error) {
-	f.calls++
-	if f.calls <= f.errs {
-		return nil, errors.New("tls: failed to verify certificate")
-	}
-	return connect.NewResponse(&pingv1.PingResponse{}), nil
-}
-
-func TestPingInstanceGivesUp(t *testing.T) {
-	cli := &fakePingClient{errs: 100}
-	err := pingInstance(t.Context(), cli, "runner", 3, time.Millisecond)
-	assert.ErrorContains(t, err, "after 3 attempts")
-	assert.Equal(t, 3, cli.calls)
-}
-
-func TestPingInstanceRetriesUntilReachable(t *testing.T) {
-	cli := &fakePingClient{errs: 2}
-	require.NoError(t, pingInstance(t.Context(), cli, "runner", 5, time.Millisecond))
-	assert.Equal(t, 3, cli.calls)
+	cfg := &config.Config{}
+	cfg.Runner.File = filepath.Join(t.TempDir(), ".runner")
+	err := doRegister(t.Context(), cfg, &registerInputs{InstanceAddr: server.URL, RunnerName: "runner"})
+	assert.ErrorContains(t, err, "cannot ping the Gitea instance server")
+	assert.Equal(t, int32(1), requests.Load())
 }

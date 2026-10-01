@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	goruntime "runtime"
 	"strings"
-	"time"
 
 	"gitea.com/gitea/runner/internal/app/run"
 	"gitea.com/gitea/runner/internal/pkg/client"
@@ -23,7 +22,6 @@ import (
 
 	"connectrpc.com/connect"
 	pingv1 "gitea.dev/actionslib/ping/v1"
-	"gitea.dev/actionslib/ping/v1/pingv1connect"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	"github.com/mattn/go-isatty"
 	log "github.com/sirupsen/logrus"
@@ -347,40 +345,6 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
 	return nil
 }
 
-// pingAttempts bounds the wait for the instance to come up, so a permanent
-// failure (bad URL, untrusted certificate) reports an error instead of looping
-// forever.
-const (
-	pingAttempts = 10
-	pingInterval = time.Second
-)
-
-func pingInstance(ctx context.Context, cli pingv1connect.PingServiceClient, runnerName string, attempts int, interval time.Duration) error {
-	var err error
-	for i := range attempts {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		_, err = cli.Ping(ctx, connect.NewRequest(&pingv1.PingRequest{
-			Data: runnerName,
-		}))
-		if err == nil {
-			log.Debugln("Successfully pinged the Gitea instance server")
-			return nil
-		}
-		log.WithError(err).Errorln("Cannot ping the Gitea instance server")
-		if i == attempts-1 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(interval):
-		}
-	}
-	return fmt.Errorf("cannot ping the Gitea instance server after %d attempts: %w", attempts, err)
-}
-
 func doRegister(ctx context.Context, cfg *config.Config, inputs *registerInputs) error {
 	// Refuse to rewrite the runner file while another process is using it.
 	releaseLock, err := lock.TryLock(cfg.Runner.File)
@@ -405,9 +369,12 @@ func doRegister(ctx context.Context, cfg *config.Config, inputs *registerInputs)
 		config.RequestTimeout,
 	)
 
-	if err := pingInstance(ctx, cli, inputs.RunnerName, pingAttempts, pingInterval); err != nil {
-		return err
+	if _, err := cli.Ping(ctx, connect.NewRequest(&pingv1.PingRequest{
+		Data: inputs.RunnerName,
+	})); err != nil {
+		return fmt.Errorf("cannot ping the Gitea instance server: %w", err)
 	}
+	log.Debugln("Successfully pinged the Gitea instance server")
 
 	reg := &config.Registration{
 		Name:      inputs.RunnerName,
