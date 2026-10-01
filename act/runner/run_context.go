@@ -7,6 +7,7 @@ package runner
 import (
 	"archive/tar"
 	"bufio"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -448,7 +449,10 @@ func (rc *RunContext) startKubernetesPod() common.Executor {
 		if rc.containerSpec.Options != "" || len(rc.containerSpec.Volumes) > 0 || rc.containerSpec.Credentials != nil {
 			return errors.New("container options, volumes and credentials are not supported on Kubernetes")
 		}
-		options := rc.Config.Kubernetes
+		var options container.KubernetesOptions
+		if rc.Config.KubernetesPicker != nil {
+			options = rc.Config.KubernetesPicker(rc.runsOnPlatformNames(ctx))
+		}
 		options.MaxLifetime, options.ForcePull = rc.Config.ContainerMaxLifetime, rc.Config.ForcePull
 		pod, err := container.NewKubernetesPod(options)
 		if err != nil {
@@ -1261,13 +1265,12 @@ func (rc *RunContext) resolvePlatformImage(ctx context.Context) error {
 		rc.containerSpec, rc.containerEnv = spec, env
 	}
 	image, err := rc.runsOnImage(ctx)
-	image, rc.kubernetes = strings.CutPrefix(image, "kubernetes://")
-	if rc.containerSpec.Image != "" {
-		rc.platformImage = rc.containerSpec.Image
-		return nil
+	if err != nil {
+		return err
 	}
-	rc.platformImage = image
-	return err
+	image, rc.kubernetes = strings.CutPrefix(image, "kubernetes://")
+	rc.platformImage = cmp.Or(rc.containerSpec.Image, image)
+	return nil
 }
 
 // imagelessContainer reports a container: mapping without an image key, which configures the runs-on image.

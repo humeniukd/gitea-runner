@@ -81,11 +81,12 @@ func fakeKubernetes(t *testing.T, podStatus string) (string, *fakeCluster) {
 	}))
 	t.Cleanup(server.Close)
 	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(kubeconfig), "token"), []byte("test-token\n"), 0o600))
 	require.NoError(t, os.WriteFile(kubeconfig, fmt.Appendf(nil, `
 current-context: test
 contexts: [{name: test, context: {cluster: test, user: test, namespace: ci}}]
-clusters: [{name: test, cluster: {server: %q}}]
-users: [{name: test, user: {token: test-token}}]
+clusters: [{name: test, cluster: {server: "http://kubernetes.invalid", proxy-url: %q}}]
+users: [{name: test, user: {tokenFile: token}}]
 `, server.URL), 0o600))
 	return kubeconfig, cluster
 }
@@ -142,7 +143,10 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 			"automountServiceAccountToken": true,
 			"containers": []any{
 				map[string]any{"name": "job", "resources": map[string]any{"limits": map[string]any{"cpu": "2"}}},
-				map[string]any{"name": "$services", "imagePullPolicy": "Always", "resources": map[string]any{"limits": map[string]any{"memory": "256Mi"}}},
+				map[string]any{
+					"name": "$services", "imagePullPolicy": "Always", "resources": map[string]any{"limits": map[string]any{"memory": "256Mi"}},
+					"env": []any{map[string]any{"name": "POSTGRES_PASSWORD", "value": "template"}},
+				},
 			},
 		}},
 		{"spec": map[string]any{
@@ -184,14 +188,25 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	assert.NotContains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], "service-secret")
 	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/secrets"][0], "service-secret")
 	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/secrets"][0], `"com.gitea.runner.uuid":"runner-uuid"`)
-	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], `"secretKeyRef":{"key":"my-db.0","name":"`+pod.secretName+`"}`)
+	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], `{"name":"POSTGRES_PASSWORD","valueFrom":{"secretKeyRef":{"key":"my-db.0","name":"`+pod.secretName+`"}}}`)
+	assert.Equal(t, []any{"new"}, mergeManifest([]any{"old"}, []any{"new"}, ""))
+	mount := func(path string) any { return map[string]any{"name": "config", "mountPath": path} }
+	assert.Equal(t, []any{mount("/a"), mount("/b")}, mergeManifest([]any{mount("/a")}, []any{mount("/b")}, "volumeMounts"))
 	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], `"args":["postgres","-D","$$(PGDATA)"]`)
 
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "env"), []byte("#!/bin/sh\necho \"$@\" > \"$0-args\"\nexec /usr/bin/env \"$@\"\n"), 0o755))
+	t.Setenv("PATH", workdir+":"+os.Getenv("PATH"))
 	require.NoError(t, job.Start(false)(ctx))
 
-	require.NoError(t, job.Exec([]string{"printenv", "INPUT_WHO-TO-GREET"}, map[string]string{"INPUT_WHO-TO-GREET": "it's\nme", "SECRET": "hunter2"}, "", "")(ctx))
+	stepEnv := map[string]string{"INPUT_WHO-TO-GREET": "it's\nme", "SECRET": "hunter2", "UID": "5"}
+	require.NoError(t, job.Exec([]string{"printenv", "SECRET"}, stepEnv, "", "")(ctx))
+	envArgs, err := os.ReadFile(filepath.Join(workdir, "env-args"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(envArgs), "hunter2")
+	require.NoError(t, job.Exec([]string{"printenv", "INPUT_WHO-TO-GREET"}, stepEnv, "", "")(ctx))
+	require.NoError(t, job.Exec([]string{"printenv", "UID"}, stepEnv, "", "")(ctx))
 	require.NoError(t, job.Exec([]string{"pwd", "-P"}, nil, "", workdir)(ctx))
-	assert.Equal(t, "it's\nme\n"+workdir+"\n", jobLog.String())
+	assert.Equal(t, "hunter2\nit's\nme\n5\n"+workdir+"\n", jobLog.String())
 	assert.Equal(t, ExitCodeError(3), job.Exec([]string{"sh", "-c", "echo failing >&2; exit 3"}, nil, "", "")(ctx))
 	assert.Contains(t, jobLog.String(), "failing\n")
 	for _, query := range cluster.requests["exec"] {

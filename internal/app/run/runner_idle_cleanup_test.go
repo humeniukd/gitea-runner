@@ -333,7 +333,9 @@ func TestRunnerOnIdleRemovesOrphanNetworks(t *testing.T) {
 	t.Cleanup(func() { removeOrphanJobVolumes = origRemoveOrphanJobVolumes })
 	var sweptPods []string
 	origRemoveOrphanKubernetesResources := removeOrphanKubernetesResources
-	removeOrphanKubernetesResources = func(_ context.Context, options container.KubernetesOptions, createdBefore time.Time) error {
+	removeOrphanKubernetesResources = func(ctx context.Context, options container.KubernetesOptions, createdBefore time.Time) error {
+		_, hasDeadline := ctx.Deadline()
+		assert.True(t, hasDeadline)
 		sweptPods = append(sweptPods, options.RunnerUUID)
 		assert.Equal(t, now.Add(-24*time.Hour), createdBefore)
 		return nil

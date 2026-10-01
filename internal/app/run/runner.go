@@ -178,6 +178,8 @@ func (r *Runner) OnIdle(ctx context.Context) {
 	}
 	r.cleanupOrphanDockerResources(ctx)
 	if r.uuid != "" && r.usesKubernetes() {
+		ctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
 		if err := removeOrphanKubernetesResources(ctx, r.kubernetesOptions(nil), r.now().Add(-r.cfg.Runner.WorkdirCleanupAge)); err != nil {
 			log.Warnf("failed to clean up job pods left behind by earlier jobs: %v", err)
 		}
@@ -625,7 +627,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		SharedToolCache:                   r.cfg.Runner.ToolCacheMode == config.ToolCacheModeShared,
 		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
 		RunnerName:                        r.name,
-		Kubernetes:                        r.kubernetesOptions(job.RunsOn()),
+		KubernetesPicker:                  r.kubernetesOptions,
 	}
 
 	rr, err := runner.New(runnerConfig)

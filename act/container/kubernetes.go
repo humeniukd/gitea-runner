@@ -51,7 +51,7 @@ type KubernetesPod struct {
 type kubernetesContainer struct {
 	LinuxContainerEnvironmentExtensions
 	pod   *KubernetesPod
-	id    string // the workflow's service id, which name may differ from
+	id    string // the workflow's service id, name is its DNS label form
 	name  string
 	input *NewContainerInput
 	probe map[string]any
@@ -117,7 +117,7 @@ func (p *KubernetesPod) create(ctx context.Context) error {
 		labels[runnerUUIDLabel] = p.options.RunnerUUID
 	}
 	metadata := map[string]any{"name": name, "labels": labels}
-	if hostname, err := os.Hostname(); p.client.tokenFile != "" && err == nil {
+	if hostname, err := os.Hostname(); p.client.inCluster && err == nil {
 		var runner struct{ Metadata struct{ Name, UID string } }
 		if err := p.client.do(ctx, http.MethodGet, p.client.path("pods/"+hostname), nil, &runner); err == nil {
 			metadata["ownerReferences"] = []any{map[string]any{"apiVersion": "v1", "kind": "Pod", "name": runner.Metadata.Name, "uid": runner.Metadata.UID}}
@@ -155,20 +155,20 @@ func (p *KubernetesPod) manifest(secret string, secretData map[string]string, me
 		"terminationGracePeriodSeconds": 0, // the job container's tail ignores SIGTERM
 	}}
 	for _, layer := range p.options.PodTemplates {
-		template, _ = mergeManifest(template, layer).(map[string]any)
+		template, _ = mergeManifest(template, layer, "").(map[string]any)
 	}
 	templateSpec, _ := template["spec"].(map[string]any)
 	templateContainers, _ := templateSpec["containers"].([]any)
 	templateVolumes, _ := templateSpec["volumes"].([]any)
 	var serviceTemplate any
-	if index := slices.IndexFunc(templateContainers, func(container any) bool { return manifestName(container) == "$services" }); index >= 0 {
+	if index := slices.IndexFunc(templateContainers, func(container any) bool { return manifestField(container, "name") == "$services" }); index >= 0 {
 		serviceTemplate = templateContainers[index]
 		templateSpec["containers"] = slices.Delete(slices.Clone(templateContainers), index, index+1)
 	}
 	var containers, hostnames, volumes []any
 	names := map[string]bool{}
 	for _, container := range templateContainers {
-		names[manifestName(container)] = true
+		names[manifestField(container, "name")] = true
 	}
 	for _, c := range append([]*kubernetesContainer{p.job}, p.services...) {
 		if c != p.job && (c.name == "" || names[c.name]) {
@@ -183,11 +183,11 @@ func (p *KubernetesPod) manifest(secret string, secretData map[string]string, me
 			containers = append(containers, spec)
 			continue
 		}
-		containers = append(containers, mergeManifest(serviceTemplate, spec))
+		containers = append(containers, mergeManifest(serviceTemplate, spec, ""))
 		hostnames = append(hostnames, c.name)
 	}
 	for _, name := range []string{"workspace", "act"} {
-		if !slices.ContainsFunc(templateVolumes, func(volume any) bool { return manifestName(volume) == name }) {
+		if !slices.ContainsFunc(templateVolumes, func(volume any) bool { return manifestField(volume, "name") == name }) {
 			volumes = append(volumes, map[string]any{"name": name, "emptyDir": map[string]any{}})
 		}
 	}
@@ -198,11 +198,11 @@ func (p *KubernetesPod) manifest(secret string, secretData map[string]string, me
 	if p.options.MaxLifetime > 0 {
 		spec["activeDeadlineSeconds"] = max(1, int64(p.options.MaxLifetime.Seconds()))
 	}
-	return mergeManifest(template, map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": metadata, "spec": spec}), nil
+	return mergeManifest(template, map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": metadata, "spec": spec}, ""), nil
 }
 
-// mergeManifest merges over onto base like a strategic merge patch: maps key by key, list items by name, other values replaced.
-func mergeManifest(base, over any) any {
+// mergeManifest merges over onto base like a strategic merge patch: maps key by key, map list items by name or volumeMounts by mountPath, env entries and other values replaced.
+func mergeManifest(base, over any, field string) any {
 	switch over := over.(type) {
 	case map[string]any:
 		merged := map[string]any{}
@@ -210,19 +210,26 @@ func mergeManifest(base, over any) any {
 			maps.Copy(merged, base)
 		}
 		for key, value := range over {
-			merged[key] = mergeManifest(merged[key], value)
+			merged[key] = mergeManifest(merged[key], value, key)
 		}
 		return merged
 	case []any:
+		key := cmp.Or(map[string]string{"volumeMounts": "mountPath"}[field], "name")
 		baseList, _ := base.([]any)
 		merged := slices.Clone(baseList)
 		for _, item := range over {
-			name := manifestName(item)
-			index := slices.IndexFunc(merged, func(existing any) bool { return name != "" && manifestName(existing) == name })
-			if index < 0 {
+			if _, ok := item.(map[string]any); !ok {
+				return over
+			}
+			name := manifestField(item, key)
+			index := slices.IndexFunc(merged, func(existing any) bool { return name != "" && manifestField(existing, key) == name })
+			switch {
+			case index < 0:
 				merged = append(merged, item)
-			} else {
-				merged[index] = mergeManifest(merged[index], item)
+			case field == "env":
+				merged[index] = item
+			default:
+				merged[index] = mergeManifest(merged[index], item, "")
 			}
 		}
 		return merged
@@ -230,10 +237,10 @@ func mergeManifest(base, over any) any {
 	return over
 }
 
-func manifestName(item any) string {
+func manifestField(item any, key string) string {
 	fields, _ := item.(map[string]any)
-	name, _ := fields["name"].(string)
-	return name
+	value, _ := fields[key].(string)
+	return value
 }
 
 func (c *kubernetesContainer) spec(secret string, secretData map[string]string) (map[string]any, error) {
@@ -381,10 +388,23 @@ func (*kubernetesContainer) Pull(bool) common.Executor {
 	return func(context.Context) error { return nil }
 }
 
-// Exec feeds the command to sh on stdin, keeping its env out of the request URL and the process list.
+var (
+	shellName    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	bashReadonly = []string{"BASHOPTS", "BASH_VERSINFO", "EUID", "PPID", "SHELLOPTS", "UID"} // bash as sh cannot export these
+)
+
+// Exec feeds the command to sh on stdin, which exports the env so it stays out of the request URL and, where sh can export a name, out of process arguments.
 func (c *kubernetesContainer) Exec(command []string, env map[string]string, _, workdir string) common.Executor {
 	return func(ctx context.Context) error {
-		script := "exec " + shellquote.Join(append(append([]string{"env", "--"}, getEnvListFromMap(env)...), command...)...)
+		script, args := "", []string{"env", "--"}
+		for name, value := range env {
+			if shellName.MatchString(name) && !slices.Contains(bashReadonly, name) {
+				script += "command export " + shellquote.Join(name+"="+value) + "\n"
+			} else {
+				args = append(args, name+"="+value)
+			}
+		}
+		script += "exec " + shellquote.Join(append(args, command...)...)
 		if workdir != "" {
 			script = "cd " + shellquote.Join(workdir) + " || exit\n" + script
 		}
@@ -464,7 +484,7 @@ func (c *kubernetesContainer) Inspect(ctx context.Context) (*Info, error) {
 	}
 	info := &Info{ID: c.pod.name + "/" + c.name, State: "created", Health: HealthNone, Ports: map[string]string{}}
 	for port := range c.input.ExposedPorts {
-		info.Ports[port.Port()] = port.Port() // services share the job's network, so a port is reached as is
+		info.Ports[port.Port()] = port.Port() // services share the pod's network
 	}
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.Name != c.name {

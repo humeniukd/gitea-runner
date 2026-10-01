@@ -75,6 +75,7 @@ type Config struct {
 	// AppURL. It is never set for github.com or a GithubMirror, so the token stays on-instance.
 	DefaultActionInstanceIsSelfHosted bool
 	PlatformPicker                    func(labels []string) string
+	KubernetesPicker                  func(labels []string) container.KubernetesOptions
 	JobLoggerLevel                    *log.Level    // the level of job logger
 	ValidVolumes                      []string      // only volumes (and bind mounts) in this slice can be mounted on the job container or service containers
 	SharedToolCache                   bool          // one tool cache for all jobs instead of one per job
@@ -85,7 +86,6 @@ type Config struct {
 	RunnerName                        string        // name this runner registered with, reported as `runner.name`, defaults to the hostname
 	JobStartedHook                    string        // script run inside the job environment before the job's first step; ACTIONS_RUNNER_HOOK_JOB_STARTED is read from Env when empty
 	JobCompletedHook                  string        // script run inside the job environment after the job's last step; ACTIONS_RUNNER_HOOK_JOB_COMPLETED is read from Env when empty
-	Kubernetes                        container.KubernetesOptions
 }
 
 // RunnerDebug reports whether debug logging is on, exposed as `runner.debug` and

@@ -35,6 +35,7 @@ const (
 type kubeClient struct {
 	server, namespace, token string
 	tokenFile                string // re-read on every request, service account tokens rotate
+	inCluster                bool
 	http                     *http.Client
 }
 
@@ -52,15 +53,15 @@ func isNotFound(err error) bool {
 
 func newKubeClient(kubeconfig, namespace string) (*kubeClient, error) {
 	client := &kubeClient{namespace: namespace}
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
 	if host := os.Getenv("KUBERNETES_SERVICE_HOST"); host != "" && kubeconfig == "" {
-		if err := client.loadInCluster(host, tlsConfig); err != nil {
+		if err := client.loadInCluster(host, transport.TLSClientConfig); err != nil {
 			return nil, err
 		}
-	} else if err := client.loadKubeconfig(kubeconfig, tlsConfig); err != nil {
+	} else if err := client.loadKubeconfig(kubeconfig, transport); err != nil {
 		return nil, err
 	}
-	client.http = &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: tlsConfig}}
+	client.http = &http.Client{Transport: transport}
 	return client, nil
 }
 
@@ -80,10 +81,11 @@ func (c *kubeClient) loadInCluster(host string, tlsConfig *tls.Config) error {
 		}
 		c.namespace = strings.TrimSpace(string(namespace))
 	}
+	c.inCluster = true
 	return nil
 }
 
-func (c *kubeClient) loadKubeconfig(path string, tlsConfig *tls.Config) error {
+func (c *kubeClient) loadKubeconfig(path string, transport *http.Transport) error {
 	if paths := filepath.SplitList(os.Getenv("KUBECONFIG")); path == "" && len(paths) > 0 {
 		path = paths[0]
 	}
@@ -108,6 +110,9 @@ func (c *kubeClient) loadKubeconfig(path string, tlsConfig *tls.Config) error {
 			Name    string
 			Cluster struct {
 				Server                   string
+				TLSServerName            string `yaml:"tls-server-name"`
+				InsecureSkipTLSVerify    bool   `yaml:"insecure-skip-tls-verify"`
+				ProxyURL                 string `yaml:"proxy-url"`
 				CertificateAuthority     string `yaml:"certificate-authority"`
 				CertificateAuthorityData string `yaml:"certificate-authority-data"`
 			}
@@ -116,6 +121,7 @@ func (c *kubeClient) loadKubeconfig(path string, tlsConfig *tls.Config) error {
 			Name string
 			User struct {
 				Token                 string
+				TokenFile             string `yaml:"tokenFile"`
 				ClientCertificate     string `yaml:"client-certificate"`
 				ClientCertificateData string `yaml:"client-certificate-data"`
 				ClientKey             string `yaml:"client-key"`
@@ -139,6 +145,12 @@ func (c *kubeClient) loadKubeconfig(path string, tlsConfig *tls.Config) error {
 	}
 	c.namespace = cmp.Or(c.namespace, current.Namespace, "default")
 
+	resolve := func(file string) string {
+		if file == "" || filepath.IsAbs(file) {
+			return file
+		}
+		return filepath.Join(filepath.Dir(path), file)
+	}
 	read := func(data, file string) ([]byte, error) {
 		if data != "" {
 			return base64.StdEncoding.DecodeString(data)
@@ -146,17 +158,23 @@ func (c *kubeClient) loadKubeconfig(path string, tlsConfig *tls.Config) error {
 		if file == "" {
 			return nil, nil
 		}
-		if !filepath.IsAbs(file) {
-			file = filepath.Join(filepath.Dir(path), file)
-		}
-		return os.ReadFile(file)
+		return os.ReadFile(resolve(file))
 	}
 
+	tlsConfig := transport.TLSClientConfig
 	for _, cluster := range config.Clusters {
 		if cluster.Name != current.Cluster {
 			continue
 		}
 		c.server = strings.TrimSuffix(cluster.Cluster.Server, "/")
+		tlsConfig.ServerName, tlsConfig.InsecureSkipVerify = cluster.Cluster.TLSServerName, cluster.Cluster.InsecureSkipTLSVerify
+		if cluster.Cluster.ProxyURL != "" {
+			proxy, err := url.Parse(cluster.Cluster.ProxyURL)
+			if err != nil {
+				return fmt.Errorf("kubeconfig %s: %w", path, err)
+			}
+			transport.Proxy = http.ProxyURL(proxy)
+		}
 		ca, err := read(cluster.Cluster.CertificateAuthorityData, cluster.Cluster.CertificateAuthority)
 		if err != nil {
 			return err
@@ -173,7 +191,7 @@ func (c *kubeClient) loadKubeconfig(path string, tlsConfig *tls.Config) error {
 		if user.User.Exec != nil || user.User.AuthProvider != nil {
 			return fmt.Errorf("kubeconfig %s: user %q authenticates through a credential plugin, which the runner does not support, use a token or client certificate", path, user.Name)
 		}
-		c.token = user.User.Token
+		c.token, c.tokenFile = user.User.Token, resolve(user.User.TokenFile)
 		cert, err := read(user.User.ClientCertificateData, user.User.ClientCertificate)
 		if err != nil {
 			return err
