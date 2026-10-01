@@ -4,11 +4,10 @@
 package telemetry
 
 import (
+	"cmp"
 	"context"
 	"errors"
-	"math"
-	"os"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,26 +17,28 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const cumulative = metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE
 
-// pushMetrics exports the Prometheus registry on an interval and once more on shutdown, so short-lived runners report too.
-func pushMetrics(c *client, res *resource.Resource, gatherer prometheus.Gatherer) func(context.Context) error {
+// pushMetrics also pushes on shutdown so short-lived runners report.
+func pushMetrics(exporter *client, res *resource.Resource, gatherer prometheus.Gatherer) func(context.Context) error {
 	attrs := make([]*commonpb.KeyValue, 0, res.Len())
 	for _, kv := range res.Attributes() {
 		attrs = append(attrs, keyValue(string(kv.Key), kv.Value.String()))
 	}
-	start := uint64(time.Now().UnixNano())
+	interval, timeout := millis("OTEL_METRIC_EXPORT_INTERVAL", time.Minute, time.Minute), millis("OTEL_METRIC_EXPORT_TIMEOUT", 30*time.Second, noLimit)
 	push := func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
 		families, err := gatherer.Gather()
-		return errors.Join(err, c.upload(ctx, &metricpb.MetricsData{ResourceMetrics: []*metricpb.ResourceMetrics{{
+		return errors.Join(err, exporter.upload(ctx, &metricpb.MetricsData{ResourceMetrics: []*metricpb.ResourceMetrics{{
 			Resource:     &resourcepb.Resource{Attributes: attrs},
-			ScopeMetrics: []*metricpb.ScopeMetrics{{Scope: &commonpb.InstrumentationScope{Name: scope}, Metrics: convert(families, start)}},
+			ScopeMetrics: []*metricpb.ScopeMetrics{{Scope: &commonpb.InstrumentationScope{Name: scope}, Metrics: convert(families)}},
 			SchemaUrl:    res.SchemaURL(),
 		}}}))
 	}
-	interval, timeout := millis("OTEL_METRIC_EXPORT_INTERVAL", time.Minute), millis("OTEL_METRIC_EXPORT_TIMEOUT", 30*time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -49,11 +50,9 @@ func pushMetrics(c *client, res *resource.Resource, gatherer prometheus.Gatherer
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				pushCtx, cancelPush := context.WithTimeout(ctx, timeout)
-				if err := push(pushCtx); err != nil {
-					log.WithError(err).Warn("OTLP metrics export failed")
+				if err := push(ctx); err != nil && ctx.Err() == nil {
+					log.WithError(err).Warn("OTLP metrics export failed, set OTEL_METRICS_EXPORTER=none to disable it")
 				}
-				cancelPush()
 			}
 		}
 	}()
@@ -64,48 +63,50 @@ func pushMetrics(c *client, res *resource.Resource, gatherer prometheus.Gatherer
 	}
 }
 
-func millis(key string, fallback time.Duration) time.Duration {
-	if ms, err := strconv.Atoi(os.Getenv(key)); err == nil && ms > 0 {
-		return time.Duration(ms) * time.Millisecond
-	}
-	return fallback
+var ucum = map[string]string{
+	"days": "d", "hours": "h", "minutes": "min", "seconds": "s", "milliseconds": "ms", "microseconds": "us", "nanoseconds": "ns",
+	"bytes": "By", "kibibytes": "KiBy", "mebibytes": "MiBy", "gibibytes": "GiBy", "tebibytes": "TiBy",
+	"kilobytes": "kBy", "megabytes": "MBy", "gigabytes": "GBy", "terabytes": "TBy",
+	"meters": "m", "volts": "V", "amperes": "A", "joules": "J", "watts": "W", "grams": "g", "celsius": "Cel", "hertz": "Hz", "percent": "%",
 }
 
-// convert keeps Prometheus names, as the OTel compatibility spec asks; cumulative series start at runner startup.
-func convert(families []*dto.MetricFamily, start uint64) []*metricpb.Metric {
+// convert follows https://opentelemetry.io/docs/specs/otel/compatibility/prometheus_and_openmetrics/#prometheus-metric-points-to-otlp
+func convert(families []*dto.MetricFamily) []*metricpb.Metric {
 	now := uint64(time.Now().UnixNano())
 	metrics := make([]*metricpb.Metric, 0, len(families))
 	for _, family := range families {
-		metric := &metricpb.Metric{Name: family.GetName(), Description: family.GetHelp()}
+		metric := &metricpb.Metric{
+			Name: family.GetName(), Description: family.GetHelp(), Unit: cmp.Or(ucum[family.GetUnit()], family.GetUnit()),
+			Metadata: []*commonpb.KeyValue{keyValue("prometheus.type", strings.ToLower(family.GetType().String()))},
+		}
 		switch family.GetType() {
 		case dto.MetricType_COUNTER:
 			sum := &metricpb.Sum{AggregationTemporality: cumulative, IsMonotonic: true}
-			for _, m := range family.GetMetric() {
-				sum.DataPoints = append(sum.DataPoints, number(m, start, now, m.GetCounter().GetValue()))
+			for _, series := range family.GetMetric() {
+				sum.DataPoints = append(sum.DataPoints, number(series, unixNano(series.GetCounter().GetCreatedTimestamp()), now, series.GetCounter().GetValue()))
 			}
 			metric.Data = &metricpb.Metric_Sum{Sum: sum}
-		case dto.MetricType_GAUGE, dto.MetricType_UNTYPED:
+		case dto.MetricType_GAUGE:
 			gauge := &metricpb.Gauge{}
-			for _, m := range family.GetMetric() {
-				value := m.GetGauge().GetValue()
-				if m.Untyped != nil {
-					value = m.GetUntyped().GetValue()
-				}
-				gauge.DataPoints = append(gauge.DataPoints, number(m, 0, now, value))
+			for _, series := range family.GetMetric() {
+				gauge.DataPoints = append(gauge.DataPoints, number(series, 0, now, series.GetGauge().GetValue()))
 			}
 			metric.Data = &metricpb.Metric_Gauge{Gauge: gauge}
 		case dto.MetricType_HISTOGRAM:
 			histogram := &metricpb.Histogram{AggregationTemporality: cumulative}
-			for _, m := range family.GetMetric() {
-				histogram.DataPoints = append(histogram.DataPoints, histogramPoint(m, start, now))
+			for _, series := range family.GetMetric() {
+				histogram.DataPoints = append(histogram.DataPoints, histogramPoint(series, now))
 			}
 			metric.Data = &metricpb.Metric_Histogram{Histogram: histogram}
 		case dto.MetricType_SUMMARY:
 			summary := &metricpb.Summary{}
-			for _, m := range family.GetMetric() {
-				point := &metricpb.SummaryDataPoint{Attributes: labels(m), StartTimeUnixNano: start, TimeUnixNano: now, Count: m.GetSummary().GetSampleCount(), Sum: m.GetSummary().GetSampleSum()}
-				for _, q := range m.GetSummary().GetQuantile() {
-					point.QuantileValues = append(point.QuantileValues, &metricpb.SummaryDataPoint_ValueAtQuantile{Quantile: q.GetQuantile(), Value: q.GetValue()})
+			for _, series := range family.GetMetric() {
+				point := &metricpb.SummaryDataPoint{
+					Attributes: labels(series), StartTimeUnixNano: unixNano(series.GetSummary().GetCreatedTimestamp()), TimeUnixNano: now,
+					Count: series.GetSummary().GetSampleCount(), Sum: series.GetSummary().GetSampleSum(),
+				}
+				for _, quantile := range series.GetSummary().GetQuantile() {
+					point.QuantileValues = append(point.QuantileValues, &metricpb.SummaryDataPoint_ValueAtQuantile{Quantile: quantile.GetQuantile(), Value: quantile.GetValue()})
 				}
 				summary.DataPoints = append(summary.DataPoints, point)
 			}
@@ -118,34 +119,35 @@ func convert(families []*dto.MetricFamily, start uint64) []*metricpb.Metric {
 	return metrics
 }
 
-func number(m *dto.Metric, start, now uint64, value float64) *metricpb.NumberDataPoint {
-	return &metricpb.NumberDataPoint{Attributes: labels(m), StartTimeUnixNano: start, TimeUnixNano: now, Value: &metricpb.NumberDataPoint_AsDouble{AsDouble: value}}
+func number(series *dto.Metric, start, now uint64, value float64) *metricpb.NumberDataPoint {
+	return &metricpb.NumberDataPoint{Attributes: labels(series), StartTimeUnixNano: start, TimeUnixNano: now, Value: &metricpb.NumberDataPoint_AsDouble{AsDouble: value}}
 }
 
-// histogramPoint turns Prometheus' cumulative buckets into per-bucket counts, with the +Inf bucket last.
-func histogramPoint(m *dto.Metric, start, now uint64) *metricpb.HistogramDataPoint {
-	h := m.GetHistogram()
-	buckets := h.GetBucket()
-	if n := len(buckets); n > 0 && math.IsInf(buckets[n-1].GetUpperBound(), 1) {
-		buckets = buckets[:n-1]
-	}
+// unixNano maps a nil timestamp to 0, leaving the start time unset as the spec asks.
+func unixNano(timestamp *timestamppb.Timestamp) uint64 {
+	return uint64(timestamp.AsTime().UnixNano())
+}
+
+func histogramPoint(series *dto.Metric, now uint64) *metricpb.HistogramDataPoint {
+	histogram := series.GetHistogram()
 	point := &metricpb.HistogramDataPoint{
-		Attributes: labels(m), StartTimeUnixNano: start, TimeUnixNano: now, Count: h.GetSampleCount(), Sum: new(h.GetSampleSum()),
-		ExplicitBounds: make([]float64, len(buckets)), BucketCounts: make([]uint64, len(buckets)+1),
+		Attributes: labels(series), StartTimeUnixNano: unixNano(histogram.GetCreatedTimestamp()), TimeUnixNano: now,
+		Count: histogram.GetSampleCount(), Sum: histogram.SampleSum,
+		BucketCounts: make([]uint64, len(histogram.GetBucket())+1),
 	}
 	var below uint64
-	for i, b := range buckets {
-		point.ExplicitBounds[i], point.BucketCounts[i] = b.GetUpperBound(), b.GetCumulativeCount()-below
-		below = b.GetCumulativeCount()
+	for i, bucket := range histogram.GetBucket() {
+		point.ExplicitBounds = append(point.ExplicitBounds, bucket.GetUpperBound())
+		point.BucketCounts[i], below = bucket.GetCumulativeCount()-below, bucket.GetCumulativeCount()
 	}
-	point.BucketCounts[len(buckets)] = h.GetSampleCount() - below
+	point.BucketCounts[len(histogram.GetBucket())] = histogram.GetSampleCount() - below
 	return point
 }
 
-func labels(m *dto.Metric) []*commonpb.KeyValue {
-	attrs := make([]*commonpb.KeyValue, 0, len(m.GetLabel()))
-	for _, l := range m.GetLabel() {
-		attrs = append(attrs, keyValue(l.GetName(), l.GetValue()))
+func labels(series *dto.Metric) []*commonpb.KeyValue {
+	attrs := make([]*commonpb.KeyValue, 0, len(series.GetLabel()))
+	for _, label := range series.GetLabel() {
+		attrs = append(attrs, keyValue(label.GetName(), label.GetValue()))
 	}
 	return attrs
 }

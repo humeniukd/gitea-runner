@@ -200,8 +200,7 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 
 		poller := poll.New(cfg, cli, runner)
 
-		// Registered even without the server, since OpenTelemetry exports the same registry.
-		metrics.Init()
+		metrics.Init() // OTLP exports the registry even without the server
 		metrics.RunnerInfo.WithLabelValues(ver.Version(), resp.Msg.Runner.Name).Set(1)
 		metrics.RunnerCapacity.Set(float64(cfg.Runner.Capacity))
 		metrics.RegisterUptimeFunc(time.Now())

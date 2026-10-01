@@ -6,23 +6,29 @@ package telemetry
 import (
 	"bytes"
 	"cmp"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	"github.com/avast/retry-go/v5"
+	"github.com/docker/go-connections/tlsconfig"
 	"github.com/prometheus/client_golang/prometheus"
+	log "github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -33,6 +39,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -63,10 +70,10 @@ func Setup(ctx context.Context, uuid, name string, gatherer prometheus.Gatherer)
 		if base := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint == "" && base != "" {
 			endpoint = strings.TrimSuffix(base, "/") + "/v1/" + strings.ToLower(signal)
 		}
-		if endpoint == "" || strings.EqualFold(os.Getenv("OTEL_"+signal+"_EXPORTER"), "none") {
+		if endpoint == "" || !exportsOTLP(signal) {
 			continue
 		}
-		if protocol := cmp.Or(os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_PROTOCOL"), os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL")); protocol != "" && !strings.EqualFold(protocol, "http/protobuf") {
+		if protocol := os.Getenv(otlpKey(signal, "PROTOCOL")); protocol != "" && !strings.EqualFold(protocol, "http/protobuf") {
 			return noop, fmt.Errorf("OTLP protocol %q is not supported, only http/protobuf is", protocol)
 		}
 		headers := http.Header{}
@@ -78,7 +85,19 @@ func Setup(ctx context.Context, uuid, name string, gatherer prometheus.Gatherer)
 				}
 			}
 		}
-		clients[signal] = &client{endpoint, headers}
+		compressionKey := otlpKey(signal, "COMPRESSION")
+		compression := os.Getenv(compressionKey)
+		if !slices.Contains([]string{"", "none", "gzip"}, strings.ToLower(compression)) {
+			log.Warnf("ignoring unsupported %s=%q", compressionKey, compression)
+		}
+		httpClient, err := newHTTPClient(signal)
+		if err != nil {
+			return noop, err
+		}
+		clients[signal] = &client{
+			endpoint: endpoint, headers: headers, timeout: millis(otlpKey(signal, "TIMEOUT"), 10*time.Second, noLimit),
+			gzip: strings.EqualFold(compression, "gzip"), httpClient: httpClient,
+		}
 	}
 	if len(clients) == 0 {
 		return noop, nil
@@ -103,19 +122,79 @@ func Setup(ctx context.Context, uuid, name string, gatherer prometheus.Gatherer)
 		shutdown = append(shutdown, pushMetrics(c, res, gatherer))
 	}
 	return func(ctx context.Context) error {
-		var errs []error
+		var group errgroup.Group
 		for _, fn := range shutdown {
-			errs = append(errs, fn(ctx))
+			group.Go(func() error { return fn(ctx) })
 		}
-		return errors.Join(errs...)
+		return group.Wait()
 	}, nil
+}
+
+func exportsOTLP(signal string) bool {
+	key := "OTEL_" + signal + "_EXPORTER"
+	otlp, known := false, false
+	for value := range strings.SplitSeq(os.Getenv(key), ",") {
+		switch value = strings.TrimSpace(value); strings.ToLower(value) {
+		case "":
+		case "otlp":
+			otlp, known = true, true
+		case "none":
+			known = true
+		default:
+			log.Warnf("ignoring unsupported %s value %q", key, value)
+		}
+	}
+	return otlp || !known
+}
+
+func otlpKey(signal, name string) string {
+	if key := "OTEL_EXPORTER_OTLP_" + signal + "_" + name; os.Getenv(key) != "" {
+		return key
+	}
+	return "OTEL_EXPORTER_OTLP_" + name
+}
+
+const noLimit = math.MaxInt32 * time.Millisecond // the spec's stand-in for a 0 timeout
+
+func millis(key string, fallback, zero time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	ms, err := strconv.ParseInt(value, 10, 32)
+	if err != nil || ms < 0 {
+		log.Warnf("ignoring %s=%q, it must be a non-negative number of milliseconds", key, value)
+		return fallback
+	}
+	return cmp.Or(time.Duration(ms)*time.Millisecond, zero)
+}
+
+// newHTTPClient applies the OTLP certificate variables, a configured CA replaces the system roots like in the Go SDK.
+func newHTTPClient(signal string) (*http.Client, error) {
+	caFile, certFile, keyFile := os.Getenv(otlpKey(signal, "CERTIFICATE")), os.Getenv(otlpKey(signal, "CLIENT_CERTIFICATE")), os.Getenv(otlpKey(signal, "CLIENT_KEY"))
+	if caFile == "" && certFile == "" && keyFile == "" {
+		return exportClient, nil
+	}
+	config, err := tlsconfig.Client(tlsconfig.Options{CAFile: caFile, CertFile: certFile, KeyFile: keyFile, ExclusiveRootPools: true})
+	if err != nil {
+		return nil, err
+	}
+	transport, _ := http.DefaultTransport.(*http.Transport)
+	transport = transport.Clone()
+	transport.TLSClientConfig = config
+	return &http.Client{Transport: transport, CheckRedirect: exportClient.CheckRedirect}, nil
 }
 
 // client replaces the otlp*http exporters, which link gRPC (+7 MB): https://github.com/open-telemetry/opentelemetry-go/issues/2579
 type client struct {
-	endpoint string
-	headers  http.Header
+	endpoint   string
+	headers    http.Header
+	timeout    time.Duration
+	gzip       bool
+	httpClient *http.Client
 }
+
+var gzipWriters = sync.Pool{New: func() any { return gzip.NewWriter(io.Discard) }}
 
 // exportClient refuses redirects, which would carry the collector's header credentials to another host.
 var exportClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -133,14 +212,28 @@ func (c *client) upload(ctx context.Context, data proto.Message) error {
 	if err != nil {
 		return err
 	}
-	return retry.New(retry.Context(ctx), retry.Attempts(5), retry.LastErrorOnly(true)).Do(func() error {
+	if c.gzip {
+		var buffer bytes.Buffer
+		writer, _ := gzipWriters.Get().(*gzip.Writer)
+		writer.Reset(&buffer)
+		_, _ = writer.Write(body)
+		_ = writer.Close()
+		gzipWriters.Put(writer)
+		body = buffer.Bytes()
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return retry.New(retry.Context(ctx), retry.Attempts(5), retry.LastErrorOnly(true), retry.DelayType(retryDelay)).Do(func() error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 		if err != nil {
 			return retry.Unrecoverable(err)
 		}
 		req.Header = c.headers.Clone()
 		req.Header.Set("Content-Type", "application/x-protobuf")
-		resp, err := exportClient.Do(req)
+		if c.gzip {
+			req.Header.Set("Content-Encoding", "gzip")
+		}
+		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			return err
 		}
@@ -149,12 +242,25 @@ func (c *client) upload(ctx context.Context, data proto.Message) error {
 		if resp.StatusCode < http.StatusMultipleChoices {
 			return nil
 		}
-		err = fmt.Errorf("OTLP export failed: %s", resp.Status)
+		err = &statusError{resp.Status, resp.Header.Get("Retry-After")}
 		if slices.Contains([]int{http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout}, resp.StatusCode) {
 			return err
 		}
 		return retry.Unrecoverable(err)
 	})
+}
+
+type statusError struct{ status, retryAfter string }
+
+func (e *statusError) Error() string { return "OTLP export failed: " + e.status }
+
+func retryDelay(attempt uint, err error, config retry.DelayContext) time.Duration {
+	if status := (*statusError)(nil); errors.As(err, &status) {
+		if seconds, err := strconv.ParseUint(status.retryAfter, 10, 31); err == nil {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return retry.CombineDelay(retry.BackOffDelay, retry.RandomDelay)(attempt, err, config)
 }
 
 func StartJob(ctx context.Context, task *runnerv1.Task) (context.Context, func(runnerv1.Result)) {
