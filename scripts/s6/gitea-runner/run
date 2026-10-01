@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
-until docker info &> /dev/null; do
-  echo "Waiting for Docker daemon to start..."
+until /etc/s6/docker/data/check &> /dev/null; do # s6-svwait can read missing or stale readiness status
   sleep 1
 done
 
