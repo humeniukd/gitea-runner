@@ -109,9 +109,12 @@ func createDockerNetwork(ctx context.Context, cli client.APIClient, name string,
 		}
 	}
 
-	defaultBridge, err := cli.NetworkInspect(ctx, "bridge", client.NetworkInspectOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to inspect default bridge network: %w", err)
+	defaultBridge, inspectErr := cli.NetworkInspect(ctx, "bridge", client.NetworkInspectOptions{})
+	options := map[string]string(nil)
+	if inspectErr != nil {
+		common.Logger(ctx).Warnf("cannot inspect default bridge network, job network %s will use Docker defaults: %v", name, inspectErr)
+	} else {
+		options = jobBridgeOptions(defaultBridge.Network.Options)
 	}
 
 	for i := range networkCreateAttempts {
@@ -128,7 +131,7 @@ func createDockerNetwork(ctx context.Context, cli client.APIClient, name string,
 			Scope:      "local",
 			EnableIPv4: opts.EnableIPv4,
 			EnableIPv6: opts.EnableIPv6,
-			Options:    jobBridgeOptions(defaultBridge.Network.Options),
+			Options:    options,
 			Labels:     runnerLabels(opts.RunnerUUID),
 		}); err == nil {
 			return nil
