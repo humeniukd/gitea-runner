@@ -64,7 +64,7 @@ func fakeKubernetes(t *testing.T, podStatus string) (string, *fakeCluster) {
 		cluster.record(r.Method+" "+r.URL.Path, string(body))
 		pods, secrets := "/api/v1/namespaces/ci/pods", "/api/v1/namespaces/ci/secrets"
 		switch {
-		case r.Method == http.MethodGet && (r.URL.Path == pods || r.URL.Path == secrets):
+		case r.Method == http.MethodGet && r.URL.Path == pods:
 			cluster.record("list", r.URL.Query().Get("labelSelector"))
 			_, _ = io.WriteString(w, `{"items":[{"metadata":{"name":"old","creationTimestamp":"2020-01-01T00:00:00Z"}},{"metadata":{"name":"new","creationTimestamp":"2999-01-01T00:00:00Z"}}]}`)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
@@ -245,10 +245,11 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	assert.Len(t, cluster.requests["DELETE /api/v1/namespaces/ci/secrets/"+pod.secretName], 1)
 
 	require.NoError(t, RemoveOrphanKubernetesResources(ctx, options, time.Now()))
-	assert.Equal(t, []string{runnerUUIDLabel + "=runner-uuid", runnerUUIDLabel + "=runner-uuid"}, cluster.requests["list"])
+	assert.Equal(t, []string{runnerUUIDLabel + "=runner-uuid"}, cluster.requests["list"])
 	assert.Len(t, cluster.requests["DELETE /api/v1/namespaces/ci/pods/old"], 1)
 	assert.Len(t, cluster.requests["DELETE /api/v1/namespaces/ci/secrets/old"], 1)
 	assert.Empty(t, cluster.requests["DELETE /api/v1/namespaces/ci/pods/new"])
+	assert.Empty(t, cluster.requests["DELETE /api/v1/namespaces/ci/secrets/new"])
 }
 
 func TestKubernetesPodFailsBeforeSteps(t *testing.T) {

@@ -136,7 +136,7 @@ func (p *KubernetesPod) create(ctx context.Context) error {
 		}
 	}
 	if len(secretData) > 0 {
-		p.secretName = name
+		p.secretName = name // named like the pod, RemoveOrphanKubernetesResources finds it by that
 		if err := p.client.do(ctx, http.MethodPost, p.client.path("secrets"), map[string]any{"metadata": metadata, "stringData": secretData}, nil); err != nil {
 			return fmt.Errorf("create secret: %w", err)
 		}
@@ -526,32 +526,34 @@ func (c *kubernetesContainer) Remove() common.Executor {
 	}
 }
 
-// RemoveOrphanKubernetesResources removes the job pods and Secrets of this runner created before createdBefore, which a teardown did not get to.
+// RemoveOrphanKubernetesResources removes this runner's job pods created before createdBefore and the Secrets named like them, as listing Secrets would reveal all of the namespace's.
 func RemoveOrphanKubernetesResources(ctx context.Context, options KubernetesOptions, createdBefore time.Time) error {
 	client, err := newKubeClient(options.Kubeconfig, options.Namespace)
 	if err != nil {
 		return fmt.Errorf("connect to Kubernetes: %w", err)
 	}
 	defer client.http.CloseIdleConnections()
-	var errs []error
-	for _, resource := range []string{"pods", "secrets"} {
-		var list struct {
-			Items []struct {
-				Metadata struct {
-					Name              string
-					CreationTimestamp time.Time
-				}
+	var pods struct {
+		Items []struct {
+			Metadata struct {
+				Name              string
+				CreationTimestamp time.Time
 			}
 		}
-		if err := client.do(ctx, http.MethodGet, client.path(resource+"?labelSelector="+url.QueryEscape(runnerUUIDLabel+"="+options.RunnerUUID)), nil, &list); err != nil {
-			errs = append(errs, fmt.Errorf("list %s: %w", resource, err))
+	}
+	if err := client.do(ctx, http.MethodGet, client.path("pods?labelSelector="+url.QueryEscape(runnerUUIDLabel+"="+options.RunnerUUID)), nil, &pods); err != nil {
+		return fmt.Errorf("list pods: %w", err)
+	}
+	var errs []error
+	for _, item := range pods.Items {
+		if !item.Metadata.CreationTimestamp.Before(createdBefore) {
 			continue
 		}
-		for _, item := range list.Items {
-			if item.Metadata.CreationTimestamp.Before(createdBefore) {
-				errs = append(errs, client.delete(ctx, resource, item.Metadata.Name))
-			}
+		if err := client.delete(ctx, "secrets", item.Metadata.Name); err != nil {
+			errs = append(errs, err) // leave the pod for the next cleanup, it is the only way back to its Secret
+			continue
 		}
+		errs = append(errs, client.delete(ctx, "pods", item.Metadata.Name))
 	}
 	return errors.Join(errs...)
 }
