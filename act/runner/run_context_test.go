@@ -343,7 +343,7 @@ jobs:
 	require.Nil(t, redis.Cmd)
 }
 
-func TestStartJobContainerEvaluatesContainersOnceAndTrimsDockerPrefix(t *testing.T) {
+func TestStartJobContainerBuildsEvaluatedJobAndServiceInputs(t *testing.T) {
 	inputs := startJobContainerInputs(t, `
 jobs:
   job:
@@ -359,6 +359,7 @@ jobs:
 	require.Equal(t, []string{"/entry.sh"}, redis.Entrypoint)
 	require.Equal(t, []string{"redis-server", "--port", "6380"}, redis.Cmd)
 	require.Equal(t, "node:20", job.Image)
+	require.Equal(t, "sleep", job.Entrypoint[0])
 	require.Equal(t, "--label ${{ github.job }}", job.WorkflowOptions)
 	require.Equal(t, "${{ vars.TITLE }}", job.Password)
 }
@@ -1628,10 +1629,13 @@ func createRunsOnRunContext(t *testing.T, runsOn string) *RunContext {
 	})
 }
 
-func TestRunContextContainerImageCannotSelectHost(t *testing.T) {
+func TestRunContextContainerImageCannotSelectBackend(t *testing.T) {
 	rc := createIfTestRunContext(map[string]*model.Job{"job1": createJob(t, "container: -self-hosted", "")})
 	require.NoError(t, rc.resolvePlatformImage(t.Context()))
 	assert.False(t, rc.IsHostEnv())
+
+	rc = createIfTestRunContext(map[string]*model.Job{"job1": createJob(t, "runs-on: ${{ fromJSON('x') }}\ncontainer: node", "")})
+	require.ErrorContains(t, rc.resolvePlatformImage(t.Context()), "runs-on")
 }
 
 func TestRunContextImageOS(t *testing.T) {
