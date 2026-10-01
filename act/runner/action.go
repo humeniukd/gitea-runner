@@ -6,6 +6,7 @@ package runner
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -287,6 +288,20 @@ func dockerActionImageTag(repository, actionName string, localAction bool) strin
 	return strings.ToLower(image)
 }
 
+// dockerActionImage tags a Dockerfile action's image per step and job, so its stages share one build and concurrent jobs never run each other's.
+func (rc *RunContext) dockerActionImage(ctx context.Context, step actionStep, actionName string, localAction bool) string {
+	job := rc.topLevelRunContext()
+	if job.dockerActionImages == nil {
+		job.dockerActionImages = map[*model.Step]string{}
+	}
+	image, ok := job.dockerActionImages[step.getStepModel()]
+	if !ok {
+		image = dockerActionImageTag(step.getGithubContext(ctx).Repository, actionName, localAction) + "-" + strings.ToLower(rand.Text())
+		job.dockerActionImages[step.getStepModel()] = image
+	}
+	return image
+}
+
 // TODO: break out parts of function to reduce complexicity
 func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, basedir string, localAction bool, stage stepStage) error {
 	logger := common.Logger(ctx)
@@ -304,7 +319,7 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 		// Apply forcePull only for prebuild docker images
 		forcePull = rc.Config.ForcePull
 	} else {
-		image = dockerActionImageTag(step.getGithubContext(ctx).Repository, actionName, localAction)
+		image = rc.dockerActionImage(ctx, step, actionName, localAction)
 		contextDir, fileName := filepath.Split(filepath.Join(basedir, action.Runs.Image))
 
 		anyArchExists, err := ContainerImageExistsLocally(ctx, image, "any")
@@ -330,7 +345,7 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 		if !correctArchExists || rc.Config.ForceRebuild {
 			logger.Debugf("image '%s' for architecture '%s' will be built from context '%s", image, rc.Config.ContainerArchitecture, contextDir)
 			var buildContext io.ReadCloser
-			if localAction {
+			if localAction && !rc.IsHostEnv() { // a host path streams through the daemon, honoring .dockerignore
 				buildContext, err = rc.JobContainer.GetContainerArchive(ctx, contextDir+"/.")
 				if err != nil {
 					return err
@@ -444,7 +459,14 @@ func newStepContainer(ctx context.Context, step step, image string, cmd, entrypo
 	rc := step.getRunContext()
 	logWriter := rc.commandLogWriter(ctx)
 	envList := make([]string, 0)
+	declared := mergeMaps(rc.topLevelRunContext().jobEnv, rc.GlobalEnv, step.getStepModel().Environment())
+	if action, ok := step.(actionStep); ok {
+		maps.Copy(declared, action.getActionModel().Runs.Env)
+	}
 	for k, v := range *step.getEnv() {
+		if _, ok := declared[k]; rc.IsHostEnv() && !ok && strings.EqualFold(k, rc.JobContainer.GetPathVariableName()) { // the runner's own PATH stays out, as on GitHub
+			continue
+		}
 		envList = append(envList, fmt.Sprintf("%s=%s", k, v))
 	}
 

@@ -251,7 +251,6 @@ func startJobContainerInputs(t *testing.T, workflowYAML string, cfg *Config) []*
 	rc := &RunContext{
 		Name:   "test",
 		Config: cfg,
-		Env:    map[string]string{},
 		Run: &model.Run{
 			JobID:    "job",
 			Workflow: workflow,
@@ -362,6 +361,29 @@ jobs:
 	require.Equal(t, "sleep", job.Entrypoint[0])
 	require.Equal(t, "--label ${{ github.job }}", job.WorkflowOptions)
 	require.Equal(t, "${{ vars.TITLE }}", job.Password)
+
+	inputs = startJobContainerInputs(t, `
+env:
+  REG_USER: ${{ vars.REG_USER }}
+  TEXT: ${{ vars.TEXT }}
+  JOB_CONTAINER_NAME: from-workflow
+jobs:
+  job:
+    container:
+      image: node:20
+      credentials: {username: "${{ env.REG_USER }}", password: pass}
+    services:
+      redis:
+        image: redis:latest
+        credentials: {username: "${{ env.REG_USER }}", password: pass}
+        env: {TEXT: "${{ env.TEXT }}"}
+        options: --volumes-from ${{ env.JOB_CONTAINER_NAME }}
+`, &Config{Vars: map[string]string{"REG_USER": "user", "TEXT": "${{ 'literal' }}"}})
+	redis, job = inputs[0], inputs[1]
+	require.Equal(t, "user", job.Username)
+	require.Equal(t, "user", redis.Username)
+	require.Equal(t, []string{"TEXT=${{ 'literal' }}"}, redis.Env)
+	require.Equal(t, "--volumes-from "+job.Name, redis.WorkflowOptions)
 }
 
 // Only the workflow's options may be stripped later, so the two sources have to reach the
@@ -662,6 +684,16 @@ func TestRunContextValidVolumes(t *testing.T) {
 	assert.Contains(t, rc.validVolumes(), rc.Config.Workdir)
 	rc.Config.PresetGitHubContext = &model.GithubContext{}
 	assert.Contains(t, rc.validVolumes(), filepath.FromSlash("/workspace/1"))
+
+	hostEnv := &container.HostEnvironment{Path: t.TempDir(), ActPath: t.TempDir()}
+	rc.JobContainer = hostEnv
+	rc.Config.BindWorkdir = false
+	rc.Config.SharedToolCache = true
+	binds, mounts := rc.GetBindsAndMounts(t.Context())
+	assert.Contains(t, strings.Join(binds, " "), hostEnv.Path+":"+hostEnv.Path)
+	assert.Contains(t, strings.Join(binds, " "), hostEnv.GetActPath()+":"+hostEnv.GetActPath())
+	assert.Contains(t, mounts, sharedToolCacheVolume)
+	assert.Equal(t, binds, container.SanitizeBinds(t.Context(), rc.validVolumes(), binds))
 }
 
 func TestCleanupJobResourcesCleansServicesWithoutJobContainer(t *testing.T) {
@@ -960,7 +992,6 @@ func TestGetGithubContextRef(t *testing.T) {
 func createIfTestRunContext(jobs map[string]*model.Job) *RunContext {
 	rc := &RunContext{
 		Config: &Config{Workdir: ".", PlatformPicker: func([]string) string { return "ubuntu-latest" }},
-		Env:    map[string]string{},
 		Run: &model.Run{
 			JobID: "job1",
 			Workflow: &model.Workflow{
@@ -1037,6 +1068,8 @@ func TestRunContextIsEnabled(t *testing.T) {
 	// success()
 	rc := createIfTestRunContext(map[string]*model.Job{
 		"job1": createJob(t, `runs-on: ubuntu-latest
+env:
+  BROKEN: ${{ fromJSON('invalid') }}
 if: success()`, ""),
 	})
 	assertObject.True(rc.isEnabled(context.Background()))

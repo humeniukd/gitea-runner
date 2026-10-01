@@ -246,6 +246,9 @@ func inputsFromEnv(env map[string]string) map[string]any {
 }
 
 func getEvaluatorInputs(rc *RunContext, stepInputs map[string]any, ghc *model.GithubContext) map[string]any {
+	if stepInputs != nil { // an action's own inputs, which workflow inputs must not shadow
+		return maps.Clone(stepInputs)
+	}
 	inputs := map[string]any{}
 
 	// only a called workflow's job itself takes the inputs Gitea resolved,
