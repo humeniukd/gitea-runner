@@ -1174,7 +1174,7 @@ func (cr *containerReference) sanitizeConfig(ctx context.Context, config *contai
 				sanitizedBinds = append(sanitizedBinds, bind)
 				continue
 			}
-			if matcher.isValid(parsed.Source, mount.Type(parsed.Type)) {
+			if matcher.isValid(parsed.Source, mount.Type(parsed.Type), parsed.ReadOnly) {
 				sanitizedBinds = append(sanitizedBinds, bind)
 			} else {
 				logger.Warnf("[%s] is not a valid volume, will be ignored", parsed.Source)
@@ -1184,7 +1184,7 @@ func (cr *containerReference) sanitizeConfig(ctx context.Context, config *contai
 		// sanitize mounts
 		sanitizedMounts := make([]mount.Mount, 0, len(hostConfig.Mounts))
 		for _, mt := range hostConfig.Mounts {
-			if matcher.isValid(mt.Source, mt.Type) {
+			if matcher.isValid(mt.Source, mt.Type, mt.ReadOnly) {
 				sanitizedMounts = append(sanitizedMounts, mt)
 			} else {
 				logger.Warnf("[%s] is not a valid volume, will be ignored", mt.Source)
@@ -1240,26 +1240,35 @@ func overlayVolumes(dst, src *container.HostConfig) {
 }
 
 type validVolumeMatcher struct {
-	allowAll bool
-	named    []string
-	host     []string
+	allowAll         bool
+	allowAllReadOnly bool
+	named            []validVolumeRule
+	host             []validVolumeRule
+}
+
+type validVolumeRule struct {
+	pattern  string
+	readOnly bool
 }
 
 func newValidVolumeMatcher(ctx context.Context, validVolumes []string) validVolumeMatcher {
 	logger := common.Logger(ctx)
 	ret := validVolumeMatcher{
-		named: make([]string, 0, len(validVolumes)),
-		host:  make([]string, 0, len(validVolumes)),
+		named: make([]validVolumeRule, 0, len(validVolumes)),
+		host:  make([]validVolumeRule, 0, len(validVolumes)),
 	}
 
 	for _, v := range validVolumes {
+		readOnly := strings.HasSuffix(v, ":ro")
+		v = strings.TrimSuffix(v, ":ro")
 		if v == "**" {
 			ret.allowAll = true
+			ret.allowAllReadOnly = readOnly
 			continue
 		}
 		if !isHostVolumePattern(v) {
 			if doublestar.ValidatePattern(v) {
-				ret.named = append(ret.named, v)
+				ret.named = append(ret.named, validVolumeRule{pattern: v, readOnly: readOnly})
 			} else {
 				logger.Errorf("invalid volume pattern %s", v)
 			}
@@ -1271,7 +1280,7 @@ func newValidVolumeMatcher(ctx context.Context, validVolumes []string) validVolu
 			continue
 		}
 		if doublestar.ValidatePathPattern(normalized) {
-			ret.host = append(ret.host, normalized)
+			ret.host = append(ret.host, validVolumeRule{pattern: normalized, readOnly: readOnly})
 		} else {
 			logger.Errorf("invalid volume pattern %s", normalized)
 		}
@@ -1280,24 +1289,24 @@ func newValidVolumeMatcher(ctx context.Context, validVolumes []string) validVolu
 	return ret
 }
 
-func (m validVolumeMatcher) isValid(source string, sourceType mount.Type) bool {
+func (m validVolumeMatcher) isValid(source string, sourceType mount.Type, readOnly bool) bool {
 	if m.allowAll {
-		return true
+		return !m.allowAllReadOnly || readOnly
 	}
 	if isHostVolumeSource(source, sourceType) {
 		normalized, err := normalizeHostVolumePath(source)
 		if err != nil {
 			return false
 		}
-		for _, pattern := range m.host {
-			if doublestar.PathMatchUnvalidated(pattern, normalized) {
+		for _, rule := range m.host {
+			if doublestar.PathMatchUnvalidated(rule.pattern, normalized) && (!rule.readOnly || readOnly) {
 				return true
 			}
 		}
 		return false
 	}
-	for _, pattern := range m.named {
-		if doublestar.MatchUnvalidated(pattern, source) {
+	for _, rule := range m.named {
+		if doublestar.MatchUnvalidated(rule.pattern, source) && (!rule.readOnly || readOnly) {
 			return true
 		}
 	}

@@ -247,6 +247,8 @@ container:
   # If you want to allow any volume, please use the following configuration:
   # valid_volumes:
   #   - '**'
+  # Add :ro to require workflow mounts of a path or named volume to be read-only.
+  #   - /etc/ssl/certs/ca-certificates.crt:ro
   #valid_volumes: []
   # Overrides the docker client host with the specified one.
   # If it's empty, runner will find an available docker host automatically.

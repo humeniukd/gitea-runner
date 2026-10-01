@@ -578,6 +578,17 @@ func TestCheckVolumes(t *testing.T) {
 				"/opt/app/cache:/cache",
 			},
 		},
+		{
+			desc:         "read-only rules reject writable binds",
+			validVolumes: []string{"/etc/ssl/certs/ca-certificates.crt:ro"},
+			binds: []string{
+				"/etc/ssl/certs/ca-certificates.crt:/certs/ca-certificates.crt:ro",
+				"/etc/ssl/certs/ca-certificates.crt:/certs/writable",
+			},
+			expectedBinds: []string{
+				"/etc/ssl/certs/ca-certificates.crt:/certs/ca-certificates.crt:ro",
+			},
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
@@ -593,6 +604,25 @@ func TestCheckVolumes(t *testing.T) {
 			assert.Len(t, hook.AllEntries(), len(tc.binds)-len(tc.expectedBinds)) // every drop is warned about
 		})
 	}
+}
+
+func TestCheckVolumesReadOnlyMountRule(t *testing.T) {
+	logger, hook := test.NewNullLogger()
+	ctx := common.WithLogger(context.Background(), logger)
+	cr := &containerReference{input: &NewContainerInput{ValidVolumes: []string{"/etc/ssl/certs:ro"}}}
+	_, hostConfig := cr.sanitizeConfig(ctx, &container.Config{}, &container.HostConfig{Mounts: []mount.Mount{
+		{Type: mount.TypeBind, Source: "/etc/ssl/certs", Target: "/certs", ReadOnly: true},
+		{Type: mount.TypeBind, Source: "/etc/ssl/certs", Target: "/writable"},
+	}})
+	require.Equal(t, []mount.Mount{{Type: mount.TypeBind, Source: "/etc/ssl/certs", Target: "/certs", ReadOnly: true}}, hostConfig.Mounts)
+	require.Len(t, hook.AllEntries(), 1)
+}
+
+func TestCheckVolumesReadOnlyWildcardRule(t *testing.T) {
+	logger, _ := test.NewNullLogger()
+	matcher := newValidVolumeMatcher(common.WithLogger(context.Background(), logger), []string{"**:ro"})
+	assert.True(t, matcher.isValid("any-volume", mount.TypeVolume, true))
+	assert.False(t, matcher.isValid("any-volume", mount.TypeVolume, false))
 }
 
 // A volume driver decides for itself what it mounts, e.g. the local driver with device= binds
