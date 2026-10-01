@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-Docker Engine Community version is required for docker mode. To install Docker CE, follow the official [install instructions](https://docs.docker.com/engine/install/).
+Docker Engine Community version is required for docker mode. To install Docker CE, follow the official [install instructions](https://docs.docker.com/engine/install/). Git must be installed and available on `PATH` to download actions and check out repositories.
 
 ### Download pre-built binary
 

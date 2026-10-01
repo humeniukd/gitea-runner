@@ -337,6 +337,26 @@ func TestGitCloneExecutorNonFastForwardRef(t *testing.T) {
 	assert.Equal(t, "second", strings.TrimSpace(string(out)), "working tree should be at the latest commit")
 }
 
+func TestGitCloneExecutorRefreshesHexadecimalBranch(t *testing.T) {
+	remoteDir := t.TempDir()
+	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
+	workDir := t.TempDir()
+	require.NoError(t, gitCmd("clone", remoteDir, workDir))
+	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "deadbeef"))
+	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "first"))
+	require.NoError(t, gitCmd("-C", workDir, "push", "-u", "origin", "deadbeef"))
+
+	cacheDir := t.TempDir()
+	clone := NewGitCloneExecutor(NewGitCloneExecutorInput{URL: remoteDir, Ref: "deadbeef", Dir: cacheDir, Depth: 1})
+	require.NoError(t, clone(t.Context()))
+	require.Equal(t, "first", gitHeadSubject(t, cacheDir))
+
+	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "second"))
+	require.NoError(t, gitCmd("-C", workDir, "push", "origin", "deadbeef"))
+	require.NoError(t, clone(t.Context()))
+	require.Equal(t, "second", gitHeadSubject(t, cacheDir))
+}
+
 func TestGitCloneExecutorOfflineMode(t *testing.T) {
 	// Build a local "remote" with a single commit on main.
 	remoteDir := t.TempDir()

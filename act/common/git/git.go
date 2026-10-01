@@ -217,7 +217,7 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 }
 
 func clone(ctx context.Context, input NewGitCloneExecutorInput) error {
-	if input.Depth > 0 && isHashRef(input.Ref) {
+	if input.Depth > 0 && isFullObjectID(input.Ref) {
 		if err := shallowPinnedClone(ctx, input); err == nil {
 			return nil
 		} else if err := removePartialClone(input.Dir); err != nil {
@@ -267,7 +267,7 @@ func fetch(ctx context.Context, input NewGitCloneExecutorInput) error {
 }
 
 func fetchRefSpec(ctx context.Context, dir, ref string) string {
-	if isHashRef(ref) {
+	if isFullObjectID(ref) {
 		return "+" + ref + ":refs/pinned/" + ref
 	}
 	if strings.HasPrefix(ref, "refs/") {
@@ -280,7 +280,7 @@ func fetchRefSpec(ctx context.Context, dir, ref string) string {
 }
 
 func resolveRef(ctx context.Context, dir, ref string) (string, error) {
-	if isHashRef(ref) {
+	if isFullObjectID(ref) {
 		return gitOutput(ctx, dir, "rev-parse", "--verify", ref+"^{commit}")
 	}
 	if sha, err := gitOutput(ctx, dir, "rev-parse", "--verify", "refs/tags/"+ref+"^{commit}"); err == nil {
@@ -292,10 +292,12 @@ func resolveRef(ctx context.Context, dir, ref string) (string, error) {
 	return gitOutput(ctx, dir, "rev-parse", "--verify", ref+"^{commit}")
 }
 
-func isHashRef(ref string) bool { return hexRefRegex.MatchString(ref) }
+func isFullObjectID(ref string) bool {
+	return hexRefRegex.MatchString(ref) && (len(ref) == 40 || len(ref) == 64)
+}
 
 func isFullHash(ctx context.Context, dir, ref string) bool {
-	if !isHashRef(ref) {
+	if !isFullObjectID(ref) {
 		return false
 	}
 	format, err := gitOutput(ctx, dir, "rev-parse", "--show-object-format")
@@ -306,7 +308,7 @@ func isFullHash(ctx context.Context, dir, ref string) bool {
 }
 
 func isShortHash(ctx context.Context, dir, ref, resolved string) bool {
-	return isHashRef(ref) && !isFullHash(ctx, dir, ref) && strings.HasPrefix(resolved, ref)
+	return hexRefRegex.MatchString(ref) && !isFullHash(ctx, dir, ref) && strings.HasPrefix(resolved, ref)
 }
 
 func removePartialClone(dir string) error {
