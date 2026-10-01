@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -31,6 +32,8 @@ const DefaultImage = "docker.gitea.com/runner-images:ubuntu-latest"
 // applied both at config load (for a configured script) and at the point of use
 // (so a programmatically built config still gets a sane bound).
 const DefaultPostTaskScriptTimeout = 5 * time.Minute
+
+var configEnvironmentVariable = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // Minimal is the smallest config file that runs the runner: options it does not
 // name keep their default, and it names none.
@@ -242,6 +245,10 @@ func LoadDefault(file string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open config file %q: %w", file, err)
 		}
+		content, err = expandConfigEnvironment(content)
+		if err != nil {
+			return nil, fmt.Errorf("parse config file %q: %w", file, err)
+		}
 		if err := yaml.Unmarshal(content, cfg); err != nil {
 			return nil, fmt.Errorf("parse config file %q: %w", file, err)
 		}
@@ -409,6 +416,52 @@ func LoadDefault(file string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// expandConfigEnvironment expands ${NAME} only in YAML values. Requiring every
+// referenced name avoids silently replacing an operator's setting with an empty value.
+func expandConfigEnvironment(content []byte) ([]byte, error) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(content, &document); err != nil {
+		return nil, err
+	}
+	var visit func(*yaml.Node, bool) error
+	visit = func(node *yaml.Node, value bool) error {
+		if node.Kind == yaml.ScalarNode && value {
+			var missing string
+			changed := false
+			node.Value = configEnvironmentVariable.ReplaceAllStringFunc(node.Value, func(match string) string {
+				changed = true
+				name := configEnvironmentVariable.FindStringSubmatch(match)[1]
+				result, ok := os.LookupEnv(name)
+				if !ok {
+					missing = name
+				}
+				return result
+			})
+			if missing != "" {
+				return fmt.Errorf("%s is not set", missing)
+			}
+			if changed {
+				node.Tag = ""
+			}
+			return nil
+		}
+		for index, child := range node.Content {
+			isValue := value
+			if node.Kind == yaml.MappingNode {
+				isValue = index%2 == 1
+			}
+			if err := visit(child, isValue); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := visit(&document, true); err != nil {
+		return nil, err
+	}
+	return yaml.Marshal(&document)
 }
 
 // warnUnknownKeys reports keys the config does not define, which are otherwise ignored

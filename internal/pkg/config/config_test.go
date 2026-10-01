@@ -42,6 +42,33 @@ cache:
 	require.NoError(t, err)
 }
 
+func TestLoadDefaultExpandsEnvironmentValues(t *testing.T) {
+	t.Setenv("RUNNER_CAPACITY", "4")
+	t.Setenv("RUNNER_LABEL", "linux:host")
+	path := write(t, "runner:\n  capacity: ${RUNNER_CAPACITY}\n  labels:\n    - ${RUNNER_LABEL}\n")
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, 4, cfg.Runner.Capacity)
+	assert.Equal(t, []string{"linux:host"}, cfg.Runner.Labels)
+}
+
+func TestLoadDefaultRejectsUnsetEnvironmentValue(t *testing.T) {
+	path := write(t, "runner:\n  capacity: ${RUNNER_MISSING}\n")
+
+	_, err := LoadDefault(path)
+	require.ErrorContains(t, err, "RUNNER_MISSING is not set")
+}
+
+func TestLoadDefaultDoesNotExpandEnvironmentKeys(t *testing.T) {
+	t.Setenv("RUNNER_KEY", "capacity")
+	path := write(t, "runner:\n  ${RUNNER_KEY}: 4\n")
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, 1, cfg.Runner.Capacity)
+}
+
 func TestLoadDefault_CacheS3(t *testing.T) {
 	dir := t.TempDir()
 	accessPath := filepath.Join(dir, "access.key")

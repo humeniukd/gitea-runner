@@ -17,6 +17,9 @@ log:
   #  max_size: 1GB
 
 runner:
+  # Values may contain ${NAME}, which is expanded from the runner process environment.
+  # A referenced variable must be set. Keys are never expanded.
+  #capacity: ${RUNNER_CAPACITY}
   # Where to store the registration result.
   #file: .runner
   # Execute how many tasks concurrently at the same time.
