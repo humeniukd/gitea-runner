@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 
-exec s6-notifyoncheck -n 0 dockerd-entrypoint.sh
+rm -f /etc/s6/.s6-svscan/exitcode
+exec dockerd-entrypoint.sh

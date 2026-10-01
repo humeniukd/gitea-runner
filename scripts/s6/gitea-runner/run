@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 
-while [ ! -d /etc/s6/docker/supervise ]; do
-    sleep 0.1
+until docker info &> /dev/null; do
+  echo "Waiting for Docker daemon to start..."
+  sleep 1
 done
-
-s6-svwait -U /etc/s6/docker
 
 exec run.sh
