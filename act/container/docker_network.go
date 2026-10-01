@@ -24,6 +24,9 @@ import (
 const (
 	networkCreateAttempts   = 3
 	networkCreateRetryDelay = time.Second
+
+	bridgeNameOption    = "com.docker.network.bridge.name"
+	defaultBridgeOption = "com.docker.network.bridge.default_bridge"
 )
 
 // RemoveOrphanNetworks removes the networks this runner created for jobs whose teardown did
@@ -87,45 +90,66 @@ func NewDockerNetworkCreateExecutor(name string, opts NewDockerNetworkCreateExec
 			return err
 		}
 		defer cli.Close()
+		return createDockerNetwork(ctx, cli, name, opts)
+	}
+}
 
-		// Only create the network if it doesn't exist
-		networks, err := cli.NetworkList(ctx, client.NetworkListOptions{})
-		if err != nil {
+func createDockerNetwork(ctx context.Context, cli client.APIClient, name string, opts NewDockerNetworkCreateExecutorInput) error {
+	// Only create the network if it doesn't exist
+	networks, err := cli.NetworkList(ctx, client.NetworkListOptions{})
+	if err != nil {
+		return err
+	}
+	// For Gitea, reduce log noise
+	// common.Logger(ctx).Debugf("%v", networks)
+	for _, n := range networks.Items {
+		if n.Name == name {
+			common.Logger(ctx).Debugf("Network %v exists", name)
+			return nil
+		}
+	}
+
+	defaultBridge, err := cli.NetworkInspect(ctx, "bridge", client.NetworkInspectOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to inspect default bridge network: %w", err)
+	}
+
+	for i := range networkCreateAttempts {
+		if i > 0 {
+			common.Logger(ctx).Infof("Waiting for a free docker address pool to create network %s", name)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(i) * networkCreateRetryDelay):
+			}
+		}
+		if _, err = cli.NetworkCreate(ctx, name, client.NetworkCreateOptions{
+			Driver:     "bridge",
+			Scope:      "local",
+			EnableIPv4: opts.EnableIPv4,
+			EnableIPv6: opts.EnableIPv6,
+			Options:    jobBridgeOptions(defaultBridge.Network.Options),
+			Labels:     runnerLabels(opts.RunnerUUID),
+		}); err == nil {
+			return nil
+		}
+		if !isAddressPoolExhausted(err) {
 			return err
 		}
-		// For Gitea, reduce log noise
-		// common.Logger(ctx).Debugf("%v", networks)
-		for _, n := range networks.Items {
-			if n.Name == name {
-				common.Logger(ctx).Debugf("Network %v exists", name)
-				return nil
-			}
-		}
-
-		for i := range networkCreateAttempts {
-			if i > 0 {
-				common.Logger(ctx).Infof("Waiting for a free docker address pool to create network %s", name)
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(time.Duration(i) * networkCreateRetryDelay):
-				}
-			}
-			if _, err = cli.NetworkCreate(ctx, name, client.NetworkCreateOptions{
-				Driver:     "bridge",
-				Scope:      "local",
-				EnableIPv4: opts.EnableIPv4,
-				EnableIPv6: opts.EnableIPv6,
-				Labels:     runnerLabels(opts.RunnerUUID),
-			}); err == nil {
-				return nil
-			}
-			if !isAddressPoolExhausted(err) {
-				return err
-			}
-		}
-		return fmt.Errorf("docker has no address pool left for this job's network, lower runner.capacity or widen default-address-pools in the docker daemon config: %w", err)
 	}
+	return fmt.Errorf("docker has no address pool left for this job's network, lower runner.capacity or widen default-address-pools in the docker daemon config: %w", err)
+}
+
+func jobBridgeOptions(defaultOptions map[string]string) map[string]string {
+	options := make(map[string]string, len(defaultOptions))
+	for key, value := range defaultOptions {
+		switch key {
+		case bridgeNameOption, defaultBridgeOption:
+			continue
+		}
+		options[key] = value
+	}
+	return options
 }
 
 func runnerLabels(runnerUUID string) map[string]string {

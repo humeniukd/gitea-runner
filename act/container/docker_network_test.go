@@ -57,6 +57,52 @@ func TestIsAddressPoolExhausted(t *testing.T) {
 	assert.False(t, isAddressPoolExhausted(cerrdefs.ErrInvalidArgument.WithMessage("invalid subnet 10.0.0.0/8: it overlaps with an existing network")))
 }
 
+func TestJobBridgeOptions(t *testing.T) {
+	defaultOptions := map[string]string{
+		bridgeNameOption:                       "docker0",
+		defaultBridgeOption:                    "true",
+		"com.docker.network.bridge.enable_icc": "true",
+		"com.docker.network.driver.mtu":        "1450",
+	}
+
+	assert.Equal(t, map[string]string{
+		"com.docker.network.bridge.enable_icc": "true",
+		"com.docker.network.driver.mtu":        "1450",
+	}, jobBridgeOptions(defaultOptions))
+}
+
+func TestCreateDockerNetworkCopiesDefaultBridgeOptions(t *testing.T) {
+	ctx := context.Background()
+	client := &mockDockerClient{}
+	enableIPv4, enableIPv6 := true, false
+	opts := NewDockerNetworkCreateExecutorInput{
+		EnableIPv4: &enableIPv4,
+		EnableIPv6: &enableIPv6,
+		RunnerUUID: "runner-1",
+	}
+	client.On("NetworkList", ctx, mobyclient.NetworkListOptions{}).
+		Return(mobyclient.NetworkListResult{}, nil).Once()
+	client.On("NetworkInspect", ctx, "bridge", mobyclient.NetworkInspectOptions{}).
+		Return(mobyclient.NetworkInspectResult{Network: network.Inspect{Network: network.Network{Options: map[string]string{
+			bridgeNameOption:                "docker0",
+			defaultBridgeOption:             "true",
+			"com.docker.network.driver.mtu": "1450",
+		}}}}, nil).Once()
+	client.On("NetworkCreate", ctx, "job-network", mobyclient.NetworkCreateOptions{
+		Driver:     "bridge",
+		Scope:      "local",
+		EnableIPv4: &enableIPv4,
+		EnableIPv6: &enableIPv6,
+		Options: map[string]string{
+			"com.docker.network.driver.mtu": "1450",
+		},
+		Labels: runnerLabels("runner-1"),
+	}).Return(mobyclient.NetworkCreateResult{}, nil).Once()
+
+	require.NoError(t, createDockerNetwork(ctx, client, "job-network", opts))
+	client.AssertExpectations(t)
+}
+
 func (m *mockDockerClient) NetworkConnect(ctx context.Context, id string, opts mobyclient.NetworkConnectOptions) (mobyclient.NetworkConnectResult, error) {
 	return mobyclient.NetworkConnectResult{}, m.Called(ctx, id, opts).Error(0)
 }
