@@ -79,53 +79,24 @@ If the registry succeed, it will run immediately. Next time, you could run the r
 
 ### Run with docker
 
-```bash
-docker run -e GITEA_INSTANCE_URL=https://your_gitea.com -e GITEA_RUNNER_REGISTRATION_TOKEN=<your_token> -v /var/run/docker.sock:/var/run/docker.sock --name my_runner gitea/runner:nightly
-```
-
-Mount a volume on `/data` if you want the registration file and optional config to survive container recreation (see [scripts/run.sh](scripts/run.sh)).
-
-> **`/data` does not hold the image cache.** It is the runner's working directory and contains only the `.runner` registration file and, optionally, your config file. Images pulled for jobs live in the *Docker daemon's* data root, which for the `dind` flavours is inside the container (`/var/lib/docker`, or `/home/rootless/.local/share/docker` for `dind-rootless`). To keep the image cache across restarts, give that path its own volume as well — otherwise every new container re-pulls the job images. With the `basic` flavour the images live on whichever daemon you point the runner at, so there is nothing extra to persist.
-
-### Image flavours
-
-The image is published in three flavours, all built from the single multi-stage [Dockerfile](Dockerfile) in this repository. They differ only in how a Docker daemon is made available to the jobs the runner executes; the `gitea-runner` binary inside them is identical.
-
-| Tag | Build target | Base image | Docker daemon | Process supervisor | Runs as |
-| --- | --- | --- | --- | --- | --- |
-| `latest` (and `<version>`) | `basic` | `alpine` | none — uses an external daemon you provide | [`tini`](https://github.com/krallin/tini) | `root` |
-| `latest-dind` | `dind` | `docker:dind` | bundled, started inside the container | [`s6`](https://skarnet.org/software/s6/) | `root` (privileged) |
-| `latest-dind-rootless` | `dind-rootless` | `docker:dind-rootless` | bundled, started rootless inside the container | [`s6`](https://skarnet.org/software/s6/) | `rootless` (UID 1000) |
-
-#### `latest` — basic
-
-The default flavour ships only the runner on a minimal Alpine base. It contains **no Docker daemon of its own**: jobs that use `docker://` images need a daemon supplied from outside the container, typically by bind-mounting the host's socket:
-
-```bash
-docker run -e GITEA_INSTANCE_URL=https://your_gitea.com -e GITEA_RUNNER_REGISTRATION_TOKEN=<your_token> \
-  -v /var/run/docker.sock:/var/run/docker.sock --name my_runner gitea/runner:latest
-```
-
-`tini` is the entrypoint (it reaps zombie processes), and it just runs [`scripts/run.sh`](scripts/run.sh), which registers the runner on first start and then execs `gitea-runner daemon`. This flavour does not need `--privileged`. The trade-off is that jobs share the host's daemon, so they can see other containers and images on that daemon.
-
-#### `latest-dind` — Docker-in-Docker
-
-This flavour is based on the official `docker:dind` image and bundles its own Docker daemon, so it needs no external socket — only the `--privileged` flag that Docker-in-Docker requires:
+The recommended Docker-in-Docker image runs its own Docker daemon for jobs. Jobs never get the host's Docker socket, which is equivalent to root access on the host.
 
 ```bash
 docker run --privileged -e GITEA_INSTANCE_URL=https://your_gitea.com -e GITEA_RUNNER_REGISTRATION_TOKEN=<your_token> \
-  --name my_runner gitea/runner:latest-dind
+  -v "$PWD/data:/data" -v runner-docker:/var/lib/docker --name my_runner gitea/runner:nightly-dind
 ```
 
-Two processes have to run side by side here (the Docker daemon and the runner), so the entrypoint is the [`s6`](https://skarnet.org/software/s6/) supervision tree under [`scripts/s6`](scripts/s6) instead of `tini`. `s6` starts `dockerd`, and the runner service waits for the daemon to come up (`s6-svwait`) before launching [`run.sh`](scripts/run.sh). Each container has a private daemon isolated from the host's, at the cost of running privileged.
+The volumes keep the runner's registration and the job image cache across container recreation.
 
-#### `latest-dind-rootless` — rootless Docker-in-Docker
+### Image flavours
 
-Same idea as `dind`, but built on `docker:dind-rootless` so the bundled daemon and the runner run as an unprivileged user (`rootless`, UID 1000) rather than `root`. `DOCKER_HOST` is preset to `unix:///run/user/1000/docker.sock` so the runner talks to the rootless daemon. This reduces the blast radius compared to the privileged `dind` flavour, but rootless Docker carries the usual rootless limitations (networking, cgroups, storage drivers, and some operations that need additional host configuration such as `/etc/subuid` / `/etc/subgid` mappings and unprivileged user-namespace support).
+| Tag | Docker daemon for jobs |
+| --- | --- |
+| `latest-dind` (recommended) | Bundled, needs `--privileged`. |
+| `latest-dind-rootless` | Bundled, runs as a non-root user (UID 1000) for stronger isolation. Needs `--privileged` and [rootless Docker](https://docs.docker.com/engine/security/rootless/) support on the host. Keeps its image cache in `/home/rootless/.local/share/docker`. |
+| `latest` | None. Mount the host's socket with `-v /var/run/docker.sock:/var/run/docker.sock`, or set `DOCKER_HOST`. |
 
-> **The UID is fixed at 1000.** It comes from the `rootless` user baked into the upstream `docker:dind-rootless` base image, and the bundled daemon always listens on `/run/user/1000/docker.sock` inside the container, so running this flavour as a different user (`--user 1001`) does not work. If you need the runner to talk to a *host* rootless daemon that runs under some other UID, use the `basic` flavour instead and bind-mount that daemon's socket (see [examples/vm/rootless-docker.md](examples/vm/rootless-docker.md)); pointing `DOCKER_HOST` at a host socket from inside `dind-rootless` will not work. Changing the UID otherwise means rebuilding the image from a base with a different `rootless` user.
-
-> **Note on Podman:** these images target the Docker daemon. The bundled `dind`/`dind-rootless` daemons are `dockerd`, not Podman, and the `basic` flavour expects a Docker-compatible socket. Running them under rootless Podman is not a supported configuration, though pointing the `basic` flavour at a Podman socket that emulates the Docker API may work for some workloads.
+Versioned and `nightly` tags carry the same suffixes, for example `nightly-dind`. The images target Docker, not Podman.
 
 ### Configuration
 
@@ -201,15 +172,21 @@ A label is written as:
 | Part | Meaning |
 | --- | --- |
 | `name` | The name a workflow refers to in `runs-on`, e.g. `ubuntu-latest`. |
-| `schema` | Either `docker` or `host`. Defaults to `host` when omitted. |
-| `args` | Only used by the `docker` schema: the image to run the job in. |
+| `schema` | `docker`, `kubernetes` or `host`. Defaults to `host` when omitted. |
+| `args` | Only used by the `docker` and `kubernetes` schemas: the image to run the job in. |
 
-Two schemas are supported:
+Three schemas are supported:
 
 - **`docker://<image>`** — the job runs inside a container created from `<image>`:
 
   ```text
   ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest
+  ```
+
+- **`kubernetes://<image>`** — the job runs as a Kubernetes pod created from `<image>`, see **[docs/kubernetes.md](docs/kubernetes.md)**:
+
+  ```text
+  ubuntu-latest:kubernetes://docker.gitea.com/runner-images:ubuntu-latest
   ```
 
 - **`host`** — the job's steps run directly on the machine the runner is on, using the tools installed there:
@@ -226,9 +203,9 @@ ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest,macos:host
 
 a workflow with `runs-on: ubuntu-latest` is executed in the `runner-images:ubuntu-latest` container, and one with `runs-on: macos` is executed directly on the host.
 
-Names may themselves contain a colon (for example `pool:e57e18d4-10d4-406f-93bf-60f127221bdd`); only `host` and `docker` are treated as schemas.
+Names may themselves contain a colon, for example `pool:e57e18d4-10d4-406f-93bf-60f127221bdd`. Only `host`, `docker` and `kubernetes` are treated as schemas.
 
-If a job's `runs-on` matches none of the runner's labels, or sets no `runs-on` at all, it still runs: in `runner.default_image` where docker is available, on the host where it is not. Images maintained for this purpose are listed at [gitea/runner-images](https://gitea.com/gitea/runner-images).
+If a job's `runs-on` matches none of the runner's labels, or sets no `runs-on` at all, it still runs in `runner.default_image`: as a container when the runner has `docker` labels, as a pod when it has `kubernetes` labels, else as a container where docker is available and on the host where it is not. Images maintained for this purpose are listed at [gitea/runner-images](https://gitea.com/gitea/runner-images).
 
 Labels are chosen at registration time (`--labels`, or the interactive prompt) and can be changed afterwards by editing `runner.labels` in the config file, or in the Gitea UI under the runner's settings.
 
@@ -380,6 +357,7 @@ While the runner is idle it cleans up after earlier jobs:
 - only purely numeric subdirectories under `container.workdir_parent` are treated as task workspaces and may be removed
 - cleanup assumes `container.workdir_parent` is not shared across multiple runners
 - on runners that use docker, per-job networks left behind by jobs the runner did not live to tear down are removed, identified by the `com.gitea.runner.uuid` label carrying this runner's uuid
+- on runners with `kubernetes` labels, job pods with that label older than `runner.workdir_cleanup_age` are removed the same way, together with their Secrets
 - cleanup runs every `runner.idle_cleanup_interval` (default: `10m`; set `0` to disable), and setting either knob to `0` disables all of the above
 
 #### Post-task script (`runner.post_task_script`)

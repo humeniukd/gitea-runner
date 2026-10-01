@@ -5,6 +5,7 @@ package run
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,7 @@ import (
 	"connectrpc.com/connect"
 	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
+	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -243,6 +245,16 @@ func TestRunnerFallbackPlatform(t *testing.T) {
 	}
 }
 
+func TestRunnerKubernetesOptionsLayerTheLabelPodTemplatesInRunsOnOrder(t *testing.T) {
+	cfg := &config.Config{Kubernetes: config.Kubernetes{
+		PodTemplate:  map[string]any{"base": true},
+		PodTemplates: map[string]map[string]any{"gpu": {"gpu": true}, "large": {"large": true}, "other": {"other": true}},
+	}}
+	r := &Runner{cfg: cfg, labels: labels.Labels{{Name: "linux"}, {Name: "gpu"}, {Name: "large"}}}
+
+	require.Equal(t, []map[string]any{{"base": true}, {"large": true}, {"gpu": true}}, r.kubernetesOptions([]string{"linux", "large", "other", "gpu", "large"}).PodTemplates)
+}
+
 // Proxy variables are assembled per task, because a job's service containers have to be
 // reached directly and they are only known once the workflow is parsed.
 func TestNewRunnerLeavesProxyToTheTask(t *testing.T) {
@@ -348,7 +360,7 @@ func TestNewRunnerCacheServiceV2(t *testing.T) {
 	r.isolatedCacheContainer = func() string { return "a1b2c3d4e5f6" }
 	pickPlatform := func(runsOn []string) string { return map[string]string{"native": labels.SelfHostedPlatform}[runsOn[0]] }
 	for job, isolated := range map[string]bool{"native": false, "linux": true, "containerized": true, "empty": false} {
-		cacheURL, cacheContainer := r.cacheForJob(workflow.GetJob(job), pickPlatform)
+		cacheURL, cacheContainer := r.cacheForJob(workflow.GetJob(job), pickPlatform(workflow.GetJob(job).RunsOn()))
 		if isolated {
 			assert.Equal(t, "a1b2c3d4e5f6", cacheContainer, job)
 			assert.Equal(t, strings.Replace(r.cacheHandler.ExternalURL(), "127.0.0.1", cacheContainer, 1), cacheURL, job)
@@ -402,4 +414,16 @@ func TestRestoreCalledWorkflowContext(t *testing.T) {
 		assert.Nil(t, restoreCalledWorkflowContext(task))
 		assert.Equal(t, "workflow_call", task.Context.AsMap()["event_name"])
 	})
+}
+
+func TestTaskLogFields(t *testing.T) {
+	fields := func(token string) log.Fields {
+		taskContext, err := structpb.NewStruct(map[string]any{"repository": "owner/repo", "run_id": "159", "run_number": "14", "gitea_runtime_token": token})
+		require.NoError(t, err)
+		return taskLogFields(&runnerv1.Task{Id: 72, Context: taskContext}, "build")
+	}
+	want := log.Fields{"task_id": int64(72), "job": "build", "repository": "owner/repo", "run_id": "159", "run_number": "14"}
+	assert.Equal(t, want, fields("malformed"))
+	want["job_id"] = int64(221)
+	assert.Equal(t, want, fields("header."+base64.RawURLEncoding.EncodeToString([]byte(`{"TaskID":72,"JobID":221}`))+".signature"))
 }
