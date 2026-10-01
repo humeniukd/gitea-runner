@@ -42,6 +42,21 @@ cache:
 	require.NoError(t, err)
 }
 
+func TestLoadClientCertificateRequiresCertificateAndKey(t *testing.T) {
+	for _, runner := range []*Runner{
+		{ClientCertificate: "client.crt"},
+		{ClientKey: "client.key"},
+	} {
+		err := loadClientCertificate(runner)
+		require.ErrorContains(t, err, "must be configured together")
+	}
+}
+
+func TestLoadClientCertificateReportsInvalidPair(t *testing.T) {
+	err := loadClientCertificate(&Runner{ClientCertificate: "missing.crt", ClientKey: "missing.key"})
+	require.ErrorContains(t, err, "load runner client certificate")
+}
+
 func TestLoadDefault_CacheS3(t *testing.T) {
 	dir := t.TempDir()
 	accessPath := filepath.Join(dir, "access.key")

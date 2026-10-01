@@ -5,6 +5,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"maps"
@@ -60,6 +61,9 @@ type Runner struct {
 	Timeout               time.Duration     `yaml:"timeout"`                  // Timeout specifies the duration for runner timeout.
 	ShutdownTimeout       time.Duration     `yaml:"shutdown_timeout"`         // ShutdownTimeout specifies the duration to wait for running jobs to complete during a shutdown of the runner.
 	Insecure              bool              `yaml:"insecure"`                 // Insecure indicates whether the runner operates in an insecure mode.
+	ClientCertificate     string            `yaml:"client_certificate"`       // ClientCertificate is the PEM certificate used to authenticate the runner to Gitea.
+	ClientKey             string            `yaml:"client_key"`               // ClientKey is the PEM private key paired with ClientCertificate.
+	TLSCertificate        *tls.Certificate  `yaml:"-"`                        // TLSCertificate is loaded from ClientCertificate and ClientKey at startup.
 	FetchTimeout          time.Duration     `yaml:"fetch_timeout"`            // FetchTimeout specifies the timeout duration for fetching resources.
 	FetchInterval         time.Duration     `yaml:"fetch_interval"`           // FetchInterval specifies the interval duration for fetching resources.
 	FetchIntervalMax      time.Duration     `yaml:"fetch_interval_max"`       // FetchIntervalMax specifies the maximum backoff interval when idle.
@@ -264,6 +268,9 @@ func LoadDefault(file string) (*Config, error) {
 			maps.Copy(cfg.Runner.Envs, envs)
 		}
 	}
+	if err := loadClientCertificate(&cfg.Runner); err != nil {
+		return nil, err
+	}
 
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
@@ -409,6 +416,21 @@ func LoadDefault(file string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadClientCertificate(runner *Runner) error {
+	if runner.ClientCertificate == "" && runner.ClientKey == "" {
+		return nil
+	}
+	if runner.ClientCertificate == "" || runner.ClientKey == "" {
+		return errors.New("runner.client_certificate and runner.client_key must be configured together")
+	}
+	certificate, err := tls.LoadX509KeyPair(runner.ClientCertificate, runner.ClientKey)
+	if err != nil {
+		return fmt.Errorf("load runner client certificate: %w", err)
+	}
+	runner.TLSCertificate = &certificate
+	return nil
 }
 
 // warnUnknownKeys reports keys the config does not define, which are otherwise ignored

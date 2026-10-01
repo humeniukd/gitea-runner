@@ -174,6 +174,7 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			reg.UUID,
 			reg.Token,
 			config.RequestTimeout,
+			cfg.Runner.TLSCertificate,
 		)
 
 		runner := run.NewRunner(cfg, reg, cli)
