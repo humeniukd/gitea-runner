@@ -454,6 +454,9 @@ func TestRunEventHostEnvironment(t *testing.T) {
 				requireHostTools(t, "nix")
 			case "uses-docker-url", "local-action-dockerfile":
 				requireDocker(t)
+				if _, err := os.Stat("/.dockerenv"); err == nil {
+					t.Skip("skipping: inside a container, the docker daemon cannot bind-mount this process's files")
+				}
 			}
 			t.Parallel()
 			hostPlanSlots <- struct{}{}
