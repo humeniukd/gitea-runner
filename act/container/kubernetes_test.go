@@ -192,6 +192,9 @@ func TestKubernetesPodRunsJobThroughAPI(t *testing.T) {
 	assert.Equal(t, []any{"new"}, mergeManifest([]any{"old"}, []any{"new"}, ""))
 	mount := func(path string) any { return map[string]any{"name": "config", "mountPath": path} }
 	assert.Equal(t, []any{mount("/a"), mount("/b")}, mergeManifest([]any{mount("/a")}, []any{mount("/b")}, "volumeMounts"))
+	tmpfs := map[string]any{"name": "workspace", "emptyDir": map[string]any{"medium": "Memory"}}
+	ephemeral := map[string]any{"name": "workspace", "ephemeral": map[string]any{}}
+	assert.Equal(t, []any{ephemeral}, mergeManifest([]any{tmpfs}, []any{ephemeral}, "volumes"))
 	assert.Contains(t, cluster.requests["POST /api/v1/namespaces/ci/pods"][0], `"args":["postgres","-D","$$(PGDATA)"]`)
 
 	require.NoError(t, os.WriteFile(filepath.Join(workdir, "env"), []byte("#!/bin/sh\necho \"$@\" > \"$0-args\"\nexec /usr/bin/env \"$@\"\n"), 0o755))

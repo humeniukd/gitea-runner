@@ -201,7 +201,7 @@ func (p *KubernetesPod) manifest(secret string, secretData map[string]string, me
 	return mergeManifest(template, map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": metadata, "spec": spec}, ""), nil
 }
 
-// mergeManifest merges over onto base like a strategic merge patch: maps key by key, map list items by name or volumeMounts by mountPath, env entries and other values replaced.
+// mergeManifest merges over onto base like a strategic merge patch: maps key by key, map list items by name or volumeMounts by mountPath, env entries, volumes and other values replaced.
 func mergeManifest(base, over any, field string) any {
 	switch over := over.(type) {
 	case map[string]any:
@@ -226,7 +226,7 @@ func mergeManifest(base, over any, field string) any {
 			switch {
 			case index < 0:
 				merged = append(merged, item)
-			case field == "env":
+			case field == "env" || field == "volumes": // each holds one source, merging two makes a pod the API rejects
 				merged[index] = item
 			default:
 				merged[index] = mergeManifest(merged[index], item, "")
