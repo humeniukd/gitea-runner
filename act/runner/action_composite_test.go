@@ -28,10 +28,8 @@ func TestCompositeActionParity(t *testing.T) {
 			jobIndex:      1,
 			jobTotal:      4,
 		}
-		step := &model.Step{With: map[string]string{"SHARED": "outer"}}
-		require.NoError(t, yaml.Unmarshal([]byte("env: {PATH: /caller}"), step))
 		composite, err := newCompositeRunContext(ctx, parent, &stepActionRemote{
-			Step:       step,
+			Step:       &model.Step{With: map[string]string{"SHARED": "outer"}},
 			RunContext: parent,
 			action:     &model.Action{Inputs: map[string]model.Input{"shared": {Default: "outer-default"}}},
 			env:        map[string]string{"INPUT_SHARED": "outer"},
@@ -40,7 +38,6 @@ func TestCompositeActionParity(t *testing.T) {
 
 		assert.Same(t, strategy, composite.Run.Job().Strategy)
 		assert.True(t, composite.IsHostEnv())
-		assert.True(t, composite.callerDeclaresPath)
 		interpolated, err := composite.NewExpressionEvaluator(ctx).Interpolate(ctx,
 			"${{ matrix.os }}|${{ strategy.max-parallel }}|${{ strategy.job-index }}|${{ inputs.shared }}")
 		require.NoError(t, err)

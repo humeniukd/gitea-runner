@@ -85,7 +85,6 @@ type RunContext struct {
 
 	jobEnv             map[string]string      // workflow and job env as evaluated for the container and service specs
 	dockerActionImages map[*model.Step]string // Dockerfile action images built for this job, removed when it ends
-	callerDeclaresPath bool                   // a step calling this composite action set PATH
 
 	// summaryFileInitialized tracks which per-step summary files (workflow/step-summary-N.md)
 	// have already been created on the JobContainer. The runner sets up file-command files
@@ -362,15 +361,8 @@ func (rc *RunContext) GetBindsAndMounts(ctx context.Context) ([]string, map[stri
 			mounts[sharedToolCacheVolume] = toolCache
 		}
 	}
-	bindModifiers := ""
-	if runtime.GOOS == "darwin" {
-		bindModifiers = ":delegated"
-	}
-	if selinux.GetEnabled() {
-		bindModifiers = ":z"
-	}
 	if hostEnv, ok := rc.JobContainer.(*container.HostEnvironment); ok {
-		binds = append(binds, hostEnv.Path+":"+hostEnv.Path+bindModifiers, hostEnv.GetActPath()+":"+hostEnv.GetActPath()+bindModifiers)
+		binds = append(binds, hostEnv.Path+":"+hostEnv.Path, hostEnv.GetActPath()+":"+hostEnv.GetActPath())
 	}
 	mounts[name+"-env"] = ext.GetActPath() // runner-internal, never overridable
 
@@ -381,6 +373,13 @@ func (rc *RunContext) GetBindsAndMounts(ctx context.Context) ([]string, map[stri
 			source, target = rc.Config.Workdir, workdir
 		}
 		if rc.Config.BindWorkdir {
+			bindModifiers := ""
+			if runtime.GOOS == "darwin" {
+				bindModifiers = ":delegated"
+			}
+			if selinux.GetEnabled() {
+				bindModifiers = ":z"
+			}
 			binds = append(binds, fmt.Sprintf("%s:%s%s", source, target, bindModifiers))
 		} else {
 			mounts[name] = target

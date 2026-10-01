@@ -304,17 +304,6 @@ func (rc *RunContext) dockerActionImage(ctx context.Context, step actionStep, ac
 	return image
 }
 
-func declaresPath(envs ...map[string]string) bool {
-	for _, env := range envs {
-		for name := range env {
-			if strings.EqualFold(name, "PATH") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // TODO: break out parts of function to reduce complexicity
 func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, basedir string, localAction bool, stage stepStage) error {
 	logger := common.Logger(ctx)
@@ -472,13 +461,8 @@ func newStepContainer(ctx context.Context, step step, image string, cmd, entrypo
 	rc := step.getRunContext()
 	logWriter := rc.commandLogWriter(ctx)
 	envList := make([]string, 0)
-	var runsEnv map[string]string
-	if action, ok := step.(actionStep); ok {
-		runsEnv = action.getActionModel().Runs.Env
-	}
-	dropHostPath := rc.IsHostEnv() && !rc.callerDeclaresPath && !declaresPath(rc.topLevelRunContext().jobEnv, rc.GlobalEnv, step.getStepModel().Environment(), runsEnv)
 	for k, v := range *step.getEnv() {
-		if dropHostPath && strings.EqualFold(k, "PATH") && v == rc.JobContainer.DefaultPathVariable() { // the runner's own PATH stays out, as on GitHub
+		if rc.IsHostEnv() && strings.EqualFold(k, rc.JobContainer.GetPathVariableName()) && v == rc.JobContainer.DefaultPathVariable() { // the runner's own PATH stays out, as on GitHub
 			continue
 		}
 		envList = append(envList, fmt.Sprintf("%s=%s", k, v))

@@ -690,8 +690,7 @@ func TestRunContextValidVolumes(t *testing.T) {
 	rc.Config.BindWorkdir = false
 	rc.Config.SharedToolCache = true
 	binds, mounts := rc.GetBindsAndMounts(t.Context())
-	assert.Contains(t, strings.Join(binds, " "), hostEnv.Path+":"+hostEnv.Path)
-	assert.Contains(t, strings.Join(binds, " "), hostEnv.GetActPath()+":"+hostEnv.GetActPath())
+	assert.Subset(t, binds, []string{hostEnv.Path + ":" + hostEnv.Path, hostEnv.GetActPath() + ":" + hostEnv.GetActPath()})
 	assert.Contains(t, mounts, sharedToolCacheVolume)
 	assert.Equal(t, binds, container.SanitizeBinds(t.Context(), rc.validVolumes(), binds))
 }

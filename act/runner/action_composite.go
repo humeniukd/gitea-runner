@@ -108,7 +108,6 @@ func newCompositeRunContext(ctx context.Context, parent *RunContext, step action
 		jobIndex:      parent.jobIndex,
 		jobTotal:      parent.jobTotal,
 	}
-	compositerc.callerDeclaresPath = parent.callerDeclaresPath || declaresPath(step.getStepModel().Environment())
 	compositerc.setCompositeActionEnv(env)
 	compositerc.ExprEval = compositerc.NewExpressionEvaluator(ctx)
 
