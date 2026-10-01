@@ -522,6 +522,8 @@ func TestDockerActionImageTag(t *testing.T) {
 	assert.Equal(t, image, (&RunContext{Parent: job}).dockerActionImage(t.Context(), step, "abc123", false))
 	assert.NotEqual(t, image, job.dockerActionImage(t.Context(), &stepActionRemote{Step: &model.Step{}, RunContext: job}, "abc123", false))
 	assert.NotEqual(t, image, newTestRC(workflow, nil).dockerActionImage(t.Context(), step, "abc123", false))
+	job.dockerActionImage(common.WithDryrun(t.Context(), true), &stepActionRemote{Step: &model.Step{}, RunContext: job}, "abc123", false)
+	assert.Len(t, job.dockerActionImages, 2)
 }
 
 func TestExecAsDockerStageEntrypoint(t *testing.T) {

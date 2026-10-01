@@ -259,6 +259,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			logger.Errorf("##[error]%s", EscapeCommandData("Error while stop job container: "+err.Error()))
 		}
 		setJobResult(ctx, info, rc, jobError == nil)
+		rc.removeDockerActionImages(ctx)
 
 		return err
 	})
@@ -411,7 +412,7 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 	logger.WithField("jobResult", jobResult).Infof("Job %s", jobResultMessage)
 }
 
-// evaluateJobEnv returns the workflow and job env evaluated, leaving rc.Env raw.
+// evaluateJobEnv returns the workflow and job env evaluated, as far as it got on error, leaving rc.Env raw.
 func evaluateJobEnv(ctx context.Context, rc *RunContext) (map[string]string, error) {
 	env := rc.GetEnv()
 	evaluated := maps.Clone(env)
@@ -419,7 +420,7 @@ func evaluateJobEnv(ctx context.Context, rc *RunContext) (map[string]string, err
 	var workflowEnv map[string]string
 	if rc.Run.Workflow.Env == nil {
 		if err := model.DecodeEvaluated("workflow env", rc.Run.Workflow.RawEnv, evaluator.shared(ctx).EvaluateYamlNode, &workflowEnv); err != nil {
-			return nil, err
+			return evaluated, err
 		}
 	}
 	if workflowEnv != nil {
@@ -429,7 +430,7 @@ func evaluateJobEnv(ctx context.Context, rc *RunContext) (map[string]string, err
 	var err error
 	for k, v := range env {
 		if evaluated[k], err = evaluator.Interpolate(ctx, v); err != nil {
-			return nil, fmt.Errorf("unable to interpolate env %s: %w", k, err)
+			return evaluated, fmt.Errorf("unable to interpolate env %s: %w", k, err)
 		}
 	}
 	return evaluated, nil
@@ -438,11 +439,11 @@ func evaluateJobEnv(ctx context.Context, rc *RunContext) (map[string]string, err
 // evaluateJobEnvAndDefaults resolves the job's env, defaults.run and container env once, as GitHub does at job setup.
 func evaluateJobEnvAndDefaults(ctx context.Context, rc *RunContext) error {
 	env, err := evaluateJobEnv(ctx, rc)
+	rc.Env = env
+	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
 	if err != nil {
 		return err
 	}
-	rc.Env = env
-	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
 	var defaults model.Defaults
 	if err := model.DecodeEvaluated("defaults", rc.Run.Job().RawDefaults, rc.ExprEval.shared(ctx).EvaluateYamlNode, &defaults); err != nil {
 		return err

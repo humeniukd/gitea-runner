@@ -288,7 +288,7 @@ func dockerActionImageTag(repository, actionName string, localAction bool) strin
 	return strings.ToLower(image)
 }
 
-// dockerActionImage tags a Dockerfile action's image per step and job, so its stages share one build and concurrent jobs never run each other's.
+// One image per step and job: its stages share a build, and concurrent jobs never run each other's.
 func (rc *RunContext) dockerActionImage(ctx context.Context, step actionStep, actionName string, localAction bool) string {
 	job := rc.topLevelRunContext()
 	if job.dockerActionImages == nil {
@@ -297,9 +297,22 @@ func (rc *RunContext) dockerActionImage(ctx context.Context, step actionStep, ac
 	image, ok := job.dockerActionImages[step.getStepModel()]
 	if !ok {
 		image = dockerActionImageTag(step.getGithubContext(ctx).Repository, actionName, localAction) + "-" + strings.ToLower(rand.Text())
-		job.dockerActionImages[step.getStepModel()] = image
+		if !common.Dryrun(ctx) { // a dry run builds nothing to remove
+			job.dockerActionImages[step.getStepModel()] = image
+		}
 	}
 	return image
+}
+
+func declaresPath(envs ...map[string]string) bool {
+	for _, env := range envs {
+		for name := range env {
+			if strings.EqualFold(name, "PATH") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TODO: break out parts of function to reduce complexicity
@@ -345,7 +358,7 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 		if !correctArchExists || rc.Config.ForceRebuild {
 			logger.Debugf("image '%s' for architecture '%s' will be built from context '%s", image, rc.Config.ContainerArchitecture, contextDir)
 			var buildContext io.ReadCloser
-			if localAction && !rc.IsHostEnv() { // a host path streams through the daemon, honoring .dockerignore
+			if localAction {
 				buildContext, err = rc.JobContainer.GetContainerArchive(ctx, contextDir+"/.")
 				if err != nil {
 					return err
@@ -459,12 +472,13 @@ func newStepContainer(ctx context.Context, step step, image string, cmd, entrypo
 	rc := step.getRunContext()
 	logWriter := rc.commandLogWriter(ctx)
 	envList := make([]string, 0)
-	declared := mergeMaps(rc.topLevelRunContext().jobEnv, rc.GlobalEnv, step.getStepModel().Environment())
+	var runsEnv map[string]string
 	if action, ok := step.(actionStep); ok {
-		maps.Copy(declared, action.getActionModel().Runs.Env)
+		runsEnv = action.getActionModel().Runs.Env
 	}
+	dropHostPath := rc.IsHostEnv() && !rc.callerDeclaresPath && !declaresPath(rc.topLevelRunContext().jobEnv, rc.GlobalEnv, step.getStepModel().Environment(), runsEnv)
 	for k, v := range *step.getEnv() {
-		if _, ok := declared[k]; rc.IsHostEnv() && !ok && strings.EqualFold(k, rc.JobContainer.GetPathVariableName()) { // the runner's own PATH stays out, as on GitHub
+		if dropHostPath && strings.EqualFold(k, "PATH") && v == rc.JobContainer.DefaultPathVariable() { // the runner's own PATH stays out, as on GitHub
 			continue
 		}
 		envList = append(envList, fmt.Sprintf("%s=%s", k, v))

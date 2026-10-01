@@ -85,6 +85,7 @@ type RunContext struct {
 
 	jobEnv             map[string]string      // workflow and job env as evaluated for the container and service specs
 	dockerActionImages map[*model.Step]string // Dockerfile action images built for this job, removed when it ends
+	callerDeclaresPath bool                   // a step calling this composite action set PATH
 
 	// summaryFileInitialized tracks which per-step summary files (workflow/step-summary-N.md)
 	// have already been created on the JobContainer. The runner sets up file-command files
@@ -840,15 +841,18 @@ func (rc *RunContext) UpdateExtraPath(ctx context.Context, githubEnvPath string)
 
 func (rc *RunContext) stopJobContainer() common.Executor {
 	return func(ctx context.Context) error {
-		for _, image := range rc.dockerActionImages {
-			if _, err := container.RemoveImage(ctx, image, true, false); err != nil {
-				common.Logger(ctx).Warnf("failed to remove action image %s: %v", image, err)
-			}
-		}
 		if rc.cleanUpJobContainer != nil {
 			return rc.cleanUpJobContainer(ctx)
 		}
 		return nil
+	}
+}
+
+func (rc *RunContext) removeDockerActionImages(ctx context.Context) {
+	for _, image := range rc.dockerActionImages {
+		if _, err := container.RemoveImage(ctx, image, true, false); err != nil {
+			common.Logger(ctx).Warnf("failed to remove action image %s: %v", image, err)
+		}
 	}
 }
 
@@ -1271,10 +1275,10 @@ func (rc *RunContext) runsOnPlatformNames(ctx context.Context) []string {
 
 // resolvePlatformImage evaluates the job's container once for every consumer, skipping one whose image is empty as GitHub does.
 func (rc *RunContext) resolvePlatformImage(ctx context.Context) error {
-	rc.jobEnv, _ = evaluateJobEnv(ctx, rc) // a broken env fails the job where it sets up, as it did before
+	rc.jobEnv, _ = evaluateJobEnv(ctx, rc) // a broken env fails the job at setup instead
 	withoutEnv, env := splitContainerEnv(rc.Run.Job().RawContainer)
 	var spec model.ContainerSpec
-	if err := model.DecodeEvaluated("container", withoutEnv, rc.NewExpressionEvaluatorWithEnv(ctx, mergeMaps(rc.GetEnv(), rc.jobEnv)).shared(ctx).EvaluateYamlNode, &spec); err != nil {
+	if err := model.DecodeEvaluated("container", withoutEnv, rc.NewExpressionEvaluatorWithEnv(ctx, rc.jobEnv).shared(ctx).EvaluateYamlNode, &spec); err != nil {
 		return err
 	}
 	spec.Image = strings.TrimPrefix(spec.Image, "docker://")

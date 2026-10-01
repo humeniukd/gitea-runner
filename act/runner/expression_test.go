@@ -433,6 +433,10 @@ jobs:
 	enabled, err := isStepEnabled(t.Context(), "inputs.message == 'workflow'", step, stepStageMain)
 	require.NoError(t, err)
 	assert.True(t, enabled)
+	step.Step, step.action = &model.Step{}, &model.Action{Inputs: map[string]model.Input{"fallback": {Default: "${{ inputs.message }}"}}}
+	env, err := evaluateCompositeInputAndEnv(t.Context(), rc, step)
+	require.NoError(t, err)
+	assert.Equal(t, "workflow", env["INPUT_FALLBACK"])
 }
 
 func TestResolveWorkflowCallToleratesMismatchesAndPassesInheritedSecretsVerbatim(t *testing.T) {

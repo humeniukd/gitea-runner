@@ -255,12 +255,10 @@ func getEvaluatorInputs(rc *RunContext, stepInputs map[string]any, ghc *model.Gi
 	// composite actions copy its Config but have their own `inputs`
 	if rc.Config.WorkflowCallInputs != nil && rc.Parent == nil {
 		maps.Copy(inputs, rc.Config.WorkflowCallInputs)
-		maps.Copy(inputs, stepInputs)
 		return inputs
 	}
 
 	maps.Copy(inputs, rc.workflowCallInputs)
-	maps.Copy(inputs, stepInputs)
 
 	switch ghc.EventName {
 	case "workflow_dispatch":

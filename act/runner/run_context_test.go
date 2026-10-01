@@ -762,6 +762,20 @@ func TestCleanupJobVolumesReapsAbandonedDeferredCleanup(t *testing.T) {
 	assert.ElementsMatch(t, []string{"became-active", "remove-failed", "foreign", "fresh", "unknown-age"}, slices.Collect(maps.Keys(volumes)))
 }
 
+func TestRemoveDockerActionImagesByTag(t *testing.T) {
+	var removed []string
+	fakeDockerDaemon(t, func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodDelete {
+			removed = append(removed, strings.TrimPrefix(request.URL.Path, "/v1.47/images/"))
+			_, _ = io.WriteString(writer, "[]")
+			return
+		}
+		_, _ = io.WriteString(writer, `{"Id":"sha256:shared"}`)
+	})
+	(&RunContext{dockerActionImages: map[*model.Step]string{{}: "act-action-dockeraction:latest-job"}}).removeDockerActionImages(t.Context())
+	assert.Equal(t, []string{"act-action-dockeraction:latest-job"}, removed)
+}
+
 func TestCleanupJobResourcesContinuesAfterFailure(t *testing.T) {
 	t.Setenv("TMPDIR", "/tmp")
 	proxyDir := t.TempDir()
@@ -1073,6 +1087,7 @@ env:
 if: success()`, ""),
 	})
 	assertObject.True(rc.isEnabled(context.Background()))
+	require.Error(t, evaluateJobEnvAndDefaults(context.Background(), rc))
 
 	rc = createIfTestRunContext(map[string]*model.Job{
 		"job1": createJob(t, `runs-on: ubuntu-latest`, "failure"),

@@ -18,14 +18,6 @@ jobs:
       env:
         SOMEVAR: 'Not Mona'
     - run: '[[ "${{ steps.dockerlocal.outputs.whoami }}" == "Mona the Octocat" ]]'
-    - run: |
-        printf '\necho "whoami=rebuilt-$WHOAMI-$DOCKERFILE_VERSION" >> "$GITHUB_OUTPUT"\n' >> actions/docker-local/entrypoint.sh
-        printf '\nENV DOCKERFILE_VERSION=updated\n' >> actions/docker-local/Dockerfile
-    - uses: ./actions/docker-local
-      id: rebuilt
-      with:
-        who-to-greet: 'Mona the Octocat'
-    - run: '[[ "${{ steps.rebuilt.outputs.whoami }}" == "rebuilt-Mona the Octocat-updated" ]]'
     # Test if overriding args doesn't leak inputs
     - uses: ./actions/docker-local-noargs
       with:

@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.yaml.in/yaml/v4"
 )
 
 func TestStepDockerMain(t *testing.T) {
@@ -159,7 +160,7 @@ func TestStepDockerNewStepContainerNetworkModeAndPath(t *testing.T) {
 		platform      string
 		path          string
 		expectDefault bool
-		declared      bool
+		declaredIn    string
 		keepsPath     bool
 	}{
 		{
@@ -176,11 +177,50 @@ func TestStepDockerNewStepContainerNetworkModeAndPath(t *testing.T) {
 			expectDefault: true,
 		},
 		{
-			name:          "host mode keeps a declared PATH",
+			name:          "host mode keeps a PATH that is not the runner's",
+			platform:      "-self-hosted",
+			path:          "/custom/bin",
+			expectDefault: true,
+			keepsPath:     true,
+		},
+		{
+			name:          "host mode keeps a PATH from GITHUB_ENV",
 			platform:      "-self-hosted",
 			path:          inheritedPath,
 			expectDefault: true,
-			declared:      true,
+			declaredIn:    "GITHUB_ENV",
+			keepsPath:     true,
+		},
+		{
+			name:          "host mode keeps a PATH from the workflow env",
+			platform:      "-self-hosted",
+			path:          inheritedPath,
+			expectDefault: true,
+			declaredIn:    "workflow",
+			keepsPath:     true,
+		},
+		{
+			name:          "host mode keeps a PATH a composite caller declared",
+			platform:      "-self-hosted",
+			path:          inheritedPath,
+			expectDefault: true,
+			declaredIn:    "caller",
+			keepsPath:     true,
+		},
+		{
+			name:          "host mode matches a PATH declaration case-insensitively",
+			platform:      "-self-hosted",
+			path:          inheritedPath,
+			expectDefault: true,
+			declaredIn:    "Path",
+			keepsPath:     true,
+		},
+		{
+			name:          "host mode keeps a PATH from the step env",
+			platform:      "-self-hosted",
+			path:          inheritedPath,
+			expectDefault: true,
+			declaredIn:    "step",
 			keepsPath:     true,
 		},
 	}
@@ -229,8 +269,17 @@ func TestStepDockerNewStepContainerNetworkModeAndPath(t *testing.T) {
 			sd.RunContext.ExprEval = sd.RunContext.NewExpressionEvaluator(ctx)
 
 			require.NoError(t, sd.RunContext.resolvePlatformImage(ctx))
-			if tc.declared {
+			switch tc.declaredIn {
+			case "GITHUB_ENV":
 				sd.RunContext.GlobalEnv = map[string]string{"PATH": tc.path}
+			case "workflow":
+				sd.RunContext.jobEnv = map[string]string{"PATH": tc.path}
+			case "caller":
+				sd.RunContext.callerDeclaresPath = true
+			case "Path":
+				sd.RunContext.GlobalEnv = map[string]string{"Path": tc.path}
+			case "step":
+				require.NoError(t, yaml.Unmarshal([]byte("env: {PATH: '"+tc.path+"'}"), sd.Step))
 			}
 			assert.Equal(t, tc.expectDefault, sd.RunContext.IsHostEnv(), "IsHostEnv mismatch for platform %q", tc.platform)
 
