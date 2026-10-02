@@ -8,7 +8,7 @@ Built-in actions ship with the runner, so a job needs no action download and no 
 
 ## checkout
 
-Works like `actions/checkout` with these inputs. Any other input fails the step.
+Works like `actions/checkout` with these inputs. Any other input fails the step. A remote checkout runs `git` inside the job, so the image needs `git`.
 
 | Input | Default |
 | --- | --- |

@@ -5,6 +5,7 @@ package checkout
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,14 +23,54 @@ import (
 
 type fakeContainer struct {
 	container.ExecutionsEnvironment
+	root     string
 	dst, src string
 	log      []string
+}
+
+func (f *fakeContainer) hostPath(containerPath string) string {
+	rel := strings.TrimPrefix(containerPath, "/workspace")
+	return filepath.Join(f.root, filepath.FromSlash(rel))
+}
+
+func (f *fakeContainer) mapArg(arg string) string {
+	if arg == "/workspace" || strings.HasPrefix(arg, "/workspace/") {
+		return f.hostPath(arg)
+	}
+	return arg
 }
 
 func (f *fakeContainer) CopyDir(dst, src string, _, _ bool) common.Executor {
 	return func(context.Context) error {
 		f.dst, f.src = dst, src
 		if out, err := exec.Command("git", "--git-dir", filepath.Join(src, ".git"), "log", "--format=%s").Output(); err == nil {
+			f.log = strings.Fields(string(out))
+		}
+		return nil
+	}
+}
+
+func (f *fakeContainer) Exec(command []string, _ map[string]string, _, _ string) common.Executor {
+	return func(context.Context) error {
+		if len(command) > 0 && command[0] == "mkdir" {
+			return os.MkdirAll(f.mapArg(command[len(command)-1]), 0o755)
+		}
+		args := make([]string, len(command))
+		for i, a := range command {
+			args[i] = f.mapArg(a)
+			if (a == "-C" || a == "init") && i+1 < len(command) {
+				f.dst = command[i+1]
+			}
+		}
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
+		}
+		if f.dst == "" {
+			return nil
+		}
+		if out, err := exec.Command("git", "-C", f.hostPath(f.dst), "log", "--format=%s").Output(); err == nil {
 			f.log = strings.Fields(string(out))
 		}
 		return nil
@@ -88,7 +129,7 @@ func TestCheckout(t *testing.T) {
 		{name: "negative fetch-depth", inputs: map[string]string{"fetch-depth": "-1"}, err: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fc := &fakeContainer{}
+			fc := &fakeContainer{root: t.TempDir()}
 			err := Main(t.Context(), &action.Context{
 				Container:      fc,
 				Github:         &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main", Sha: sha, ServerURL: server},
@@ -108,7 +149,7 @@ func TestCheckout(t *testing.T) {
 			assert.Equal(t, tc.log, fc.log)
 			assert.Equal(t, tc.hostCopy, strings.HasPrefix(fc.src, host))
 			if tc.log != nil {
-				assert.NoDirExists(t, fc.src)
+				assert.DirExists(t, fc.hostPath(fc.dst))
 			}
 		})
 	}
