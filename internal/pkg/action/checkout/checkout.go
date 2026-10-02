@@ -6,15 +6,15 @@ package checkout
 import (
 	"cmp"
 	"context"
+	"encoding/base64"
 	"fmt"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 
-	"gitea.com/gitea/runner/act/common/git"
+	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/internal/pkg/action"
 )
 
@@ -53,22 +53,53 @@ func Main(ctx context.Context, c *action.Context) error {
 			ref = ghc.Sha
 		}
 	}
-	dir, err := os.MkdirTemp("", "checkout-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(dir)
-	if err := git.NewGitCloneExecutor(git.NewGitCloneExecutorInput{
-		URL:             strings.TrimSuffix(ghc.ServerURL, "/") + "/" + repository,
-		Ref:             ref,
-		Dir:             dir,
-		Token:           cmp.Or(c.Inputs["token"], ghc.Token),
-		Depth:           depth,
-		InsecureSkipTLS: c.InsecureSkipTLS,
-	})(ctx); err != nil {
+	url := strings.TrimSuffix(ghc.ServerURL, "/") + "/" + repository
+	if err := clone(ctx, c.Container, url, ref, dst, cmp.Or(c.Inputs["token"], ghc.Token), depth, c.InsecureSkipTLS); err != nil {
 		return fmt.Errorf("checkout: clone %s@%s: %w", repository, ref, err)
 	}
-	return c.Container.CopyDir(dst, dir+string(filepath.Separator)+".", false, false)(ctx)
+	return nil
+}
+
+func clone(ctx context.Context, env container.ExecutionsEnvironment, url, ref, dst, token string, depth int, insecureSkipTLS bool) error {
+	run := func(args ...string) error {
+		return env.Exec(args, nil, "", "")(ctx)
+	}
+	git := func(args ...string) error {
+		cmd := append([]string{"git"}, gitConfigArgs(token, insecureSkipTLS)...)
+		return run(append(cmd, args...)...)
+	}
+	if err := run("git", "--version"); err != nil {
+		return fmt.Errorf("git is required in the job image: %w", err)
+	}
+	if err := run("mkdir", "-p", dst); err != nil {
+		return err
+	}
+	if err := git("init", dst); err != nil {
+		return err
+	}
+	if err := git("-C", dst, "remote", "add", "origin", url); err != nil {
+		return err
+	}
+	fetch := []string{"-C", dst, "fetch", "--no-tags"}
+	if depth > 0 {
+		fetch = append(fetch, "--depth", strconv.Itoa(depth))
+	}
+	if err := git(append(fetch, "origin", ref)...); err != nil {
+		return err
+	}
+	return git("-C", dst, "checkout", "--force", "FETCH_HEAD")
+}
+
+func gitConfigArgs(token string, insecureSkipTLS bool) []string {
+	var args []string
+	if insecureSkipTLS {
+		args = append(args, "-c", "http.sslVerify=false")
+	}
+	if token != "" {
+		auth := base64.StdEncoding.EncodeToString([]byte("token:" + token))
+		args = append(args, "-c", "http.extraHeader=AUTHORIZATION: basic "+auth)
+	}
+	return args
 }
 
 func workspaceDestination(workspace, checkoutPath string) (string, error) {
@@ -91,7 +122,6 @@ func fetchDepth(input string) (int, error) {
 	return depth, nil
 }
 
-// NewGitCloneExecutor resolves branches by short name, a full tag ref stays exact.
-func shortBranch(ref string) string {
+func shortBranch(ref string) string { // full tag refs stay exact
 	return strings.TrimPrefix(ref, "refs/heads/")
 }
