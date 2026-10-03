@@ -8,7 +8,7 @@ Built-in actions ship with the runner, so a job needs no action download and no 
 
 ## checkout
 
-Works like `actions/checkout` with these inputs. Any other input fails the step. It runs Git 2.34.1 or newer where the job runs, so the job image needs `git`.
+Works like `actions/checkout` with these inputs. Any other input fails the step. It runs `git` where the job runs, so the job image needs `git` 2.34.1 or newer.
 
 | Input | Default |
 | --- | --- |
