@@ -17,6 +17,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/action"
 
 	"gitea.dev/actionslib/pkg/model"
+	"github.com/kballard/go-shellquote"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,6 +27,7 @@ type fakeContainer struct {
 	root     string
 	dst, src string
 	log      []string
+	cmds     [][]string
 }
 
 func (f *fakeContainer) hostPath(containerPath string) string {
@@ -52,29 +54,56 @@ func (f *fakeContainer) CopyDir(dst, src string, _, _ bool) common.Executor {
 
 func (f *fakeContainer) Exec(command []string, _ map[string]string, _, _ string) common.Executor {
 	return func(context.Context) error {
-		if len(command) > 0 && command[0] == "mkdir" {
-			return os.MkdirAll(f.mapArg(command[len(command)-1]), 0o755)
+		f.cmds = append(f.cmds, append([]string{}, command...))
+		if len(command) >= 3 && command[0] == "sh" && command[1] == "-c" {
+			return f.runScript(command[2])
 		}
-		args := make([]string, len(command))
-		for i, a := range command {
-			args[i] = f.mapArg(a)
-			if (a == "-C" || a == "init") && i+1 < len(command) {
-				f.dst = command[i+1]
-			}
+		return f.runArgs(command)
+	}
+}
+
+func (f *fakeContainer) runScript(script string) error {
+	for line := range strings.SplitSeq(script, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "set -eu" {
+			continue
 		}
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
+		args, err := shellquote.Split(line)
+		if err != nil {
+			return err
 		}
-		if f.dst == "" {
-			return nil
+		if err := f.runArgs(args); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func (f *fakeContainer) runArgs(command []string) error {
+	if len(command) > 0 && command[0] == "mkdir" {
+		return os.MkdirAll(f.mapArg(command[len(command)-1]), 0o755)
+	}
+	args := make([]string, len(command))
+	for i, a := range command {
+		args[i] = f.mapArg(a)
+		if (a == "-C" || a == "init") && i+1 < len(command) {
+			f.dst = command[i+1]
+		}
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
+	}
+	if f.dst != "" {
 		if out, err := exec.Command("git", "-C", f.hostPath(f.dst), "log", "--format=%s").Output(); err == nil {
 			f.log = strings.Fields(string(out))
 		}
-		return nil
 	}
+	return nil
 }
 
 func runGit(t *testing.T, args ...string) string {
@@ -88,6 +117,54 @@ func runGit(t *testing.T, args ...string) string {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	return strings.TrimSpace(string(out))
+}
+
+func TestCloneCommands(t *testing.T) {
+	steps := cloneCommands("http://example/org/repo", "main", "/workspace/src", "tok", 1, true)
+	script := scriptFromCommands(steps)
+	assert.Contains(t, script, "protocol.version=2")
+	assert.Contains(t, script, "http.sslVerify=false")
+	assert.Contains(t, script, "AUTHORIZATION: basic")
+	assert.Contains(t, script, "--depth")
+	assert.NotContains(t, script, "git --version")
+	require.Len(t, steps, 5)
+	assert.Equal(t, []string{"mkdir", "-p", "/workspace/src"}, steps[0])
+	assert.Equal(t, "git", steps[1][0])
+	assert.Equal(t, []string{"-c", "protocol.version=2"}, steps[1][1:3])
+}
+
+func TestEnsureGit(t *testing.T) {
+	fc := &fakeContainer{root: t.TempDir()}
+	require.NoError(t, EnsureGit(t.Context(), fc))
+	require.Len(t, fc.cmds, 1)
+	assert.Equal(t, []string{"git", "--version"}, fc.cmds[0])
+}
+
+func TestCheckoutCallsEnsureGitBeforeClone(t *testing.T) {
+	work := t.TempDir()
+	runGit(t, "init", "--initial-branch=main", work)
+	runGit(t, "-C", work, "commit", "--allow-empty", "-m", "c1")
+	sha := runGit(t, "-C", work, "rev-parse", "HEAD")
+	server := t.TempDir()
+	runGit(t, "clone", "--bare", "--branch", "main", work, filepath.Join(server, "org", "repo"))
+
+	fc := &fakeContainer{root: t.TempDir()}
+	var ensures int
+	require.NoError(t, Main(t.Context(), &action.Context{
+		Container:      fc,
+		Github:         &model.GithubContext{Repository: "org/repo", Ref: "refs/heads/main", Sha: sha, ServerURL: server},
+		HostWorkdir:    t.TempDir(),
+		Workspace:      "/workspace",
+		NoSkipCheckout: true, // force remote clone
+		EnsureGit: func(context.Context) error {
+			ensures++
+			return EnsureGit(t.Context(), fc)
+		},
+	}))
+	assert.Equal(t, 1, ensures)
+	require.GreaterOrEqual(t, len(fc.cmds), 2)
+	assert.Equal(t, []string{"git", "--version"}, fc.cmds[0])
+	assert.Equal(t, "sh", fc.cmds[1][0])
 }
 
 func TestCheckout(t *testing.T) {
@@ -150,6 +227,9 @@ func TestCheckout(t *testing.T) {
 			assert.Equal(t, tc.hostCopy, strings.HasPrefix(fc.src, host))
 			if tc.log != nil {
 				assert.DirExists(t, fc.hostPath(fc.dst))
+				require.Len(t, fc.cmds, 1)
+				assert.Equal(t, []string{"sh", "-c"}, fc.cmds[0][:2])
+				assert.Contains(t, fc.cmds[0][2], "protocol.version=2")
 			}
 		})
 	}

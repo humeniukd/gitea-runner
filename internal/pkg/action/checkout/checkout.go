@@ -10,12 +10,15 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 
 	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/internal/pkg/action"
+
+	"github.com/kballard/go-shellquote"
 )
 
 var inputNames = []string{"repository", "ref", "token", "path", "fetch-depth"}
@@ -54,40 +57,74 @@ func Main(ctx context.Context, c *action.Context) error {
 		}
 	}
 	url := strings.TrimSuffix(ghc.ServerURL, "/") + "/" + repository
+	if c.EnsureGit != nil {
+		if err := c.EnsureGit(ctx); err != nil {
+			return err
+		}
+	}
 	if err := clone(ctx, c.Container, url, ref, dst, cmp.Or(c.Inputs["token"], ghc.Token), depth, c.InsecureSkipTLS); err != nil {
 		return fmt.Errorf("checkout: clone %s@%s: %w", repository, ref, err)
 	}
 	return nil
 }
 
+// EnsureGit checks that git is on PATH in the job environment.
+func EnsureGit(ctx context.Context, env container.ExecutionsEnvironment) error {
+	if err := env.Exec([]string{"git", "--version"}, nil, "", "")(ctx); err != nil {
+		return fmt.Errorf("git is required in the job image for builtin:checkout: %w", err)
+	}
+	return nil
+}
+
 func clone(ctx context.Context, env container.ExecutionsEnvironment, url, ref, dst, token string, depth int, insecureSkipTLS bool) error {
-	run := func(args ...string) error {
-		return env.Exec(args, nil, "", "")(ctx)
+	steps := cloneCommands(url, ref, dst, token, depth, insecureSkipTLS)
+	if joinCloneScript(env) {
+		return env.Exec([]string{"sh", "-c", scriptFromCommands(steps)}, nil, "", "")(ctx)
 	}
-	git := func(args ...string) error {
-		cmd := append([]string{"git"}, gitConfigArgs(token, insecureSkipTLS)...)
-		return run(append(cmd, args...)...)
+	for _, step := range steps {
+		if err := env.Exec(step, nil, "", "")(ctx); err != nil {
+			return err
+		}
 	}
-	if err := run("git", "--version"); err != nil {
-		return fmt.Errorf("git is required in the job image: %w", err)
+	return nil
+}
+
+// joinCloneScript is true for Linux job containers (one docker exec). Windows host
+// mode has no sh guarantee, so it runs the same git argv list as separate execs.
+func joinCloneScript(env container.ExecutionsEnvironment) bool {
+	if runtime.GOOS != "windows" {
+		return true
 	}
-	if err := run("mkdir", "-p", dst); err != nil {
-		return err
-	}
-	if err := git("init", dst); err != nil {
-		return err
-	}
-	if err := git("-C", dst, "remote", "add", "origin", url); err != nil {
-		return err
+	_, host := env.(*container.HostEnvironment)
+	return !host
+}
+
+func cloneCommands(url, ref, dst, token string, depth int, insecureSkipTLS bool) [][]string {
+	cfg := append([]string{"-c", "protocol.version=2"}, gitConfigArgs(token, insecureSkipTLS)...)
+	git := func(args ...string) []string {
+		return append(append([]string{"git"}, cfg...), args...)
 	}
 	fetch := []string{"-C", dst, "fetch", "--no-tags"}
 	if depth > 0 {
 		fetch = append(fetch, "--depth", strconv.Itoa(depth))
 	}
-	if err := git(append(fetch, "origin", ref)...); err != nil {
-		return err
+	fetch = append(fetch, "origin", ref)
+	return [][]string{
+		{"mkdir", "-p", dst},
+		git("init", dst),
+		git("-C", dst, "remote", "add", "origin", url),
+		git(fetch...),
+		git("-C", dst, "checkout", "--force", "FETCH_HEAD"),
 	}
-	return git("-C", dst, "checkout", "--force", "FETCH_HEAD")
+}
+
+func scriptFromCommands(steps [][]string) string {
+	lines := make([]string, 0, len(steps)+1)
+	lines = append(lines, "set -eu")
+	for _, step := range steps {
+		lines = append(lines, shellquote.Join(step...))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func gitConfigArgs(token string, insecureSkipTLS bool) []string {

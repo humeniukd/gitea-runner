@@ -5,6 +5,8 @@
 package action
 
 import (
+	"context"
+
 	"gitea.com/gitea/runner/act/container"
 
 	"gitea.dev/actionslib/pkg/model"
@@ -20,4 +22,6 @@ type Context struct {
 	NoSkipCheckout  bool
 	UseGitIgnore    bool
 	InsecureSkipTLS bool
+	// EnsureGit runs once before a remote clone; nil skips the probe.
+	EnsureGit func(context.Context) error
 }
