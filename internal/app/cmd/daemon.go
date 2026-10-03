@@ -44,10 +44,6 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		initLogging(cfg)
 		log.Infoln("Starting runner daemon")
 
-		if err := envcheck.CheckGit(ctx); err != nil {
-			return err
-		}
-
 		reg, err := config.LoadRegistration(cfg.Runner.File)
 		if os.IsNotExist(err) {
 			log.Error("registration file not found, please register the runner first")

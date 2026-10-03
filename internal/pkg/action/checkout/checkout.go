@@ -79,11 +79,7 @@ func clone(ctx context.Context, c *action.Context, commands [][]string, token st
 	maps.Copy(env, git.ConfigEnv(append([]string{"protocol.version=2", "init.defaultBranch=main", "advice.detachedHead=false", "safe.directory=*"},
 		git.RemoteConfig(token, c.InsecureSkipTLS)...)...))
 	if _, host := c.Container.(*container.HostEnvironment); !host || runtime.GOOS != "windows" {
-		script := []string{
-			"set -e",
-			`command -v git >/dev/null || { echo "builtin:checkout needs git on PATH" >&2; exit 127; }`,
-			`[ "$(git config advice.detachedHead)" = false ] || { echo "builtin:checkout needs Git 2.34.1 or newer" >&2; exit 1; }`,
-		}
+		script := []string{"set -e", `command -v git >/dev/null || { echo "builtin:checkout needs git on PATH" >&2; exit 127; }`}
 		for _, command := range commands {
 			script = append(script, shellquote.Join(command...))
 		}
