@@ -152,8 +152,13 @@ var otlpMetrics = map[string]otlpMetric{
 	},
 	"gitea_runner_client_errors_total": {
 		name: "cicd.system.errors", unit: "{error}",
-		labels: map[string]string{"method": "rpc.method"}, values: rpcMethods,
-		extra: []*commonpb.KeyValue{keyValue("cicd.system.component", "runner"), keyValue("error.type", "_OTHER")},
+		labels: map[string]string{"method": "rpc.method", "code": "error.type"}, values: rpcMethods,
+		extra: []*commonpb.KeyValue{keyValue("cicd.system.component", "runner")},
+	},
+	"gitea_runner_state": {
+		name: "cicd.worker.count", unit: "{worker}", upDown: true,
+		labels: map[string]string{"state": "cicd.worker.state"},
+		values: map[string]string{"idle": "available", "unavailable": "offline"},
 	},
 	"go_goroutines":                 {name: "go.goroutine.count", unit: "{goroutine}", upDown: true},
 	"go_memstats_alloc_bytes_total": {name: "go.memory.allocated", unit: "By"},

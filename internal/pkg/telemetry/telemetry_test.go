@@ -178,7 +178,8 @@ func TestConvert(t *testing.T) {
 	for name, value := range gauges {
 		registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name}, func() float64 { return value }))
 	}
-	registry.MustRegister(counter, histogram, summary, jobs, running, fetch, updateLog)
+	state := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "gitea_runner_state"}, []string{"state"})
+	registry.MustRegister(counter, histogram, summary, jobs, running, fetch, updateLog, state)
 	counter.WithLabelValues("success").Add(3)
 	for _, value := range []float64{0.5, 1.5, 3} {
 		histogram.Observe(value)
@@ -186,6 +187,8 @@ func TestConvert(t *testing.T) {
 	summary.Observe(4)
 	jobs.WithLabelValues("cancelled").Inc()
 	running.Set(2)
+	state.WithLabelValues("idle").Set(1)
+	state.WithLabelValues("unavailable").Set(0)
 	families, err := registry.Gather()
 	require.NoError(t, err)
 
@@ -195,7 +198,7 @@ func TestConvert(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{
 		"duration_seconds", "gc_seconds", "jobs_total", "gitea.runner.jobs", "gitea.runner.job.active", "rpc.client.call.duration",
-		"go_memstats_sys_bytes", "go_memstats_heap_released_bytes", "go_memstats_stack_inuse_bytes", "go.memory.used",
+		"go_memstats_sys_bytes", "go_memstats_heap_released_bytes", "go_memstats_stack_inuse_bytes", "go.memory.used", "cicd.worker.count",
 	}, slices.Collect(maps.Keys(exported)))
 	assert.Equal(t, "s", exported["duration_seconds"].GetUnit())
 	buckets := exported["duration_seconds"].GetHistogram().GetDataPoints()[0]
@@ -230,6 +233,7 @@ func TestConvert(t *testing.T) {
 		return values
 	}
 	assert.Equal(t, map[string]float64{"stack": 20, "other": 50}, attributes(exported["go.memory.used"].GetSum().GetDataPoints(), "go.memory.type"))
+	assert.Equal(t, map[string]float64{"available": 1, "offline": 0}, attributes(exported["cicd.worker.count"].GetSum().GetDataPoints(), "cicd.worker.state"))
 	calls := exported["rpc.client.call.duration"]
 	assert.Equal(t, "s", calls.GetUnit())
 	require.Len(t, calls.GetHistogram().GetDataPoints(), 2)

@@ -394,7 +394,7 @@ func (p *Poller) fetchTask(ctx context.Context, s *workerState) (*runnerv1.Task,
 		p.lastPollFailed.Store(true)
 		s.consecutiveErrors++
 		metrics.PollFetchTotal.WithLabelValues(metrics.LabelResultError).Inc()
-		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodFetchTask).Inc()
+		metrics.ClientErrors.WithLabelValues(metrics.LabelMethodFetchTask, connect.CodeOf(err).String()).Inc()
 		return nil, false
 	}
 	p.markHealthyPoll()

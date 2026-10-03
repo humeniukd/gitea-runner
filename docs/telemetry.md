@@ -45,6 +45,7 @@ The metrics of the Prometheus endpoint are also exported, whether or not `metric
 
 | Metric | Attributes |
 | --- | --- |
+| `cicd.worker.count` | `cicd.worker.state` |
 | `cicd.system.errors` | `cicd.system.component`, `rpc.method`, `error.type` |
 | `rpc.client.call.duration` | `rpc.system.name`, `rpc.method` |
 | `gitea.runner.jobs` | `cicd.pipeline.result` |
