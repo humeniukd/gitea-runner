@@ -6,8 +6,8 @@ package checkout
 import (
 	"cmp"
 	"context"
-	"encoding/base64"
 	"fmt"
+	"maps"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"gitea.com/gitea/runner/act/common/git"
 	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/internal/pkg/action"
 
@@ -57,86 +58,47 @@ func Main(ctx context.Context, c *action.Context) error {
 		}
 	}
 	url := strings.TrimSuffix(ghc.ServerURL, "/") + "/" + repository
-	if c.EnsureGit != nil {
-		if err := c.EnsureGit(ctx); err != nil {
-			return err
-		}
-	}
-	if err := clone(ctx, c.Container, url, ref, dst, cmp.Or(c.Inputs["token"], ghc.Token), depth, c.InsecureSkipTLS); err != nil {
+	if err := clone(ctx, c, url, ref, dst, cmp.Or(c.Inputs["token"], ghc.Token), depth); err != nil {
 		return fmt.Errorf("checkout: clone %s@%s: %w", repository, ref, err)
 	}
 	return nil
 }
 
-// EnsureGit checks that git is on PATH in the job environment.
-func EnsureGit(ctx context.Context, env container.ExecutionsEnvironment) error {
-	if err := env.Exec([]string{"git", "--version"}, nil, "", "")(ctx); err != nil {
-		return fmt.Errorf("git is required in the job image for builtin:checkout: %w", err)
+func clone(ctx context.Context, c *action.Context, url, ref, dst, token string, depth int) error {
+	env := map[string]string{"GIT_TERMINAL_PROMPT": "0"}
+	maps.Copy(env, c.Env)
+	// safe.directory: a bound workdir is owned by the host user, not the container's
+	maps.Copy(env, git.ConfigEnv(append([]string{"protocol.version=2", "init.defaultBranch=main", "advice.detachedHead=false", "safe.directory=*"},
+		git.RemoteConfig(token, c.InsecureSkipTLS)...)...))
+	commands := cloneCommands(url, ref, dst, depth)
+	if _, host := c.Container.(*container.HostEnvironment); !host || runtime.GOOS != "windows" {
+		script := []string{"set -e", `command -v git >/dev/null || { echo "builtin:checkout needs git on PATH" >&2; exit 127; }`}
+		for _, command := range commands {
+			script = append(script, shellquote.Join(command...))
+		}
+		return c.Container.Exec([]string{"sh", "-c", strings.Join(script, "\n")}, env, "", "")(ctx)
 	}
-	return nil
-}
-
-func clone(ctx context.Context, env container.ExecutionsEnvironment, url, ref, dst, token string, depth int, insecureSkipTLS bool) error {
-	steps := cloneCommands(url, ref, dst, token, depth, insecureSkipTLS)
-	if joinCloneScript(env) {
-		return env.Exec([]string{"sh", "-c", scriptFromCommands(steps)}, nil, "", "")(ctx)
-	}
-	for _, step := range steps {
-		if err := env.Exec(step, nil, "", "")(ctx); err != nil {
+	for _, command := range commands {
+		if err := c.Container.Exec(command, env, "", "")(ctx); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// joinCloneScript is true for Linux job containers (one docker exec). Windows host
-// mode has no sh guarantee, so it runs the same git argv list as separate execs.
-func joinCloneScript(env container.ExecutionsEnvironment) bool {
-	if runtime.GOOS != "windows" {
-		return true
+func cloneCommands(url, ref, dst string, depth int) [][]string {
+	repo := func(args ...string) []string { return append([]string{"git", "-C", dst}, args...) }
+	commands := [][]string{
+		{"git", "init", "--quiet", dst},
+		repo("config", "remote.origin.url", url), // not `remote add`, which fails when checking out into the same path again
+		repo("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"),
 	}
-	_, host := env.(*container.HostEnvironment)
-	return !host
-}
-
-func cloneCommands(url, ref, dst, token string, depth int, insecureSkipTLS bool) [][]string {
-	cfg := append([]string{"-c", "protocol.version=2"}, gitConfigArgs(token, insecureSkipTLS)...)
-	git := func(args ...string) []string {
-		return append(append([]string{"git"}, cfg...), args...)
+	if depth == 0 {
+		commands = append(commands, repo("fetch", "--tags", "origin"), repo("fetch", "origin", ref))
+	} else {
+		commands = append(commands, repo("fetch", "--no-tags", "--depth", strconv.Itoa(depth), "origin", ref))
 	}
-	fetch := []string{"-C", dst, "fetch", "--no-tags"}
-	if depth > 0 {
-		fetch = append(fetch, "--depth", strconv.Itoa(depth))
-	}
-	fetch = append(fetch, "origin", ref)
-	return [][]string{
-		{"mkdir", "-p", dst},
-		git("init", dst),
-		git("-C", dst, "remote", "add", "origin", url),
-		git(fetch...),
-		git("-C", dst, "checkout", "--force", "FETCH_HEAD"),
-	}
-}
-
-func scriptFromCommands(steps [][]string) string {
-	lines := make([]string, 0, len(steps)+1)
-	lines = append(lines, "set -eu")
-	for _, step := range steps {
-		lines = append(lines, shellquote.Join(step...))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func gitConfigArgs(token string, insecureSkipTLS bool) []string {
-	var args []string
-	if insecureSkipTLS {
-		args = append(args, "-c", "http.sslVerify=false")
-	}
-	if token != "" {
-		auth := base64.StdEncoding.EncodeToString([]byte("token:" + token))
-		args = append(args, "-c", "http.extraHeader=AUTHORIZATION: basic "+auth)
-	}
-	return args
+	return append(commands, repo("checkout", "--force", "FETCH_HEAD"))
 }
 
 func workspaceDestination(workspace, checkoutPath string) (string, error) {

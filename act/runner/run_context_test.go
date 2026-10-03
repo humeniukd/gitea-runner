@@ -216,10 +216,6 @@ func (fakeContainer) Inspect(context.Context) (*container.Info, error) {
 
 func (fakeContainer) DumpLogs(context.Context) error { return nil }
 
-func (fakeContainer) Exec([]string, map[string]string, string, string) common.Executor {
-	return func(context.Context) error { return nil }
-}
-
 func fakeDockerDaemon(t *testing.T, handler http.HandlerFunc) {
 	t.Helper()
 	daemon := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
