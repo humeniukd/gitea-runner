@@ -102,7 +102,7 @@ func Setup(ctx context.Context, uuid, name string, gatherer prometheus.Gatherer)
 	if len(clients) == 0 {
 		return noop, nil
 	}
-	res, err := resource.New(ctx, resource.WithTelemetrySDK(), resource.WithAttributes(
+	res, err := resource.New(ctx, resource.WithTelemetrySDK(), resource.WithProcessRuntimeName(), resource.WithProcessRuntimeVersion(), resource.WithAttributes(
 		semconv.ServiceName("gitea-runner"),
 		semconv.ServiceVersion(ver.Version()),
 		semconv.ServiceInstanceID(uuid),
