@@ -119,10 +119,11 @@ func openFiles() otlpMetric {
 
 // otlpMetrics renames metrics to the OTel semantic conventions. Runner metrics without one use gitea.runner.*.
 // Unlisted Go and process metrics keep their Prometheus names, as semconv reserves go.* and process.* and
-// dashboards know the client_golang names. Info metrics are resource attributes, so not sent.
+// dashboards know the client_golang names. Info metrics and the start time are resource attributes, so not sent.
 var otlpMetrics = map[string]otlpMetric{
 	"gitea_runner_info":                           {},
 	"go_info":                                     {},
+	"process_start_time_seconds":                  {},
 	"gitea_runner_capacity":                       {name: "gitea.runner.job.limit", unit: "{job}", upDown: true},
 	"gitea_runner_uptime_seconds":                 {name: "process.uptime", unit: "s"},
 	"gitea_runner_job_running":                    {name: "gitea.runner.job.active", unit: "{job}", upDown: true},

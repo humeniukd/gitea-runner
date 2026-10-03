@@ -45,6 +45,8 @@ import (
 
 const scope = "gitea.com/gitea/runner"
 
+var processCreation = time.Now() // package init, within milliseconds of the process start
+
 type taskRunKey struct{}
 
 type taskRun struct {
@@ -108,6 +110,7 @@ func Setup(ctx context.Context, uuid, name string, gatherer prometheus.Gatherer)
 		semconv.ServiceInstanceID(uuid),
 		semconv.CICDWorkerID(uuid),
 		semconv.CICDWorkerName(name),
+		semconv.ProcessCreationTime(processCreation.UTC().Format(time.RFC3339Nano)),
 	), resource.WithFromEnv())
 	if err != nil {
 		return noop, err

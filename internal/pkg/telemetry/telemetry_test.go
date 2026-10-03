@@ -159,6 +159,11 @@ func TestExportRetriesAndMatchesOTLP(t *testing.T) {
 	assert.True(t, slices.ContainsFunc(resourceMetrics.GetResource().GetAttributes(), func(kv *commonpb.KeyValue) bool {
 		return proto.Equal(kv, keyValue("service.name", "gitea-runner"))
 	}))
+	created := slices.IndexFunc(resourceMetrics.GetResource().GetAttributes(), func(kv *commonpb.KeyValue) bool { return kv.GetKey() == "process.creation.time" })
+	require.NotEqual(t, -1, created)
+	creation, err := time.Parse(time.RFC3339Nano, resourceMetrics.GetResource().GetAttributes()[created].GetValue().GetStringValue())
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now(), creation, time.Hour)
 	assert.InDelta(t, 2, resourceMetrics.GetScopeMetrics()[0].GetMetrics()[0].GetGauge().GetDataPoints()[0].GetAsDouble(), 0)
 }
 
