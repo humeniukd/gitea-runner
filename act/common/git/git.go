@@ -5,7 +5,9 @@
 package git
 
 import (
+	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -32,7 +34,7 @@ var (
 	githubSSHRegex      = regexp.MustCompile(`github.com[:/](.+)/(.+?)(?:.git)?$`)
 	hexRefRegex         = regexp.MustCompile(`^[0-9a-fA-F]+$`)
 
-	localEnvVars = []string{ // `git rev-parse --local-env-vars`
+	LocalEnvVars = []string{ // `git rev-parse --local-env-vars`, inherited ones point git at another repository
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY",
 		"GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS",
 		"GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE", "GIT_COMMON_DIR",
@@ -214,10 +216,7 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 			return err
 		}
 		resolved, err := resolveRef(ctx, input.Dir, input.Ref)
-		if err == nil && isShortHash(input.Ref, resolved) {
-			return &Error{err: ErrShortRef, commit: resolved}
-		}
-		if err != nil && input.OfflineMode {
+		if errors.Is(err, ErrShortRef) || (err != nil && input.OfflineMode) {
 			return err
 		}
 		if !input.OfflineMode && (err != nil || (reused && !isFullHash(input.Ref, resolved))) {
@@ -272,11 +271,7 @@ func clone(ctx context.Context, input NewGitCloneExecutorInput) error {
 }
 
 func shallowPinnedClone(ctx context.Context, input NewGitCloneExecutorInput) error {
-	objectFormat := "sha1"
-	if len(input.Ref) == 64 {
-		objectFormat = "sha256"
-	}
-	if _, err := runGit(ctx, "", &input, "init", "--object-format="+objectFormat, input.Dir); err != nil {
+	if _, err := runGit(ctx, "", &input, "init", "--object-format="+ObjectFormat(input.Ref), input.Dir); err != nil {
 		return err
 	}
 	if _, err := runGit(ctx, input.Dir, &input, "remote", "add", "origin", input.URL); err != nil {
@@ -287,7 +282,7 @@ func shallowPinnedClone(ctx context.Context, input NewGitCloneExecutorInput) err
 }
 
 func fetch(ctx context.Context, input NewGitCloneExecutorInput) error {
-	args := []string{"fetch", "--force", "--prune", "--no-auto-maintenance"}
+	args := []string{"fetch", "--force", "--prune"}
 	if _, err := os.Stat(filepath.Join(input.Dir, ".git", "shallow")); err == nil {
 		args = append(args, "--depth", "1", "--no-tags")
 	}
@@ -296,35 +291,53 @@ func fetch(ctx context.Context, input NewGitCloneExecutorInput) error {
 }
 
 func cachedRef(ref string) string {
-	return "refs/runner/" + base64.RawURLEncoding.EncodeToString([]byte(ref))
+	return fmt.Sprintf("refs/runner/%x", sha256.Sum256([]byte(ref)))
 }
 
 func resolveRef(ctx context.Context, dir, ref string) (string, error) {
-	if isFullObjectID(ref) {
-		return gitOutput(ctx, dir, "rev-parse", "--verify", ref+"^{commit}")
+	if !isFullObjectID(ref) {
+		for _, name := range []string{cachedRef(ref), "refs/tags/" + ref, "refs/remotes/origin/" + ref} {
+			if sha, err := gitOutput(ctx, dir, "rev-parse", "--verify", name+"^{commit}"); err == nil {
+				return sha, nil
+			}
+		}
 	}
-	if sha, err := gitOutput(ctx, dir, "rev-parse", "--verify", cachedRef(ref)+"^{commit}"); err == nil {
-		return sha, nil
+	sha, err := gitOutput(ctx, dir, "rev-parse", "--verify", ref+"^{commit}")
+	if err == nil && hexRefRegex.MatchString(ref) && len(sha) != len(ref) {
+		return "", &Error{err: ErrShortRef, commit: sha}
 	}
-	if sha, err := gitOutput(ctx, dir, "rev-parse", "--verify", "refs/tags/"+ref+"^{commit}"); err == nil {
-		return sha, nil
-	}
-	if sha, err := gitOutput(ctx, dir, "rev-parse", "--verify", "refs/remotes/origin/"+ref+"^{commit}"); err == nil {
-		return sha, nil
-	}
-	return gitOutput(ctx, dir, "rev-parse", "--verify", ref+"^{commit}")
+	return sha, err
 }
 
 func isFullObjectID(ref string) bool {
-	return hexRefRegex.MatchString(ref) && (len(ref) == 40 || len(ref) == 64)
+	return ObjectFormat(ref) != ""
 }
 
 func isFullHash(ref, resolved string) bool {
 	return isFullObjectID(ref) && len(ref) == len(resolved)
 }
 
-func isShortHash(ref, resolved string) bool {
-	return hexRefRegex.MatchString(ref) && !isFullHash(ref, resolved) && strings.HasPrefix(resolved, ref)
+// ObjectFormat returns the object format of a full commit hash, empty for anything else.
+func ObjectFormat(sha string) string {
+	switch {
+	case !hexRefRegex.MatchString(sha):
+		return ""
+	case len(sha) == 40:
+		return "sha1"
+	case len(sha) == 64:
+		return "sha256"
+	}
+	return ""
+}
+
+// RemoteObjectFormat asks the remote for the object format of ref, sha1 when it has no such ref.
+func RemoteObjectFormat(ctx context.Context, url, ref, token string, insecureSkipTLS bool) (string, error) {
+	out, err := runGit(ctx, "", &NewGitCloneExecutorInput{Token: token, InsecureSkipTLS: insecureSkipTLS}, "ls-remote", url, ref)
+	if err != nil {
+		return "", err
+	}
+	sha, _, _ := strings.Cut(string(out), "\t")
+	return cmp.Or(ObjectFormat(sha), "sha1"), nil
 }
 
 func removePartialClone(dir string) error {
@@ -372,7 +385,7 @@ func runGit(ctx context.Context, dir string, input *NewGitCloneExecutorInput, ar
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = slices.DeleteFunc(os.Environ(), func(entry string) bool {
 		name, _, _ := strings.Cut(entry, "=")
-		return slices.Contains(localEnvVars, name)
+		return slices.Contains(LocalEnvVars, name)
 	})
 	for key, value := range ConfigEnv(config...) {
 		cmd.Env = append(cmd.Env, key+"="+value)

@@ -216,6 +216,8 @@ func TestGitCloneExecutor(t *testing.T) {
 	require.NoError(t, err)
 	fullSha := strings.TrimSpace(string(out))
 
+	require.NoError(t, gitCmd("-C", workDir, "push", "origin", "main:refs/heads/"+fullSha[:4]))
+
 	hostConfig := filepath.Join(t.TempDir(), "gitconfig")
 	require.NoError(t, os.WriteFile(hostConfig, []byte("[core]\n\tautocrlf = true\n[url \""+remoteDir+"\"]\n\tinsteadOf = https://example.invalid/action\n"), 0o644))
 	t.Setenv("GIT_CONFIG_GLOBAL", hostConfig)
@@ -243,6 +245,9 @@ func TestGitCloneExecutor(t *testing.T) {
 		},
 		"HEAD": {
 			Ref: "HEAD",
+		},
+		"hex branch named like its own commit": {
+			Ref: fullSha[:4],
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
