@@ -41,7 +41,9 @@ Jobs receive `TRACEPARENT`, so tools in a job that use OpenTelemetry can add the
 
 ## Metrics
 
-The metrics of the Prometheus endpoint are also exported, whether or not `metrics.enabled` is set. They are sent every export interval and once more on shutdown. If your collector only accepts traces, set `OTEL_METRICS_EXPORTER=none`. They are named per the [OpenTelemetry semantic conventions](https://opentelemetry.io/docs/specs/semconv/):
+The metrics of the Prometheus endpoint are also exported, whether or not `metrics.enabled` is set. They are sent every export interval and once more on shutdown. If you want to disable OTLP metrics, set `OTEL_METRICS_EXPORTER=none`.
+
+Most metric and attribute names follow [OpenTelemetry semantic conventions](https://opentelemetry.io/docs/specs/semconv/) for CI/CD. Runner metrics outside the standard semantic conventions use the runner's own `gitea.runner.*` namespace.
 
 | Metric | Attributes |
 | --- | --- |
@@ -59,15 +61,13 @@ The metrics of the Prometheus endpoint are also exported, whether or not `metric
 | `process.uptime`, `process.memory.usage`, `process.memory.virtual`, `process.unix.file_descriptor.count` (`process.windows.handle.count` on Windows) | |
 | `process.network.io` | `network.io.direction` |
 
-Runner metrics without a semantic convention use the runner's own `gitea.runner.*` namespace. The conventions reserve `go.*` and `process.*`, so the other Go and process metrics keep their Prometheus names, which dashboards already know:
+The conventions reserve `go.*` and `process.*`, so the all unstandardized Go and process metrics keep their Prometheus names:
 
 | Metric |
 | --- |
 | `go_gc_duration_seconds`, `go_threads` |
 | `go_memstats_alloc_bytes`, `go_memstats_buck_hash_sys_bytes`, `go_memstats_frees_total`, `go_memstats_gc_sys_bytes`, `go_memstats_heap_alloc_bytes`, `go_memstats_heap_idle_bytes`, `go_memstats_heap_inuse_bytes`, `go_memstats_heap_objects`, `go_memstats_heap_released_bytes`, `go_memstats_heap_sys_bytes`, `go_memstats_last_gc_time_seconds`, `go_memstats_mcache_inuse_bytes`, `go_memstats_mcache_sys_bytes`, `go_memstats_mspan_inuse_bytes`, `go_memstats_mspan_sys_bytes`, `go_memstats_other_sys_bytes`, `go_memstats_stack_inuse_bytes`, `go_memstats_stack_sys_bytes`, `go_memstats_sys_bytes` |
 | `process_cpu_seconds_total`, `process_max_fds`, `process_start_time_seconds`, `process_virtual_memory_max_bytes` |
-
-The runner and Go versions are sent as the `service.version` and `process.runtime.version` resource attributes rather than as metrics.
 
 ## Security
 
