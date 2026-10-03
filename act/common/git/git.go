@@ -172,9 +172,10 @@ type NewGitCloneExecutorInput struct {
 
 // CloneIfRequired reports whether an existing local clone was reused.
 func CloneIfRequired(ctx context.Context, input NewGitCloneExecutorInput, logger log.FieldLogger) (bool, error) {
-	origin, err := findGitRemoteURL(ctx, input.Dir)
-	if _, statErr := os.Stat(filepath.Join(input.Dir, ".git")); statErr != nil {
-		err = statErr // git would discover a repository around Dir
+	var origin string
+	_, err := os.Stat(filepath.Join(input.Dir, ".git")) // without it git would discover a repository around Dir
+	if err == nil {
+		origin, err = findGitRemoteURL(ctx, input.Dir)
 	}
 	if err == nil && origin == input.URL {
 		return true, nil
@@ -285,38 +286,25 @@ func shallowPinnedClone(ctx context.Context, input NewGitCloneExecutorInput) err
 	return err
 }
 
-func fetch(ctx context.Context, input NewGitCloneExecutorInput) (err error) {
+func fetch(ctx context.Context, input NewGitCloneExecutorInput) error {
 	args := []string{"fetch", "--force", "--prune", "--no-auto-maintenance"}
 	if _, err := os.Stat(filepath.Join(input.Dir, ".git", "shallow")); err == nil {
 		args = append(args, "--depth", "1", "--no-tags")
 	}
-	for _, refSpec := range fetchRefSpecs(ctx, input.Dir, input.Ref) {
-		if _, err = runGit(ctx, input.Dir, &input, slices.Concat(args, []string{"origin", refSpec})...); err == nil {
-			return nil
-		}
-	}
+	_, err := runGit(ctx, input.Dir, &input, append(args, "origin", "+"+input.Ref+":"+cachedRef(input.Ref))...) // git picks the remote ref, a tag before a branch
 	return err
 }
 
-func fetchRefSpecs(ctx context.Context, dir, ref string) []string {
-	tag := "+refs/tags/" + ref + ":refs/tags/" + ref
-	switch {
-	case isFullObjectID(ref):
-		return []string{"+" + ref + ":refs/pinned/" + ref}
-	case ref == "HEAD":
-		return []string{"+HEAD:refs/remotes/origin/HEAD"}
-	case strings.HasPrefix(ref, "refs/"):
-		return []string{"+" + ref + ":" + ref}
-	}
-	if _, err := runGit(ctx, dir, nil, "show-ref", "--verify", "--quiet", "refs/tags/"+ref); err == nil {
-		return []string{tag}
-	}
-	return []string{"+refs/heads/" + ref + ":refs/remotes/origin/" + ref, tag} // the tag may have been published after the cache was made
+func cachedRef(ref string) string {
+	return "refs/runner/" + base64.RawURLEncoding.EncodeToString([]byte(ref))
 }
 
 func resolveRef(ctx context.Context, dir, ref string) (string, error) {
 	if isFullObjectID(ref) {
 		return gitOutput(ctx, dir, "rev-parse", "--verify", ref+"^{commit}")
+	}
+	if sha, err := gitOutput(ctx, dir, "rev-parse", "--verify", cachedRef(ref)+"^{commit}"); err == nil {
+		return sha, nil
 	}
 	if sha, err := gitOutput(ctx, dir, "rev-parse", "--verify", "refs/tags/"+ref+"^{commit}"); err == nil {
 		return sha, nil

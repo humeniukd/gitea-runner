@@ -325,57 +325,24 @@ func TestGitCloneExecutorReclonesWhenOriginURLChanges(t *testing.T) {
 
 func TestGitCloneExecutorFollowsRemoteRefChanges(t *testing.T) {
 	t.Parallel()
-	// Simulate the scenario where a remote ref (e.g. a GitHub PR head ref) changes
-	// non-fast-forward between two fetches. Before the fix, the fetch used Force=false,
-	// causing go-git to return ErrForceNeeded and short-circuit the checkout.
-
-	// Create a bare "remote" repo with an initial commit on main and a feature branch.
 	remoteDir := t.TempDir()
 	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
-
-	// We need a working clone to push commits from.
 	workDir := t.TempDir()
 	require.NoError(t, gitCmd("clone", remoteDir, workDir))
 	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "main"))
 	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "initial"))
+	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "feature-1"))
 	require.NoError(t, gitCmd("-C", workDir, "push", "-u", "origin", "main"))
 
-	// Create a feature branch (simulates refs/pull/N/head).
-	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "feature"))
-	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "feature-1"))
-	require.NoError(t, gitCmd("-C", workDir, "push", "origin", "feature"))
-
-	// First clone via the executor — should succeed and cache the repo.
-	cloneDir := t.TempDir()
-	clone := NewGitCloneExecutor(NewGitCloneExecutorInput{
-		URL: remoteDir,
-		Ref: "main",
-		Dir: cloneDir,
-	})
+	dir := t.TempDir()
+	clone := NewGitCloneExecutor(NewGitCloneExecutorInput{URL: remoteDir, Ref: "main", Dir: dir})
 	require.NoError(t, clone(context.Background()))
 
-	// Now force-push the feature branch to a non-fast-forward commit (simulates
-	// a PR rebase). This makes refs/heads/feature non-fast-forward.
-	require.NoError(t, gitCmd("-C", workDir, "checkout", "main"))
-	require.NoError(t, gitCmd("-C", workDir, "branch", "-D", "feature"))
-	require.NoError(t, gitCmd("-C", workDir, "checkout", "-b", "feature"))
+	require.NoError(t, gitCmd("-C", workDir, "reset", "--hard", "HEAD~1"))
 	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "feature-rewritten"))
-	require.NoError(t, gitCmd("-C", workDir, "push", "--force", "origin", "feature"))
-
-	// Also advance main so we can verify the clone picks up the new commit.
-	require.NoError(t, gitCmd("-C", workDir, "checkout", "main"))
-	require.NoError(t, gitCmd("-C", workDir, "commit", "--allow-empty", "-m", "second"))
-	require.NoError(t, gitCmd("-C", workDir, "push", "origin", "main"))
-
-	// Second clone to the same directory — before the fix this returned ErrForceNeeded
-	// and left the working tree at the old commit.
-	err := clone(context.Background())
-	require.NoError(t, err, "fetch with non-fast-forward refs must not fail when Force=true")
-
-	// Verify the working tree was actually updated to the latest main commit.
-	out, err := exec.Command("git", "-C", cloneDir, "log", "--oneline", "-1", "--format=%s").Output()
-	require.NoError(t, err)
-	assert.Equal(t, "second", strings.TrimSpace(string(out)), "working tree should be at the latest commit")
+	require.NoError(t, gitCmd("-C", workDir, "push", "--force", "origin", "main"))
+	require.NoError(t, clone(context.Background()), "a non-fast-forward ref must update")
+	assert.Equal(t, "feature-rewritten", gitHeadSubject(t, dir))
 
 	tagClone := NewGitCloneExecutor(NewGitCloneExecutorInput{URL: remoteDir, Ref: "v9", Dir: t.TempDir()})
 	require.Error(t, tagClone(context.Background()))

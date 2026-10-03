@@ -111,14 +111,10 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			return f, f, err
 		}
 
-		return common.NewPipelineExecutor(
-			func(ctx context.Context) error {
-				defer git.AcquireCloneLock(actionDir)()
-				actionModel, err := sar.readAction(ctx, sar.Step, actionDir, sar.remoteAction.Path, remoteReader, os.WriteFile)
-				sar.action = actionModel
-				return err
-			},
-		)(ctx)
+		defer git.AcquireCloneLock(actionDir)()
+		actionModel, err := sar.readAction(ctx, sar.Step, actionDir, sar.remoteAction.Path, remoteReader, os.WriteFile)
+		sar.action = actionModel
+		return err
 	}
 }
 

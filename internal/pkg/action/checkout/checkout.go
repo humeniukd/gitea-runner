@@ -76,7 +76,7 @@ func clone(ctx context.Context, c *action.Context, commands [][]string, token st
 	env := map[string]string{"GIT_TERMINAL_PROMPT": "0"}
 	maps.Copy(env, c.Env)
 	// safe.directory: a bound workdir belongs to the host user
-	maps.Copy(env, git.ConfigEnv(append([]string{"protocol.version=2", "init.defaultBranch=main", "advice.detachedHead=false", "safe.directory=*"},
+	maps.Copy(env, git.ConfigEnv(append([]string{"protocol.version=2", "init.defaultBranch=main", "advice.detachedHead=false", "maintenance.auto=false", "safe.directory=*"},
 		git.RemoteConfig(token, c.InsecureSkipTLS)...)...))
 	if _, host := c.Container.(*container.HostEnvironment); !host || runtime.GOOS != "windows" {
 		script := []string{"set -e", `command -v git >/dev/null || { echo "builtin:checkout needs git on PATH" >&2; exit 127; }`}
@@ -103,7 +103,7 @@ func cloneCommands(url, ref, dst, objectFormat string, depth int) [][]string {
 		repo("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"),
 	}
 	if depth == 0 {
-		commands = append(commands, repo("fetch", "--force", "--tags", "--depth", fullDepth, "origin"), repo("fetch", "origin", ref))
+		commands = append(commands, repo("fetch", "--force", "--tags", "--depth", fullDepth, "origin", ref, "+refs/heads/*:refs/remotes/origin/*"))
 	} else {
 		commands = append(commands, repo("fetch", "--no-tags", "--depth", strconv.Itoa(depth), "origin", ref))
 	}
