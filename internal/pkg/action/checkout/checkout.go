@@ -57,22 +57,33 @@ func Main(ctx context.Context, c *action.Context) error {
 			ref = ghc.Sha
 		}
 	}
+	knownSHA := ref
+	if isWorkflowRepo {
+		knownSHA = ghc.Sha
+	}
+	objectFormat := "sha1"
+	if len(knownSHA) == 64 {
+		objectFormat = "sha256"
+	}
 	url := strings.TrimSuffix(ghc.ServerURL, "/") + "/" + repository
-	if err := clone(ctx, c, url, ref, dst, cmp.Or(c.Inputs["token"], ghc.Token), depth); err != nil {
+	if err := clone(ctx, c, cloneCommands(url, ref, dst, objectFormat, depth), cmp.Or(c.Inputs["token"], ghc.Token)); err != nil {
 		return fmt.Errorf("checkout: clone %s@%s: %w", repository, ref, err)
 	}
 	return nil
 }
 
-func clone(ctx context.Context, c *action.Context, url, ref, dst, token string, depth int) error {
+func clone(ctx context.Context, c *action.Context, commands [][]string, token string) error {
 	env := map[string]string{"GIT_TERMINAL_PROMPT": "0"}
 	maps.Copy(env, c.Env)
-	// safe.directory: a bound workdir is owned by the host user, not the container's
+	// safe.directory: a bound workdir belongs to the host user
 	maps.Copy(env, git.ConfigEnv(append([]string{"protocol.version=2", "init.defaultBranch=main", "advice.detachedHead=false", "safe.directory=*"},
 		git.RemoteConfig(token, c.InsecureSkipTLS)...)...))
-	commands := cloneCommands(url, ref, dst, depth)
 	if _, host := c.Container.(*container.HostEnvironment); !host || runtime.GOOS != "windows" {
-		script := []string{"set -e", `command -v git >/dev/null || { echo "builtin:checkout needs git on PATH" >&2; exit 127; }`}
+		script := []string{
+			"set -e",
+			`command -v git >/dev/null || { echo "builtin:checkout needs git on PATH" >&2; exit 127; }`,
+			`[ "$(git config advice.detachedHead)" = false ] || { echo "builtin:checkout needs Git 2.34.1 or newer" >&2; exit 1; }`,
+		}
 		for _, command := range commands {
 			script = append(script, shellquote.Join(command...))
 		}
@@ -86,15 +97,17 @@ func clone(ctx context.Context, c *action.Context, url, ref, dst, token string, 
 	return nil
 }
 
-func cloneCommands(url, ref, dst string, depth int) [][]string {
+const fullDepth = "2147483647" // git's INFINITE_DEPTH, also deepens a shallow dst
+
+func cloneCommands(url, ref, dst, objectFormat string, depth int) [][]string {
 	repo := func(args ...string) []string { return append([]string{"git", "-C", dst}, args...) }
 	commands := [][]string{
-		{"git", "init", "--quiet", dst},
-		repo("config", "remote.origin.url", url), // not `remote add`, which fails when checking out into the same path again
+		{"git", "init", "--quiet", "--object-format=" + objectFormat, dst},
+		repo("config", "remote.origin.url", url), // `remote add` fails on a repeated checkout
 		repo("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"),
 	}
 	if depth == 0 {
-		commands = append(commands, repo("fetch", "--tags", "origin"), repo("fetch", "origin", ref))
+		commands = append(commands, repo("fetch", "--tags", "--depth", fullDepth, "origin"), repo("fetch", "origin", ref))
 	} else {
 		commands = append(commands, repo("fetch", "--no-tags", "--depth", strconv.Itoa(depth), "origin", ref))
 	}

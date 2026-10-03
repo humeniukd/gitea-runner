@@ -83,12 +83,24 @@ func cleanGitHooks(dir string) error {
 	return nil
 }
 
-func TestFindGithubRepoUsesOrigin(t *testing.T) {
+func TestFindGitMetadataOfSHA256RepositoryUsesOrigin(t *testing.T) {
+	t.Parallel()
 	basedir := t.TempDir()
 	const remoteURL = "https://github.com/owner/repo.git"
-	require.NoError(t, gitCmd("init", basedir))
+	require.NoError(t, gitCmd("init", "--object-format=sha256", "--initial-branch=main", basedir))
 	require.NoError(t, cleanGitHooks(basedir))
+	require.NoError(t, gitCmd("-C", basedir, "commit", "--allow-empty", "-m", "init"))
 	require.NoError(t, gitCmd("-C", basedir, "remote", "add", "origin", remoteURL))
+
+	shortSHA, sha, err := FindGitRevision(context.Background(), basedir)
+	require.NoError(t, err)
+	require.Equal(t, gitRevParse(t, basedir, "HEAD"), sha)
+	require.Len(t, sha, 64)
+	require.Equal(t, sha[:7], shortSHA)
+
+	ref, err := FindGitRef(context.Background(), basedir)
+	require.NoError(t, err)
+	require.Equal(t, "refs/heads/main", ref)
 
 	url, err := findGitRemoteURL(context.Background(), basedir)
 	require.NoError(t, err)
@@ -100,6 +112,7 @@ func TestFindGithubRepoUsesOrigin(t *testing.T) {
 }
 
 func TestGitFindRef(t *testing.T) {
+	t.Parallel()
 	basedir := t.TempDir()
 
 	for name, tt := range map[string]struct {
@@ -255,6 +268,7 @@ func TestGitCloneExecutor(t *testing.T) {
 }
 
 func TestGitCloneExecutorReclonesWhenOriginURLChanges(t *testing.T) {
+	t.Parallel()
 	createRemote := func(message string) string {
 		remoteDir := t.TempDir()
 		require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
@@ -300,6 +314,7 @@ func TestGitCloneExecutorReclonesWhenOriginURLChanges(t *testing.T) {
 }
 
 func TestGitCloneExecutorNonFastForwardRef(t *testing.T) {
+	t.Parallel()
 	// Simulate the scenario where a remote ref (e.g. a GitHub PR head ref) changes
 	// non-fast-forward between two fetches. Before the fix, the fetch used Force=false,
 	// causing go-git to return ErrForceNeeded and short-circuit the checkout.
@@ -354,6 +369,7 @@ func TestGitCloneExecutorNonFastForwardRef(t *testing.T) {
 }
 
 func TestGitCloneExecutorOfflineMode(t *testing.T) {
+	t.Parallel()
 	// Build a local "remote" with a single commit on main.
 	remoteDir := t.TempDir()
 	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
@@ -400,6 +416,7 @@ func TestGitCloneExecutorOfflineMode(t *testing.T) {
 }
 
 func TestGitCloneExecutorQuietDemotesCloneLine(t *testing.T) {
+	t.Parallel()
 	remoteDir := t.TempDir()
 	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
 	workDir := t.TempDir()
@@ -438,6 +455,7 @@ func TestGitCloneExecutorQuietDemotesCloneLine(t *testing.T) {
 }
 
 func TestGitCloneExecutorShallow(t *testing.T) {
+	t.Parallel()
 	// Build a local "remote" with several commits on main plus a tag, so a full clone would pull noticeably more history than a shallow one.
 	remoteDir := t.TempDir()
 	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
@@ -532,6 +550,7 @@ func TestGitCloneExecutorShallow(t *testing.T) {
 }
 
 func TestGitCloneExecutorPinnedHashIgnoresShadowingRef(t *testing.T) {
+	t.Parallel()
 	remoteDir := t.TempDir()
 	require.NoError(t, gitCmd("init", "--bare", "--initial-branch=main", remoteDir))
 	workDir := t.TempDir()
@@ -656,6 +675,7 @@ func TestAcquireCloneLock(t *testing.T) {
 
 // An unresponsive remote must not pin a job: the refresh has to be interruptible.
 func TestNewGitCloneExecutorFetchSendsTokenAndHonoursContext(t *testing.T) {
+	t.Parallel()
 	block := make(chan struct{})
 	reached := make(chan struct{})
 	var once sync.Once

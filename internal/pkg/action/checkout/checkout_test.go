@@ -56,12 +56,17 @@ func TestCheckout(t *testing.T) {
 	server := t.TempDir()
 	runGit(t, "clone", "--bare", "--branch", "main", work, filepath.Join(server, "org", "repo"))
 	runGit(t, "clone", "--bare", "--branch", "trunk", work, filepath.Join(server, "other", "repo"))
+	sha256Repo := filepath.Join(server, "org", "sha256")
+	runGit(t, "init", "--object-format=sha256", "--initial-branch=main", sha256Repo)
+	runGit(t, "-C", sha256Repo, "commit", "--allow-empty", "-m", "s1")
+	sha256 := runGit(t, "-C", sha256Repo, "rev-parse", "HEAD")
 	host := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(host, "marker"), nil, 0o644))
 
 	for _, tc := range []struct {
 		name          string
 		bind, noSkip  bool
+		before        map[string]string
 		inputs        map[string]string
 		dst           string
 		log, refs     []string
@@ -74,16 +79,19 @@ func TestCheckout(t *testing.T) {
 		{name: "ref clones shallow", inputs: map[string]string{"ref": "refs/heads/feature"}, log: []string{"f1"}},
 		{name: "tag ref wins over same-named branch", inputs: map[string]string{"ref": "refs/tags/trunk"}, log: []string{"c2"}},
 		{
-			name: "fetch-depth 0 clones full history with every branch and tag", inputs: map[string]string{"ref": "feature", "fetch-depth": "0"}, log: []string{"f1", "c2", "c1"},
+			name: "fetch-depth 0 deepens a shallow checkout to every branch and tag", before: map[string]string{"ref": "feature"},
+			inputs: map[string]string{"ref": "feature", "fetch-depth": "0"}, log: []string{"f1", "c2", "c1"},
 			refs: []string{"refs/remotes/origin/feature", "refs/remotes/origin/main", "refs/remotes/origin/trunk", "refs/tags/trunk", "refs/tags/v1"},
 		},
 		{name: "other repository defaults to its default branch", inputs: map[string]string{"repository": "other/repo"}, log: []string{"t2"}},
+		{name: "sha256 repository", inputs: map[string]string{"repository": "org/sha256", "ref": sha256}, log: []string{"s1"}},
 		{name: "unsupported input", inputs: map[string]string{"submodules": "true"}, err: true},
 		{name: "relative path escaping workspace", inputs: map[string]string{"path": "../x"}, err: true},
 		{name: "absolute path", inputs: map[string]string{"path": "/x"}, err: true},
 		{name: "negative fetch-depth", inputs: map[string]string{"fetch-depth": "-1"}, err: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			workspace := t.TempDir()
 			checkout := func(inputs map[string]string) error {
 				return Main(t.Context(), &action.Context{
@@ -96,6 +104,9 @@ func TestCheckout(t *testing.T) {
 					NoSkipCheckout: tc.noSkip,
 					Env:            map[string]string{"PATH": os.Getenv("PATH"), "GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1"},
 				})
+			}
+			if tc.before != nil {
+				require.NoError(t, checkout(tc.before))
 			}
 			err := checkout(tc.inputs)
 			if tc.err {

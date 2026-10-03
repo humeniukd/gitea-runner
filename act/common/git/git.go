@@ -31,20 +31,24 @@ var (
 	githubSSHRegex      = regexp.MustCompile(`github.com[:/](.+)/(.+?)(?:.git)?$`)
 	hexRefRegex         = regexp.MustCompile(`^[0-9a-fA-F]+$`)
 
-	// localEnvVars is `git rev-parse --local-env-vars`, inherited values would point commands at another repository.
-	localEnvVars = []string{
+	localEnvVars = []string{ // `git rev-parse --local-env-vars`
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY",
 		"GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS",
 		"GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE", "GIT_COMMON_DIR",
 	}
 
-	cloneLocks lock.Keyed[string]
+	cloneLocks lock.Keyed[string] // key: clone target directory
 
 	ErrShortRef = errors.New("short SHA references are not supported")
 )
 
 // AcquireCloneLock returns an unlock function after locking the per-directory mutex for dir.
-func AcquireCloneLock(dir string) func() { return cloneLocks.Lock(dir) }
+// Only concurrent operations targeting the same directory are serialized; clones into different directories run in parallel.
+// Callers reading files inside dir (e.g. tarring a checked-out action into a job container) must hold this lock too,
+// otherwise a concurrent NewGitCloneExecutor on the same dir can mutate the worktree mid-read.
+func AcquireCloneLock(dir string) func() {
+	return cloneLocks.Lock(dir)
+}
 
 type Error struct {
 	err    error
@@ -55,7 +59,7 @@ func (e *Error) Error() string  { return e.err.Error() }
 func (e *Error) Unwrap() error  { return e.err }
 func (e *Error) Commit() string { return e.commit }
 
-// FindGitRevision gets the current git revision.
+// FindGitRevision get the current git revision
 func FindGitRevision(ctx context.Context, file string) (shortSHA, sha string, err error) {
 	logger := common.Logger(ctx)
 	sha, err = gitOutput(ctx, file, "rev-parse", "--verify", "HEAD^{commit}")
@@ -70,7 +74,7 @@ func FindGitRevision(ctx context.Context, file string) (shortSHA, sha string, er
 	return sha[:7], sha, nil
 }
 
-// FindGitRef gets the current git ref.
+// FindGitRef get the current git ref
 func FindGitRef(ctx context.Context, file string) (string, error) {
 	logger := common.Logger(ctx)
 	logger.Debugf("Loading revision from git directory")
@@ -102,7 +106,7 @@ func FindGitRef(ctx context.Context, file string) (string, error) {
 	return "", fmt.Errorf("failed to identify reference (tag/branch) for the checked-out revision '%s'", revision)
 }
 
-// FindGithubRepo gets the repository slug from origin.
+// FindGithubRepo get the repo
 func FindGithubRepo(ctx context.Context, file, githubInstance string) (string, error) {
 	url, err := findGitRemoteURL(ctx, file)
 	if err != nil {
@@ -113,7 +117,7 @@ func FindGithubRepo(ctx context.Context, file, githubInstance string) (string, e
 }
 
 func findGitRemoteURL(ctx context.Context, file string) (string, error) {
-	url, err := gitOutput(ctx, file, "config", "--get", "remote.origin.url") // not `remote get-url`, its insteadOf rewrite would never match input.URL
+	url, err := gitOutput(ctx, file, "config", "--get", "remote.origin.url") // `remote get-url` applies insteadOf
 	if err != nil {
 		return "", err
 	}
@@ -144,19 +148,27 @@ func findGitSlug(url, githubInstance string) (string, string) {
 	return "", url
 }
 
-// NewGitCloneExecutorInput is the input for NewGitCloneExecutor.
+// NewGitCloneExecutorInput the input for the NewGitCloneExecutor
 type NewGitCloneExecutorInput struct {
-	URL             string
-	Ref             string
-	Dir             string
-	Token           string
-	OfflineMode     bool
-	Depth           int
-	Quiet           bool
+	URL         string
+	Ref         string
+	Dir         string
+	Token       string
+	OfflineMode bool
+
+	// Depth limits the clone/fetch to the given number of commits from the tip of the requested ref.
+	// 0 for full clone.
+	Depth int
+
+	// Quiet drops the informational clone line to debug level, for callers that log their own
+	// download summary (the setup section's action report).
+	Quiet bool
+
+	// For Gitea
 	InsecureSkipTLS bool
 }
 
-// CloneIfRequired ensures Dir is a clone of URL and reports whether it reused a cached clone.
+// CloneIfRequired reports whether an existing local clone was reused.
 func CloneIfRequired(ctx context.Context, input NewGitCloneExecutorInput, logger log.FieldLogger) (bool, error) {
 	origin, err := findGitRemoteURL(ctx, input.Dir)
 	if err == nil && origin == input.URL {
@@ -179,7 +191,7 @@ func CloneIfRequired(ctx context.Context, input NewGitCloneExecutorInput, logger
 	return false, nil
 }
 
-// NewGitCloneExecutor creates an executor to clone git repositories with the native Git CLI.
+// NewGitCloneExecutor creates an executor to clone git repos
 func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
@@ -254,7 +266,11 @@ func clone(ctx context.Context, input NewGitCloneExecutorInput) error {
 }
 
 func shallowPinnedClone(ctx context.Context, input NewGitCloneExecutorInput) error {
-	if _, err := runGit(ctx, "", &input, "init", input.Dir); err != nil {
+	objectFormat := "sha1"
+	if len(input.Ref) == 64 {
+		objectFormat = "sha256"
+	}
+	if _, err := runGit(ctx, "", &input, "init", "--object-format="+objectFormat, input.Dir); err != nil {
 		return err
 	}
 	if _, err := runGit(ctx, input.Dir, &input, "remote", "add", "origin", input.URL); err != nil {
@@ -332,7 +348,6 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 	return strings.TrimSpace(string(output)), err
 }
 
-// RemoteConfig returns the `-c` style entries that authenticate with token and optionally skip TLS verification.
 func RemoteConfig(token string, insecureSkipTLS bool) []string {
 	var config []string
 	if insecureSkipTLS {
@@ -344,7 +359,7 @@ func RemoteConfig(token string, insecureSkipTLS bool) []string {
 	return config
 }
 
-// ConfigEnv returns the environment that applies `-c` style entries to a git command, keeping secrets out of its argv.
+// ConfigEnv applies `-c` style entries through the environment, keeping secrets out of argv.
 func ConfigEnv(config ...string) map[string]string {
 	env := map[string]string{"GIT_CONFIG_COUNT": strconv.Itoa(len(config))}
 	for i, entry := range config {
@@ -356,7 +371,7 @@ func ConfigEnv(config ...string) map[string]string {
 }
 
 func runGit(ctx context.Context, dir string, input *NewGitCloneExecutorInput, args ...string) ([]byte, error) {
-	config := []string{"core.autocrlf=false", "core.eol=lf"} // action files stay LF like go-git checked them out
+	config := []string{"core.autocrlf=false", "core.eol=lf"} // keep action files LF
 	if input != nil {
 		config = append(config, RemoteConfig(input.Token, input.InsecureSkipTLS)...)
 	}
@@ -373,7 +388,7 @@ func runGit(ctx context.Context, dir string, input *NewGitCloneExecutorInput, ar
 	}
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
 	if runtime.GOOS != "windows" {
-		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) } // git removes its lock files on SIGINT, a SIGKILL leaves them to fail later jobs
+		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) } // lets git remove its lock files
 	}
 	cmd.WaitDelay = time.Second
 	var stderr strings.Builder

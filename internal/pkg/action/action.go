@@ -20,5 +20,5 @@ type Context struct {
 	NoSkipCheckout  bool
 	UseGitIgnore    bool
 	InsecureSkipTLS bool
-	Env             map[string]string // the step environment, commands run in Container need it
+	Env             map[string]string
 }

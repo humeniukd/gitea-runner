@@ -13,12 +13,10 @@ import (
 	"strings"
 )
 
-// MinGitVersion is the git of Ubuntu 22.04.
-const MinGitVersion = "2.34.1"
+const MinGitVersion = "2.34.1" // Ubuntu 22.04
 
 var gitVersionRegex = regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?`)
 
-// CheckGit verifies that git on PATH is at least MinGitVersion.
 func CheckGit(ctx context.Context) error {
 	out, err := exec.CommandContext(ctx, "git", "version").Output()
 	if err != nil {
@@ -37,7 +35,7 @@ func parseVersion(text string) []int {
 	}
 	version := make([]int, 0, 3)
 	for _, part := range match[1:] {
-		number, _ := strconv.Atoi(part) // a missing patch level counts as 0
+		number, _ := strconv.Atoi(part) // missing patch is 0
 		version = append(version, number)
 	}
 	return version
