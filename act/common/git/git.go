@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +30,13 @@ var (
 	githubHTTPRegex     = regexp.MustCompile(`^https?://.*github.com.*/(.+)/(.+?)(?:.git)?$`)
 	githubSSHRegex      = regexp.MustCompile(`github.com[:/](.+)/(.+?)(?:.git)?$`)
 	hexRefRegex         = regexp.MustCompile(`^[0-9a-fA-F]+$`)
+
+	// localEnvVars is `git rev-parse --local-env-vars`, inherited values would point commands at another repository.
+	localEnvVars = []string{
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY",
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS",
+		"GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE", "GIT_COMMON_DIR",
+	}
 
 	cloneLocks lock.Keyed[string]
 
@@ -104,7 +113,7 @@ func FindGithubRepo(ctx context.Context, file, githubInstance string) (string, e
 }
 
 func findGitRemoteURL(ctx context.Context, file string) (string, error) {
-	url, err := gitOutput(ctx, file, "remote", "get-url", "origin")
+	url, err := gitOutput(ctx, file, "config", "--get", "remote.origin.url") // not `remote get-url`, its insteadOf rewrite would never match input.URL
 	if err != nil {
 		return "", err
 	}
@@ -323,23 +332,49 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 	return strings.TrimSpace(string(output)), err
 }
 
+// RemoteConfig returns the `-c` style entries that authenticate with token and optionally skip TLS verification.
+func RemoteConfig(token string, insecureSkipTLS bool) []string {
+	var config []string
+	if insecureSkipTLS {
+		config = append(config, "http.sslVerify=false")
+	}
+	if token != "" {
+		config = append(config, "http.extraHeader=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("token:"+token)))
+	}
+	return config
+}
+
+// ConfigEnv returns the environment that applies `-c` style entries to a git command, keeping secrets out of its argv.
+func ConfigEnv(config ...string) map[string]string {
+	env := map[string]string{"GIT_CONFIG_COUNT": strconv.Itoa(len(config))}
+	for i, entry := range config {
+		key, value, _ := strings.Cut(entry, "=")
+		env["GIT_CONFIG_KEY_"+strconv.Itoa(i)] = key
+		env["GIT_CONFIG_VALUE_"+strconv.Itoa(i)] = value
+	}
+	return env
+}
+
 func runGit(ctx context.Context, dir string, input *NewGitCloneExecutorInput, args ...string) ([]byte, error) {
-	commandArgs := make([]string, 0, len(args)+4)
+	config := []string{"core.autocrlf=false", "core.eol=lf"} // action files stay LF like go-git checked them out
 	if input != nil {
-		if input.InsecureSkipTLS {
-			commandArgs = append(commandArgs, "-c", "http.sslVerify=false")
-		}
-		if input.Token != "" {
-			auth := base64.StdEncoding.EncodeToString([]byte("token:" + input.Token))
-			commandArgs = append(commandArgs, "-c", "http.extraHeader=Authorization: Basic "+auth)
-		}
+		config = append(config, RemoteConfig(input.Token, input.InsecureSkipTLS)...)
 	}
 	if dir != "" {
-		commandArgs = append(commandArgs, "-C", dir)
+		args = append([]string{"-C", dir}, args...)
 	}
-	commandArgs = append(commandArgs, args...)
-	cmd := exec.CommandContext(ctx, "git", commandArgs...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = slices.DeleteFunc(os.Environ(), func(entry string) bool {
+		name, _, _ := strings.Cut(entry, "=")
+		return slices.Contains(localEnvVars, name)
+	})
+	for key, value := range ConfigEnv(config...) {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
+	if runtime.GOOS != "windows" {
+		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) } // git removes its lock files on SIGINT, a SIGKILL leaves them to fail later jobs
+	}
 	cmd.WaitDelay = time.Second
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

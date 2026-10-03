@@ -4,7 +4,9 @@
 
 ### Prerequisites
 
-Docker Engine Community version is required for docker mode. To install Docker CE, follow the official [install instructions](https://docs.docker.com/engine/install/). Git must be installed and available on `PATH` to download actions and check out repositories.
+- Git 2.34.1 or newer on the `PATH` of the runner, which downloads actions and reusable workflows with it.
+- Docker Engine Community version for docker mode, Docker actions and `docker://` steps. To install Docker CE, follow the official [install instructions](https://docs.docker.com/engine/install/).
+- Where steps run, the job image or the host in host mode: `bash` or `sh` for `run` steps (`pwsh` or `powershell` on a Windows host), `node` for JavaScript actions and `hashFiles()`, and Git 2.34.1 or newer for [`builtin:checkout`](docs/builtin-actions.md). Kubernetes mode needs [a few more tools](docs/kubernetes.md).
 
 ### Download pre-built binary
 
