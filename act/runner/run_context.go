@@ -31,6 +31,7 @@ import (
 	"gitea.com/gitea/runner/act/common"
 	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/act/ghcontext"
+	"gitea.com/gitea/runner/internal/pkg/action/checkout"
 	"gitea.com/gitea/runner/internal/pkg/lock"
 
 	"gitea.dev/actionslib/pkg/exprparser"
@@ -85,6 +86,7 @@ type RunContext struct {
 
 	jobEnv             map[string]string      // workflow and job env as evaluated for the container and service specs
 	dockerActionImages map[*model.Step]string // Dockerfile action images built for this job, removed when it ends
+	jobGitEnsured      bool                   // EnsureGit already ran for this job
 
 	// summaryFileInitialized tracks which per-step summary files (workflow/step-summary-N.md)
 	// have already been created on the JobContainer. The runner sets up file-command files
@@ -442,6 +444,18 @@ func (rc *RunContext) startHostEnvironment() common.Executor {
 
 		return rc.copyWorkflowFiles()(ctx)
 	}
+}
+
+// ensureJobGit probes git once per job before the first remote builtin:checkout clone.
+func (rc *RunContext) ensureJobGit(ctx context.Context) error {
+	if rc.jobGitEnsured {
+		return nil
+	}
+	rc.jobGitEnsured = true
+	if rc.JobContainer == nil {
+		return nil
+	}
+	return checkout.EnsureGit(ctx, rc.JobContainer)
 }
 
 func (rc *RunContext) setRunnerContextEnv(ctx context.Context) {
