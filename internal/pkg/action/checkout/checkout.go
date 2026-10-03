@@ -107,7 +107,7 @@ func cloneCommands(url, ref, dst, objectFormat string, depth int) [][]string {
 		repo("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"),
 	}
 	if depth == 0 {
-		commands = append(commands, repo("fetch", "--tags", "--depth", fullDepth, "origin"), repo("fetch", "origin", ref))
+		commands = append(commands, repo("fetch", "--force", "--tags", "--depth", fullDepth, "origin"), repo("fetch", "origin", ref))
 	} else {
 		commands = append(commands, repo("fetch", "--no-tags", "--depth", strconv.Itoa(depth), "origin", ref))
 	}

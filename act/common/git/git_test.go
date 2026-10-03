@@ -91,6 +91,7 @@ func TestFindGitMetadataOfSHA256RepositoryUsesOrigin(t *testing.T) {
 	require.NoError(t, cleanGitHooks(basedir))
 	require.NoError(t, gitCmd("-C", basedir, "commit", "--allow-empty", "-m", "init"))
 	require.NoError(t, gitCmd("-C", basedir, "remote", "add", "origin", remoteURL))
+	require.NoError(t, gitCmd("-C", basedir, "config", "--add", "remote.origin.url", "https://github.com/other/repo.git"))
 
 	shortSHA, sha, err := FindGitRevision(context.Background(), basedir)
 	require.NoError(t, err)
@@ -240,6 +241,9 @@ func TestGitCloneExecutor(t *testing.T) {
 			Err: &Error{ErrShortRef, fullSha},
 			Ref: fullSha[:7],
 		},
+		"HEAD": {
+			Ref: "HEAD",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -253,6 +257,7 @@ func TestGitCloneExecutor(t *testing.T) {
 			if tt.Err != nil {
 				assert.Error(t, err) //nolint:testifylint // pre-existing issue from nektos/act
 				assert.Equal(t, tt.Err, err)
+				assert.Equal(t, tt.Err, clone(context.Background()), "a retry on the cache keeps the error")
 				return
 			}
 			assert.Empty(t, err) //nolint:testifylint // pre-existing issue from nektos/act
@@ -292,6 +297,11 @@ func TestGitCloneExecutorReclonesWhenOriginURLChanges(t *testing.T) {
 		Dir: cacheDir,
 	})(t.Context()))
 
+	nested := filepath.Join(cacheDir, "nested")
+	require.NoError(t, os.Mkdir(nested, 0o755))
+	require.NoError(t, NewGitCloneExecutor(NewGitCloneExecutorInput{URL: oldRemoteDir, Ref: "main", Dir: nested})(t.Context()))
+	assert.DirExists(t, filepath.Join(nested, ".git"), "an empty cache dir inside a clone of the same URL gets its own repository")
+
 	markerPath := filepath.Join(cacheDir, "stale-marker")
 	require.NoError(t, os.WriteFile(markerPath, []byte("stale"), 0o644))
 
@@ -313,7 +323,7 @@ func TestGitCloneExecutorReclonesWhenOriginURLChanges(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "stale cached directory should be removed before recloning")
 }
 
-func TestGitCloneExecutorNonFastForwardRef(t *testing.T) {
+func TestGitCloneExecutorFollowsRemoteRefChanges(t *testing.T) {
 	t.Parallel()
 	// Simulate the scenario where a remote ref (e.g. a GitHub PR head ref) changes
 	// non-fast-forward between two fetches. Before the fix, the fetch used Force=false,
@@ -366,6 +376,12 @@ func TestGitCloneExecutorNonFastForwardRef(t *testing.T) {
 	out, err := exec.Command("git", "-C", cloneDir, "log", "--oneline", "-1", "--format=%s").Output()
 	require.NoError(t, err)
 	assert.Equal(t, "second", strings.TrimSpace(string(out)), "working tree should be at the latest commit")
+
+	tagClone := NewGitCloneExecutor(NewGitCloneExecutorInput{URL: remoteDir, Ref: "v9", Dir: t.TempDir()})
+	require.Error(t, tagClone(context.Background()))
+	require.NoError(t, gitCmd("-C", workDir, "tag", "v9"))
+	require.NoError(t, gitCmd("-C", workDir, "push", "origin", "v9"))
+	require.NoError(t, tagClone(context.Background()), "a tag published after a failed lookup must be fetched")
 }
 
 func TestGitCloneExecutorOfflineMode(t *testing.T) {

@@ -810,8 +810,12 @@ func (cr *containerReference) exec(cmd []string, env map[string]string, user, wo
 		// Fix slashes when running on Windows
 		if runtime.GOOS == "windows" {
 			var newCmd []string
-			for _, v := range cmd {
-				newCmd = append(newCmd, strings.ReplaceAll(v, `\`, `/`))
+			for i, v := range cmd {
+				if i == 2 && cmd[1] == "-c" {
+					newCmd = append(newCmd, v)
+				} else {
+					newCmd = append(newCmd, strings.ReplaceAll(v, `\`, `/`))
+				}
 			}
 			cmd = newCmd
 		}

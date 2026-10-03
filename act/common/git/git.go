@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
@@ -117,13 +118,14 @@ func FindGithubRepo(ctx context.Context, file, githubInstance string) (string, e
 }
 
 func findGitRemoteURL(ctx context.Context, file string) (string, error) {
-	url, err := gitOutput(ctx, file, "config", "--get", "remote.origin.url") // `remote get-url` applies insteadOf
+	urls, err := gitOutput(ctx, file, "config", "--get-all", "remote.origin.url") // `remote get-url` applies insteadOf
 	if err != nil {
 		return "", err
 	}
-	if url == "" {
+	if urls == "" {
 		return "", errors.New("remote 'origin' exists but has no URL")
 	}
+	url, _, _ := strings.Cut(urls, "\n")
 	return url, nil
 }
 
@@ -171,6 +173,9 @@ type NewGitCloneExecutorInput struct {
 // CloneIfRequired reports whether an existing local clone was reused.
 func CloneIfRequired(ctx context.Context, input NewGitCloneExecutorInput, logger log.FieldLogger) (bool, error) {
 	origin, err := findGitRemoteURL(ctx, input.Dir)
+	if _, statErr := os.Stat(filepath.Join(input.Dir, ".git")); statErr != nil {
+		err = statErr // git would discover a repository around Dir
+	}
 	if err == nil && origin == input.URL {
 		return true, nil
 	}
@@ -208,6 +213,9 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 			return err
 		}
 		resolved, err := resolveRef(ctx, input.Dir, input.Ref)
+		if err == nil && isShortHash(ctx, input.Dir, input.Ref, resolved) {
+			return &Error{err: ErrShortRef, commit: resolved}
+		}
 		if err != nil && input.OfflineMode {
 			return err
 		}
@@ -220,9 +228,6 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 		if err != nil {
 			logger.Errorf("Unable to resolve %s: %v", input.Ref, err)
 			return err
-		}
-		if isShortHash(ctx, input.Dir, input.Ref, resolved) {
-			return &Error{err: ErrShortRef, commit: resolved}
 		}
 		if _, err := runGit(ctx, input.Dir, nil, "checkout", "--force", "--detach", resolved); err != nil {
 			return fmt.Errorf("checkout %s: %w", resolved, err)
@@ -280,28 +285,33 @@ func shallowPinnedClone(ctx context.Context, input NewGitCloneExecutorInput) err
 	return err
 }
 
-func fetch(ctx context.Context, input NewGitCloneExecutorInput) error {
+func fetch(ctx context.Context, input NewGitCloneExecutorInput) (err error) {
 	args := []string{"fetch", "--force", "--prune"}
 	if shallow, _ := gitOutput(ctx, input.Dir, "rev-parse", "--is-shallow-repository"); shallow == "true" {
-		args = append(args, "--depth", "1", "--no-tags", "origin", fetchRefSpec(ctx, input.Dir, input.Ref))
-	} else {
-		args = append(args, "origin", fetchRefSpec(ctx, input.Dir, input.Ref))
+		args = append(args, "--depth", "1", "--no-tags")
 	}
-	_, err := runGit(ctx, input.Dir, &input, args...)
+	for _, refSpec := range fetchRefSpecs(ctx, input.Dir, input.Ref) {
+		if _, err = runGit(ctx, input.Dir, &input, slices.Concat(args, []string{"origin", refSpec})...); err == nil {
+			return nil
+		}
+	}
 	return err
 }
 
-func fetchRefSpec(ctx context.Context, dir, ref string) string {
-	if isFullObjectID(ref) {
-		return "+" + ref + ":refs/pinned/" + ref
-	}
-	if strings.HasPrefix(ref, "refs/") {
-		return "+" + ref + ":" + ref
+func fetchRefSpecs(ctx context.Context, dir, ref string) []string {
+	tag := "+refs/tags/" + ref + ":refs/tags/" + ref
+	switch {
+	case isFullObjectID(ref):
+		return []string{"+" + ref + ":refs/pinned/" + ref}
+	case ref == "HEAD":
+		return []string{"+HEAD:refs/remotes/origin/HEAD"}
+	case strings.HasPrefix(ref, "refs/"):
+		return []string{"+" + ref + ":" + ref}
 	}
 	if _, err := runGit(ctx, dir, nil, "show-ref", "--verify", "--quiet", "refs/tags/"+ref); err == nil {
-		return "+refs/tags/" + ref + ":refs/tags/" + ref
+		return []string{tag}
 	}
-	return "+refs/heads/" + ref + ":refs/remotes/origin/" + ref
+	return []string{"+refs/heads/" + ref + ":refs/remotes/origin/" + ref, tag} // the tag may have been published after the cache was made
 }
 
 func resolveRef(ctx context.Context, dir, ref string) (string, error) {
@@ -354,7 +364,7 @@ func RemoteConfig(token string, insecureSkipTLS bool) []string {
 		config = append(config, "http.sslVerify=false")
 	}
 	if token != "" {
-		config = append(config, "http.extraHeader=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("token:"+token)))
+		config = append(config, "http.extraHeader=", "http.extraHeader=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("token:"+token)))
 	}
 	return config
 }
