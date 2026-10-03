@@ -563,6 +563,24 @@ func TestGitCloneExecutorShallow(t *testing.T) {
 		assert.FileExists(t, shallowMarker(dir), "repo should remain shallow after update")
 		assert.Equal(t, 1, gitRevCount(t, dir))
 	})
+
+	t.Run("sha256 full hash is cloned shallowly, reused without the remote, and its 40-character prefix is short", func(t *testing.T) {
+		remote := filepath.Join(t.TempDir(), "remote.git")
+		require.NoError(t, gitCmd("init", "--bare", "--object-format=sha256", "--initial-branch=main", remote))
+		work := t.TempDir()
+		require.NoError(t, gitCmd("clone", remote, work))
+		require.NoError(t, gitCmd("-C", work, "commit", "--allow-empty", "-m", "pinned"))
+		require.NoError(t, gitCmd("-C", work, "push", "origin", "main"))
+		sha := gitRevParse(t, work, "HEAD")
+		dir := t.TempDir()
+		clone := NewGitCloneExecutor(NewGitCloneExecutorInput{URL: remote, Ref: sha, Dir: dir, Depth: 1})
+		require.NoError(t, clone(t.Context()))
+		assert.FileExists(t, shallowMarker(dir))
+		require.ErrorIs(t, NewGitCloneExecutor(NewGitCloneExecutorInput{URL: remote, Ref: sha[:40], Dir: dir, Depth: 1, OfflineMode: true})(t.Context()), ErrShortRef)
+		require.NoError(t, os.RemoveAll(remote))
+		require.NoError(t, clone(t.Context()))
+		assert.Equal(t, sha, gitRevParse(t, dir, "HEAD"))
+	})
 }
 
 func TestGitCloneExecutorPinnedHashIgnoresShadowingRef(t *testing.T) {

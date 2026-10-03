@@ -213,13 +213,13 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 			return err
 		}
 		resolved, err := resolveRef(ctx, input.Dir, input.Ref)
-		if err == nil && isShortHash(ctx, input.Dir, input.Ref, resolved) {
+		if err == nil && isShortHash(input.Ref, resolved) {
 			return &Error{err: ErrShortRef, commit: resolved}
 		}
 		if err != nil && input.OfflineMode {
 			return err
 		}
-		if !input.OfflineMode && (err != nil || (reused && !isFullHash(ctx, input.Dir, input.Ref))) {
+		if !input.OfflineMode && (err != nil || (reused && !isFullHash(input.Ref, resolved))) {
 			if err := fetch(ctx, input); err != nil {
 				return err
 			}
@@ -286,8 +286,8 @@ func shallowPinnedClone(ctx context.Context, input NewGitCloneExecutorInput) err
 }
 
 func fetch(ctx context.Context, input NewGitCloneExecutorInput) (err error) {
-	args := []string{"fetch", "--force", "--prune"}
-	if shallow, _ := gitOutput(ctx, input.Dir, "rev-parse", "--is-shallow-repository"); shallow == "true" {
+	args := []string{"fetch", "--force", "--prune", "--no-auto-maintenance"}
+	if _, err := os.Stat(filepath.Join(input.Dir, ".git", "shallow")); err == nil {
 		args = append(args, "--depth", "1", "--no-tags")
 	}
 	for _, refSpec := range fetchRefSpecs(ctx, input.Dir, input.Ref) {
@@ -331,19 +331,12 @@ func isFullObjectID(ref string) bool {
 	return hexRefRegex.MatchString(ref) && (len(ref) == 40 || len(ref) == 64)
 }
 
-func isFullHash(ctx context.Context, dir, ref string) bool {
-	if !isFullObjectID(ref) {
-		return false
-	}
-	format, err := gitOutput(ctx, dir, "rev-parse", "--show-object-format")
-	if err != nil {
-		return false
-	}
-	return (format == "sha1" && len(ref) == 40) || (format == "sha256" && len(ref) == 64)
+func isFullHash(ref, resolved string) bool {
+	return isFullObjectID(ref) && len(ref) == len(resolved)
 }
 
-func isShortHash(ctx context.Context, dir, ref, resolved string) bool {
-	return hexRefRegex.MatchString(ref) && !isFullHash(ctx, dir, ref) && strings.HasPrefix(resolved, ref)
+func isShortHash(ref, resolved string) bool {
+	return hexRefRegex.MatchString(ref) && !isFullHash(ref, resolved) && strings.HasPrefix(resolved, ref)
 }
 
 func removePartialClone(dir string) error {
