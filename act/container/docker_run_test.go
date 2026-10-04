@@ -647,6 +647,7 @@ func TestSanitizeOptionsHostConfig(t *testing.T) {
 	logger, _ := test.NewNullLogger()
 
 	// every field the sanitizer resets, so a reset dropped in a refactor fails here
+	oomKillDisable := true
 	hostConfig := &container.HostConfig{
 		PidMode:           "host",
 		IpcMode:           "host",
@@ -666,6 +667,9 @@ func TestSanitizeOptionsHostConfig(t *testing.T) {
 		DeviceCgroupRules: []string{"a *:* rwm"},
 		DeviceRequests:    []container.DeviceRequest{{Count: -1, Capabilities: [][]string{{"gpu"}}}},
 		Sysctls:           map[string]string{"net.ipv4.ip_forward": "1"},
+		LogConfig:         container.LogConfig{Type: "syslog", Config: map[string]string{"syslog-address": "tcp://169.254.169.254:514"}},
+		OomScoreAdj:       -1000,
+		OomKillDisable:    &oomKillDisable,
 	}
 
 	sanitizeOptionsHostConfig(logger, hostConfig, &container.HostConfig{})
@@ -699,7 +703,9 @@ func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.
 	const dangerousOptions = "--pid=host --ipc=host --uts=host --cgroupns=host " +
 		"--userns=host --cap-add=ALL --security-opt seccomp=unconfined " +
 		"--security-opt apparmor=unconfined --volumes-from other --isolation process " +
-		"--runtime runc --cgroup-parent /custom --sysctl net.ipv4.ip_forward=1"
+		"--runtime runc --cgroup-parent /custom --sysctl net.ipv4.ip_forward=1 " +
+		"--log-driver=syslog --log-opt syslog-address=tcp://169.254.169.254:514 " +
+		"--oom-score-adj=-1000 --oom-kill-disable"
 
 	// whatever the workflow adds, an unprivileged container comes out exactly as the runner's
 	// own options alone describe it, field for field
@@ -716,6 +722,10 @@ func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.
 	assert.Equal(t, []string{"ALL"}, kept.CapAdd)
 	assert.Equal(t, "runc", kept.Runtime)
 	assert.Equal(t, "host", string(kept.UsernsMode))
+	assert.Equal(t, "syslog", kept.LogConfig.Type)
+	assert.Equal(t, -1000, kept.OomScoreAdj)
+	require.NotNil(t, kept.OomKillDisable)
+	assert.True(t, *kept.OomKillDisable)
 	assert.False(t, kept.Privileged)
 
 	// privileged is the administrator opting in, so the workflow's options are honored
@@ -723,6 +733,11 @@ func TestMergeContainerConfigsStripsDangerousOptionsWhenUnprivileged(t *testing.
 	assert.Equal(t, "host", string(privileged.PidMode))
 	assert.Equal(t, []string{"ALL"}, privileged.CapAdd)
 	assert.Equal(t, []string{"seccomp=unconfined", "apparmor=unconfined"}, privileged.SecurityOpt)
+	assert.Equal(t, "syslog", privileged.LogConfig.Type)
+	assert.Equal(t, map[string]string{"syslog-address": "tcp://169.254.169.254:514"}, privileged.LogConfig.Config)
+	assert.Equal(t, -1000, privileged.OomScoreAdj)
+	require.NotNil(t, privileged.OomKillDisable)
+	assert.True(t, *privileged.OomKillDisable)
 }
 
 func TestCheckVolumesRejectsEscapingHostPaths(t *testing.T) {
