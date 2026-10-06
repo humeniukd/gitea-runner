@@ -8,7 +8,9 @@ Built-in actions ship with the runner, so a job needs no action download and no 
 
 ## checkout
 
-Works like `actions/checkout` with these inputs. Any other input fails the step. It runs `git` where the job runs, so the job image needs `git` 2.34.1 or newer, plus `git-lfs` for `lfs` and `ssh` for `ssh-key`.
+Works like `actions/checkout` with these inputs. Any other input fails the step. It runs `git` where the job runs, so the job image needs `git` 2.34.1 or newer.
+
+The job image needs `git-lfs` only when `lfs` is used, and `ssh` only when `ssh-key` is used.
 
 | Input | Default |
 | --- | --- |
