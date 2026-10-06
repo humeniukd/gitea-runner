@@ -57,20 +57,6 @@ func TestIsAddressPoolExhausted(t *testing.T) {
 	assert.False(t, isAddressPoolExhausted(cerrdefs.ErrInvalidArgument.WithMessage("invalid subnet 10.0.0.0/8: it overlaps with an existing network")))
 }
 
-func TestJobBridgeOptions(t *testing.T) {
-	defaultOptions := map[string]string{
-		bridgeNameOption:                       "docker0",
-		defaultBridgeOption:                    "true",
-		"com.docker.network.bridge.enable_icc": "true",
-		"com.docker.network.driver.mtu":        "1450",
-	}
-
-	assert.Equal(t, map[string]string{
-		"com.docker.network.bridge.enable_icc": "true",
-		"com.docker.network.driver.mtu":        "1450",
-	}, jobBridgeOptions(defaultOptions))
-}
-
 func TestCreateDockerNetworkCopiesDefaultBridgeOptions(t *testing.T) {
 	ctx := context.Background()
 	client := &mockDockerClient{}
@@ -84,9 +70,12 @@ func TestCreateDockerNetworkCopiesDefaultBridgeOptions(t *testing.T) {
 		Return(mobyclient.NetworkListResult{}, nil).Once()
 	client.On("NetworkInspect", ctx, "bridge", mobyclient.NetworkInspectOptions{}).
 		Return(mobyclient.NetworkInspectResult{Network: network.Inspect{Network: network.Network{Options: map[string]string{
-			bridgeNameOption:                "docker0",
-			defaultBridgeOption:             "true",
-			"com.docker.network.driver.mtu": "1450",
+			"com.docker.network.bridge.name":                 "docker0",
+			"com.docker.network.bridge.default_bridge":       "true",
+			"com.docker.network.bridge.enable_icc":           "false",
+			"com.docker.network.bridge.enable_ip_masquerade": "false",
+			"com.docker.network.bridge.host_binding_ipv4":    "127.0.0.1",
+			"com.docker.network.driver.mtu":                  "1450",
 		}}}}, nil).Once()
 	client.On("NetworkCreate", ctx, "job-network", mobyclient.NetworkCreateOptions{
 		Driver:     "bridge",
@@ -94,7 +83,8 @@ func TestCreateDockerNetworkCopiesDefaultBridgeOptions(t *testing.T) {
 		EnableIPv4: &enableIPv4,
 		EnableIPv6: &enableIPv6,
 		Options: map[string]string{
-			"com.docker.network.driver.mtu": "1450",
+			"com.docker.network.bridge.host_binding_ipv4": "127.0.0.1",
+			"com.docker.network.driver.mtu":               "1450",
 		},
 		Labels: runnerLabels("runner-1"),
 	}).Return(mobyclient.NetworkCreateResult{}, nil).Once()

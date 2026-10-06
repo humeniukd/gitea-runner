@@ -24,10 +24,10 @@ import (
 const (
 	networkCreateAttempts   = 3
 	networkCreateRetryDelay = time.Second
-
-	bridgeNameOption    = "com.docker.network.bridge.name"
-	defaultBridgeOption = "com.docker.network.bridge.default_bridge"
 )
+
+// icc and ip-masq stay out, as on a job network they would cut services or the internet off
+var inheritedBridgeOptions = []string{"com.docker.network.driver.mtu", "com.docker.network.bridge.host_binding_ipv4"}
 
 // RemoveOrphanNetworks removes the networks this runner created for jobs whose teardown did
 // not get to them: the runner died with the job, the teardown timed out, or the network still
@@ -144,13 +144,11 @@ func createDockerNetwork(ctx context.Context, cli client.APIClient, name string,
 }
 
 func jobBridgeOptions(defaultOptions map[string]string) map[string]string {
-	options := make(map[string]string, len(defaultOptions))
-	for key, value := range defaultOptions {
-		switch key {
-		case bridgeNameOption, defaultBridgeOption:
-			continue
+	options := make(map[string]string, len(inheritedBridgeOptions))
+	for _, key := range inheritedBridgeOptions {
+		if value, ok := defaultOptions[key]; ok {
+			options[key] = value
 		}
-		options[key] = value
 	}
 	return options
 }
