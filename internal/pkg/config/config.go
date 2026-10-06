@@ -18,6 +18,7 @@ import (
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 	"go.yaml.in/yaml/v4"
+	"golang.org/x/net/http/httpguts"
 )
 
 // RequestTimeout bounds every RPC to Gitea, and with it runner.fetch_timeout.
@@ -321,6 +322,9 @@ func LoadDefault(file string) (*Config, error) {
 	if !slices.Contains(ToolCacheModes, cfg.Runner.ToolCacheMode) {
 		return nil, fmt.Errorf("invalid runner.tool_cache_mode %q: must be one of %q", cfg.Runner.ToolCacheMode, ToolCacheModes)
 	}
+	if err := validateExtraHeaders(cfg.Runner.ExtraHeaders); err != nil {
+		return nil, err
+	}
 	if cfg.Host.WorkdirParent == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -455,6 +459,21 @@ func definedRunnerConfigKeys(content []byte) (map[string]bool, error) {
 }
 
 // resolveSecretFile reads key from key_file, so deployments can mount a secret instead of committing it.
+func validateExtraHeaders(headers map[string]string) error {
+	seen := make(map[string]string, len(headers))
+	for name, value := range headers {
+		if !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
+			return fmt.Errorf("invalid runner.extra_headers entry %q", name)
+		}
+		key := strings.ToLower(name)
+		if other, ok := seen[key]; ok {
+			return fmt.Errorf("runner.extra_headers sets %q and %q, which name the same header", other, name)
+		}
+		seen[key] = name
+	}
+	return nil
+}
+
 func resolveSecretFile(key string, secret *string, file string) error {
 	if file == "" {
 		return nil
