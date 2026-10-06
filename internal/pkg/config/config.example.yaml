@@ -1,5 +1,7 @@
 # Every option with its default value, all commented out. Read this file, do not copy it.
 # `./gitea-runner config init` writes a config file to copy the lines you change into.
+# Values, not keys, may reference the runner process environment as ${NAME}, such as
+# `capacity: ${RUNNER_CAPACITY}`. A referenced variable must be set, write $${NAME} for a literal ${NAME}.
 
 # Logging for the runner process itself (messages printed to stderr), plus the copy of
 # each task's log kept under log.job. Neither controls how workflow step output is streamed
@@ -17,9 +19,6 @@ log:
   #  max_size: 1GB
 
 runner:
-  # Values may contain ${NAME}, which is expanded from the runner process environment.
-  # A referenced variable must be set. Keys are never expanded.
-  #capacity: ${RUNNER_CAPACITY}
   # Where to store the registration result.
   #file: .runner
   # Execute how many tasks concurrently at the same time.
