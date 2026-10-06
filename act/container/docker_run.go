@@ -1190,7 +1190,8 @@ func (cr *containerReference) sanitizeConfig(ctx context.Context, config *contai
 	// sanitize mounts
 	sanitizedMounts := make([]mount.Mount, 0, len(hostConfig.Mounts))
 	for _, mt := range hostConfig.Mounts {
-		if matcher.isValid(mt.Source, mt.Type, mt.ReadOnly) {
+		readOnly := mt.ReadOnly && (mt.BindOptions == nil || !mt.BindOptions.ReadOnlyNonRecursive) // bind-recursive=writable leaves submounts writable
+		if matcher.isValid(mt.Source, mt.Type, readOnly) {
 			sanitizedMounts = append(sanitizedMounts, mt)
 		} else {
 			logger.Warnf("[%s] is not a valid volume, will be ignored", mt.Source)
@@ -1236,10 +1237,9 @@ func overlayVolumes(dst, src *container.HostConfig) {
 }
 
 type validVolumeMatcher struct {
-	allowAll         bool
-	allowAllReadOnly bool
-	named            []validVolumeRule
-	host             []validVolumeRule
+	allowAll bool
+	named    []validVolumeRule
+	host     []validVolumeRule
 }
 
 type validVolumeRule struct {
@@ -1255,11 +1255,15 @@ func newValidVolumeMatcher(ctx context.Context, validVolumes []string) validVolu
 	}
 
 	for _, v := range validVolumes {
-		readOnly := strings.HasSuffix(v, ":ro")
-		v = strings.TrimSuffix(v, ":ro")
+		v, readOnly := strings.CutSuffix(v, ":ro")
 		if v == "**" {
-			ret.allowAll = true
-			ret.allowAllReadOnly = readOnly
+			if !readOnly {
+				ret.allowAll = true
+				continue
+			}
+			// a rule rather than allowAll, so the runner's own writable volumes still match
+			ret.named = append(ret.named, validVolumeRule{pattern: v, readOnly: true})
+			ret.host = append(ret.host, validVolumeRule{pattern: v, readOnly: true})
 			continue
 		}
 		if !isHostVolumePattern(v) {
@@ -1286,10 +1290,7 @@ func newValidVolumeMatcher(ctx context.Context, validVolumes []string) validVolu
 }
 
 func (m validVolumeMatcher) isValid(source string, sourceType mount.Type, readOnly bool) bool {
-	if m.allowAll {
-		return !m.allowAllReadOnly || readOnly
-	}
-	if sourceType == mount.TypeTmpfs && source == "" { // backed by memory, exposes nothing from the host, same as --tmpfs
+	if m.allowAll || (sourceType == mount.TypeTmpfs && source == "") { // tmpfs is backed by memory, exposes nothing from the host, same as --tmpfs
 		return true
 	}
 	if isHostVolumeSource(source, sourceType) {

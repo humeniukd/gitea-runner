@@ -239,15 +239,15 @@ container:
   #workdir_parent:
   # Volumes and bind mounts containers may mount, as globs (https://github.com/bmatcuk/doublestar#patterns).
   # `*` matches within a path segment, `**` across segments. Empty allows none. tmpfs mounts are always allowed.
-  # For example, to allow the `data` volume and all json files in `/src`:
+  # A `:ro` suffix, as in `docker run -v`, allows only read-only mounts of what the glob matches.
+  # For example, to allow the `data` volume, all json files in `/src` and `/etc/ssl/certs` read-only:
   # valid_volumes:
   #   - data
   #   - /src/*.json
+  #   - /etc/ssl/certs:ro
   # To allow any volume:
   # valid_volumes:
   #   - '**'
-  # Add :ro to require workflow mounts of a path or named volume to be read-only.
-  #   - /etc/ssl/certs/ca-certificates.crt:ro
   #valid_volumes: []
   # Overrides the docker client host with the specified one.
   # If it's empty, runner will find an available docker host automatically.
