@@ -1239,9 +1239,6 @@ func (rc *RunContext) Executor() (common.Executor, error) {
 
 func (rc *RunContext) runsOnImage(ctx context.Context) (string, error) {
 	runsOn := rc.Run.Job().RunsOn()
-	if err := requireRunsOn(rc.Run.JobID, runsOn); err != nil {
-		return "", err
-	}
 	for i, v := range runsOn {
 		var err error
 		if runsOn[i], err = rc.ExprEval.Interpolate(ctx, v); err != nil {
@@ -1347,7 +1344,8 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 	if jobType == model.JobTypeInvalid {
 		return false, jobTypeErr
 	}
-	if jobType == model.JobTypeDefault && rc.Parent == nil {
+	stepless := len(job.Steps) == 0 // how Gitea passes needed jobs, which only carry their result
+	if jobType == model.JobTypeDefault && !stepless {
 		if err := requireRunsOn(rc.Run.JobID, job.RunsOn()); err != nil {
 			return false, err
 		}
@@ -1362,7 +1360,7 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	if jobType != model.JobTypeDefault || rc.Parent != nil {
+	if jobType != model.JobTypeDefault || stepless {
 		return true, nil
 	}
 

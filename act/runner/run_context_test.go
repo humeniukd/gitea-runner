@@ -186,74 +186,6 @@ func TestRunContext_EvalBool(t *testing.T) {
 	}
 }
 
-func TestIsEnabledRequiresRunsOnForDefaultJobs(t *testing.T) {
-	tests := []struct {
-		name    string
-		job     *model.Job
-		wantErr bool
-	}{
-		{"missing", &model.Job{}, true},
-		{"missing and skipped", jobWithIf(t, &model.Job{}, false), true},
-		{"empty list", jobWithRunsOn(t, []string{}), true},
-		{"empty scalar", jobWithRunsOn(t, ""), true},
-		{"empty expression", jobWithRunsOn(t, "${{ '' }}"), true},
-		{"present", jobWithRunsOn(t, "ubuntu-latest"), false},
-		{"reusable workflow", &model.Job{Uses: "./.gitea/workflows/reusable.yml"}, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			workflow := &model.Workflow{Jobs: map[string]*model.Job{"test": tt.job}}
-
-			rc := &RunContext{
-				Config: &Config{PlatformPicker: func([]string) string { return "alpine" }},
-				Run:    &model.Run{JobID: "test", Workflow: workflow},
-			}
-			rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
-
-			enabled, err := rc.isEnabled(t.Context())
-			if tt.wantErr {
-				require.ErrorContains(t, err, "non-empty 'runs-on'")
-				assert.False(t, enabled)
-				return
-			}
-			require.NoError(t, err)
-			assert.True(t, enabled)
-		})
-	}
-}
-
-func jobWithRunsOn(t *testing.T, runsOn any) *model.Job {
-	t.Helper()
-	var rawRunsOn yaml.Node
-	require.NoError(t, rawRunsOn.Encode(runsOn))
-	return &model.Job{RawRunsOn: rawRunsOn}
-}
-
-func jobWithIf(t *testing.T, job *model.Job, condition bool) *model.Job {
-	t.Helper()
-	require.NoError(t, job.If.Encode(condition))
-	return job
-}
-
-func TestIsEnabledAllowsSyntheticCompositeJobWithoutRunsOn(t *testing.T) {
-	rc := &RunContext{
-		Config: &Config{},
-		Run: &model.Run{
-			JobID: "composite",
-			Workflow: &model.Workflow{Jobs: map[string]*model.Job{
-				"composite": {},
-			}},
-		},
-		Parent: &RunContext{},
-	}
-	rc.ExprEval = rc.NewExpressionEvaluator(t.Context())
-
-	enabled, err := rc.isEnabled(t.Context())
-	require.NoError(t, err)
-	assert.True(t, enabled)
-}
-
 // fakeContainer turns every container operation into a no-op, so startJobContainer
 // runs without a Docker daemon. The embedded interface is nil, so any method the
 // test does not exercise panics rather than silently doing the wrong thing.
@@ -394,6 +326,7 @@ func TestStartJobContainerGivesServicesTheirVolumes(t *testing.T) {
 	redis := startJobContainerInputs(t, `
 jobs:
   job:
+    runs-on: ubuntu-latest
     services:
       redis:
         image: redis:latest
@@ -414,6 +347,7 @@ func TestStartJobContainerBuildsEvaluatedJobAndServiceInputs(t *testing.T) {
 	inputs := startJobContainerInputs(t, `
 jobs:
   job:
+    runs-on: ubuntu-latest
     container: ${{ fromJSON('{"image":"docker://node:20","options":"--label ${{ github.job }}","credentials":{"username":"user","password":"${{ vars.TITLE }}"}}') }}
     services: ${{ fromJSON('{"redis":{"image":"docker://redis:latest","volumes":["data:/data"],"env":{"TITLE":"${{ github.job }}"},"credentials":{"username":"user","password":"${{ github.job }}"},"entrypoint":"/entry.sh","command":"redis-server --port 6380"}}') }}
 `, &Config{})
@@ -437,6 +371,7 @@ env:
   JOB_CONTAINER_NAME: from-workflow
 jobs:
   job:
+    runs-on: ubuntu-latest
     container:
       image: node:20
       credentials: {username: "${{ env.REG_USER }}", password: pass}
@@ -607,7 +542,7 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 		}
 
 		t.Run("InterpolatedContainerVolumes", func(t *testing.T) {
-			job := &model.Job{}
+			job := createJob(t, "runs-on: ubuntu-latest", "")
 			err := job.RawContainer.Encode(map[string]any{
 				"image":   "node:20",
 				"volumes": []string{"${{ secrets.MAME }}:/root/.mame/roms:ro"},
@@ -1260,11 +1195,30 @@ if: false`, ""),
 	assertObject.False(rc.isEnabled(context.Background()))
 
 	rc = createIfTestRunContext(map[string]*model.Job{
-		"job1": createJob(t, `if: ${{ fromJSON('not-json') }}`, ""),
+		"job1": createJob(t, `runs-on: ubuntu-latest
+if: ${{ fromJSON('not-json') }}`, ""),
 	})
 	enabled, err := rc.isEnabled(context.Background())
 	require.NoError(t, err)
 	assertObject.False(enabled)
+
+	for _, runsOn := range []string{"", "if: false", "runs-on: ''", "runs-on: []", "runs-on: [ubuntu-latest, ' ']", "runs-on: {labels: []}", "runs-on: ${{ '' }}"} {
+		rc = createIfTestRunContext(map[string]*model.Job{
+			"job1": createJob(t, runsOn+"\nsteps: [run: echo]", ""),
+		})
+		enabled, err = rc.isEnabled(t.Context())
+		require.ErrorContains(t, err, `job "job1" requires a non-empty 'runs-on'`, runsOn)
+		assertObject.False(enabled)
+	}
+
+	rc = createIfTestRunContext(map[string]*model.Job{
+		"job1": createJob(t, `runs-on: {group: org}
+steps: [run: echo]`, ""),
+	})
+	assertObject.True(rc.isEnabled(t.Context()))
+
+	rc = createIfTestRunContext(map[string]*model.Job{"job1": {Result: "success"}})
+	assertObject.True(rc.isEnabled(t.Context())) // Gitea's placeholder for a needed job
 }
 
 func TestPlanExecutorFailsMatrixJobWithoutRunsOn(t *testing.T) {
@@ -1758,7 +1712,7 @@ func createRunsOnRunContext(t *testing.T, runsOn string) *RunContext {
 }
 
 func TestRunContextContainerImageCannotSelectBackend(t *testing.T) {
-	rc := createIfTestRunContext(map[string]*model.Job{"job1": createJob(t, "container: -self-hosted", "")})
+	rc := createIfTestRunContext(map[string]*model.Job{"job1": createJob(t, "runs-on: ubuntu-latest\ncontainer: -self-hosted", "")})
 	require.NoError(t, rc.resolvePlatformImage(t.Context()))
 	assert.False(t, rc.IsHostEnv())
 
