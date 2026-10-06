@@ -5,7 +5,6 @@
 package git
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -328,16 +327,6 @@ func ObjectFormat(sha string) string {
 		return "sha256"
 	}
 	return ""
-}
-
-// RemoteObjectFormat asks the remote for the object format of ref, sha1 when it has no such ref.
-func RemoteObjectFormat(ctx context.Context, url, ref, token string, insecureSkipTLS bool) (string, error) {
-	out, err := runGit(ctx, "", &NewGitCloneExecutorInput{Token: token, InsecureSkipTLS: insecureSkipTLS}, "ls-remote", url, ref)
-	if err != nil {
-		return "", err
-	}
-	sha, _, _ := strings.Cut(string(out), "\t")
-	return cmp.Or(ObjectFormat(sha), "sha1"), nil
 }
 
 func removePartialClone(dir string) error {

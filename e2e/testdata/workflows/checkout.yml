@@ -1,0 +1,26 @@
+name: checkout
+on: push
+jobs:
+  checkout:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - id: checkout
+        uses: builtin:checkout
+      - uses: builtin:checkout
+        with:
+          ref: ${{ github.ref_name }}
+          path: short
+      - run: test "$(git -C short rev-parse HEAD)" = "$GITHUB_SHA"
+      - if: github.ref_type == 'branch'
+        run: |
+          test "$(git symbolic-ref HEAD)" = "$GITHUB_REF"
+          test "${{ steps.checkout.outputs.ref }}" = "$GITHUB_REF"
+          test "${{ steps.checkout.outputs.commit }}" = "$GITHUB_SHA"
+          git -c user.name=e2e -c user.email=e2e@example.com commit --allow-empty -m pushed
+          git push
+          git tag moved
+          git push --force origin moved
+      - if: github.ref_type == 'tag'
+        run: test "$(git describe --tags)" = "$GITHUB_REF_NAME"
