@@ -108,10 +108,12 @@ func TestNewSetsExtraHeadersWithoutReplacingRunnerAuthentication(t *testing.T) {
 		"X-Proxy-Token":      "proxy-token",
 		protocol.UUIDHeader:  "other-uuid",
 		protocol.TokenHeader: "other-token",
+		"Content-Type":       "text/plain",
 	})
 	_, _ = c.Ping(t.Context(), connect.NewRequest(&pingv1.PingRequest{Data: "hi"}))
 
 	require.Equal(t, "proxy-token", gotHeaders.Get("X-Proxy-Token"))
+	require.Equal(t, "application/proto", gotHeaders.Get("Content-Type"))
 	require.Equal(t, "the-uuid", gotHeaders.Get(protocol.UUIDHeader))
 	require.Equal(t, "the-token", gotHeaders.Get(protocol.TokenHeader))
 }

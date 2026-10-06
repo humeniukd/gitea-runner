@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -73,9 +74,8 @@ func New(endpoint string, insecure bool, uuid, token string, timeout time.Durati
 	opts = append(opts, connect.WithInterceptors(connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
 			for name, values := range headers {
-				req.Header().Del(name)
-				for _, value := range values {
-					req.Header().Add(name, value)
+				if _, ok := req.Header()[name]; !ok { // keep protocol headers such as Content-Type
+					req.Header()[name] = slices.Clone(values)
 				}
 			}
 			req.Header().Set("User-Agent", "gitea-runner/"+ver.Version())
