@@ -20,4 +20,6 @@ type Context struct {
 	NoSkipCheckout  bool
 	UseGitIgnore    bool
 	InsecureSkipTLS bool
+	ClientCert      []byte
+	ClientKey       []byte
 }

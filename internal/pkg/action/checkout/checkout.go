@@ -65,6 +65,8 @@ func Main(ctx context.Context, c *action.Context) error {
 		Token:           cmp.Or(c.Inputs["token"], ghc.Token),
 		Depth:           depth,
 		InsecureSkipTLS: c.InsecureSkipTLS,
+		ClientCert:      c.ClientCert,
+		ClientKey:       c.ClientKey,
 	})(ctx); err != nil {
 		return fmt.Errorf("checkout: clone %s@%s: %w", repository, ref, err)
 	}

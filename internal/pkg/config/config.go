@@ -54,16 +54,18 @@ type LogJob struct {
 
 // Runner represents the configuration for the runner.
 type Runner struct {
-	File                  string            `yaml:"file"`                     // File specifies the file path for the runner.
-	Capacity              int               `yaml:"capacity"`                 // Capacity specifies the capacity of the runner.
-	Envs                  map[string]string `yaml:"envs"`                     // Envs stores environment variables for the runner.
-	EnvFile               string            `yaml:"env_file"`                 // EnvFile specifies the path to the file containing environment variables for the runner.
-	Timeout               time.Duration     `yaml:"timeout"`                  // Timeout specifies the duration for runner timeout.
-	ShutdownTimeout       time.Duration     `yaml:"shutdown_timeout"`         // ShutdownTimeout specifies the duration to wait for running jobs to complete during a shutdown of the runner.
-	Insecure              bool              `yaml:"insecure"`                 // Insecure indicates whether the runner operates in an insecure mode.
-	ClientCertificate     string            `yaml:"client_certificate"`       // ClientCertificate is the PEM certificate used to authenticate the runner to Gitea.
-	ClientKey             string            `yaml:"client_key"`               // ClientKey is the PEM private key paired with ClientCertificate.
-	TLSCertificate        *tls.Certificate  `yaml:"-"`                        // TLSCertificate is loaded from ClientCertificate and ClientKey at startup.
+	File                  string            `yaml:"file"`               // File specifies the file path for the runner.
+	Capacity              int               `yaml:"capacity"`           // Capacity specifies the capacity of the runner.
+	Envs                  map[string]string `yaml:"envs"`               // Envs stores environment variables for the runner.
+	EnvFile               string            `yaml:"env_file"`           // EnvFile specifies the path to the file containing environment variables for the runner.
+	Timeout               time.Duration     `yaml:"timeout"`            // Timeout specifies the duration for runner timeout.
+	ShutdownTimeout       time.Duration     `yaml:"shutdown_timeout"`   // ShutdownTimeout specifies the duration to wait for running jobs to complete during a shutdown of the runner.
+	Insecure              bool              `yaml:"insecure"`           // Insecure indicates whether the runner operates in an insecure mode.
+	ClientCertificate     string            `yaml:"client_certificate"` // ClientCertificate is the PEM certificate used to authenticate the runner to Gitea.
+	ClientKey             string            `yaml:"client_key"`         // ClientKey is the PEM private key paired with ClientCertificate.
+	TLSCertificate        *tls.Certificate  `yaml:"-"`                  // TLSCertificate is loaded from ClientCertificate and ClientKey at startup.
+	TLSCertificatePEM     []byte            `yaml:"-"`                  // TLSCertificatePEM and TLSKeyPEM hold the same pair for git clones, which take PEM.
+	TLSKeyPEM             []byte            `yaml:"-"`
 	FetchTimeout          time.Duration     `yaml:"fetch_timeout"`            // FetchTimeout specifies the timeout duration for fetching resources.
 	FetchInterval         time.Duration     `yaml:"fetch_interval"`           // FetchInterval specifies the interval duration for fetching resources.
 	FetchIntervalMax      time.Duration     `yaml:"fetch_interval_max"`       // FetchIntervalMax specifies the maximum backoff interval when idle.
@@ -425,11 +427,19 @@ func loadClientCertificate(runner *Runner) error {
 	if runner.ClientCertificate == "" || runner.ClientKey == "" {
 		return errors.New("runner.client_certificate and runner.client_key must be configured together")
 	}
-	certificate, err := tls.LoadX509KeyPair(runner.ClientCertificate, runner.ClientKey)
+	certPEM, err := os.ReadFile(runner.ClientCertificate)
+	if err != nil {
+		return fmt.Errorf("read runner.client_certificate: %w", err)
+	}
+	keyPEM, err := os.ReadFile(runner.ClientKey)
+	if err != nil {
+		return fmt.Errorf("read runner.client_key: %w", err)
+	}
+	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return fmt.Errorf("load runner client certificate: %w", err)
 	}
-	runner.TLSCertificate = &certificate
+	runner.TLSCertificate, runner.TLSCertificatePEM, runner.TLSKeyPEM = &certificate, certPEM, keyPEM
 	return nil
 }
 

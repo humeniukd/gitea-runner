@@ -626,6 +626,8 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		ValidVolumes:                      r.cfg.Container.ValidVolumes,
 		SharedToolCache:                   r.cfg.Runner.ToolCacheMode == config.ToolCacheModeShared,
 		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
+		ClientCert:                        r.cfg.Runner.TLSCertificatePEM,
+		ClientKey:                         r.cfg.Runner.TLSKeyPEM,
 		RunnerName:                        r.name,
 		KubernetesPicker:                  r.kubernetesOptions,
 	}

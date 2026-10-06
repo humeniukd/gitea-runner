@@ -41,7 +41,8 @@ runner:
   # Whether skip verifying the TLS certificate of the Gitea instance.
   #insecure: false
   # PEM certificate and private key used when the Gitea server requires mutual TLS.
-  # Both settings are required together.
+  # Both settings are required together. The runner presents them on its own requests and on
+  # action and builtin:checkout clones from the instance. Steps in a job do not get them.
   #client_certificate: /etc/gitea-runner/client.crt
   #client_key: /etc/gitea-runner/client.key
   # The timeout for fetching the job from the Gitea instance.

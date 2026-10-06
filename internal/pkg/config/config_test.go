@@ -4,6 +4,12 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,19 +48,38 @@ cache:
 	require.NoError(t, err)
 }
 
-func TestLoadClientCertificateRequiresCertificateAndKey(t *testing.T) {
-	for _, runner := range []*Runner{
-		{ClientCertificate: "client.crt"},
-		{ClientKey: "client.key"},
-	} {
-		err := loadClientCertificate(runner)
-		require.ErrorContains(t, err, "must be configured together")
-	}
-}
+func TestLoadClientCertificate(t *testing.T) {
+	dir := t.TempDir()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{SerialNumber: big.NewInt(1)}, &x509.Certificate{SerialNumber: big.NewInt(1)}, &key.PublicKey, key)
+	require.NoError(t, err)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	require.NoError(t, err)
+	certPath, keyPath := filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
+	require.NoError(t, os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+	require.NoError(t, os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600))
 
-func TestLoadClientCertificateReportsInvalidPair(t *testing.T) {
-	err := loadClientCertificate(&Runner{ClientCertificate: "missing.crt", ClientKey: "missing.key"})
-	require.ErrorContains(t, err, "load runner client certificate")
+	for _, tc := range []struct {
+		runner  Runner
+		wantErr string
+	}{
+		{Runner{ClientCertificate: certPath}, "must be configured together"},
+		{Runner{ClientKey: keyPath}, "must be configured together"},
+		{Runner{ClientCertificate: certPath, ClientKey: filepath.Join(dir, "missing.key")}, "read runner.client_key"},
+		{Runner{ClientCertificate: keyPath, ClientKey: keyPath}, "load runner client certificate"},
+		{Runner{ClientCertificate: certPath, ClientKey: keyPath}, ""},
+	} {
+		err := loadClientCertificate(&tc.runner)
+		if tc.wantErr != "" {
+			require.ErrorContains(t, err, tc.wantErr)
+			continue
+		}
+		require.NoError(t, err)
+		require.NotNil(t, tc.runner.TLSCertificate)
+		require.NotEmpty(t, tc.runner.TLSCertificatePEM)
+		require.NotEmpty(t, tc.runner.TLSKeyPEM)
+	}
 }
 
 func TestLoadDefault_CacheS3(t *testing.T) {

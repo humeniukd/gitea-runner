@@ -48,6 +48,8 @@ func (sab *stepActionBuiltin) main() common.Executor {
 			NoSkipCheckout:  rc.Config.NoSkipCheckout,
 			UseGitIgnore:    rc.Config.UseGitIgnore,
 			InsecureSkipTLS: rc.Config.InsecureSkipTLS,
+			ClientCert:      rc.Config.ClientCert,
+			ClientKey:       rc.Config.ClientKey,
 		})
 	})
 }

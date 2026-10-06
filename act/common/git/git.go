@@ -279,6 +279,8 @@ type NewGitCloneExecutorInput struct {
 
 	// For Gitea
 	InsecureSkipTLS bool
+	// PEM pair for an instance that requires mutual TLS
+	ClientCert, ClientKey []byte
 }
 
 // CloneIfRequired returns the repository and a boolean indicating whether an existing local clone was reused.
@@ -322,6 +324,8 @@ func CloneIfRequired(ctx context.Context, refName plumbing.ReferenceName, input 
 		Progress: progressWriter,
 
 		InsecureSkipTLS: input.InsecureSkipTLS, // For Gitea
+		ClientCert:      input.ClientCert,
+		ClientKey:       input.ClientKey,
 	}
 	if input.Token != "" {
 		cloneOptions.Auth = &http.BasicAuth{
@@ -368,6 +372,8 @@ func NewGitCloneExecutor(input NewGitCloneExecutorInput) common.Executor {
 			RefSpecs:        []config.RefSpec{"refs/*:refs/*", "HEAD:refs/heads/HEAD", "refs/heads/*:refs/remotes/origin/*"},
 			Force:           true,
 			InsecureSkipTLS: input.InsecureSkipTLS,
+			ClientCert:      input.ClientCert,
+			ClientKey:       input.ClientKey,
 		}
 		if input.Token != "" {
 			fetchOptions.Auth = &http.BasicAuth{
@@ -505,6 +511,8 @@ func fetchPinnedSHA(ctx context.Context, input NewGitCloneExecutorInput, opts gi
 		Auth:            opts.Auth,
 		Progress:        opts.Progress,
 		InsecureSkipTLS: opts.InsecureSkipTLS,
+		ClientCert:      opts.ClientCert,
+		ClientKey:       opts.ClientKey,
 	}); err != nil {
 		return nil, err
 	}
