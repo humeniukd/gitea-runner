@@ -42,31 +42,28 @@ cache:
 	require.NoError(t, err)
 }
 
-func TestLoadDefaultExpandsEnvironmentValues(t *testing.T) {
+func TestLoadDefault_ExpandsEnvironmentValues(t *testing.T) {
 	t.Setenv("RUNNER_CAPACITY", "4")
 	t.Setenv("RUNNER_LABEL", "linux:host")
-	path := write(t, "runner:\n  capacity: ${RUNNER_CAPACITY}\n  labels:\n    - ${RUNNER_LABEL}\n")
+	t.Setenv("RUNNER_KEY", "fetch_timeout")
+	path := write(t, `runner:
+  capacity: ${RUNNER_CAPACITY}
+  labels:
+    - ${RUNNER_LABEL}
+  envs:
+    LITERAL: $${RUNNER_LABEL}
+  ${RUNNER_KEY}: 1s
+`)
 
 	cfg, err := LoadDefault(path)
 	require.NoError(t, err)
 	assert.Equal(t, 4, cfg.Runner.Capacity)
 	assert.Equal(t, []string{"linux:host"}, cfg.Runner.Labels)
-}
+	assert.Equal(t, map[string]string{"LITERAL": "${RUNNER_LABEL}"}, cfg.Runner.Envs)
+	assert.NotEqual(t, time.Second, cfg.Runner.FetchTimeout)
 
-func TestLoadDefaultRejectsUnsetEnvironmentValue(t *testing.T) {
-	path := write(t, "runner:\n  capacity: ${RUNNER_MISSING}\n")
-
-	_, err := LoadDefault(path)
+	_, err = LoadDefault(write(t, "runner:\n  capacity: ${RUNNER_MISSING}\n"))
 	require.ErrorContains(t, err, "RUNNER_MISSING is not set")
-}
-
-func TestLoadDefaultDoesNotExpandEnvironmentKeys(t *testing.T) {
-	t.Setenv("RUNNER_KEY", "capacity")
-	path := write(t, "runner:\n  ${RUNNER_KEY}: 4\n")
-
-	cfg, err := LoadDefault(path)
-	require.NoError(t, err)
-	assert.Equal(t, 1, cfg.Runner.Capacity)
 }
 
 func TestLoadDefault_CacheS3(t *testing.T) {
