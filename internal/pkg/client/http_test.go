@@ -136,6 +136,17 @@ func TestNewKeepsHeadersOnSameOriginRedirect(t *testing.T) {
 	require.Equal(t, "the-token", gotHeaders.Get(protocol.TokenHeader))
 }
 
+func TestNewStopsRedirectLoop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	c := New(server.URL, false, "", "", time.Minute, nil)
+	_, err := c.Ping(t.Context(), connect.NewRequest(&pingv1.PingRequest{Data: "hi"}))
+	require.ErrorContains(t, err, "stopped after 10 redirects")
+}
+
 func TestNewDropsAuthenticationAndExtraHeadersOnCrossOriginRedirect(t *testing.T) {
 	gotHeaders := make(http.Header)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

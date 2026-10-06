@@ -6,6 +6,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -35,6 +36,9 @@ func getHTTPClient(endpoint string, insecure bool, timeout time.Duration, extraH
 		Transport: transport,
 		Timeout:   timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 { // a custom CheckRedirect replaces net/http's own limit
+				return errors.New("stopped after 10 redirects")
+			}
 			if sameOrigin(req.URL, via[0].URL) {
 				return nil
 			}
