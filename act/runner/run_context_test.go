@@ -1267,6 +1267,19 @@ if: false`, ""),
 	assertObject.False(enabled)
 }
 
+func TestPlanExecutorFailsMatrixJobWithoutRunsOn(t *testing.T) {
+	workflow, err := model.ReadWorkflow(strings.NewReader(`
+jobs:
+  test:
+    strategy: {matrix: {os: [a, b]}}
+    steps: [run: echo]
+`))
+	require.NoError(t, err)
+	plan := &model.Plan{Stages: []*model.Stage{{Runs: []*model.Run{{Workflow: workflow, JobID: "test"}}}}}
+	require.ErrorContains(t, (&runnerImpl{config: &Config{}}).NewPlanExecutor(plan)(t.Context()), "non-empty 'runs-on'")
+	assert.Equal(t, "failure", workflow.Jobs["test"].Result)
+}
+
 func TestRunContextGetEnv(t *testing.T) {
 	tests := []struct {
 		description string

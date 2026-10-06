@@ -1222,7 +1222,9 @@ func (rc *RunContext) Executor() (common.Executor, error) {
 		res, err := rc.isEnabled(ctx)
 		if err != nil {
 			// Record the failure so a job that cannot start gets a stop time. rc.caller is only set for reusable workflows.
+			unlock := lockJob(rc.Run.Job()) // matrix combinations share the job and can fail at once
 			rc.result("failure")
+			unlock()
 			if rc.caller != nil { // For Gitea
 				rc.caller.setReusedWorkflowJobResult(rc.Run.JobID, "failure")
 			}
