@@ -273,6 +273,9 @@ container:
   # How long a job waits for a service container that declares a healthcheck to become
   # healthy. A negative value (e.g. -1s) starts the steps without waiting.
   #service_ready_timeout: 5m
+  # Remove the containers, networks and volumes a job creates through its Docker proxy when
+  # the job ends. Set to false for jobs that deploy to the runner's Docker daemon.
+  #docker_proxy_cleanup: true
 
 host:
   # The parent directory of a job's working directory.

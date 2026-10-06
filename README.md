@@ -254,7 +254,7 @@ volumes:
 
 Linux container jobs use a Docker proxy when socket sharing and permissions allow it. Other setups use the daemon socket directly. The proxy adds a job label to every container, network, and volume a job creates, then removes every labeled resource after post steps and the completed hook. This includes containers started by `docker run` or `docker compose`, even when they have a restart policy.
 
-Use a Docker host that the proxy cannot serve, such as `container.docker_host: tcp://docker.example:2376`, for a job that deliberately creates resources that must outlive it. Such jobs receive the daemon socket directly, so their resources are not labeled or removed by the runner. Mounting the daemon socket explicitly through `container.options` has the same effect. Host jobs use their existing Docker access, where `.` works.
+Set `container.docker_proxy_cleanup: false` when jobs deploy resources that must outlive them to the runner's Docker daemon. The proxy then still labels them, but leaves them for you to remove. Host jobs use their existing Docker access, where `.` works.
 
 #### Proxy
 
