@@ -13,7 +13,7 @@ Where steps run, in the job image or on the runner in host mode:
 
 - `bash` or `sh` for `run` steps, `pwsh` or `powershell` on a Windows host.
 - `node` for JavaScript actions and `hashFiles()`.
-- `git` 2.34.1 or newer for [`builtin:checkout`](docs/builtin-actions.md).
+- `git` 2.34.1 or newer for [`builtin:checkout`](docs/builtin-actions.md), plus `git-lfs` and `ssh` for its `lfs` and `ssh-key` inputs.
 
 Kubernetes mode needs [a few more tools](docs/kubernetes.md) in job images.
 
