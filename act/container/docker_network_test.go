@@ -93,11 +93,11 @@ func TestCreateDockerNetworkCopiesDefaultBridgeOptions(t *testing.T) {
 	client.AssertExpectations(t)
 }
 
-func TestCreateDockerNetworkUsesDockerDefaultsWhenBridgeInspectionFails(t *testing.T) {
+func TestCreateDockerNetworkWithoutDefaultBridge(t *testing.T) {
 	ctx := context.Background()
 	client := &mockDockerClient{}
 	client.On("NetworkList", ctx, mobyclient.NetworkListOptions{}).Return(mobyclient.NetworkListResult{}, nil).Once()
-	client.On("NetworkInspect", ctx, "bridge", mobyclient.NetworkInspectOptions{}).Return(mobyclient.NetworkInspectResult{}, errors.New("bridge unavailable")).Once()
+	client.On("NetworkInspect", ctx, "bridge", mobyclient.NetworkInspectOptions{}).Return(mobyclient.NetworkInspectResult{}, cerrdefs.ErrNotFound.WithMessage("network bridge not found")).Once()
 	client.On("NetworkCreate", ctx, "job-network", mobyclient.NetworkCreateOptions{
 		Driver: "bridge",
 		Scope:  "local",

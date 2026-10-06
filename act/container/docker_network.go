@@ -109,12 +109,11 @@ func createDockerNetwork(ctx context.Context, cli client.APIClient, name string,
 		}
 	}
 
-	defaultBridge, inspectErr := cli.NetworkInspect(ctx, "bridge", client.NetworkInspectOptions{})
-	options := map[string]string(nil)
-	if inspectErr != nil {
-		common.Logger(ctx).Warnf("cannot inspect default bridge network, job network %s will use Docker defaults: %v", name, inspectErr)
-	} else {
+	var options map[string]string
+	if defaultBridge, err := cli.NetworkInspect(ctx, "bridge", client.NetworkInspectOptions{}); err == nil {
 		options = jobBridgeOptions(defaultBridge.Network.Options)
+	} else if !cerrdefs.IsNotFound(err) {
+		common.Logger(ctx).Warnf("cannot inspect default bridge network, job network %s will use Docker defaults: %v", name, err)
 	}
 
 	for i := range networkCreateAttempts {
