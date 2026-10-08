@@ -61,7 +61,7 @@ type Runner struct {
 	Timeout               time.Duration     `yaml:"timeout"`                  // Timeout specifies the duration for runner timeout.
 	ShutdownTimeout       time.Duration     `yaml:"shutdown_timeout"`         // ShutdownTimeout specifies the duration to wait for running jobs to complete during a shutdown of the runner.
 	Insecure              bool              `yaml:"insecure"`                 // Insecure indicates whether the runner operates in an insecure mode.
-	ExtraHeaders          map[string]string `yaml:"extra_headers"`            // ExtraHeaders adds headers to requests to the Gitea Actions API, for example to authenticate through a reverse proxy.
+	ExtraHeaders          map[string]string `yaml:"extra_headers"`            // ExtraHeaders adds HTTP headers to runner API requests to Gitea.
 	FetchTimeout          time.Duration     `yaml:"fetch_timeout"`            // FetchTimeout specifies the timeout duration for fetching resources.
 	FetchInterval         time.Duration     `yaml:"fetch_interval"`           // FetchInterval specifies the interval duration for fetching resources.
 	FetchIntervalMax      time.Duration     `yaml:"fetch_interval_max"`       // FetchIntervalMax specifies the maximum backoff interval when idle.
@@ -458,7 +458,6 @@ func definedRunnerConfigKeys(content []byte) (map[string]bool, error) {
 	return defined, nil
 }
 
-// resolveSecretFile reads key from key_file, so deployments can mount a secret instead of committing it.
 func validateExtraHeaders(headers map[string]string) error {
 	seen := make(map[string]string, len(headers))
 	for name, value := range headers {
@@ -474,6 +473,7 @@ func validateExtraHeaders(headers map[string]string) error {
 	return nil
 }
 
+// resolveSecretFile reads key from key_file, so deployments can mount a secret instead of committing it.
 func resolveSecretFile(key string, secret *string, file string) error {
 	if file == "" {
 		return nil

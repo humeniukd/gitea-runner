@@ -4,6 +4,7 @@
 package client
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,7 +70,12 @@ func TestNewSetsBaseURLAndHeaders(t *testing.T) {
 	defer server.Close()
 
 	// trailing slash must be trimmed before "/api/actions" is appended
-	c := New(server.URL+"/", false, "the-uuid", "the-token", time.Minute, nil)
+	c := New(server.URL+"/", false, "the-uuid", "the-token", time.Minute, map[string]string{
+		"X-Proxy-Token":      "proxy-token",
+		protocol.UUIDHeader:  "other-uuid",
+		protocol.TokenHeader: "other-token",
+		"Content-Type":       "text/plain",
+	})
 	// Address returns the endpoint as supplied (untrimmed)
 	require.Equal(t, server.URL+"/", c.Address())
 
@@ -79,6 +85,8 @@ func TestNewSetsBaseURLAndHeaders(t *testing.T) {
 	require.True(t, strings.HasPrefix(gotPath, "/api/actions/"), "unexpected path %q", gotPath)
 	require.Equal(t, "the-uuid", gotHeaders.Get(protocol.UUIDHeader))
 	require.Equal(t, "the-token", gotHeaders.Get(protocol.TokenHeader))
+	require.Equal(t, "proxy-token", gotHeaders.Get("X-Proxy-Token"))
+	require.Equal(t, "application/proto", gotHeaders.Get("Content-Type"))
 }
 
 func TestNewOmitsEmptyHeaders(t *testing.T) {
@@ -96,48 +104,6 @@ func TestNewOmitsEmptyHeaders(t *testing.T) {
 	require.Empty(t, gotHeaders.Get(protocol.TokenHeader))
 }
 
-func TestNewSetsExtraHeadersWithoutReplacingRunnerAuthentication(t *testing.T) {
-	gotHeaders := make(http.Header)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHeaders = r.Header.Clone()
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	c := New(server.URL, false, "the-uuid", "the-token", time.Minute, map[string]string{
-		"X-Proxy-Token":      "proxy-token",
-		protocol.UUIDHeader:  "other-uuid",
-		protocol.TokenHeader: "other-token",
-		"Content-Type":       "text/plain",
-	})
-	_, _ = c.Ping(t.Context(), connect.NewRequest(&pingv1.PingRequest{Data: "hi"}))
-
-	require.Equal(t, "proxy-token", gotHeaders.Get("X-Proxy-Token"))
-	require.Equal(t, "application/proto", gotHeaders.Get("Content-Type"))
-	require.Equal(t, "the-uuid", gotHeaders.Get(protocol.UUIDHeader))
-	require.Equal(t, "the-token", gotHeaders.Get(protocol.TokenHeader))
-}
-
-func TestNewKeepsHeadersOnSameOriginRedirect(t *testing.T) {
-	gotHeaders := make(http.Header)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/redirected" {
-			http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
-			return
-		}
-		gotHeaders = r.Header.Clone()
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	c := New(server.URL, false, "the-uuid", "the-token", time.Minute, map[string]string{"X-Proxy-Token": "proxy-token"})
-	_, _ = c.Ping(t.Context(), connect.NewRequest(&pingv1.PingRequest{Data: "hi"}))
-
-	require.Equal(t, "proxy-token", gotHeaders.Get("X-Proxy-Token"))
-	require.Equal(t, "the-uuid", gotHeaders.Get(protocol.UUIDHeader))
-	require.Equal(t, "the-token", gotHeaders.Get(protocol.TokenHeader))
-}
-
 func TestNewStopsRedirectLoop(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, r.URL.Path, http.StatusTemporaryRedirect)
@@ -149,20 +115,34 @@ func TestNewStopsRedirectLoop(t *testing.T) {
 	require.ErrorContains(t, err, "stopped after 10 redirects")
 }
 
-func TestNewDropsAuthenticationAndExtraHeadersOnCrossOriginRedirect(t *testing.T) {
-	gotHeaders := make(http.Header)
+func TestNewRedirectKeepsExtraHeadersOnlyOnSameHost(t *testing.T) {
+	var gotHeaders http.Header
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotHeaders = r.Header.Clone()
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer target.Close()
-	origin := httptest.NewServer(http.RedirectHandler(target.URL, http.StatusTemporaryRedirect))
-	defer origin.Close()
+	_, port, err := net.SplitHostPort(target.Listener.Addr().String())
+	require.NoError(t, err)
 
-	c := New(origin.URL, false, "the-uuid", "the-token", time.Minute, map[string]string{"X-Proxy-Token": "proxy-token"})
-	_, _ = c.Ping(t.Context(), connect.NewRequest(&pingv1.PingRequest{Data: "hi"}))
+	for _, tc := range []struct {
+		newOrigin func(http.Handler) *httptest.Server
+		host      string
+		kept      bool
+	}{
+		{httptest.NewServer, "127.0.0.1", true},
+		{httptest.NewServer, "localhost", false},
+		{httptest.NewTLSServer, "127.0.0.1", false},
+	} {
+		gotHeaders = nil
+		origin := tc.newOrigin(http.RedirectHandler("http://"+net.JoinHostPort(tc.host, port), http.StatusPermanentRedirect))
+		c := New(origin.URL, true, "the-uuid", "the-token", time.Minute, map[string]string{"X-Proxy-Token": "proxy-token", "Content-Type": "text/plain"})
+		_, _ = c.Ping(t.Context(), connect.NewRequest(&pingv1.PingRequest{Data: "hi"}))
+		origin.Close()
 
-	require.Empty(t, gotHeaders.Get("X-Proxy-Token"))
-	require.Empty(t, gotHeaders.Get(protocol.UUIDHeader))
-	require.Empty(t, gotHeaders.Get(protocol.TokenHeader))
+		require.NotNil(t, gotHeaders, origin.URL)
+		require.Equal(t, tc.kept, gotHeaders.Get("X-Proxy-Token") != "", "%s to %s", origin.URL, tc.host)
+		require.Equal(t, "the-token", gotHeaders.Get(protocol.TokenHeader))
+		require.Equal(t, "application/proto", gotHeaders.Get("Content-Type"))
+	}
 }

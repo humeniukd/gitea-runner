@@ -83,9 +83,9 @@ runner:
   # and github_mirror is not empty. In this case,
   # it replaces https://github.com with the value here, which is useful for some special network environments.
   #github_mirror: ''
-  # Extra HTTP headers sent while registering and communicating with the Gitea Actions API.
-  # Use these for a reverse proxy that requires its own authentication. Headers are
-  # not sent to a different origin after a redirect, and cannot replace headers the runner sets itself.
+  # Extra HTTP headers for runner API requests to Gitea, e.g. reverse proxy authentication.
+  # Not used for action clones, artifacts, job summaries or jobs. Runner headers take precedence.
+  # Dropped on redirects to another hostname, or to HTTP if the instance URL uses HTTPS.
   #extra_headers:
   #  X-Proxy-Token: 'example'
   # When true (the default), fetch only the requested ref of an action repository (e.g. actions/checkout@v4) at depth 1 instead of cloning every branch's full history.
