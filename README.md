@@ -4,7 +4,19 @@
 
 ### Prerequisites
 
-Docker Engine Community version is required for docker mode. To install Docker CE, follow the official [install instructions](https://docs.docker.com/engine/install/).
+On the runner:
+
+- `git` 2.34.1 or newer on `PATH`, to download actions and reusable workflows.
+- `docker` or `podman` with `podman.socket` enabled, for docker mode, Docker actions and `docker://` steps. To install Docker CE, follow the official [install instructions](https://docs.docker.com/engine/install/).
+
+Where steps run, in the job image or on the runner in host mode:
+
+- `bash` or `sh` for `run` steps, `pwsh` or `powershell` on a Windows host.
+- `node` for JavaScript actions and `hashFiles()`.
+- `git` 2.34.1 or newer for [`builtin:checkout`](docs/builtin-actions.md).
+- `git-lfs` and `ssh` for `builtin:checkout`, only when its `lfs` or `ssh-key` input is used.
+
+Kubernetes mode needs [a few more tools](docs/kubernetes.md) in job images.
 
 ### Download pre-built binary
 
@@ -157,7 +169,7 @@ Of the [runner images](https://gitea.com/gitea/runner-images), the `-full` flavo
 
 #### Environment variables
 
-Earlier releases let a few environment variables (`GITEA_DEBUG`, `GITEA_TRACE`, `GITEA_RUNNER_CAPACITY`, `GITEA_RUNNER_FILE`, `GITEA_RUNNER_ENVIRON`, `GITEA_RUNNER_ENV_FILE`) override parts of the config. They are gone, use the YAML file for all settings. The Docker images still read their own variables, such as `RUNNER_STATE_FILE`, see [scripts/run.sh](scripts/run.sh) and the container documentation below.
+Earlier releases let a few environment variables (`GITEA_DEBUG`, `GITEA_TRACE`, `GITEA_RUNNER_CAPACITY`, `GITEA_RUNNER_FILE`, `GITEA_RUNNER_ENVIRON`, `GITEA_RUNNER_ENV_FILE`) override parts of the config. They are gone, use the YAML file for all settings. Config values can read the runner's environment as `${NAME}`, for example `capacity: ${RUNNER_CAPACITY}`. An unset `NAME` fails the load, and `$${NAME}` is a literal `${NAME}`. The Docker images still read their own variables, such as `RUNNER_STATE_FILE`, see [scripts/run.sh](scripts/run.sh) and the container documentation below.
 
 ### Labels
 
@@ -205,7 +217,7 @@ a workflow with `runs-on: ubuntu-latest` is executed in the `runner-images:ubunt
 
 Names may themselves contain a colon, for example `pool:e57e18d4-10d4-406f-93bf-60f127221bdd`. Only `host`, `docker` and `kubernetes` are treated as schemas.
 
-If a job's `runs-on` matches none of the runner's labels, or sets no `runs-on` at all, it still runs in `runner.default_image`: as a container when the runner has `docker` labels, as a pod when it has `kubernetes` labels, else as a container where docker is available and on the host where it is not. Images maintained for this purpose are listed at [gitea/runner-images](https://gitea.com/gitea/runner-images).
+Jobs run on `runner.default_image` when no runner label matches their `runs-on`: as a pod on runners with `kubernetes` labels, otherwise in a container, or on the host when docker is unavailable. Suitable images are listed at [gitea/runner-images](https://gitea.com/gitea/runner-images).
 
 Labels are chosen at registration time (`--labels`, or the interactive prompt) and can be changed afterwards by editing `runner.labels` in the config file, or in the Gitea UI under the runner's settings.
 
