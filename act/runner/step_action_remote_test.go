@@ -854,9 +854,9 @@ func TestStepActionRemoteCloneTokenSurvivesNilSecrets(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 
-			var captured git.NewGitCloneExecutorInput
+			var capturedToken string
 			setCloneExecutor(t, func(input git.NewGitCloneExecutorInput) common.Executor {
-				captured = input
+				capturedToken = input.Token
 				return func(ctx context.Context) error { return nil }
 			})
 
@@ -870,10 +870,8 @@ func TestStepActionRemoteCloneTokenSurvivesNilSecrets(t *testing.T) {
 						ActionCacheDir:        "/tmp/test-cache",
 						// Mirrors the state of a composite RunContext: job secrets are
 						// stripped, but the job token is still reachable via Config.Token.
-						Secrets:    nil,
-						Token:      wantToken,
-						ClientCert: []byte("cert"),
-						ClientKey:  []byte("key"),
+						Secrets: nil,
+						Token:   wantToken,
 					},
 					Run: &model.Run{
 						JobID: "1",
@@ -891,9 +889,7 @@ func TestStepActionRemoteCloneTokenSurvivesNilSecrets(t *testing.T) {
 
 			err := sar.prepareActionExecutor()(ctx)
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantCloneToken, captured.Token)
-			// the client certificate follows the same host gate as the token
-			assert.Equal(t, tt.wantCloneToken != "", captured.ClientCert != nil && captured.ClientKey != nil)
+			assert.Equal(t, tt.wantCloneToken, capturedToken)
 
 			sarm.AssertExpectations(t)
 		})

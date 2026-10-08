@@ -278,9 +278,8 @@ type NewGitCloneExecutorInput struct {
 	Quiet bool
 
 	// For Gitea
-	InsecureSkipTLS bool
-	// PEM pair for an instance that requires mutual TLS
-	ClientCert, ClientKey []byte
+	InsecureSkipTLS       bool
+	ClientCert, ClientKey []byte // PEM
 }
 
 // CloneIfRequired returns the repository and a boolean indicating whether an existing local clone was reused.

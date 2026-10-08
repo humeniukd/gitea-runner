@@ -68,30 +68,16 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 		actionDir := sar.actionDir()
 		defaultActionURL := sar.RunContext.Config.DefaultActionURL()
 		// For Gitea
-		// A composite RunContext nils Config.Secrets, so getGitCloneToken would yield an
-		// empty token and clone the action anonymously (401 against the authenticated
-		// instance). github.Token survives the composite config copy and matches the
-		// top-level token; keep the shouldCloneURLUseToken host gate to avoid leaking it.
-		cloneURL := sar.remoteAction.CloneURL(defaultActionURL)
-		token := ""
-		if shouldCloneURLUseToken(sar.RunContext.Config.GitHubInstance, sar.RunContext.Config.trustedActionInstance(), cloneURL) {
-			token = github.Token
-		}
-		cloneInput := git.NewGitCloneExecutorInput{
-			URL:         cloneURL,
+		// github.Token, unlike Config.GetToken, survives the composite config copy, which nils Config.Secrets.
+		gitClone := stepActionRemoteNewCloneExecutor(sar.RunContext.Config.withInstanceAuth(git.NewGitCloneExecutorInput{
+			URL:         sar.remoteAction.CloneURL(defaultActionURL),
 			Ref:         sar.remoteAction.Ref,
 			Dir:         actionDir,
-			Token:       token,
 			OfflineMode: sar.RunContext.Config.ActionOfflineMode,
 			Depth:       sar.RunContext.Config.ActionCloneDepth,
 			// printPrepareActions reports the download with its resolved commit.
 			Quiet: true,
-		}
-		if sar.cloneFromInstance() { // For Gitea
-			cloneInput.InsecureSkipTLS = sar.RunContext.Config.InsecureSkipTLS
-			cloneInput.ClientCert, cloneInput.ClientKey = sar.RunContext.Config.ClientCert, sar.RunContext.Config.ClientKey
-		}
-		gitClone := stepActionRemoteNewCloneExecutor(cloneInput)
+		}, github.Token))
 		var ntErr common.Executor
 		if err := gitClone(ctx); err != nil {
 			var refErr *git.Error
@@ -260,18 +246,6 @@ func (sar *stepActionRemote) getCompositeRunContext(ctx context.Context) (*RunCo
 
 func (sar *stepActionRemote) getCompositeSteps() *compositeSteps {
 	return sar.compositeSteps
-}
-
-// For Gitea
-// cloneFromInstance reports whether the action is cloned from the Gitea instance, the only host its TLS settings are meant for.
-func (sar *stepActionRemote) cloneFromInstance() bool {
-	if sar.remoteAction.URL == "" {
-		// Empty URL means the default action instance should be used
-		// Return true if the URL of the Gitea instance is the same as the URL of the default action instance
-		return sar.RunContext.Config.DefaultActionURL() == sar.RunContext.Config.GitHubInstance
-	}
-	// Return true if the URL of the remote action is the same as the URL of the Gitea instance
-	return sar.remoteAction.URL == sar.RunContext.Config.GitHubInstance
 }
 
 type remoteAction struct {

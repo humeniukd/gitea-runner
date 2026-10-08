@@ -20,7 +20,7 @@ import (
 func TestGetHTTPClientUsesProxyFromEnvironment(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://proxy.example.com:8080")
 
-	client := getHTTPClient("http://gitea.example.com", false, time.Minute, nil)
+	client := getHTTPClient("http://gitea.example.com", nil, time.Minute)
 	require.Equal(t, time.Minute, client.Timeout)
 	transport, ok := client.Transport.(*http.Transport)
 	require.True(t, ok)
@@ -34,39 +34,10 @@ func TestGetHTTPClientUsesProxyFromEnvironment(t *testing.T) {
 	require.Equal(t, "http://proxy.example.com:8080", proxyURL.String())
 }
 
-func TestGetHTTPClientInsecureTLS(t *testing.T) {
-	// insecure only takes effect for https endpoints
-	httpsInsecure := getHTTPClient("https://gitea.example.com", true, time.Minute, nil)
-	transport, ok := httpsInsecure.Transport.(*http.Transport)
-	require.True(t, ok)
-	require.NotNil(t, transport.TLSClientConfig)
-	require.True(t, transport.TLSClientConfig.InsecureSkipVerify)
-
-	for _, tc := range []struct {
-		name     string
-		endpoint string
-		insecure bool
-	}{
-		{"https secure", "https://gitea.example.com", false},
-		{"http insecure ignored", "http://gitea.example.com", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			c := getHTTPClient(tc.endpoint, tc.insecure, time.Minute, nil)
-			tr, ok := c.Transport.(*http.Transport)
-			require.True(t, ok)
-			require.Nil(t, tr.TLSClientConfig)
-		})
-	}
-}
-
-func TestGetHTTPClientUsesClientCertificate(t *testing.T) {
-	certificate := &tls.Certificate{Certificate: [][]byte{{1}}}
-	client := getHTTPClient("https://gitea.example.com", false, time.Minute, certificate)
-	transport, ok := client.Transport.(*http.Transport)
-	require.True(t, ok)
-	require.NotNil(t, transport.TLSClientConfig)
-	require.False(t, transport.TLSClientConfig.InsecureSkipVerify)
-	require.Equal(t, []tls.Certificate{*certificate}, transport.TLSClientConfig.Certificates)
+func TestGetHTTPClientAppliesTLSConfigOnlyToHTTPS(t *testing.T) {
+	tlsConfig := &tls.Config{}
+	require.Same(t, tlsConfig, getHTTPClient("https://gitea.example.com", tlsConfig, time.Minute).Transport.(*http.Transport).TLSClientConfig)
+	require.Nil(t, getHTTPClient("http://gitea.example.com", tlsConfig, time.Minute).Transport.(*http.Transport).TLSClientConfig)
 }
 
 func TestNewSetsBaseURLAndHeaders(t *testing.T) {
@@ -80,7 +51,7 @@ func TestNewSetsBaseURLAndHeaders(t *testing.T) {
 	defer server.Close()
 
 	// trailing slash must be trimmed before "/api/actions" is appended
-	c := New(server.URL+"/", false, "the-uuid", "the-token", time.Minute, nil)
+	c := New(server.URL+"/", nil, "the-uuid", "the-token", time.Minute)
 	// Address returns the endpoint as supplied (untrimmed)
 	require.Equal(t, server.URL+"/", c.Address())
 
@@ -100,7 +71,7 @@ func TestNewOmitsEmptyHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := New(server.URL, false, "", "", time.Minute, nil)
+	c := New(server.URL, nil, "", "", time.Minute)
 	_, _ = c.Ping(t.Context(), connect.NewRequest(&pingv1.PingRequest{Data: "hi"}))
 
 	require.Empty(t, gotHeaders.Get(protocol.UUIDHeader))

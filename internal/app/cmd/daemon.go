@@ -170,11 +170,10 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 
 		cli := client.New(
 			reg.Address,
-			cfg.Runner.Insecure,
+			cfg.Runner.TLSConfig(),
 			reg.UUID,
 			reg.Token,
 			config.RequestTimeout,
-			cfg.Runner.TLSCertificate,
 		)
 
 		runner := run.NewRunner(cfg, reg, cli)

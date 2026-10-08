@@ -7,6 +7,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"math/big"
@@ -48,38 +49,50 @@ cache:
 	require.NoError(t, err)
 }
 
-func TestLoadClientCertificate(t *testing.T) {
-	dir := t.TempDir()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+func TestClientCertIsValidatedOnLoadReadOnUseAndOfferedOnlyWhenAccepted(t *testing.T) {
+	require.True(t, (&Runner{Insecure: true}).TLSConfig().InsecureSkipVerify)
+	_, _, err := (&Runner{}).ReadClientCert()
 	require.NoError(t, err)
-	der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{SerialNumber: big.NewInt(1)}, &x509.Certificate{SerialNumber: big.NewInt(1)}, &key.PublicKey, key)
-	require.NoError(t, err)
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	require.NoError(t, err)
-	certPath, keyPath := filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
-	require.NoError(t, os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
-	require.NoError(t, os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600))
 
-	for _, tc := range []struct {
-		runner  Runner
-		wantErr string
-	}{
-		{Runner{ClientCertificate: certPath}, "must be configured together"},
-		{Runner{ClientKey: keyPath}, "must be configured together"},
-		{Runner{ClientCertificate: certPath, ClientKey: filepath.Join(dir, "missing.key")}, "read runner.client_key"},
-		{Runner{ClientCertificate: keyPath, ClientKey: keyPath}, "load runner client certificate"},
-		{Runner{ClientCertificate: certPath, ClientKey: keyPath}, ""},
-	} {
-		err := loadClientCertificate(&tc.runner)
-		if tc.wantErr != "" {
-			require.ErrorContains(t, err, tc.wantErr)
-			continue
-		}
+	dir := t.TempDir()
+	certPath, keyPath := filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
+	writePair := func() []byte {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		require.NoError(t, err)
-		require.NotNil(t, tc.runner.TLSCertificate)
-		require.NotEmpty(t, tc.runner.TLSCertificatePEM)
-		require.NotEmpty(t, tc.runner.TLSKeyPEM)
+		template := &x509.Certificate{SerialNumber: big.NewInt(1)}
+		der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+		require.NoError(t, err)
+		keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+		require.NoError(t, os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600))
+		return der
 	}
+	load := func(certFile, keyFile string) (*Config, error) {
+		return LoadDefault(write(t, "runner:\n  client_cert_file: '"+certFile+"'\n  client_key_file: '"+keyFile+"'\n"))
+	}
+	writePair()
+
+	_, err = load(certPath, "")
+	require.ErrorContains(t, err, "must be set together")
+	_, err = load(keyPath, keyPath)
+	require.ErrorContains(t, err, "load runner client certificate")
+
+	cfg, err := load(certPath, keyPath)
+	require.NoError(t, err)
+	renewed := writePair()
+	info := &tls.CertificateRequestInfo{Version: tls.VersionTLS13, SignatureSchemes: []tls.SignatureScheme{tls.ECDSAWithP256AndSHA256}}
+	pair, err := cfg.Runner.TLSConfig().GetClientCertificate(info)
+	require.NoError(t, err)
+	require.Equal(t, renewed, pair.Certificate[0])
+	info.AcceptableCAs = [][]byte{[]byte("another CA")}
+	pair, err = cfg.Runner.TLSConfig().GetClientCertificate(info)
+	require.NoError(t, err)
+	require.Empty(t, pair.Certificate)
+	certPEM, _, err := cfg.Runner.ReadClientCert()
+	require.NoError(t, err)
+	block, _ := pem.Decode(certPEM)
+	require.Equal(t, renewed, block.Bytes)
 }
 
 func TestLoadDefault_CacheS3(t *testing.T) {

@@ -61,11 +61,8 @@ type Runner struct {
 	Timeout               time.Duration     `yaml:"timeout"`                  // Timeout specifies the duration for runner timeout.
 	ShutdownTimeout       time.Duration     `yaml:"shutdown_timeout"`         // ShutdownTimeout specifies the duration to wait for running jobs to complete during a shutdown of the runner.
 	Insecure              bool              `yaml:"insecure"`                 // Insecure indicates whether the runner operates in an insecure mode.
-	ClientCertificate     string            `yaml:"client_certificate"`       // ClientCertificate is the PEM certificate used to authenticate the runner to Gitea.
-	ClientKey             string            `yaml:"client_key"`               // ClientKey is the PEM private key paired with ClientCertificate.
-	TLSCertificate        *tls.Certificate  `yaml:"-"`                        // TLSCertificate is loaded from ClientCertificate and ClientKey at startup.
-	TLSCertificatePEM     []byte            `yaml:"-"`                        // TLSCertificatePEM is ClientCertificate as read, for git clones, which take PEM.
-	TLSKeyPEM             []byte            `yaml:"-"`                        // TLSKeyPEM is ClientKey as read.
+	ClientCertFile        string            `yaml:"client_cert_file"`         // ClientCertFile is the PEM certificate presented to a Gitea instance that requires mutual TLS.
+	ClientKeyFile         string            `yaml:"client_key_file"`          // ClientKeyFile is the PEM private key paired with ClientCertFile.
 	FetchTimeout          time.Duration     `yaml:"fetch_timeout"`            // FetchTimeout specifies the timeout duration for fetching resources.
 	FetchInterval         time.Duration     `yaml:"fetch_interval"`           // FetchInterval specifies the interval duration for fetching resources.
 	FetchIntervalMax      time.Duration     `yaml:"fetch_interval_max"`       // FetchIntervalMax specifies the maximum backoff interval when idle.
@@ -270,8 +267,13 @@ func LoadDefault(file string) (*Config, error) {
 			maps.Copy(cfg.Runner.Envs, envs)
 		}
 	}
-	if err := loadClientCertificate(&cfg.Runner); err != nil {
-		return nil, err
+	if (cfg.Runner.ClientCertFile == "") != (cfg.Runner.ClientKeyFile == "") {
+		return nil, errors.New("runner.client_cert_file and runner.client_key_file must be set together")
+	}
+	if cfg.Runner.ClientCertFile != "" {
+		if _, err := tls.LoadX509KeyPair(cfg.Runner.ClientCertFile, cfg.Runner.ClientKeyFile); err != nil {
+			return nil, fmt.Errorf("load runner client certificate: %w", err)
+		}
 	}
 
 	if cfg.Log.Level == "" {
@@ -420,27 +422,29 @@ func LoadDefault(file string) (*Config, error) {
 	return cfg, nil
 }
 
-func loadClientCertificate(runner *Runner) error {
-	if runner.ClientCertificate == "" && runner.ClientKey == "" {
-		return nil
+func (r *Runner) TLSConfig() *tls.Config {
+	tlsConfig := &tls.Config{InsecureSkipVerify: r.Insecure}
+	if r.ClientCertFile != "" {
+		tlsConfig.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			pair, err := tls.LoadX509KeyPair(r.ClientCertFile, r.ClientKeyFile) // per handshake, so renewed files apply
+			if err != nil || info.SupportsCertificate(&pair) != nil {
+				return &tls.Certificate{}, err
+			}
+			return &pair, nil
+		}
 	}
-	if runner.ClientCertificate == "" || runner.ClientKey == "" {
-		return errors.New("runner.client_certificate and runner.client_key must be configured together")
+	return tlsConfig
+}
+
+func (r *Runner) ReadClientCert() (cert, key []byte, err error) {
+	if r.ClientCertFile == "" {
+		return nil, nil, nil
 	}
-	certPEM, err := os.ReadFile(runner.ClientCertificate)
-	if err != nil {
-		return fmt.Errorf("read runner.client_certificate: %w", err)
+	if cert, err = os.ReadFile(r.ClientCertFile); err != nil {
+		return nil, nil, err
 	}
-	keyPEM, err := os.ReadFile(runner.ClientKey)
-	if err != nil {
-		return fmt.Errorf("read runner.client_key: %w", err)
-	}
-	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		return fmt.Errorf("load runner client certificate: %w", err)
-	}
-	runner.TLSCertificate, runner.TLSCertificatePEM, runner.TLSKeyPEM = &certificate, certPEM, keyPEM
-	return nil
+	key, err = os.ReadFile(r.ClientKeyFile)
+	return cert, key, err
 }
 
 // warnUnknownKeys reports keys the config does not define, which are otherwise ignored
