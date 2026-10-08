@@ -18,6 +18,7 @@ import (
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 	"go.yaml.in/yaml/v4"
+	"golang.org/x/net/http/httpguts"
 )
 
 // RequestTimeout bounds every RPC to Gitea, and with it runner.fetch_timeout.
@@ -62,6 +63,7 @@ type Runner struct {
 	Timeout               time.Duration     `yaml:"timeout"`                  // Timeout specifies the duration for runner timeout.
 	ShutdownTimeout       time.Duration     `yaml:"shutdown_timeout"`         // ShutdownTimeout specifies the duration to wait for running jobs to complete during a shutdown of the runner.
 	Insecure              bool              `yaml:"insecure"`                 // Insecure indicates whether the runner operates in an insecure mode.
+	ExtraHeaders          map[string]string `yaml:"extra_headers"`            // ExtraHeaders adds HTTP headers to runner API requests to Gitea.
 	FetchTimeout          time.Duration     `yaml:"fetch_timeout"`            // FetchTimeout specifies the timeout duration for fetching resources.
 	FetchInterval         time.Duration     `yaml:"fetch_interval"`           // FetchInterval specifies the interval duration for fetching resources.
 	FetchIntervalMax      time.Duration     `yaml:"fetch_interval_max"`       // FetchIntervalMax specifies the maximum backoff interval when idle.
@@ -326,6 +328,9 @@ func LoadDefault(file string) (*Config, error) {
 	if !slices.Contains(ToolCacheModes, cfg.Runner.ToolCacheMode) {
 		return nil, fmt.Errorf("invalid runner.tool_cache_mode %q: must be one of %q", cfg.Runner.ToolCacheMode, ToolCacheModes)
 	}
+	if err := validateExtraHeaders(cfg.Runner.ExtraHeaders); err != nil {
+		return nil, err
+	}
 	if cfg.Host.WorkdirParent == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -480,6 +485,21 @@ func definedRunnerConfigKeys(root *yaml.Node) map[string]bool {
 	}
 
 	return defined
+}
+
+func validateExtraHeaders(headers map[string]string) error {
+	seen := make(map[string]string, len(headers))
+	for name, value := range headers {
+		if !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
+			return fmt.Errorf("invalid runner.extra_headers entry %q", name)
+		}
+		key := strings.ToLower(name)
+		if other, ok := seen[key]; ok {
+			return fmt.Errorf("runner.extra_headers sets %q and %q, which name the same header", other, name)
+		}
+		seen[key] = name
+	}
+	return nil
 }
 
 // resolveSecretFile reads key from key_file, so deployments can mount a secret instead of committing it.
