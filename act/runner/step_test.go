@@ -218,7 +218,6 @@ func TestSetupEnv(t *testing.T) {
 env: ${{ fromJSON(matrix.env) }}
 jobs:
   test:
-    runs-on: ubuntu-latest
     env:
       PRIORITY: ${{ matrix.priority }}
     defaults:

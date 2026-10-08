@@ -212,7 +212,7 @@ func TestStepDockerNewStepContainerNetworkModeAndPath(t *testing.T) {
 						JobID: "1",
 						Workflow: &model.Workflow{
 							Jobs: map[string]*model.Job{
-								"1": createJob(t, "runs-on: ubuntu-latest", ""),
+								"1": {},
 							},
 						},
 					},

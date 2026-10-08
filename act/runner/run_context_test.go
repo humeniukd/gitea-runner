@@ -326,7 +326,6 @@ func TestStartJobContainerGivesServicesTheirVolumes(t *testing.T) {
 	redis := startJobContainerInputs(t, `
 jobs:
   job:
-    runs-on: ubuntu-latest
     services:
       redis:
         image: redis:latest
@@ -347,7 +346,6 @@ func TestStartJobContainerBuildsEvaluatedJobAndServiceInputs(t *testing.T) {
 	inputs := startJobContainerInputs(t, `
 jobs:
   job:
-    runs-on: ubuntu-latest
     container: ${{ fromJSON('{"image":"docker://node:20","options":"--label ${{ github.job }}","credentials":{"username":"user","password":"${{ vars.TITLE }}"}}') }}
     services: ${{ fromJSON('{"redis":{"image":"docker://redis:latest","volumes":["data:/data"],"env":{"TITLE":"${{ github.job }}"},"credentials":{"username":"user","password":"${{ github.job }}"},"entrypoint":"/entry.sh","command":"redis-server --port 6380"}}') }}
 `, &Config{})
@@ -371,7 +369,6 @@ env:
   JOB_CONTAINER_NAME: from-workflow
 jobs:
   job:
-    runs-on: ubuntu-latest
     container:
       image: node:20
       credentials: {username: "${{ env.REG_USER }}", password: pass}
@@ -542,7 +539,7 @@ func TestRunContext_GetBindsAndMounts(t *testing.T) {
 		}
 
 		t.Run("InterpolatedContainerVolumes", func(t *testing.T) {
-			job := createJob(t, "runs-on: ubuntu-latest", "")
+			job := &model.Job{}
 			err := job.RawContainer.Encode(map[string]any{
 				"image":   "node:20",
 				"volumes": []string{"${{ secrets.MAME }}:/root/.mame/roms:ro"},
@@ -1195,43 +1192,11 @@ if: false`, ""),
 	assertObject.False(rc.isEnabled(context.Background()))
 
 	rc = createIfTestRunContext(map[string]*model.Job{
-		"job1": createJob(t, `runs-on: ubuntu-latest
-if: ${{ fromJSON('not-json') }}`, ""),
+		"job1": createJob(t, `if: ${{ fromJSON('not-json') }}`, ""),
 	})
 	enabled, err := rc.isEnabled(context.Background())
 	require.NoError(t, err)
 	assertObject.False(enabled)
-
-	for _, runsOn := range []string{"", "if: false", "runs-on: ''", "runs-on: []", "runs-on: [ubuntu-latest, ' ']", "runs-on: {labels: []}", "runs-on: ${{ '' }}"} {
-		rc = createIfTestRunContext(map[string]*model.Job{
-			"job1": createJob(t, runsOn+"\nsteps: [run: echo]", ""),
-		})
-		enabled, err = rc.isEnabled(t.Context())
-		require.ErrorContains(t, err, `job "job1" requires a non-empty 'runs-on'`, runsOn)
-		assertObject.False(enabled)
-	}
-
-	rc = createIfTestRunContext(map[string]*model.Job{
-		"job1": createJob(t, `runs-on: {group: org}
-steps: [run: echo]`, ""),
-	})
-	assertObject.True(rc.isEnabled(t.Context()))
-
-	rc = createIfTestRunContext(map[string]*model.Job{"job1": {Result: "success"}})
-	assertObject.True(rc.isEnabled(t.Context())) // Gitea's placeholder for a needed job
-}
-
-func TestPlanExecutorFailsMatrixJobWithoutRunsOn(t *testing.T) {
-	workflow, err := model.ReadWorkflow(strings.NewReader(`
-jobs:
-  test:
-    strategy: {matrix: {os: [a, b]}}
-    steps: [run: echo]
-`))
-	require.NoError(t, err)
-	plan := &model.Plan{Stages: []*model.Stage{{Runs: []*model.Run{{Workflow: workflow, JobID: "test"}}}}}
-	require.ErrorContains(t, (&runnerImpl{config: &Config{}}).NewPlanExecutor(plan)(t.Context()), "non-empty 'runs-on'")
-	assert.Equal(t, "failure", workflow.Jobs["test"].Result)
 }
 
 func TestRunContextGetEnv(t *testing.T) {
@@ -1712,7 +1677,7 @@ func createRunsOnRunContext(t *testing.T, runsOn string) *RunContext {
 }
 
 func TestRunContextContainerImageCannotSelectBackend(t *testing.T) {
-	rc := createIfTestRunContext(map[string]*model.Job{"job1": createJob(t, "runs-on: ubuntu-latest\ncontainer: -self-hosted", "")})
+	rc := createIfTestRunContext(map[string]*model.Job{"job1": createJob(t, "container: -self-hosted", "")})
 	require.NoError(t, rc.resolvePlatformImage(t.Context()))
 	assert.False(t, rc.IsHostEnv())
 

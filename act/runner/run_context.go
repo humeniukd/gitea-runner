@@ -1222,9 +1222,7 @@ func (rc *RunContext) Executor() (common.Executor, error) {
 		res, err := rc.isEnabled(ctx)
 		if err != nil {
 			// Record the failure so a job that cannot start gets a stop time. rc.caller is only set for reusable workflows.
-			unlock := lockJob(rc.Run.Job()) // matrix combinations share the job and can fail at once
 			rc.result("failure")
-			unlock()
 			if rc.caller != nil { // For Gitea
 				rc.caller.setReusedWorkflowJobResult(rc.Run.JobID, "failure")
 			}
@@ -1245,21 +1243,11 @@ func (rc *RunContext) runsOnImage(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("unable to interpolate runs-on: %w", err)
 		}
 	}
-	if err := requireRunsOn(rc.Run.JobID, runsOn); err != nil {
-		return "", err
-	}
 
 	if rc.Config.PlatformPicker != nil {
 		return rc.Config.PlatformPicker(runsOn), nil
 	}
 	return "", nil
-}
-
-func requireRunsOn(jobID string, runsOn []string) error {
-	if len(runsOn) == 0 || slices.ContainsFunc(runsOn, func(label string) bool { return strings.TrimSpace(label) == "" }) {
-		return fmt.Errorf("job %q requires a non-empty 'runs-on'", jobID)
-	}
-	return nil
 }
 
 func (rc *RunContext) runsOnPlatformNames(ctx context.Context) []string {
@@ -1344,12 +1332,6 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 	if jobType == model.JobTypeInvalid {
 		return false, jobTypeErr
 	}
-	stepless := len(job.Steps) == 0 // how Gitea passes needed jobs, which only carry their result
-	if jobType == model.JobTypeDefault && !stepless {
-		if err := requireRunsOn(rc.Run.JobID, job.RunsOn()); err != nil {
-			return false, err
-		}
-	}
 
 	if !runJob {
 		if rc.caller != nil { // For Gitea
@@ -1360,7 +1342,7 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	if jobType != model.JobTypeDefault || stepless {
+	if jobType != model.JobTypeDefault {
 		return true, nil
 	}
 
@@ -1722,9 +1704,7 @@ func parentDir(p string) string {
 // still names a release when the label is a rolling one such as ubuntu-latest.
 func (rc *RunContext) imageOS(ctx context.Context) string {
 	if rc.Run.Job().RunsOn() == nil {
-		// A composite action runs on a synthetic job, and resolving its image would only
-		// log that runs-on is missing.
-		return ""
+		return "" // a composite action runs on a synthetic job without runs-on
 	}
 	if imageOS := imageOSFromImage(rc.platformImage); imageOS != "" {
 		return imageOS
