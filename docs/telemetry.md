@@ -31,7 +31,7 @@ Except for the endpoint, each `OTEL_EXPORTER_OTLP_*` variable has `TRACES` and `
 
 - A span per job, named `RUN {workflow} {job}`, with the repository, ref, commit, run URL, run number, attempt and result.
 - A span per step, named as in Gitea's step list, including `Pre` and `Post` stages and the steps of composite actions, with the step's result.
-- The runner's name, UUID and version.
+- The runner's name, UUID, version, process ID and start time, and the Go version.
 
 Logs, step output and secrets are never sent. Step names are taken from the workflow file as written, without expanding `${{ }}` expressions.
 
@@ -41,33 +41,23 @@ Jobs receive `TRACEPARENT`, so tools in a job that use OpenTelemetry can add the
 
 ## Metrics
 
-The metrics of the Prometheus endpoint are also exported, whether or not `metrics.enabled` is set. They are sent every export interval and once more on shutdown. If you want to disable OTLP metrics, set `OTEL_METRICS_EXPORTER=none`.
+The metrics of the Prometheus endpoint are also exported, whether or not `metrics.enabled` is set, except `gitea_runner_info`, `go_info` and `process_start_time_seconds`, which are sent as resource attributes. They are sent every export interval and once more on shutdown. To turn them off, set `OTEL_METRICS_EXPORTER=none`.
 
-Most metric and attribute names follow [OpenTelemetry semantic conventions](https://opentelemetry.io/docs/specs/semconv/) for CI/CD. Runner metrics outside the standard semantic conventions use the runner's own `gitea.runner.*` namespace.
+Metrics are named after the [OpenTelemetry semantic conventions](https://opentelemetry.io/docs/specs/semconv/) where one exists, and under `gitea.runner.*` otherwise. Other Go and process metrics, such as `go_memstats_heap_alloc_bytes`, keep their Prometheus names.
 
 | Metric | Attributes |
 | --- | --- |
 | `cicd.worker.count` | `cicd.worker.state` |
 | `cicd.system.errors` | `cicd.system.component`, `rpc.method`, `error.type` |
-| `rpc.client.call.duration` | `rpc.system.name`, `rpc.method` |
 | `gitea.runner.jobs` | `cicd.pipeline.result` |
 | `gitea.runner.job.active`, `gitea.runner.job.limit`, `gitea.runner.job.utilization`, `gitea.runner.job.duration` | |
 | `gitea.runner.poll.fetches` | `gitea.runner.poll.result` |
-| `gitea.runner.poll.backoff` | |
+| `gitea.runner.uptime`, `gitea.runner.poll.backoff`, `gitea.runner.poll.fetch.duration` | |
 | `gitea.runner.report.log.requests`, `gitea.runner.report.state.requests` | `gitea.runner.report.result` |
-| `gitea.runner.report.log.buffer` | |
+| `gitea.runner.report.log.buffer`, `gitea.runner.report.log.duration`, `gitea.runner.report.state.duration` | |
 | `go.memory.used` | `go.memory.type` |
-| `go.goroutine.count`, `go.memory.allocated`, `go.memory.allocations`, `go.memory.gc.goal`, `go.memory.gc.cycles`, `go.memory.limit`, `go.config.gogc`, `go.processor.limit` | |
-| `process.uptime`, `process.memory.usage`, `process.memory.virtual`, `process.unix.file_descriptor.count` (`process.windows.handle.count` on Windows) | |
-| `process.network.io` | `network.io.direction` |
-
-The conventions reserve `go.*` and `process.*`, so the all unstandardized Go and process metrics keep their Prometheus names:
-
-| Metric |
-| --- |
-| `go_gc_duration_seconds`, `go_threads` |
-| `go_memstats_alloc_bytes`, `go_memstats_buck_hash_sys_bytes`, `go_memstats_frees_total`, `go_memstats_gc_sys_bytes`, `go_memstats_heap_alloc_bytes`, `go_memstats_heap_idle_bytes`, `go_memstats_heap_inuse_bytes`, `go_memstats_heap_objects`, `go_memstats_heap_released_bytes`, `go_memstats_heap_sys_bytes`, `go_memstats_last_gc_time_seconds`, `go_memstats_mcache_inuse_bytes`, `go_memstats_mcache_sys_bytes`, `go_memstats_mspan_inuse_bytes`, `go_memstats_mspan_sys_bytes`, `go_memstats_other_sys_bytes`, `go_memstats_stack_inuse_bytes`, `go_memstats_stack_sys_bytes`, `go_memstats_sys_bytes` |
-| `process_cpu_seconds_total`, `process_max_fds`, `process_virtual_memory_max_bytes` |
+| `go.goroutine.count`, `go.memory.allocated`, `go.memory.gc.goal`, `go.memory.gc.cycles`, `go.memory.limit`, `go.config.gogc`, `go.processor.limit` | |
+| `process.memory.usage`, `process.memory.virtual`, `process.unix.file_descriptor.count` (`process.windows.handle.count` on Windows) | |
 
 ## Security
 

@@ -65,7 +65,7 @@ func ResultToStatusLabel(r runnerv1.Result) string {
 	}
 }
 
-// JobStatus is ResultToStatusLabel, reporting a job its deadline stopped as timeout.
+// JobStatus reports an unsuccessful job past its deadline as timeout, like the job's trace span.
 func JobStatus(ctx context.Context, r runnerv1.Result) string {
 	status := ResultToStatusLabel(r)
 	if status != LabelStatusSuccess && status != LabelStatusSkipped && errors.Is(ctx.Err(), context.DeadlineExceeded) {

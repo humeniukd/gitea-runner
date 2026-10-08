@@ -156,14 +156,10 @@ func TestExportRetriesAndMatchesOTLP(t *testing.T) {
 	assert.Equal(t, "op", tracesData.GetResourceSpans()[0].GetScopeSpans()[0].GetSpans()[0].GetName())
 
 	resourceMetrics := metricsData.GetResourceMetrics()[0]
-	assert.True(t, slices.ContainsFunc(resourceMetrics.GetResource().GetAttributes(), func(kv *commonpb.KeyValue) bool {
-		return proto.Equal(kv, keyValue("service.name", "gitea-runner"))
-	}))
-	created := slices.IndexFunc(resourceMetrics.GetResource().GetAttributes(), func(kv *commonpb.KeyValue) bool { return kv.GetKey() == "process.creation.time" })
-	require.NotEqual(t, -1, created)
-	creation, err := time.Parse(time.RFC3339Nano, resourceMetrics.GetResource().GetAttributes()[created].GetValue().GetStringValue())
-	require.NoError(t, err)
-	assert.WithinDuration(t, time.Now(), creation, time.Hour)
+	pid := &commonpb.KeyValue{Key: "process.pid", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: int64(os.Getpid())}}}
+	for _, want := range []*commonpb.KeyValue{keyValue("service.name", "gitea-runner"), keyValue("process.creation.time", processCreation.UTC().Format(time.RFC3339Nano)), pid} {
+		assert.True(t, slices.ContainsFunc(resourceMetrics.GetResource().GetAttributes(), func(kv *commonpb.KeyValue) bool { return proto.Equal(kv, want) }), want.GetKey())
+	}
 	assert.InDelta(t, 2, resourceMetrics.GetScopeMetrics()[0].GetMetrics()[0].GetGauge().GetDataPoints()[0].GetAsDouble(), 0)
 }
 
@@ -174,8 +170,6 @@ func TestConvert(t *testing.T) {
 	summary := prometheus.NewSummary(prometheus.SummaryOpts{Name: "gc_seconds", Objectives: map[float64]float64{0.5: 0.05}})
 	jobs := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "gitea_runner_job_total"}, []string{"status"})
 	running := prometheus.NewGauge(prometheus.GaugeOpts{Name: "gitea_runner_job_running"})
-	fetch := prometheus.NewHistogram(prometheus.HistogramOpts{Name: "gitea_runner_poll_fetch_duration_seconds"})
-	updateLog := prometheus.NewHistogram(prometheus.HistogramOpts{Name: "gitea_runner_report_log_duration_seconds"})
 	gauges := map[string]float64{
 		"go_info": 1, "go_gc_gomemlimit_bytes": math.MaxInt64,
 		"go_memstats_sys_bytes": 100, "go_memstats_heap_released_bytes": 30, "go_memstats_stack_inuse_bytes": 20,
@@ -184,7 +178,8 @@ func TestConvert(t *testing.T) {
 		registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name}, func() float64 { return value }))
 	}
 	state := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "gitea_runner_state"}, []string{"state"})
-	registry.MustRegister(counter, histogram, summary, jobs, running, fetch, updateLog, state)
+	clientErrors := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "gitea_runner_client_errors_total"}, []string{"method", "code"})
+	registry.MustRegister(counter, histogram, summary, jobs, running, state, clientErrors)
 	counter.WithLabelValues("success").Add(3)
 	for _, value := range []float64{0.5, 1.5, 3} {
 		histogram.Observe(value)
@@ -194,6 +189,7 @@ func TestConvert(t *testing.T) {
 	running.Set(2)
 	state.WithLabelValues("idle").Set(1)
 	state.WithLabelValues("unavailable").Set(0)
+	clientErrors.WithLabelValues("FetchTask", "unavailable").Inc()
 	families, err := registry.Gather()
 	require.NoError(t, err)
 
@@ -202,7 +198,7 @@ func TestConvert(t *testing.T) {
 		exported[metric.GetName()] = metric
 	}
 	assert.ElementsMatch(t, []string{
-		"duration_seconds", "gc_seconds", "jobs_total", "gitea.runner.jobs", "gitea.runner.job.active", "rpc.client.call.duration",
+		"duration_seconds", "gc_seconds", "jobs_total", "gitea.runner.jobs", "gitea.runner.job.active", "cicd.system.errors",
 		"go_memstats_sys_bytes", "go_memstats_heap_released_bytes", "go_memstats_stack_inuse_bytes", "go.memory.used", "cicd.worker.count",
 	}, slices.Collect(maps.Keys(exported)))
 	assert.Equal(t, "s", exported["duration_seconds"].GetUnit())
@@ -239,10 +235,9 @@ func TestConvert(t *testing.T) {
 	}
 	assert.Equal(t, map[string]float64{"stack": 20, "other": 50}, attributes(exported["go.memory.used"].GetSum().GetDataPoints(), "go.memory.type"))
 	assert.Equal(t, map[string]float64{"available": 1, "offline": 0}, attributes(exported["cicd.worker.count"].GetSum().GetDataPoints(), "cicd.worker.state"))
-	calls := exported["rpc.client.call.duration"]
-	assert.Equal(t, "s", calls.GetUnit())
-	require.Len(t, calls.GetHistogram().GetDataPoints(), 2)
-	assert.True(t, proto.Equal(keyValue("rpc.method", "runner.v1.RunnerService/UpdateLog"), calls.GetHistogram().GetDataPoints()[1].GetAttributes()[1]))
+	assert.True(t, proto.Equal(&commonpb.KeyValueList{Values: []*commonpb.KeyValue{
+		keyValue("error.type", "unavailable"), keyValue("rpc.method", "runner.v1.RunnerService/FetchTask"), keyValue("cicd.system.component", "runner"),
+	}}, &commonpb.KeyValueList{Values: exported["cicd.system.errors"].GetSum().GetDataPoints()[0].GetAttributes()}))
 }
 
 func TestExportRefusesRedirects(t *testing.T) {

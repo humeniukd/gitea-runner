@@ -206,6 +206,9 @@ func (p *Poller) Ready(grace time.Duration) (bool, string) {
 	if p.unregistered.Load() {
 		return false, "runner is no longer registered"
 	}
+	if p.pollingCtx.Err() != nil {
+		return false, "runner is shutting down"
+	}
 	p.availabilityMu.Lock()
 	ready, reason := p.availabilityReady, p.availabilityReason
 	p.availabilityMu.Unlock()
