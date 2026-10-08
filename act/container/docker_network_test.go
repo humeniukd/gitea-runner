@@ -57,54 +57,25 @@ func TestIsAddressPoolExhausted(t *testing.T) {
 	assert.False(t, isAddressPoolExhausted(cerrdefs.ErrInvalidArgument.WithMessage("invalid subnet 10.0.0.0/8: it overlaps with an existing network")))
 }
 
-func TestCreateDockerNetworkCopiesDefaultBridgeOptions(t *testing.T) {
+func TestCreateDockerNetworkInheritsDaemonMTU(t *testing.T) {
 	ctx := context.Background()
-	client := &mockDockerClient{}
-	enableIPv4, enableIPv6 := true, false
-	opts := NewDockerNetworkCreateExecutorInput{
-		EnableIPv4: &enableIPv4,
-		EnableIPv6: &enableIPv6,
-		RunnerUUID: "runner-1",
-	}
-	client.On("NetworkList", ctx, mobyclient.NetworkListOptions{}).
-		Return(mobyclient.NetworkListResult{}, nil).Once()
-	client.On("NetworkInspect", ctx, "bridge", mobyclient.NetworkInspectOptions{}).
-		Return(mobyclient.NetworkInspectResult{Network: network.Inspect{Network: network.Network{Options: map[string]string{
-			"com.docker.network.bridge.name":                 "docker0",
-			"com.docker.network.bridge.default_bridge":       "true",
-			"com.docker.network.bridge.enable_icc":           "false",
-			"com.docker.network.bridge.enable_ip_masquerade": "false",
-			"com.docker.network.bridge.host_binding_ipv4":    "127.0.0.1",
-			"com.docker.network.driver.mtu":                  "1450",
-		}}}}, nil).Once()
-	client.On("NetworkCreate", ctx, "job-network", mobyclient.NetworkCreateOptions{
-		Driver:     "bridge",
-		Scope:      "local",
-		EnableIPv4: &enableIPv4,
-		EnableIPv6: &enableIPv6,
-		Options: map[string]string{
-			"com.docker.network.bridge.host_binding_ipv4": "127.0.0.1",
-			"com.docker.network.driver.mtu":               "1450",
+	for _, tc := range []struct {
+		bridgeOptions, want map[string]string
+	}{
+		{
+			map[string]string{"com.docker.network.bridge.host_binding_ipv4": "127.0.0.1", "com.docker.network.driver.mtu": "1450"},
+			map[string]string{"com.docker.network.driver.mtu": "1450"},
 		},
-		Labels: runnerLabels("runner-1"),
-	}).Return(mobyclient.NetworkCreateResult{}, nil).Once()
-
-	require.NoError(t, createDockerNetwork(ctx, client, "job-network", opts))
-	client.AssertExpectations(t)
-}
-
-func TestCreateDockerNetworkWithoutDefaultBridge(t *testing.T) {
-	ctx := context.Background()
-	client := &mockDockerClient{}
-	client.On("NetworkList", ctx, mobyclient.NetworkListOptions{}).Return(mobyclient.NetworkListResult{}, nil).Once()
-	client.On("NetworkInspect", ctx, "bridge", mobyclient.NetworkInspectOptions{}).Return(mobyclient.NetworkInspectResult{}, cerrdefs.ErrNotFound.WithMessage("network bridge not found")).Once()
-	client.On("NetworkCreate", ctx, "job-network", mobyclient.NetworkCreateOptions{
-		Driver: "bridge",
-		Scope:  "local",
-	}).Return(mobyclient.NetworkCreateResult{}, nil).Once()
-
-	require.NoError(t, createDockerNetwork(ctx, client, "job-network", NewDockerNetworkCreateExecutorInput{}))
-	client.AssertExpectations(t)
+		{map[string]string{"com.docker.network.driver.mtu": "1500"}, nil},
+	} {
+		client := &mockDockerClient{}
+		client.On("NetworkList", ctx, mobyclient.NetworkListOptions{}).
+			Return(mobyclient.NetworkListResult{Items: []network.Summary{{Name: network.NetworkBridge, Options: tc.bridgeOptions}}}, nil)
+		client.On("NetworkCreate", ctx, "job-network", mobyclient.NetworkCreateOptions{Driver: "bridge", Scope: "local", Options: tc.want}).
+			Return(mobyclient.NetworkCreateResult{}, nil)
+		require.NoError(t, createDockerNetwork(ctx, client, "job-network", NewDockerNetworkCreateExecutorInput{}))
+		client.AssertExpectations(t)
+	}
 }
 
 func (m *mockDockerClient) NetworkConnect(ctx context.Context, id string, opts mobyclient.NetworkConnectOptions) (mobyclient.NetworkConnectResult, error) {

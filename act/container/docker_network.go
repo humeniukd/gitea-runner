@@ -26,9 +26,6 @@ const (
 	networkCreateRetryDelay = time.Second
 )
 
-// icc and ip-masq stay out, as on a job network they would cut services or the internet off
-var inheritedBridgeOptions = []string{"com.docker.network.driver.mtu", "com.docker.network.bridge.host_binding_ipv4"}
-
 // RemoveOrphanNetworks removes the networks this runner created for jobs whose teardown did
 // not get to them: the runner died with the job, the teardown timed out, or the network still
 // had an endpoint on it at the time. Each one holds a subnet of the daemon's address pool
@@ -100,6 +97,7 @@ func createDockerNetwork(ctx context.Context, cli client.APIClient, name string,
 	if err != nil {
 		return err
 	}
+	var options map[string]string
 	// For Gitea, reduce log noise
 	// common.Logger(ctx).Debugf("%v", networks)
 	for _, n := range networks.Items {
@@ -107,13 +105,10 @@ func createDockerNetwork(ctx context.Context, cli client.APIClient, name string,
 			common.Logger(ctx).Debugf("Network %v exists", name)
 			return nil
 		}
-	}
-
-	var options map[string]string
-	if defaultBridge, err := cli.NetworkInspect(ctx, "bridge", client.NetworkInspectOptions{}); err == nil {
-		options = jobBridgeOptions(defaultBridge.Network.Options)
-	} else if !cerrdefs.IsNotFound(err) {
-		common.Logger(ctx).Warnf("cannot inspect default bridge network, job network %s will use Docker defaults: %v", name, err)
+		// the daemon's mtu only reaches its default bridge, Docker's default is left out to keep default-network-opts
+		if mtu := n.Options["com.docker.network.driver.mtu"]; n.Name == network.NetworkBridge && mtu != "" && mtu != "1500" {
+			options = map[string]string{"com.docker.network.driver.mtu": mtu}
+		}
 	}
 
 	for i := range networkCreateAttempts {
@@ -140,16 +135,6 @@ func createDockerNetwork(ctx context.Context, cli client.APIClient, name string,
 		}
 	}
 	return fmt.Errorf("docker has no address pool left for this job's network, lower runner.capacity or widen default-address-pools in the docker daemon config: %w", err)
-}
-
-func jobBridgeOptions(defaultOptions map[string]string) map[string]string {
-	options := make(map[string]string, len(inheritedBridgeOptions))
-	for _, key := range inheritedBridgeOptions {
-		if value, ok := defaultOptions[key]; ok {
-			options[key] = value
-		}
-	}
-	return options
 }
 
 func runnerLabels(runnerUUID string) map[string]string {
