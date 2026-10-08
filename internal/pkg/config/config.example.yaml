@@ -239,8 +239,8 @@ container:
   #workdir_parent:
   # Volumes and bind mounts containers may mount, as globs (https://github.com/bmatcuk/doublestar#patterns).
   # `*` matches within a path segment, `**` across segments. Empty allows none. tmpfs mounts are always allowed.
-  # A `:ro` suffix, as in `docker run -v`, allows only read-only mounts of what the glob matches.
-  # For example, to allow the `data` volume, all json files in `/src` and `/etc/ssl/certs` read-only:
+  # A `:ro` suffix allows only read-only mounts, unless an entry without it matches too.
+  # For example, to allow the `data` volume and all json files in `/src`, and `/etc/ssl/certs` only read-only:
   # valid_volumes:
   #   - data
   #   - /src/*.json
