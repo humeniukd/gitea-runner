@@ -264,7 +264,7 @@ volumes:
   - ${GITEA_DOCKER_WORKSPACE:-.}/data:/app/data
 ```
 
-Linux container jobs use a Docker proxy when socket sharing and permissions allow it. Other setups use the daemon socket directly. Host jobs use their existing Docker access, where `.` works. The proxy removes the containers, networks and volumes a job creates, `docker compose` services included, after post steps and the completed hook. Set `container.docker_cleanup: false` when jobs deploy services to the runner's Docker daemon.
+Linux container jobs use a Docker proxy when socket sharing and permissions allow it. Other setups use the daemon socket directly. Host jobs use their existing Docker access, where `.` works. The proxy removes the containers, networks and volumes a job creates, `docker compose` services included, after post steps and the completed hook. Set `container.sweep: false` when jobs deploy services to the runner's Docker daemon.
 
 #### Proxy
 

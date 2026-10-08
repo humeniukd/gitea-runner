@@ -615,7 +615,7 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		},
 		ContainerOptions:                  r.cfg.Container.Options,
 		ServiceReadyTimeout:               r.cfg.Container.ServiceReadyTimeout,
-		NoDockerCleanup:                   r.cfg.Container.DockerCleanup != nil && !*r.cfg.Container.DockerCleanup,
+		NoSweep:                           r.cfg.Container.Sweep != nil && !*r.cfg.Container.Sweep,
 		ContainerDaemonSocket:             r.cfg.Container.DockerHost,
 		Privileged:                        r.cfg.Container.Privileged,
 		DefaultActionInstance:             r.getDefaultActionsURL(task),

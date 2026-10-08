@@ -284,7 +284,7 @@ container:
   #service_ready_timeout: 5m
   # Remove the containers, networks and volumes a job creates through its Docker proxy when
   # the job ends. Set to false when jobs deploy services to the runner's Docker daemon.
-  #docker_cleanup: true
+  #sweep: true
 
 host:
   # The parent directory of a job's working directory.
