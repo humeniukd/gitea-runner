@@ -19,6 +19,7 @@ import (
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 	"go.yaml.in/yaml/v4"
+	"golang.org/x/net/http/httpguts"
 )
 
 // RequestTimeout bounds every RPC to Gitea, and with it runner.fetch_timeout.
@@ -63,6 +64,7 @@ type Runner struct {
 	Insecure              bool              `yaml:"insecure"`                 // Insecure indicates whether the runner operates in an insecure mode.
 	ClientCertFile        string            `yaml:"client_cert_file"`         // ClientCertFile is the PEM certificate presented to a Gitea instance that requires mutual TLS.
 	ClientKeyFile         string            `yaml:"client_key_file"`          // ClientKeyFile is the PEM private key paired with ClientCertFile.
+	ExtraHeaders          map[string]string `yaml:"extra_headers"`            // ExtraHeaders adds HTTP headers to runner API requests to Gitea.
 	FetchTimeout          time.Duration     `yaml:"fetch_timeout"`            // FetchTimeout specifies the timeout duration for fetching resources.
 	FetchInterval         time.Duration     `yaml:"fetch_interval"`           // FetchInterval specifies the interval duration for fetching resources.
 	FetchIntervalMax      time.Duration     `yaml:"fetch_interval_max"`       // FetchIntervalMax specifies the maximum backoff interval when idle.
@@ -274,6 +276,13 @@ func LoadDefault(file string) (*Config, error) {
 		if _, err := tls.LoadX509KeyPair(cfg.Runner.ClientCertFile, cfg.Runner.ClientKeyFile); err != nil {
 			return nil, fmt.Errorf("load runner client certificate: %w", err)
 		}
+		for _, file := range []*string{&cfg.Runner.ClientCertFile, &cfg.Runner.ClientKeyFile} {
+			abs, err := filepath.Abs(*file) // git resolves a relative path against the repository it runs in
+			if err != nil {
+				return nil, err
+			}
+			*file = abs
+		}
 	}
 
 	if cfg.Log.Level == "" {
@@ -330,6 +339,9 @@ func LoadDefault(file string) (*Config, error) {
 	}
 	if !slices.Contains(ToolCacheModes, cfg.Runner.ToolCacheMode) {
 		return nil, fmt.Errorf("invalid runner.tool_cache_mode %q: must be one of %q", cfg.Runner.ToolCacheMode, ToolCacheModes)
+	}
+	if err := validateExtraHeaders(cfg.Runner.ExtraHeaders); err != nil {
+		return nil, err
 	}
 	if cfg.Host.WorkdirParent == "" {
 		home, err := os.UserHomeDir()
@@ -436,17 +448,6 @@ func (r *Runner) TLSConfig() *tls.Config {
 	return tlsConfig
 }
 
-func (r *Runner) ReadClientCert() (cert, key []byte, err error) {
-	if r.ClientCertFile == "" {
-		return nil, nil, nil
-	}
-	if cert, err = os.ReadFile(r.ClientCertFile); err != nil {
-		return nil, nil, err
-	}
-	key, err = os.ReadFile(r.ClientKeyFile)
-	return cert, key, err
-}
-
 // warnUnknownKeys reports keys the config does not define, which are otherwise ignored
 // without a trace. It only warns, so a config carrying keys from another runner version
 // still loads.
@@ -487,6 +488,21 @@ func definedRunnerConfigKeys(content []byte) (map[string]bool, error) {
 	}
 
 	return defined, nil
+}
+
+func validateExtraHeaders(headers map[string]string) error {
+	seen := make(map[string]string, len(headers))
+	for name, value := range headers {
+		if !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
+			return fmt.Errorf("invalid runner.extra_headers entry %q", name)
+		}
+		key := strings.ToLower(name)
+		if other, ok := seen[key]; ok {
+			return fmt.Errorf("runner.extra_headers sets %q and %q, which name the same header", other, name)
+		}
+		seen[key] = name
+	}
+	return nil
 }
 
 // resolveSecretFile reads key from key_file, so deployments can mount a secret instead of committing it.

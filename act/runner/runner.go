@@ -83,7 +83,7 @@ type Config struct {
 	ValidVolumes                      []string      // only volumes (and bind mounts) in this slice can be mounted on the job container or service containers
 	SharedToolCache                   bool          // one tool cache for all jobs instead of one per job
 	InsecureSkipTLS                   bool          // whether to skip verifying TLS certificate of the Gitea instance
-	ClientCert, ClientKey             []byte        // PEM client certificate for the Gitea instance
+	ClientCertFile, ClientKeyFile     string        // PEM client certificate for the Gitea instance
 	MaxParallel                       int           // max parallel jobs to run across all workflows (0 = no limit, uses CPU count)
 	AllocatePTY                       bool          // allocate a pseudo-TTY for each step's process
 	ServiceReadyTimeout               time.Duration // how long a job waits for its service containers to report healthy (0 uses the default)

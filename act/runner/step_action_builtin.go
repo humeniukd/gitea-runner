@@ -38,6 +38,7 @@ func (sab *stepActionBuiltin) main() common.Executor {
 		defer rawLogger.Infof("::endgroup::")
 
 		rc := sab.RunContext
+		rc.ApplyExtraPath(ctx, &sab.env)
 		return sab.run(ctx, &action.Context{
 			Container:       rc.JobContainer,
 			Github:          rc.getGithubContext(ctx),
@@ -48,8 +49,9 @@ func (sab *stepActionBuiltin) main() common.Executor {
 			NoSkipCheckout:  rc.Config.NoSkipCheckout,
 			UseGitIgnore:    rc.Config.UseGitIgnore,
 			InsecureSkipTLS: rc.Config.InsecureSkipTLS,
-			ClientCert:      rc.Config.ClientCert,
-			ClientKey:       rc.Config.ClientKey,
+			ClientCertFile:  rc.Config.ClientCertFile,
+			ClientKeyFile:   rc.Config.ClientKeyFile,
+			Env:             sab.env,
 		})
 	})
 }

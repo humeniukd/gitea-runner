@@ -579,11 +579,6 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 
 	r.setResultsService(envs, resultsURL)
 
-	clientCert, clientKey, err := r.cfg.Runner.ReadClientCert()
-	if err != nil {
-		return err
-	}
-
 	runnerConfig := &runner.Config{
 		// On Linux, Workdir will be like "/<parent_directory>/<owner>/<repo>"
 		// On Windows, Workdir will be like "\<parent_directory>\<owner>\<repo>"
@@ -633,8 +628,8 @@ func (r *Runner) run(ctx context.Context, task *runnerv1.Task, reporter *report.
 		ValidVolumes:                      r.cfg.Container.ValidVolumes,
 		SharedToolCache:                   r.cfg.Runner.ToolCacheMode == config.ToolCacheModeShared,
 		InsecureSkipTLS:                   r.cfg.Runner.Insecure,
-		ClientCert:                        clientCert,
-		ClientKey:                         clientKey,
+		ClientCertFile:                    r.cfg.Runner.ClientCertFile,
+		ClientKeyFile:                     r.cfg.Runner.ClientKeyFile,
 		InstanceTransport:                 r.instanceTransport,
 		RunnerName:                        r.name,
 		KubernetesPicker:                  r.kubernetesOptions,

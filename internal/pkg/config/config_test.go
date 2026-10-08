@@ -49,10 +49,8 @@ cache:
 	require.NoError(t, err)
 }
 
-func TestClientCertIsValidatedOnLoadReadOnUseAndOfferedOnlyWhenAccepted(t *testing.T) {
+func TestClientCertIsValidatedAndAbsoluteOnLoadReadOnUseAndOfferedOnlyWhenAccepted(t *testing.T) {
 	require.True(t, (&Runner{Insecure: true}).TLSConfig().InsecureSkipVerify)
-	_, _, err := (&Runner{}).ReadClientCert()
-	require.NoError(t, err)
 
 	dir := t.TempDir()
 	certPath, keyPath := filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
@@ -73,13 +71,16 @@ func TestClientCertIsValidatedOnLoadReadOnUseAndOfferedOnlyWhenAccepted(t *testi
 	}
 	writePair()
 
-	_, err = load(certPath, "")
+	_, err := load(certPath, "")
 	require.ErrorContains(t, err, "must be set together")
 	_, err = load(keyPath, keyPath)
 	require.ErrorContains(t, err, "load runner client certificate")
 
-	cfg, err := load(certPath, keyPath)
+	t.Chdir(dir)
+	cfg, err := load("client.crt", "client.key")
 	require.NoError(t, err)
+	require.True(t, filepath.IsAbs(cfg.Runner.ClientCertFile))
+	require.True(t, filepath.IsAbs(cfg.Runner.ClientKeyFile))
 	renewed := writePair()
 	info := &tls.CertificateRequestInfo{Version: tls.VersionTLS13, SignatureSchemes: []tls.SignatureScheme{tls.ECDSAWithP256AndSHA256}}
 	pair, err := cfg.Runner.TLSConfig().GetClientCertificate(info)
@@ -89,10 +90,6 @@ func TestClientCertIsValidatedOnLoadReadOnUseAndOfferedOnlyWhenAccepted(t *testi
 	pair, err = cfg.Runner.TLSConfig().GetClientCertificate(info)
 	require.NoError(t, err)
 	require.Empty(t, pair.Certificate)
-	certPEM, _, err := cfg.Runner.ReadClientCert()
-	require.NoError(t, err)
-	block, _ := pem.Decode(certPEM)
-	require.Equal(t, renewed, block.Bytes)
 }
 
 func TestLoadDefault_CacheS3(t *testing.T) {
@@ -140,6 +137,25 @@ func TestLoadDefault_ToolCacheMode(t *testing.T) {
 	_, err = LoadDefault(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tool_cache_mode")
+}
+
+func TestLoadDefault_LoadsExtraHeaders(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("runner:\n  extra_headers:\n    X-Proxy-Token: proxy-token\n"), 0o600))
+
+	cfg, err := LoadDefault(path)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"X-Proxy-Token": "proxy-token"}, cfg.Runner.ExtraHeaders)
+
+	for _, headers := range []string{
+		"X-Proxy Token: proxy-token\n",
+		"X-Proxy-Token: |\n      proxy-token\n",
+		"X-Proxy-Token: a\n    x-proxy-token: b\n",
+	} {
+		require.NoError(t, os.WriteFile(path, []byte("runner:\n  extra_headers:\n    "+headers), 0o600))
+		_, err = LoadDefault(path)
+		assert.ErrorContains(t, err, "runner.extra_headers", headers)
+	}
 }
 
 func TestLoadDefault_DefaultsWorkdirCleanupAge(t *testing.T) {

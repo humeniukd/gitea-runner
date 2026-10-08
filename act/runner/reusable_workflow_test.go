@@ -142,13 +142,17 @@ func TestCloneRemoteReusableWorkflowSendsInstanceTokenAndClientCert(t *testing.T
 	pair := server.TLS.Certificates[0]
 	keyDER, err := x509.MarshalPKCS8PrivateKey(pair.PrivateKey)
 	require.NoError(t, err)
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
+	require.NoError(t, os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: pair.Certificate[0]}), 0o600))
+	require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600))
 	rc := &RunContext{
 		Config: &Config{
 			GitHubInstance:  server.URL,
 			Secrets:         map[string]string{"GITEA_TOKEN": "token"},
 			InsecureSkipTLS: true,
-			ClientCert:      pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: pair.Certificate[0]}),
-			ClientKey:       pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
+			ClientCertFile:  certFile,
+			ClientKeyFile:   keyFile,
 		},
 		Run: &model.Run{JobID: "j1", Workflow: &model.Workflow{Jobs: map[string]*model.Job{"j1": {}}}},
 	}
@@ -178,15 +182,15 @@ func TestInstanceAuthAndTransportOnlyApplyToTheInstance(t *testing.T) {
 				DefaultActionInstance:             tt.trustedActionInstance,
 				DefaultActionInstanceIsSelfHosted: tt.trustedActionInstance != "",
 				InsecureSkipTLS:                   true,
-				ClientCert:                        []byte("cert"),
-				ClientKey:                         []byte("key"),
+				ClientCertFile:                    "/cert",
+				ClientKeyFile:                     "/key",
 			}
 			want := git.NewGitCloneExecutorInput{URL: tt.cloneURL, InsecureSkipTLS: tt.insecure}
 			if tt.token {
 				want.Token = "token"
 			}
 			if tt.cert {
-				want.ClientCert, want.ClientKey = conf.ClientCert, conf.ClientKey
+				want.ClientCertFile, want.ClientKeyFile = conf.ClientCertFile, conf.ClientKeyFile
 			}
 			require.Equal(t, want, conf.withInstanceAuth(git.NewGitCloneExecutorInput{URL: tt.cloneURL}, "token"))
 		})
