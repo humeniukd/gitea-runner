@@ -1504,6 +1504,7 @@ func TestReporter_ReportedSteps(t *testing.T) {
 		require.NoError(t, err)
 		cfg, _ := config.LoadDefault("")
 		reporter := NewReporter(t.Context(), func() {}, mocks.NewClient(t), &runnerv1.Task{Context: taskCtx}, cfg)
+		reporter.Logf("runner version")
 		reporter.ResetSteps(newTestSteps(steps))
 		return reporter
 	}
@@ -1529,10 +1530,11 @@ func TestReporter_ReportedSteps(t *testing.T) {
 
 	t.Run("steps as run", func(t *testing.T) {
 		reporter := newReporter(t, 2)
+		reporter.stepModels[0].Name = "Echo ${{ matrix.n }}"
 		reporter.Logf("workflow prepared")
 		fire(t, reporter, log.InfoLevel, "Complete job name: test", log.Fields{"raw_output": true})
 		fire(t, reporter, log.DebugLevel, "evaluating expression 'success()'", log.Fields{"stage": "Pre", "stepNumber": 0})
-		fire(t, reporter, log.InfoLevel, "Run Pre echo 0", log.Fields{"stage": "Pre", "stepNumber": 0, runner.StepStartedField: true})
+		fire(t, reporter, log.InfoLevel, "Run Pre echo 0", log.Fields{"stage": "Pre", "stepNumber": 0, "step": "Echo 1", runner.StepStartedField: true})
 		fire(t, reporter, log.InfoLevel, "pre output", log.Fields{"stage": "Pre", "stepNumber": 0, "raw_output": true})
 		fire(t, reporter, log.InfoLevel, "Success - Pre echo 0", log.Fields{"stage": "Pre", "stepNumber": 0, "stepResult": model.StepStatusSuccess})
 		fire(t, reporter, log.DebugLevel, "evaluating expression 'false'", log.Fields{"stage": "Pre", "stepNumber": 1})
@@ -1548,18 +1550,18 @@ func TestReporter_ReportedSteps(t *testing.T) {
 		fire(t, reporter, log.InfoLevel, "Job succeeded", log.Fields{"stage": runner.JobStageComplete, "jobResult": model.StepStatusSuccess})
 
 		assert.Equal(t, []reported{
-			{runnerv1.StepStage_STEP_STAGE_SETUP, 0, "Set up job", runnerv1.Result_RESULT_SUCCESS, 0, 2},
-			{runnerv1.StepStage_STEP_STAGE_PRE, 0, "Pre Run echo 0", runnerv1.Result_RESULT_SUCCESS, 2, 3},
-			{runnerv1.StepStage_STEP_STAGE_MAIN, 0, "Run echo 0", runnerv1.Result_RESULT_SUCCESS, 5, 2},
+			{runnerv1.StepStage_STEP_STAGE_SETUP, 0, "Set up job", runnerv1.Result_RESULT_SUCCESS, 0, 3},
+			{runnerv1.StepStage_STEP_STAGE_PRE, 0, "Pre Echo 1", runnerv1.Result_RESULT_SUCCESS, 3, 3},
+			{runnerv1.StepStage_STEP_STAGE_MAIN, 0, "Echo 1", runnerv1.Result_RESULT_SUCCESS, 6, 2},
 			{runnerv1.StepStage_STEP_STAGE_MAIN, 1, "Run echo 1", runnerv1.Result_RESULT_SKIPPED, 0, 0},
-			{runnerv1.StepStage_STEP_STAGE_POST, 0, "Post Run echo 0", runnerv1.Result_RESULT_SUCCESS, 7, 3},
-			{runnerv1.StepStage_STEP_STAGE_CLEANUP, 0, "Complete job", runnerv1.Result_RESULT_SUCCESS, 10, 2},
+			{runnerv1.StepStage_STEP_STAGE_POST, 0, "Post Echo 1", runnerv1.Result_RESULT_SUCCESS, 8, 3},
+			{runnerv1.StepStage_STEP_STAGE_CLEANUP, 0, "Complete job", runnerv1.Result_RESULT_SUCCESS, 11, 2},
 		}, reportedOf(reporter))
-		assert.Len(t, reporter.logRows, 12)
+		assert.Len(t, reporter.logRows, 13)
 
 		// the workflow steps keep what Gitea versions deriving them from the workflow file expect
 		require.Len(t, reporter.state.Steps, 2)
-		assert.EqualValues(t, 5, reporter.state.Steps[0].LogIndex)
+		assert.EqualValues(t, 6, reporter.state.Steps[0].LogIndex)
 		assert.EqualValues(t, 2, reporter.state.Steps[0].LogLength)
 		assert.Equal(t, runnerv1.Result_RESULT_SUCCESS, reporter.state.Steps[0].Result)
 		assert.Equal(t, runnerv1.Result_RESULT_SKIPPED, reporter.state.Steps[1].Result)
@@ -1571,7 +1573,7 @@ func TestReporter_ReportedSteps(t *testing.T) {
 		fire(t, reporter, log.InfoLevel, "Job failed", log.Fields{"jobResult": model.StepStatusFailure})
 
 		assert.Equal(t, []reported{
-			{runnerv1.StepStage_STEP_STAGE_SETUP, 0, "Set up job", runnerv1.Result_RESULT_FAILURE, 0, 2},
+			{runnerv1.StepStage_STEP_STAGE_SETUP, 0, "Set up job", runnerv1.Result_RESULT_FAILURE, 0, 3},
 			{runnerv1.StepStage_STEP_STAGE_MAIN, 0, "Run echo 0", runnerv1.Result_RESULT_CANCELLED, 0, 0},
 			{runnerv1.StepStage_STEP_STAGE_CLEANUP, 0, "Complete job", runnerv1.Result_RESULT_CANCELLED, 0, 0},
 		}, reportedOf(reporter))

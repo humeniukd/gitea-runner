@@ -172,7 +172,10 @@ func (r *Reporter) ResetSteps(steps []*model.Step) {
 	defer r.stateMu.Unlock()
 	r.stepModels = steps
 	r.reportedSteps = map[reportedStepKey]*runnerv1.StepState{}
-	r.currentReportedStep = r.addReportedStep(len(r.state.ReportedSteps), runnerv1.StepStage_STEP_STAGE_SETUP, 0, "Set up job")
+	setup := r.addReportedStep(len(r.state.ReportedSteps), runnerv1.StepStage_STEP_STAGE_SETUP, 0, "Set up job")
+	setup.StartedAt = cmp.Or(r.state.StartedAt, timestamppb.Now())
+	setup.LogLength = int64(r.logOffset + len(r.logRows)) // the runner's own lines logged before the job was parsed
+	r.currentReportedStep = setup
 	for i, step := range steps {
 		r.state.Steps = append(r.state.Steps, &runnerv1.StepState{
 			Id: int64(i),
@@ -232,13 +235,17 @@ func (r *Reporter) reportedStepOf(entry *log.Entry) (*runnerv1.StepState, bool) 
 	default:
 		return r.currentReportedStep, false
 	}
+	main := r.reportedSteps[reportedStepKey{runnerv1.StepStage_STEP_STAGE_MAIN, number}]
+	if evaluated, ok := entry.Data["step"].(string); ok && evaluated != "" && r.stepModels[number].Name != "" {
+		main.Name = evaluated // the name with its expressions evaluated, as GitHub shows it
+	}
 	if step, ok := r.reportedSteps[key]; ok {
 		return step, true
 	}
 	if started, _ := entry.Data[runner.StepStartedField].(bool); !started {
 		return r.currentReportedStep, false // a pre or post step that does not run is not shown
 	}
-	mainName := r.reportedSteps[reportedStepKey{runnerv1.StepStage_STEP_STAGE_MAIN, number}].Name
+	mainName := main.Name
 	if stage == "Pre" {
 		// pre steps run in the order of the workflow steps, so each goes right before the main steps
 		pos := slices.IndexFunc(r.state.ReportedSteps, func(v *runnerv1.StepState) bool { return v.Stage == runnerv1.StepStage_STEP_STAGE_MAIN })
