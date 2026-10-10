@@ -4,10 +4,12 @@
 package report
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +21,7 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/metrics"
 
 	"connectrpc.com/connect"
+	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	"github.com/avast/retry-go/v5"
 	log "github.com/sirupsen/logrus"
@@ -61,6 +64,11 @@ type Reporter struct {
 
 	state        *runnerv1.TaskState
 	stateChanged bool
+	// The steps in state.ReportedSteps by stage and workflow step number, the step the next log row
+	// without a step of its own belongs to, and the workflow steps. Guarded by stateMu.
+	reportedSteps       map[reportedStepKey]*runnerv1.StepState
+	currentReportedStep *runnerv1.StepState
+	stepModels          []*model.Step
 	// reportFailing keeps an outage to one log line at each end.
 	reportFailing map[string]bool
 	// serverResult is what the server decided, e.g. the zombie reaper failing
@@ -156,13 +164,124 @@ func (r *Reporter) Result() runnerv1.Result {
 	return r.state.Result
 }
 
-func (r *Reporter) ResetSteps(l int) {
+// ResetSteps sets the steps of the workflow job. They are reported both by their index in the
+// workflow file, for Gitea versions deriving the steps from the file, and as the steps the runner
+// runs, together with the setup, pre, post and cleanup steps, for Gitea versions that show those.
+func (r *Reporter) ResetSteps(steps []*model.Step) {
 	r.stateMu.Lock()
 	defer r.stateMu.Unlock()
-	for i := range l {
+	r.stepModels = steps
+	r.reportedSteps = map[reportedStepKey]*runnerv1.StepState{}
+	r.currentReportedStep = r.addReportedStep(len(r.state.ReportedSteps), runnerv1.StepStage_STEP_STAGE_SETUP, 0, "Set up job")
+	for i, step := range steps {
 		r.state.Steps = append(r.state.Steps, &runnerv1.StepState{
 			Id: int64(i),
 		})
+		r.addReportedStep(len(r.state.ReportedSteps), runnerv1.StepStage_STEP_STAGE_MAIN, i, stepDisplayName(step))
+	}
+	r.addReportedStep(len(r.state.ReportedSteps), runnerv1.StepStage_STEP_STAGE_CLEANUP, 0, "Complete job")
+}
+
+type reportedStepKey struct {
+	stage  runnerv1.StepStage
+	number int
+}
+
+// stepDisplayName names a workflow step like Gitea and GitHub do, prefixing an unnamed one with "Run".
+func stepDisplayName(step *model.Step) string {
+	if step.Name != "" {
+		return step.Name
+	}
+	run, _, _ := strings.Cut(strings.TrimSpace(step.Run), "\n")
+	return "Run " + cmp.Or(strings.TrimSpace(run), step.String())
+}
+
+// addReportedStep inserts a step at pos of the reported steps. Caller holds stateMu.
+func (r *Reporter) addReportedStep(pos int, stage runnerv1.StepStage, number int, name string) *runnerv1.StepState {
+	step := &runnerv1.StepState{Name: name, Stage: stage, Number: int64(number)}
+	r.state.ReportedSteps = slices.Insert(r.state.ReportedSteps, pos, step)
+	for i, v := range r.state.ReportedSteps[pos:] {
+		v.Id = int64(pos + i)
+	}
+	r.reportedSteps[reportedStepKey{stage, number}] = step
+	return step
+}
+
+// reportedStepOf returns the reported step an entry belongs to, adding a pre or post step the
+// first time it runs, and whether the entry names that step itself. Caller holds stateMu.
+func (r *Reporter) reportedStepOf(entry *log.Entry) (*runnerv1.StepState, bool) {
+	if r.reportedSteps == nil {
+		return nil, false
+	}
+	stage, _ := entry.Data["stage"].(string)
+	number, ok := entry.Data["stepNumber"].(int)
+	if stage == runner.JobStageComplete {
+		return r.reportedSteps[reportedStepKey{stage: runnerv1.StepStage_STEP_STAGE_CLEANUP}], false
+	}
+	if !ok || number < 0 || number >= len(r.stepModels) {
+		return r.currentReportedStep, false
+	}
+	var key reportedStepKey
+	switch stage {
+	case "Pre":
+		key = reportedStepKey{runnerv1.StepStage_STEP_STAGE_PRE, number}
+	case "Main":
+		key = reportedStepKey{runnerv1.StepStage_STEP_STAGE_MAIN, number}
+	case "Post":
+		key = reportedStepKey{runnerv1.StepStage_STEP_STAGE_POST, number}
+	default:
+		return r.currentReportedStep, false
+	}
+	if step, ok := r.reportedSteps[key]; ok {
+		return step, true
+	}
+	if started, _ := entry.Data[runner.StepStartedField].(bool); !started {
+		return r.currentReportedStep, false // a pre or post step that does not run is not shown
+	}
+	mainName := r.reportedSteps[reportedStepKey{runnerv1.StepStage_STEP_STAGE_MAIN, number}].Name
+	if stage == "Pre" {
+		// pre steps run in the order of the workflow steps, so each goes right before the main steps
+		pos := slices.IndexFunc(r.state.ReportedSteps, func(v *runnerv1.StepState) bool { return v.Stage == runnerv1.StepStage_STEP_STAGE_MAIN })
+		return r.addReportedStep(pos, key.stage, number, "Pre "+mainName), true
+	}
+	return r.addReportedStep(len(r.state.ReportedSteps)-1, key.stage, number, "Post "+mainName), true
+}
+
+// enterReportedStep makes step the one log rows without a step of their own belong to, finishing
+// the setup step once another step starts. It reports whether the step started. Caller holds stateMu.
+func (r *Reporter) enterReportedStep(step *runnerv1.StepState, timestamp time.Time) bool {
+	if prev := r.currentReportedStep; step != prev && prev.Stage == runnerv1.StepStage_STEP_STAGE_SETUP && prev.Result == runnerv1.Result_RESULT_UNSPECIFIED {
+		prev.Result = runnerv1.Result_RESULT_SUCCESS
+		prev.StoppedAt = timestamppb.New(timestamp)
+	}
+	r.currentReportedStep = step
+	if step.StartedAt != nil {
+		return false
+	}
+	step.StartedAt = timestamppb.New(timestamp)
+	return true
+}
+
+// finishReportedSteps gives a result to the reported steps that have none when the job ends:
+// the job's result to a step that was running, except the cleanup that ran in full. Caller holds stateMu.
+func (r *Reporter) finishReportedSteps(jobResult runnerv1.Result, timestamp time.Time) {
+	for _, v := range r.state.ReportedSteps {
+		if v.Result != runnerv1.Result_RESULT_UNSPECIFIED {
+			continue
+		}
+		switch {
+		case v.StartedAt == nil && jobResult == runnerv1.Result_RESULT_SKIPPED:
+			v.Result = runnerv1.Result_RESULT_SKIPPED
+		case v.StartedAt == nil:
+			v.Result = runnerv1.Result_RESULT_CANCELLED
+		case v.Stage == runnerv1.StepStage_STEP_STAGE_CLEANUP:
+			v.Result = runnerv1.Result_RESULT_SUCCESS
+		default:
+			v.Result = jobResult
+		}
+		if v.StartedAt != nil {
+			v.StoppedAt = timestamppb.New(timestamp)
+		}
 	}
 }
 
@@ -177,6 +296,12 @@ func (r *Reporter) appendLogRow(row *runnerv1.LogRow) {
 		return
 	}
 	row.Content = r.mask(row.Content)
+	if step := r.currentReportedStep; step != nil {
+		if step.LogLength == 0 {
+			step.LogIndex = int64(r.logOffset + len(r.logRows))
+		}
+		step.LogLength++
+	}
 	r.logRows = append(r.logRows, row)
 	r.jobLog.write(row.Time.AsTime(), row.Content)
 }
@@ -235,6 +360,19 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 		r.state.StartedAt = timestamppb.New(timestamp)
 	}
 
+	if reported, own := r.reportedStepOf(entry); reported != nil {
+		if r.enterReportedStep(reported, timestamp) {
+			urgentState = true
+		}
+		if v, ok := entry.Data["stepResult"]; ok && own && isJobStepEntry(entry) {
+			if stepResult, ok := r.parseResult(v); ok {
+				reported.Result = stepResult
+				reported.StoppedAt = timestamppb.New(timestamp)
+				urgentState = true
+			}
+		}
+	}
+
 	stage := entry.Data["stage"]
 
 	if stage != "Main" {
@@ -251,6 +389,7 @@ func (r *Reporter) Fire(entry *log.Entry) error {
 						}
 					}
 				}
+				r.finishReportedSteps(jobResult, timestamp)
 				urgentState = true
 			}
 		}
@@ -506,6 +645,7 @@ func (r *Reporter) Close(lastWords string) error {
 			}
 		}
 		r.state.Result = result
+		r.finishReportedSteps(result, time.Now())
 		r.appendLogRow(&runnerv1.LogRow{
 			Time:    timestamppb.Now(),
 			Content: lastWords,

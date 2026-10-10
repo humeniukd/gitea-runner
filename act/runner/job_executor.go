@@ -136,20 +136,18 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 	preparers := make([]actionPreparer, 0)
 	var postExecutor common.Executor
 
-	steps = append(steps, func(ctx context.Context) error {
-		logger := common.Logger(ctx)
-		if len(info.matrix()) > 0 {
-			logger.Infof("Matrix: %v", info.matrix())
-		}
-		return nil
-	})
-
 	infoSteps := info.steps()
 
 	if len(infoSteps) == 0 {
 		return common.NewDebugExecutor("No steps found")
 	}
 
+	preSteps = append(preSteps, func(ctx context.Context) error {
+		if len(info.matrix()) > 0 {
+			common.Logger(ctx).Infof("Matrix: %v", info.matrix())
+		}
+		return nil
+	})
 	preSteps = append(preSteps, func(ctx context.Context) error {
 		// Have to be skipped for some Tests
 		if rc.Run == nil {
@@ -228,14 +226,15 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 
 	// The setup section of the job log. The started hook goes first, so what it sets up is
 	// in place for the first action download and the first step.
+	// The pre steps come after it, as steps of their own.
 	preSteps = append(preSteps, rc.runJobStartedHook)
 	preSteps = append(preSteps, printPrepareActions(rc, preparers))
-	preSteps = append(preSteps, stepPreSteps...)
 	preSteps = append(preSteps, printCompleteJobName(rc))
+	preSteps = append(preSteps, stepPreSteps...)
 
 	// Ahead of the teardown below, while the job environment is still up.
-	postExecutor = postExecutor.Finally(rc.runJobCompletedHook)
-	postExecutor = postExecutor.Finally(func(ctx context.Context) error {
+	postExecutor = postExecutor.Finally(useJobStageLogger(JobStageComplete, rc.runJobCompletedHook))
+	postExecutor = postExecutor.Finally(useJobStageLogger(JobStageComplete, func(ctx context.Context) error {
 		// swallowed: a bad output fails this job, it must not abandon the rest of the plan
 		if err := info.interpolateOutputs()(ctx); err != nil {
 			reportStepError(ctx, rc, err)
@@ -243,9 +242,9 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 			reportStepError(ctx, rc, err)
 		}
 		return nil
-	})
+	}))
 
-	postExecutor = postExecutor.Finally(func(ctx context.Context) error {
+	postExecutor = postExecutor.Finally(useJobStageLogger(JobStageComplete, func(ctx context.Context) error {
 		jobError := common.JobError(ctx)
 		var err error
 		// always allow 1 min for stopping and removing the runner, even if we were cancelled
@@ -262,7 +261,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		rc.removeDockerActionImages(ctx)
 
 		return err
-	})
+	}))
 
 	return common.Executor(func(ctx context.Context) error {
 		if err := info.startContainer()(ctx); err != nil {
@@ -679,6 +678,13 @@ func archiveEntryMatchesPath(entryName, requestedPath string) bool {
 	entryName = path.Clean(strings.TrimPrefix(entryName, "/"))
 	requestedPath = path.Clean(strings.TrimPrefix(requestedPath, "/"))
 	return entryName == requestedPath || entryName == path.Base(requestedPath)
+}
+
+// useJobStageLogger tags the log entries of a job level executor with the stage they belong to.
+func useJobStageLogger(stage string, executor common.Executor) common.Executor {
+	return func(ctx context.Context) error {
+		return executor(common.WithLogger(ctx, common.Logger(ctx).WithField("stage", stage)))
+	}
 }
 
 func useStepLogger(rc *RunContext, stepModel *model.Step, stage stepStage, executor common.Executor) common.Executor {

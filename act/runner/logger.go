@@ -36,6 +36,13 @@ const (
 )
 
 const (
+	// JobStageComplete is the "stage" of the log entries that finalize the job after its steps.
+	JobStageComplete = "Complete"
+	// StepStartedField marks the log entry of a step that is about to run, unlike one that is skipped.
+	StepStartedField = "stepStarted"
+)
+
+const (
 	rawOutputField      = "raw_output"
 	scriptLineCyanField = "script_line_cyan"
 )

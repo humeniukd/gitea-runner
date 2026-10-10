@@ -256,8 +256,9 @@ func TestNewJobExecutorDownloadsAllActionsBeforeTheFirstStep(t *testing.T) {
 		apm := &actionPreparerMock{reference: "actions/checkout@v" + stepModel.ID, ok: true}
 		sfm.On("newStep", stepModel, rc).Return(&actionStepMock{stepMock: sm, actionPreparerMock: apm}, nil)
 
-		sm.On("pre").Return(func(context.Context) error {
+		sm.On("pre").Return(func(ctx context.Context) error {
 			executorOrder = append(executorOrder, "pre"+stepModel.ID)
+			common.Logger(ctx).Infof("Run Pre %s", stepModel.ID)
 			return nil
 		})
 		sm.On("main").Return(func(context.Context) error {
@@ -275,11 +276,15 @@ func TestNewJobExecutorDownloadsAllActionsBeforeTheFirstStep(t *testing.T) {
 
 	assert.Equal(t, []string{"pre1", "pre2", "step1", "step2"}, executorOrder)
 
+	// the setup is logged ahead of the pre steps and the cleanup is tagged, so the reporter can show both as steps of their own
 	setup := make([]string, 0)
 	for _, entry := range hook.AllEntries() {
 		if strings.HasPrefix(entry.Message, "Prepare all required actions") || strings.HasPrefix(entry.Message, "Download action") ||
-			strings.HasPrefix(entry.Message, "Complete job name") {
+			strings.HasPrefix(entry.Message, "Complete job name") || strings.HasPrefix(entry.Message, "Run Pre") {
 			setup = append(setup, entry.Message)
+		}
+		if strings.HasPrefix(entry.Message, "Cleaning up container") || entry.Data["jobResult"] != nil {
+			assert.Equal(t, JobStageComplete, entry.Data["stage"], entry.Message)
 		}
 	}
 	assert.Equal(t, []string{
@@ -287,6 +292,8 @@ func TestNewJobExecutorDownloadsAllActionsBeforeTheFirstStep(t *testing.T) {
 		"Download action repository 'actions/checkout@v1'",
 		"Download action repository 'actions/checkout@v2'",
 		"Complete job name: test",
+		"Run Pre 1",
+		"Run Pre 2",
 	}, setup)
 }
 
