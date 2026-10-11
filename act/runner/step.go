@@ -47,11 +47,11 @@ const maxSymlinkDepth = 10
 func (s stepStage) String() string {
 	switch s {
 	case stepStagePre:
-		return "Pre"
+		return StagePre
 	case stepStageMain:
-		return "Main"
+		return StageMain
 	case stepStagePost:
-		return "Post"
+		return StagePost
 	}
 	return "Unknown"
 }

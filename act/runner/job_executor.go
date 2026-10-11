@@ -233,8 +233,8 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 	preSteps = append(preSteps, stepPreSteps...)
 
 	// Ahead of the teardown below, while the job environment is still up.
-	postExecutor = postExecutor.Finally(useJobStageLogger(JobStageComplete, rc.runJobCompletedHook))
-	postExecutor = postExecutor.Finally(useJobStageLogger(JobStageComplete, func(ctx context.Context) error {
+	postExecutor = postExecutor.Finally(useJobStageLogger(StageComplete, rc.runJobCompletedHook))
+	postExecutor = postExecutor.Finally(useJobStageLogger(StageComplete, func(ctx context.Context) error {
 		// swallowed: a bad output fails this job, it must not abandon the rest of the plan
 		if err := info.interpolateOutputs()(ctx); err != nil {
 			reportStepError(ctx, rc, err)
@@ -244,7 +244,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		return nil
 	}))
 
-	postExecutor = postExecutor.Finally(useJobStageLogger(JobStageComplete, func(ctx context.Context) error {
+	postExecutor = postExecutor.Finally(useJobStageLogger(StageComplete, func(ctx context.Context) error {
 		jobError := common.JobError(ctx)
 		var err error
 		// always allow 1 min for stopping and removing the runner, even if we were cancelled

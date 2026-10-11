@@ -105,4 +105,4 @@ require (
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
 
-replace gitea.dev/actionslib => gitea.com/bircni/actionslib v1.3.1-0.20261010080820-eb6349c4bf2d
+replace gitea.dev/actionslib => gitea.com/bircni/actionslib v1.3.1-0.20261011092400-83a075b5272f

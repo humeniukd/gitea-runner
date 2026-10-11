@@ -284,7 +284,7 @@ func TestNewJobExecutorDownloadsAllActionsBeforeTheFirstStep(t *testing.T) {
 			setup = append(setup, entry.Message)
 		}
 		if strings.HasPrefix(entry.Message, "Cleaning up container") || entry.Data["jobResult"] != nil {
-			assert.Equal(t, JobStageComplete, entry.Data["stage"], entry.Message)
+			assert.Equal(t, StageComplete, entry.Data["stage"], entry.Message)
 		}
 	}
 	assert.Equal(t, []string{

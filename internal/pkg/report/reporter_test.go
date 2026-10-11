@@ -1499,14 +1499,21 @@ func newTestSteps(n int) []*model.Step {
 }
 
 func TestReporter_ReportedSteps(t *testing.T) {
-	newReporter := func(t *testing.T, steps int) *Reporter {
+	newReporter := func(t *testing.T, steps []*model.Step) (*Reporter, context.CancelFunc) {
+		client := mocks.NewClient(t)
+		client.On("UpdateLog", mock.Anything, mock.Anything).Maybe().Return(func(_ context.Context, req *connect_go.Request[runnerv1.UpdateLogRequest]) (*connect_go.Response[runnerv1.UpdateLogResponse], error) {
+			return connect_go.NewResponse(&runnerv1.UpdateLogResponse{AckIndex: req.Msg.Index + int64(len(req.Msg.Rows))}), nil
+		})
+		client.On("UpdateTask", mock.Anything, mock.Anything).Maybe().Return(connect_go.NewResponse(&runnerv1.UpdateTaskResponse{}), nil)
 		taskCtx, err := structpb.NewStruct(map[string]any{})
 		require.NoError(t, err)
 		cfg, _ := config.LoadDefault("")
-		reporter := NewReporter(t.Context(), func() {}, mocks.NewClient(t), &runnerv1.Task{Context: taskCtx}, cfg)
+		ctx, cancel := context.WithCancel(t.Context())
+		reporter := NewReporter(ctx, cancel, client, &runnerv1.Task{Context: taskCtx, Secrets: map[string]string{"TOKEN": "s3cr3t"}}, cfg)
+		reporter.RunDaemon()
 		reporter.Logf("runner version")
-		reporter.ResetSteps(newTestSteps(steps))
-		return reporter
+		reporter.ResetSteps(steps)
+		return reporter, cancel
 	}
 	fire := func(t *testing.T, reporter *Reporter, level log.Level, msg string, data log.Fields) {
 		t.Helper()
@@ -1519,7 +1526,9 @@ func TestReporter_ReportedSteps(t *testing.T) {
 		result           runnerv1.Result
 		logIndex, logLen int64
 	}
-	reportedOf := func(reporter *Reporter) []reported {
+	reportedOf := func(t *testing.T, reporter *Reporter) []reported {
+		reporter.stateMu.RLock()
+		defer reporter.stateMu.RUnlock()
 		var ret []reported
 		for i, v := range reporter.state.ReportedSteps {
 			assert.EqualValues(t, i, v.Id)
@@ -1527,55 +1536,152 @@ func TestReporter_ReportedSteps(t *testing.T) {
 		}
 		return ret
 	}
+	const (
+		setup   = runnerv1.StepStage_STEP_STAGE_SETUP
+		pre     = runnerv1.StepStage_STEP_STAGE_PRE
+		main    = runnerv1.StepStage_STEP_STAGE_MAIN
+		post    = runnerv1.StepStage_STEP_STAGE_POST
+		cleanup = runnerv1.StepStage_STEP_STAGE_CLEANUP
+
+		unspecified = runnerv1.Result_RESULT_UNSPECIFIED
+		success     = runnerv1.Result_RESULT_SUCCESS
+		failure     = runnerv1.Result_RESULT_FAILURE
+		cancelled   = runnerv1.Result_RESULT_CANCELLED
+		skipped     = runnerv1.Result_RESULT_SKIPPED
+	)
 
 	t.Run("steps as run", func(t *testing.T) {
-		reporter := newReporter(t, 2)
-		reporter.stepModels[0].Name = "Echo ${{ matrix.n }}"
+		steps := newTestSteps(2)
+		steps[0].Name = "Echo ${{ matrix.n }}"
+		reporter, _ := newReporter(t, steps)
 		reporter.Logf("workflow prepared")
 		fire(t, reporter, log.InfoLevel, "Complete job name: test", log.Fields{"raw_output": true})
-		fire(t, reporter, log.DebugLevel, "evaluating expression 'success()'", log.Fields{"stage": "Pre", "stepNumber": 0})
-		fire(t, reporter, log.InfoLevel, "Run Pre echo 0", log.Fields{"stage": "Pre", "stepNumber": 0, "step": "Echo 1", runner.StepStartedField: true})
-		fire(t, reporter, log.InfoLevel, "pre output", log.Fields{"stage": "Pre", "stepNumber": 0, "raw_output": true})
-		fire(t, reporter, log.InfoLevel, "Success - Pre echo 0", log.Fields{"stage": "Pre", "stepNumber": 0, "stepResult": model.StepStatusSuccess})
-		fire(t, reporter, log.DebugLevel, "evaluating expression 'false'", log.Fields{"stage": "Pre", "stepNumber": 1})
-		fire(t, reporter, log.DebugLevel, "Skipping step", log.Fields{"stage": "Pre", "stepNumber": 1, "stepResult": model.StepStatusSkipped})
-		fire(t, reporter, log.InfoLevel, "main output", log.Fields{"stage": "Main", "stepNumber": 0, "raw_output": true})
-		fire(t, reporter, log.InfoLevel, "main output", log.Fields{"stage": "Main", "stepNumber": 0, "raw_output": true})
-		fire(t, reporter, log.InfoLevel, "Success - Main echo 0", log.Fields{"stage": "Main", "stepNumber": 0, "stepResult": model.StepStatusSuccess})
-		fire(t, reporter, log.DebugLevel, "Skipping step", log.Fields{"stage": "Main", "stepNumber": 1, "stepResult": model.StepStatusSkipped})
-		fire(t, reporter, log.InfoLevel, "Run Post echo 0", log.Fields{"stage": "Post", "stepNumber": 0, runner.StepStartedField: true})
-		fire(t, reporter, log.InfoLevel, "post output", log.Fields{"stage": "Post", "stepNumber": 0, "raw_output": true})
-		fire(t, reporter, log.InfoLevel, "Success - Post echo 0", log.Fields{"stage": "Post", "stepNumber": 0, "stepResult": model.StepStatusSuccess})
-		fire(t, reporter, log.InfoLevel, "Cleaning up container", log.Fields{"stage": runner.JobStageComplete})
-		fire(t, reporter, log.InfoLevel, "Job succeeded", log.Fields{"stage": runner.JobStageComplete, "jobResult": model.StepStatusSuccess})
+		fire(t, reporter, log.DebugLevel, "evaluating expression 'success()'", log.Fields{"stage": runner.StagePre, "stepNumber": 0})
+		fire(t, reporter, log.InfoLevel, "Run Pre echo 0", log.Fields{"stage": runner.StagePre, "stepNumber": 0, "step": "Echo 1", runner.StepStartedField: true})
+		fire(t, reporter, log.InfoLevel, "pre output", log.Fields{"stage": runner.StagePre, "stepNumber": 0, "raw_output": true})
+		fire(t, reporter, log.InfoLevel, "Success - Pre echo 0", log.Fields{"stage": runner.StagePre, "stepNumber": 0, "stepResult": model.StepStatusSuccess})
+		fire(t, reporter, log.DebugLevel, "evaluating expression 'false'", log.Fields{"stage": runner.StagePre, "stepNumber": 1})
+		fire(t, reporter, log.DebugLevel, "Skipping step", log.Fields{"stage": runner.StagePre, "stepNumber": 1, "stepResult": model.StepStatusSkipped})
+		fire(t, reporter, log.InfoLevel, "main output", log.Fields{"stage": runner.StageMain, "stepNumber": 0, "raw_output": true})
+		fire(t, reporter, log.InfoLevel, "main output", log.Fields{"stage": runner.StageMain, "stepNumber": 0, "raw_output": true})
+		fire(t, reporter, log.InfoLevel, "Success - Main echo 0", log.Fields{"stage": runner.StageMain, "stepNumber": 0, "stepResult": model.StepStatusSuccess})
+		fire(t, reporter, log.DebugLevel, "Skipping step", log.Fields{"stage": runner.StageMain, "stepNumber": 1, "stepResult": model.StepStatusSkipped})
+		fire(t, reporter, log.InfoLevel, "Run Post echo 0", log.Fields{"stage": runner.StagePost, "stepNumber": 0, runner.StepStartedField: true})
+		fire(t, reporter, log.InfoLevel, "post output", log.Fields{"stage": runner.StagePost, "stepNumber": 0, "raw_output": true})
+		fire(t, reporter, log.InfoLevel, "Success - Post echo 0", log.Fields{"stage": runner.StagePost, "stepNumber": 0, "stepResult": model.StepStatusSuccess})
+		fire(t, reporter, log.InfoLevel, "Cleaning up container", log.Fields{"stage": runner.StageComplete})
+		fire(t, reporter, log.InfoLevel, "Job succeeded", log.Fields{"stage": runner.StageComplete, "jobResult": model.StepStatusSuccess})
 
-		assert.Equal(t, []reported{
-			{runnerv1.StepStage_STEP_STAGE_SETUP, 0, "Set up job", runnerv1.Result_RESULT_SUCCESS, 0, 3},
-			{runnerv1.StepStage_STEP_STAGE_PRE, 0, "Pre Echo 1", runnerv1.Result_RESULT_SUCCESS, 3, 3},
-			{runnerv1.StepStage_STEP_STAGE_MAIN, 0, "Echo 1", runnerv1.Result_RESULT_SUCCESS, 6, 2},
-			{runnerv1.StepStage_STEP_STAGE_MAIN, 1, "Run echo 1", runnerv1.Result_RESULT_SKIPPED, 0, 0},
-			{runnerv1.StepStage_STEP_STAGE_POST, 0, "Post Echo 1", runnerv1.Result_RESULT_SUCCESS, 8, 3},
-			{runnerv1.StepStage_STEP_STAGE_CLEANUP, 0, "Complete job", runnerv1.Result_RESULT_SUCCESS, 11, 2},
-		}, reportedOf(reporter))
-		assert.Len(t, reporter.logRows, 13)
+		want := []reported{
+			{setup, 0, "Set up job", success, 0, 3},
+			{pre, 0, "Pre Echo 1", success, 3, 3},
+			{main, 0, "Echo 1", success, 6, 2},
+			{main, 1, "Run echo 1", skipped, 0, 0},
+			{post, 0, "Post Echo 1", success, 8, 3},
+			{cleanup, 0, "Complete job", unspecified, 11, 2}, // still logging after the job result
+		}
+		assert.Equal(t, want, reportedOf(t, reporter))
+
+		fire(t, reporter, log.InfoLevel, "Removing images", log.Fields{"stage": runner.StageComplete})
+		require.NoError(t, reporter.Close(""))
+		want[5].result, want[5].logLen = success, 3
+		assert.Equal(t, want, reportedOf(t, reporter))
 
 		// the workflow steps keep what Gitea versions deriving them from the workflow file expect
 		require.Len(t, reporter.state.Steps, 2)
 		assert.EqualValues(t, 6, reporter.state.Steps[0].LogIndex)
 		assert.EqualValues(t, 2, reporter.state.Steps[0].LogLength)
-		assert.Equal(t, runnerv1.Result_RESULT_SUCCESS, reporter.state.Steps[0].Result)
-		assert.Equal(t, runnerv1.Result_RESULT_SKIPPED, reporter.state.Steps[1].Result)
+		assert.Equal(t, success, reporter.state.Steps[0].Result)
+		assert.Equal(t, skipped, reporter.state.Steps[1].Result)
+	})
+
+	t.Run("failures and cancellation", func(t *testing.T) {
+		reporter, cancel := newReporter(t, newTestSteps(3))
+		started := func(stage string, n int) log.Fields {
+			return log.Fields{"stage": stage, "stepNumber": n, runner.StepStartedField: true}
+		}
+		result := func(stage string, n int, result model.StepStatus, stepID ...string) log.Fields {
+			fields := log.Fields{"stage": stage, "stepNumber": n, "stepResult": result}
+			if len(stepID) > 0 {
+				fields["stepID"] = stepID
+			}
+			return fields
+		}
+		fire(t, reporter, log.InfoLevel, "Run Pre echo 0", started(runner.StagePre, 0))
+		fire(t, reporter, log.InfoLevel, "Success - Pre echo 0", result(runner.StagePre, 0, model.StepStatusSuccess))
+		fire(t, reporter, log.DebugLevel, "Skipping step", result(runner.StagePre, 1, model.StepStatusSkipped))
+		fire(t, reporter, log.InfoLevel, "Run Pre echo 2", started(runner.StagePre, 2))
+		fire(t, reporter, log.InfoLevel, "Success - Pre echo 2", result(runner.StagePre, 2, model.StepStatusSuccess))
+		fire(t, reporter, log.InfoLevel, "composite step", result(runner.StageMain, 0, model.StepStatusSuccess, "0", "inner"))
+		fire(t, reporter, log.InfoLevel, "Failure - Main echo 0", result(runner.StageMain, 0, model.StepStatusFailure))
+		fire(t, reporter, log.InfoLevel, "main output", log.Fields{"stage": runner.StageMain, "stepNumber": 1, "raw_output": true})
+		fire(t, reporter, log.InfoLevel, "Run Post echo 0", started(runner.StagePost, 0))
+		fire(t, reporter, log.InfoLevel, "Failure - Post echo 0", result(runner.StagePost, 0, model.StepStatusFailure))
+		cancel()
+		require.NoError(t, reporter.Close(""))
+
+		results := make(map[string]runnerv1.Result)
+		for _, v := range reportedOf(t, reporter) {
+			results[v.name] = v.result
+		}
+		assert.Equal(t, map[string]runnerv1.Result{
+			"Set up job":      success,
+			"Pre Run echo 0":  success,
+			"Pre Run echo 2":  success,
+			"Run echo 0":      failure, // not the result of its composite step
+			"Run echo 1":      cancelled,
+			"Run echo 2":      cancelled,
+			"Post Run echo 0": failure,
+			"Complete job":    cancelled,
+		}, results)
+		names := make([]string, 0, len(results))
+		for _, v := range reportedOf(t, reporter) {
+			names = append(names, v.name)
+		}
+		assert.Equal(t, []string{"Set up job", "Pre Run echo 0", "Pre Run echo 2", "Run echo 0", "Run echo 1", "Run echo 2", "Post Run echo 0", "Complete job"}, names)
 	})
 
 	t.Run("job failing during setup", func(t *testing.T) {
-		reporter := newReporter(t, 1)
+		reporter, _ := newReporter(t, newTestSteps(1))
 		reporter.Logf("workflow prepared")
 		fire(t, reporter, log.InfoLevel, "Job failed", log.Fields{"jobResult": model.StepStatusFailure})
+		require.NoError(t, reporter.Close(""))
 
 		assert.Equal(t, []reported{
-			{runnerv1.StepStage_STEP_STAGE_SETUP, 0, "Set up job", runnerv1.Result_RESULT_FAILURE, 0, 3},
-			{runnerv1.StepStage_STEP_STAGE_MAIN, 0, "Run echo 0", runnerv1.Result_RESULT_CANCELLED, 0, 0},
-			{runnerv1.StepStage_STEP_STAGE_CLEANUP, 0, "Complete job", runnerv1.Result_RESULT_CANCELLED, 0, 0},
-		}, reportedOf(reporter))
+			{setup, 0, "Set up job", failure, 0, 3},
+			{main, 0, "Run echo 0", cancelled, 0, 0},
+			{cleanup, 0, "Complete job", cancelled, 0, 0},
+		}, reportedOf(t, reporter))
+	})
+
+	t.Run("step not reached in a succeeding job", func(t *testing.T) {
+		reporter, _ := newReporter(t, newTestSteps(1))
+		fire(t, reporter, log.InfoLevel, "Job succeeded", log.Fields{"stage": runner.StageComplete, "jobResult": model.StepStatusSuccess})
+		require.NoError(t, reporter.Close(""))
+		assert.Equal(t, skipped, reportedOf(t, reporter)[1].result)
+	})
+
+	t.Run("evaluated and masked names", func(t *testing.T) {
+		steps := newTestSteps(2)
+		steps[0].Run = "echo ${{ matrix.os }}\necho more"
+		steps[1].Name = "Deploy with ${{ secrets.TOKEN }}"
+		reporter, _ := newReporter(t, steps)
+		fire(t, reporter, log.DebugLevel, "Run Main", log.Fields{"stage": runner.StageMain, "stepNumber": 0, "step": "echo linux\necho more"})
+		fire(t, reporter, log.DebugLevel, "Run Main", log.Fields{"stage": runner.StageMain, "stepNumber": 1, "step": "Deploy with s3cr3t"})
+		require.NoError(t, reporter.Close(""))
+
+		names := []string{}
+		for _, v := range reportedOf(t, reporter) {
+			names = append(names, v.name)
+		}
+		assert.Equal(t, []string{"Set up job", "Run echo linux", "Deploy with ***", "Complete job"}, names)
+	})
+
+	t.Run("reusable workflow caller", func(t *testing.T) {
+		reporter, _ := newReporter(t, nil)
+		fire(t, reporter, log.InfoLevel, "Cleaning up container", log.Fields{"stage": runner.StageComplete})
+		fire(t, reporter, log.InfoLevel, "Job succeeded", log.Fields{"stage": runner.StageComplete, "jobResult": model.StepStatusSuccess})
+		require.NoError(t, reporter.Close(""))
+		assert.Empty(t, reportedOf(t, reporter))
 	})
 }
