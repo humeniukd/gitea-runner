@@ -99,7 +99,7 @@ func printPrepareActions(rc *RunContext, preparers []actionPreparer) common.Exec
 			if err := preparer.prepareActionExecutor()(ctx); err != nil {
 				// No step has run yet, so the failure belongs to the job.
 				reportStepError(ctx, rc, err)
-				return err
+				return setupError{err}
 			}
 			reference, sha, ok := preparer.actionDownloadInfo()
 			if !ok {
@@ -114,6 +114,11 @@ func printPrepareActions(rc *RunContext, preparers []actionPreparer) common.Exec
 		return nil
 	}
 }
+
+// setupError is a failure of the job setup, such as an action that cannot be downloaded.
+type setupError struct{ error }
+
+func (e setupError) Unwrap() error { return e.error }
 
 // printCompleteJobName closes the setup section the way actions/runner ends its "Set up job" step.
 func printCompleteJobName(rc *RunContext) common.Executor {
@@ -318,6 +323,9 @@ func newStepsExecutor(rc *RunContext, preSteps, steps []common.Executor) common.
 	mainExecutor := newMainStepsExecutor(rc, steps)
 	return func(ctx context.Context) error {
 		preErr := preExecutor(ctx)
+		if errors.As(preErr, new(setupError)) {
+			return preErr // as on GitHub, no step runs after the job setup failed
+		}
 		mainErr := mainExecutor(ctx)
 		if preErr != nil {
 			return preErr

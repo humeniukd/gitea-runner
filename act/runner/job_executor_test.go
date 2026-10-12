@@ -187,6 +187,27 @@ func TestPrintPrepareActionsFailsJobOnDownloadError(t *testing.T) {
 	assert.Zero(t, remaining.prepared)
 }
 
+func TestNewStepsExecutorSkipsStepsAfterSetupFailure(t *testing.T) {
+	for name, tt := range map[string]struct {
+		preErr  error
+		mainRan bool
+	}{
+		"setup failure":    {preErr: setupError{assert.AnError}},
+		"pre step failure": {preErr: assert.AnError, mainRan: true}, // always() steps still run, as on GitHub
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := common.WithJobErrorContainer(common.WithLogger(context.Background(), logging.New(logtest.New())))
+			mainRan := false
+			err := newStepsExecutor(&RunContext{},
+				[]common.Executor{func(context.Context) error { return tt.preErr }},
+				[]common.Executor{func(context.Context) error { mainRan = true; return nil }},
+			)(ctx)
+			require.ErrorIs(t, err, assert.AnError)
+			assert.Equal(t, tt.mainRan, mainRan)
+		})
+	}
+}
+
 func TestPrintCompleteJobName(t *testing.T) {
 	for name, tt := range map[string]struct {
 		rc   *RunContext

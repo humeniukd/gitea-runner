@@ -274,8 +274,10 @@ func recordAttr[T any](rec logging.Record, key string) (T, bool) {
 // enterReportedStep makes step the one log rows without a step of their own belong to, finishing
 // the setup step once another step starts. It reports whether the step started. Caller holds stateMu.
 func (r *Reporter) enterReportedStep(step *runnerv1.StepState, timestamp time.Time) bool {
-	if prev := r.currentReportedStep; step != prev && prev.Stage == runnerv1.StepStage_STEP_STAGE_SETUP && prev.Result == runnerv1.Result_RESULT_UNSPECIFIED {
-		prev.Result = runnerv1.Result_RESULT_SUCCESS
+	if prev := r.currentReportedStep; step != prev && prev.Stage == runnerv1.StepStage_STEP_STAGE_SETUP && prev.StoppedAt == nil {
+		if prev.Result == runnerv1.Result_RESULT_UNSPECIFIED {
+			prev.Result = runnerv1.Result_RESULT_SUCCESS
+		}
 		prev.StoppedAt = timestamppb.New(timestamp)
 	}
 	r.currentReportedStep = step
@@ -295,10 +297,10 @@ func (r *Reporter) finishReportedSteps(jobResult runnerv1.Result, timestamp time
 			continue
 		}
 		switch {
-		case v.StartedAt == nil && (jobResult == runnerv1.Result_RESULT_SKIPPED || jobResult == runnerv1.Result_RESULT_SUCCESS):
-			v.Result = runnerv1.Result_RESULT_SKIPPED
-		case v.StartedAt == nil:
+		case v.StartedAt == nil && jobResult == runnerv1.Result_RESULT_CANCELLED:
 			v.Result = runnerv1.Result_RESULT_CANCELLED
+		case v.StartedAt == nil:
+			v.Result = runnerv1.Result_RESULT_SKIPPED // never reached, such as the steps after a failed setup
 		case v.Stage == runnerv1.StepStage_STEP_STAGE_CLEANUP:
 			v.Result = runnerv1.Result_RESULT_SUCCESS
 		default:
@@ -417,6 +419,10 @@ func (r *Reporter) Handle(_ context.Context, entry logging.Record) error {
 
 	if reported, own := r.reportedStepOf(entry); reported != nil {
 		if r.enterReportedStep(reported, timestamp) {
+			urgentState = true
+		}
+		if !own && entry.Level >= logging.LevelError && reported.Result == runnerv1.Result_RESULT_UNSPECIFIED {
+			reported.Result = runnerv1.Result_RESULT_FAILURE // a job level error, such as an action that cannot be downloaded
 			urgentState = true
 		}
 		if v, ok := entry.Attr("stepResult"); ok && own && isJobStepEntry(entry) {

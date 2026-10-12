@@ -1648,9 +1648,21 @@ func TestReporter_ReportedSteps(t *testing.T) {
 
 		assert.Equal(t, []reported{
 			{setup, 0, "Set up job", failure, 0, 3},
-			{main, 0, "Run echo 0", cancelled, 0, 0},
-			{cleanup, 0, "Complete job", cancelled, 0, 0},
+			{main, 0, "Run echo 0", skipped, 0, 0},
+			{cleanup, 0, "Complete job", skipped, 0, 0},
 		}, reportedOf(t, reporter))
+	})
+
+	t.Run("action failing to download", func(t *testing.T) {
+		reporter, _ := newReporter(t, newTestSteps(1))
+		send(t, reporter, logging.LevelInfo, "Prepare all required actions", map[string]any{"raw_output": true})
+		send(t, reporter, logging.LevelError, "##[error]unable to clone 'invalid-owner/invalid-action'", nil)
+		send(t, reporter, logging.LevelInfo, "Cleaning up container", map[string]any{"stage": runner.StageComplete})
+		send(t, reporter, logging.LevelInfo, "Job failed", map[string]any{"stage": runner.StageComplete, "jobResult": model.StepStatusFailure})
+		require.NoError(t, reporter.Close(""))
+
+		got := reportedOf(t, reporter)
+		assert.Equal(t, []runnerv1.Result{failure, skipped, success}, []runnerv1.Result{got[0].result, got[1].result, got[2].result})
 	})
 
 	t.Run("step not reached in a succeeding job", func(t *testing.T) {
