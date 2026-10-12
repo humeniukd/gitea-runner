@@ -97,14 +97,14 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		if err != nil {
 			stepResult.Conclusion = model.StepStatusFailure
 			stepResult.Outcome = model.StepStatusFailure
-			logger.WithField("stepResult", stepResult.Conclusion).Infof("Failure - %s %s", stage, stepModel)
+			logger.With("stepResult", stepResult.Conclusion).Infof("Failure - %s %s", stage, stepModel)
 			return err
 		}
 
 		if !runStep {
 			stepResult.Conclusion = model.StepStatusSkipped
 			stepResult.Outcome = model.StepStatusSkipped
-			logger.WithField("stepResult", stepResult.Conclusion).Debugf("Skipping step '%s' due to '%s'", stepModel, ifExpression)
+			logger.With("stepResult", stepResult.Conclusion).Debugf("Skipping step '%s' due to '%s'", stepModel, ifExpression)
 			return nil
 		}
 
@@ -112,7 +112,7 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		if strings.Contains(stepString, "::add-mask::") {
 			stepString = "add-mask command"
 		}
-		startLogger := logger.WithField(StepStartedField, true)
+		startLogger := logger.With(StepStartedField, true)
 		if stage == stepStageMain {
 			// Main steps print their own raw "Run <title>" header, so this line is redundant and
 			// only leaks into the "Set up job" section for the first step; keep it as a debug trace.
@@ -187,29 +187,35 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 		if err == nil {
 			err = insecureErr
 		}
-		if fileErr := processRunnerEnvFileCommand(ctx, envFileCommand, rc, rc.setEnvFile); fileErr != nil && err == nil {
+		fileCommandCtx := ctx
+		if ctx.Err() != nil { // an interrupted step still records its file commands, a live deadline stays in force
+			var cancelFileCommands context.CancelFunc
+			fileCommandCtx, cancelFileCommands = context.WithTimeout(context.WithoutCancel(ctx), jobCleanupTimeout)
+			defer cancelFileCommands()
+		}
+		if fileErr := processRunnerEnvFileCommand(fileCommandCtx, envFileCommand, rc, rc.setEnvFile); fileErr != nil && err == nil {
 			err = fileErr
 		}
-		if fileErr := processRunnerEnvFileCommand(ctx, stateFileCommand, rc, rc.saveState); fileErr != nil && err == nil {
+		if fileErr := processRunnerEnvFileCommand(fileCommandCtx, stateFileCommand, rc, rc.saveState); fileErr != nil && err == nil {
 			err = fileErr
 		}
-		if fileErr := processRunnerEnvFileCommand(ctx, outputFileCommand, rc, rc.setOutput); fileErr != nil && err == nil {
+		if fileErr := processRunnerEnvFileCommand(fileCommandCtx, outputFileCommand, rc, rc.setOutput); fileErr != nil && err == nil {
 			err = fileErr
 		}
-		if fileErr := rc.UpdateExtraPath(ctx, path.Join(actPath, pathFileCommand)); fileErr != nil && err == nil {
+		if fileErr := rc.UpdateExtraPath(fileCommandCtx, path.Join(actPath, pathFileCommand)); fileErr != nil && err == nil {
 			err = fileErr
 		}
-		_ = rc.JobContainer.Copy(actPath, files...)(ctx)
+		_ = rc.JobContainer.Copy(actPath, files...)(fileCommandCtx)
 
 		if err == nil {
-			logger.WithField("stepResult", stepResult.Conclusion).Infof("Success - %s %s", stage, stepString)
+			logger.With("stepResult", stepResult.Conclusion).Infof("Success - %s %s", stage, stepString)
 		} else {
 			stepResult.Outcome = model.StepStatusFailure
 
 			continueOnError, parseErr := isContinueOnError(ctx, stepModel.RawContinueOnError, step, stage)
 			if parseErr != nil {
 				stepResult.Conclusion = model.StepStatusFailure
-				logger.WithField("stepResult", stepResult.Conclusion).Infof("Failure - %s %s", stage, stepString)
+				logger.With("stepResult", stepResult.Conclusion).Infof("Failure - %s %s", stage, stepString)
 				return parseErr
 			}
 
@@ -224,7 +230,7 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 
 			// Infof: Errorf entries are promoted to the user log by the reporter,
 			// which would duplicate the ##[error] annotation emitted elsewhere.
-			logger.WithField("stepResult", stepResult.Conclusion).Infof("Failure - %s %s", stage, stepString)
+			logger.With("stepResult", stepResult.Conclusion).Infof("Failure - %s %s", stage, stepString)
 		}
 		return err
 	}

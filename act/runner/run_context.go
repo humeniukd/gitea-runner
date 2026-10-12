@@ -511,7 +511,7 @@ func (rc *RunContext) startKubernetesPod() common.Executor {
 // printStartJobContainerGroup mirrors actions/runner's "Starting job container"
 // section: emit the group header and summary, return a closer for ::endgroup::.
 func printStartJobContainerGroup(ctx context.Context, image, name, network string) func() {
-	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+	rawLogger := common.Logger(ctx).With(rawOutputField, true)
 	rawLogger.Infof("::group::Starting job container")
 	rawLogger.Infof("image: %s", image)
 	rawLogger.Infof("name: %s", name)
@@ -706,7 +706,7 @@ func (rc *RunContext) commandLogWriter(ctx context.Context) io.Writer {
 }
 
 func rawLogLine(ctx context.Context) common.LineHandler {
-	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+	rawLogger := common.Logger(ctx).With(rawOutputField, true)
 	return func(line string) bool {
 		rawLogger.Infof("%s", line)
 		return true
@@ -957,7 +957,7 @@ func (rc *RunContext) waitForServiceContainers() common.Executor {
 // waitUntilHealthy waits on the healthcheck alone, so a container that declares none is
 // ready at once and one that exited is left to the steps that need it.
 func (svc *serviceContainer) waitUntilHealthy(ctx context.Context, timeout time.Duration) error {
-	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+	rawLogger := common.Logger(ctx).With(rawOutputField, true)
 	loggedStarting := false
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -1015,7 +1015,7 @@ const serviceLogsTimeout = 15 * time.Second // cleanup gets one minute in total
 func (rc *RunContext) printServiceLogs(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, serviceLogsTimeout)
 	defer cancel()
-	rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+	rawLogger := common.Logger(ctx).With(rawOutputField, true)
 	for _, svc := range rc.serviceContainers {
 		if !svc.created || svc.logsDumped {
 			continue
@@ -1338,7 +1338,7 @@ func (rc *RunContext) isEnabled(ctx context.Context) (bool, error) {
 			rc.caller.setReusedWorkflowJobResult(rc.Run.JobID, "skipped")
 			return false, nil
 		}
-		l.WithField("jobResult", "skipped").Debugf("Skipping job '%s' due to '%s'", job.Name, job.If.Value)
+		l.With("jobResult", "skipped").Debugf("Skipping job '%s' due to '%s'", job.Name, job.If.Value)
 		return false, nil
 	}
 
@@ -1541,14 +1541,8 @@ func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext
 			merged.RunnerPerflog, merged.RunnerTrackingID = ghc.RunnerPerflog, ghc.RunnerTrackingID
 			*ghc = merged
 
-			instance := rc.Config.GitHubInstance
-			if !strings.HasPrefix(instance, "http://") &&
-				!strings.HasPrefix(instance, "https://") {
-				instance = "https://" + instance
-			}
-			ghc.ServerURL = instance
-			ghc.APIURL = instance + "/api/v1" // the version of Gitea is v1
-			ghc.GraphQLURL = ""               // Gitea doesn't support graphql
+			rc.setInstanceURLs(ghc)
+			ghc.GraphQLURL = "" // Gitea doesn't support graphql
 			return ghc
 		}
 	}
@@ -1562,7 +1556,7 @@ func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext
 
 	ghc.SetBaseAndHeadRef()
 	repoPath := rc.Config.Workdir
-	ghcontext.SetRepositoryAndOwner(ctx, ghc, rc.Config.GitHubInstance, repoPath)
+	ghcontext.SetRepositoryAndOwner(ctx, ghc, repoPath)
 	if ghc.Ref == "" {
 		ghcontext.SetRef(ctx, ghc, repoPath)
 	}
@@ -1572,27 +1566,7 @@ func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext
 
 	ghc.SetRefTypeAndName()
 
-	// defaults
-	ghc.ServerURL = "https://github.com"
-	ghc.APIURL = "https://api.github.com"
-	ghc.GraphQLURL = "https://api.github.com/graphql"
-	// per GHES
-	if rc.Config.GitHubInstance != "github.com" {
-		ghc.ServerURL = "https://" + rc.Config.GitHubInstance
-		ghc.APIURL = fmt.Sprintf("https://%s/api/v3", rc.Config.GitHubInstance)
-		ghc.GraphQLURL = fmt.Sprintf("https://%s/api/graphql", rc.Config.GitHubInstance)
-	}
-
-	{ // Adapt to Gitea
-		instance := rc.Config.GitHubInstance
-		if !strings.HasPrefix(instance, "http://") &&
-			!strings.HasPrefix(instance, "https://") {
-			instance = "https://" + instance
-		}
-		ghc.ServerURL = instance
-		ghc.APIURL = instance + "/api/v1" // the version of Gitea is v1
-		ghc.GraphQLURL = ""               // Gitea doesn't support graphql
-	}
+	rc.setInstanceURLs(ghc)
 
 	// allow to be overridden by user
 	if rc.Config.Env["GITHUB_SERVER_URL"] != "" {
@@ -1606,6 +1580,20 @@ func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext
 	}
 
 	return ghc
+}
+
+func (rc *RunContext) setInstanceURLs(ghc *model.GithubContext) {
+	if instance := strings.TrimRight(rc.Config.GitHubInstance, "/"); instance != "" {
+		ghc.ServerURL = withHTTPS(instance)
+		ghc.APIURL = ghc.ServerURL + "/api/v1"
+	}
+}
+
+func withHTTPS(u string) string {
+	if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+		return u
+	}
+	return "https://" + u
 }
 
 func isLocalCheckout(ghc *model.GithubContext, step *model.Step) bool {
@@ -1657,19 +1645,15 @@ func (rc *RunContext) withGithubEnv(ctx context.Context, github *model.GithubCon
 	env["GITHUB_HEAD_REF"] = github.HeadRef
 	env["GITHUB_SERVER_URL"] = github.ServerURL
 	env["GITHUB_API_URL"] = github.APIURL
-	env["GITHUB_GRAPHQL_URL"] = github.GraphQLURL
 
-	{ // Adapt to Gitea
-		instance := rc.Config.GitHubInstance
-		if !strings.HasPrefix(instance, "http://") &&
-			!strings.HasPrefix(instance, "https://") {
-			instance = "https://" + instance
+	for _, name := range []string{"GITHUB_SERVER_URL", "GITHUB_API_URL"} {
+		if env[name] == "" {
+			delete(env, name)
 		}
-		env["GITHUB_SERVER_URL"] = instance
-		env["GITHUB_API_URL"] = instance + "/api/v1" // the version of Gitea is v1
-		env["GITHUB_GRAPHQL_URL"] = ""               // Gitea doesn't support graphql
-		env["GITHUB_RUN_ATTEMPT"] = github.RunAttempt
 	}
+
+	env["GITHUB_GRAPHQL_URL"] = ""
+	env["GITHUB_RUN_ATTEMPT"] = github.RunAttempt
 
 	env["RUNNER_NAME"] = rc.Config.RunnerName
 	env["RUNNER_ENVIRONMENT"] = "self-hosted"

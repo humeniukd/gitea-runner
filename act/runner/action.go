@@ -145,7 +145,11 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir, actio
 		containerActionDirCopy += `/`
 	}
 
-	defer git.AcquireCloneLock(actionDir)()
+	unlock, err := git.AcquireCloneLock(ctx, actionDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	if !rc.Config.NoActionPatch {
 		// A concurrent job's prepare resets this directory, so patch under the copy's lock.
@@ -366,7 +370,11 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, actionDir, b
 				// Held across the whole build: the daemon drains contextDir lazily.
 				inner := prepImage
 				prepImage = func(ctx context.Context) error {
-					defer git.AcquireCloneLock(actionDir)()
+					unlock, err := git.AcquireCloneLock(ctx, actionDir)
+					if err != nil {
+						return err
+					}
+					defer unlock()
 					return inner(ctx)
 				}
 			}
@@ -681,17 +689,17 @@ func shouldRunPostStep(step actionStep) common.Conditional {
 		stepResult := stepResults[step.getStepModel().ID]
 
 		if stepResult == nil {
-			log.WithField("stepResult", model.StepStatusSkipped).Debugf("skipping post step for '%s'; step was not executed", step.getStepModel())
+			log.With("stepResult", model.StepStatusSkipped).Debugf("skipping post step for '%s'; step was not executed", step.getStepModel())
 			return false
 		}
 
 		if stepResult.Conclusion == model.StepStatusSkipped {
-			log.WithField("stepResult", model.StepStatusSkipped).Debugf("skipping post step for '%s'; main step was skipped", step.getStepModel())
+			log.With("stepResult", model.StepStatusSkipped).Debugf("skipping post step for '%s'; main step was skipped", step.getStepModel())
 			return false
 		}
 
 		if step.getActionModel() == nil {
-			log.WithField("stepResult", model.StepStatusSkipped).Debugf("skipping post step for '%s': no action model available", step.getStepModel())
+			log.With("stepResult", model.StepStatusSkipped).Debugf("skipping post step for '%s': no action model available", step.getStepModel())
 			return false
 		}
 

@@ -29,7 +29,10 @@ import (
 	"gitea.dev/actionslib/pkg/model"
 )
 
-const maxJobSummaryBytes = 1024 * 1024
+const (
+	jobCleanupTimeout  = time.Minute
+	maxJobSummaryBytes = 1024 * 1024
+)
 
 // jobSummaryTruncationMarker is appended to a summary that exceeded the size limit
 // so the rendered output makes the truncation visible instead of silently cutting off.
@@ -89,7 +92,7 @@ func printPrepareActions(rc *RunContext, preparers []actionPreparer) common.Exec
 			return nil
 		}
 
-		rawLogger := common.Logger(ctx).WithField(rawOutputField, true)
+		rawLogger := common.Logger(ctx).With(rawOutputField, true)
 		rawLogger.Infof("Prepare all required actions")
 
 		for _, preparer := range preparers {
@@ -123,7 +126,7 @@ func printCompleteJobName(rc *RunContext) common.Executor {
 		if name == "" && rc.Run != nil {
 			name = rc.Run.JobID
 		}
-		common.Logger(ctx).WithField(rawOutputField, true).Infof("Complete job name: %s", name)
+		common.Logger(ctx).With(rawOutputField, true).Infof("Complete job name: %s", name)
 		return nil
 	}
 }
@@ -248,7 +251,7 @@ func newJobExecutor(info jobInfo, sf stepFactory, rc *RunContext) common.Executo
 		jobError := common.JobError(ctx)
 		var err error
 		// always allow 1 min for stopping and removing the runner, even if we were cancelled
-		ctx, cancel := context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), time.Minute)
+		ctx, cancel := context.WithTimeout(common.WithLogger(context.Background(), common.Logger(ctx)), jobCleanupTimeout)
 		defer cancel()
 
 		logger := common.Logger(ctx)
@@ -408,7 +411,7 @@ func setJobResult(ctx context.Context, info jobInfo, rc *RunContext, success boo
 		jobResultMessage = "cancelled"
 	}
 
-	logger.WithField("jobResult", jobResult).Infof("Job %s", jobResultMessage)
+	logger.With("jobResult", jobResult).Infof("Job %s", jobResultMessage)
 }
 
 // evaluateJobEnv returns the workflow and job env evaluated, as far as it got on error, leaving rc.Env raw.
@@ -683,7 +686,7 @@ func archiveEntryMatchesPath(entryName, requestedPath string) bool {
 // useJobStageLogger tags the log entries of a job level executor with the stage they belong to.
 func useJobStageLogger(stage string, executor common.Executor) common.Executor {
 	return func(ctx context.Context) error {
-		return executor(common.WithLogger(ctx, common.Logger(ctx).WithField("stage", stage)))
+		return executor(common.WithLogger(ctx, common.Logger(ctx).With("stage", stage)))
 	}
 }
 

@@ -7,18 +7,20 @@ package runner
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"gitea.com/gitea/runner/act/common"
+	"gitea.com/gitea/runner/act/common/logging"
+	"gitea.com/gitea/runner/act/common/logging/logtest"
 	"gitea.com/gitea/runner/act/container"
 	"gitea.com/gitea/runner/internal/pkg/telemetry"
 
 	"gitea.dev/actionslib/pkg/model"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
-	log "github.com/sirupsen/logrus"
-	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -189,7 +191,6 @@ func TestSetupEnv(t *testing.T) {
 		"GITHUB_ACTION_PATH":       "",
 		"GITHUB_ACTION_REF":        "",
 		"GITHUB_ACTION_REPOSITORY": "",
-		"GITHUB_API_URL":           "https:///api/v1", // Gitea uses api/v1 (upstream GitHub: api/v3)
 		"GITHUB_BASE_REF":          "",
 		"GITHUB_EVENT_NAME":        "",
 		"GITHUB_EVENT_PATH":        "/var/run/act/workflow/event.json",
@@ -200,7 +201,6 @@ func TestSetupEnv(t *testing.T) {
 		"GITHUB_RUN_ATTEMPT":       "",
 		"GITHUB_RUN_ID":            "runId",
 		"GITHUB_RUN_NUMBER":        "1",
-		"GITHUB_SERVER_URL":        "https://",
 		"GITHUB_WORKFLOW":          "",
 		"INPUT_ID":                 "1234567",
 		"INPUT_STEP_WITH":          "with-value",
@@ -299,7 +299,7 @@ func TestIsStepEnabled(t *testing.T) {
 		}
 	}
 
-	log.SetLevel(log.DebugLevel)
+	logging.SetLevel(logging.LevelDebug)
 	assertObject := assert.New(t)
 
 	// success()
@@ -383,7 +383,7 @@ func TestIsContinueOnError(t *testing.T) {
 		}
 	}
 
-	log.SetLevel(log.DebugLevel)
+	logging.SetLevel(logging.LevelDebug)
 	assertObject := assert.New(t)
 
 	// absent
@@ -475,6 +475,26 @@ func TestRunStepExecutorDoesNotLeakRefusalToNextStep(t *testing.T) {
 	require.NoError(t, errB)
 }
 
+type fileCommandTestContainer struct {
+	*container.HostEnvironment
+}
+
+func (c *fileCommandTestContainer) UpdateFromEnv(srcPath string, env *map[string]string) common.Executor {
+	return func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return c.HostEnvironment.UpdateFromEnv(srcPath, env)(ctx)
+	}
+}
+
+func (c *fileCommandTestContainer) GetContainerArchive(ctx context.Context, srcPath string) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.HostEnvironment.GetContainerArchive(ctx, srcPath)
+}
+
 func TestRunStepExecutorParity(t *testing.T) {
 	newStep := func(t *testing.T, stepModel *model.Step) *stepRun {
 		rc := createRunContext(t)
@@ -493,12 +513,12 @@ func TestRunStepExecutorParity(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			step := newStep(t, test.step)
-			logger, hook := logrustest.NewNullLogger()
+			logger, hook := logtest.NewLogger()
 			err := runStepExecutor(step, stepStageMain, test.executor)(common.WithLogger(context.Background(), logger))
 
 			require.ErrorContains(t, err, test.wantError)
 			assert.Equal(t, model.StepStatusFailure, step.RunContext.StepResults[test.step.ID].Conclusion)
-			assert.Equal(t, model.StepStatusFailure, hook.LastEntry().Data["stepResult"])
+			assert.Equal(t, model.StepStatusFailure, lastRecordAttr(hook, "stepResult"))
 		})
 	}
 
@@ -507,13 +527,12 @@ func TestRunStepExecutorParity(t *testing.T) {
 			condition string
 			started   int
 		}{{"true", 1}, {"false", 0}} {
-			logger, hook := logrustest.NewNullLogger()
-			logger.SetLevel(log.DebugLevel)
+			logger, hook := logtest.NewLogger()
 			step := newStep(t, &model.Step{ID: "pre", If: yaml.Node{Value: test.condition}})
 			require.NoError(t, runStepExecutor(step, stepStagePre, noopExecutor)(common.WithLogger(context.Background(), logger)))
 			started := 0
-			for _, entry := range hook.AllEntries() {
-				if entry.Data[StepStartedField] == true {
+			for _, entry := range hook.AllRecords() {
+				if v, _ := entry.Attr(StepStartedField); v == true {
 					started++
 				}
 			}
@@ -523,7 +542,7 @@ func TestRunStepExecutorParity(t *testing.T) {
 
 	t.Run("file command error honors continue-on-error", func(t *testing.T) {
 		step := newStep(t, &model.Step{ID: "commands", RawContinueOnError: "true"})
-		logger, hook := logrustest.NewNullLogger()
+		logger, hook := logtest.NewLogger()
 		err := runStepExecutor(step, stepStageMain, func(context.Context) error {
 			require.NoError(t, os.WriteFile(step.env["GITHUB_ENV"], []byte("GOOD=1\nmalformed\n"), 0o600))
 			require.NoError(t, os.WriteFile(step.env["GITHUB_OUTPUT"], []byte("kept=value\n"), 0o600))
@@ -535,7 +554,7 @@ func TestRunStepExecutorParity(t *testing.T) {
 		result := step.RunContext.StepResults[step.Step.ID]
 		assert.Equal(t, model.StepStatusFailure, result.Outcome)
 		assert.Equal(t, model.StepStatusSuccess, result.Conclusion)
-		assert.Equal(t, model.StepStatusSuccess, hook.LastEntry().Data["stepResult"])
+		assert.Equal(t, model.StepStatusSuccess, lastRecordAttr(hook, "stepResult"))
 		assert.Equal(t, "1", step.RunContext.Env["GOOD"])
 		assert.Equal(t, "value", result.Outputs["kept"])
 		assert.Equal(t, "value", step.RunContext.IntraActionState[step.Step.ID]["saved"])
@@ -544,6 +563,30 @@ func TestRunStepExecutorParity(t *testing.T) {
 			require.NoError(t, readErr)
 			assert.Empty(t, contents)
 		}
+	})
+
+	t.Run("file commands survive a job timeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			step := newStep(t, &model.Step{ID: "interrupted"})
+			ctx, cancel := applyJobTimeout(t.Context(), step.RunContext, &model.Job{TimeoutMinutes: "1"})
+			defer cancel()
+			step.RunContext.JobContainer = &fileCommandTestContainer{step.RunContext.JobContainer.(*container.HostEnvironment)}
+			err := runStepExecutor(step, stepStageMain, func(execCtx context.Context) error {
+				for name, content := range map[string]string{
+					"GITHUB_ENV": "KEPT_ENV=value\n", "GITHUB_STATE": "saved=value\n",
+					"GITHUB_OUTPUT": "kept=value\n", "GITHUB_PATH": "/kept/bin\n",
+				} {
+					require.NoError(t, os.WriteFile(step.env[name], []byte(content), 0o600))
+				}
+				<-execCtx.Done()
+				return execCtx.Err()
+			})(ctx)
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			assert.Equal(t, "value", step.RunContext.Env["KEPT_ENV"])
+			assert.Equal(t, "value", step.RunContext.IntraActionState[step.Step.ID]["saved"])
+			assert.Equal(t, "value", step.RunContext.StepResults[step.Step.ID].Outputs["kept"])
+			assert.Contains(t, step.RunContext.ExtraPath, "/kept/bin")
+		})
 	})
 
 	t.Run("composite child files do not leak", func(t *testing.T) {
@@ -604,4 +647,9 @@ func TestRunStepExecutorParity(t *testing.T) {
 			assert.Equal(t, wantDeadline, hasDeadline, timeout)
 		}
 	})
+}
+
+func lastRecordAttr(h *logtest.Handler, key string) any {
+	v, _ := h.LastRecord().Attr(key)
+	return v
 }

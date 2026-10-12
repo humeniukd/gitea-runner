@@ -5,21 +5,23 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"gitea.com/gitea/runner/act/common/logging"
 	"gitea.com/gitea/runner/internal/pkg/config"
-	"gitea.com/gitea/runner/internal/pkg/report"
 
 	"connectrpc.com/connect"
 	runnerv1 "gitea.dev/actionslib/runner/v1"
 	"gitea.dev/actionslib/runner/v1/runnerv1connect"
-	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -62,24 +64,23 @@ func TestGetDockerSocketPathUsesConfigAndEnvironment(t *testing.T) {
 }
 
 func TestInitLoggingSetsLevelAndCaller(t *testing.T) {
-	oldLevel := log.GetLevel()
-	oldReportCaller := log.StandardLogger().ReportCaller
+	oldLevel, oldOut := logging.GetLevel(), logging.Output()
 	t.Cleanup(func() {
-		log.SetLevel(oldLevel)
-		log.SetReportCaller(oldReportCaller)
+		logging.SetLevel(oldLevel)
+		logging.SetOutput(oldOut)
+		logging.SetReportCaller(false)
+		logging.SetTextFormat(logging.TextOptions{})
 	})
-
-	oldFormatter := log.StandardLogger().Formatter
-	t.Cleanup(func() { log.SetFormatter(oldFormatter) })
 
 	cfg := &config.Config{}
 	cfg.Log.Level = "debug"
 	initLogging(cfg)
 
-	require.Equal(t, log.DebugLevel, log.GetLevel())
-	require.True(t, log.StandardLogger().ReportCaller)
-	// act plans a job on this logger, so a live task's secrets have to be masked out of it
-	require.IsType(t, report.MaskingFormatter(nil), log.StandardLogger().Formatter)
+	require.Equal(t, logging.LevelDebug, logging.GetLevel())
+	var buf strings.Builder
+	logging.SetOutput(&buf)
+	logging.Debugf("line")
+	require.Contains(t, buf.String(), "[daemon_test.go:")
 }
 
 var errUnregisteredRunner = errors.New("rpc error: code = Unauthenticated desc = unregistered runner")
@@ -87,12 +88,19 @@ var errUnregisteredRunner = errors.New("rpc error: code = Unauthenticated desc =
 type daemonTestService struct {
 	runnerv1connect.UnimplementedRunnerServiceHandler
 	declareErr, fetchErr error
+	declareCalls         atomic.Int32
 	beforeTask           bool
 	cancel               context.CancelFunc
 }
 
 func (s *daemonTestService) Declare(context.Context, *connect.Request[runnerv1.DeclareRequest]) (*connect.Response[runnerv1.DeclareResponse], error) {
+	if s.declareCalls.Add(1) == 1 {
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("bad gateway"))
+	}
 	if s.declareErr != nil {
+		if s.beforeTask {
+			s.cancel()
+		}
 		return nil, s.declareErr
 	}
 	return connect.NewResponse(&runnerv1.DeclareResponse{Runner: &runnerv1.Runner{Name: "test"}}), nil
@@ -117,7 +125,9 @@ func (*daemonTestService) UpdateLog(_ context.Context, req *connect.Request[runn
 	return connect.NewResponse(&runnerv1.UpdateLogResponse{AckIndex: req.Msg.Index + int64(len(req.Msg.Rows))}), nil
 }
 
-func TestDaemonRemovesOnlyConsumedEphemeralRegistration(t *testing.T) {
+func TestDaemonRetriesDeclareOutagesAndRemovesOnlyConsumedEphemeralRegistration(t *testing.T) {
+	defer func(delay time.Duration) { declareRetryDelay = delay }(declareRetryDelay)
+	declareRetryDelay = 0
 	for _, tc := range []struct {
 		name                  string
 		ephemeral, beforeTask bool
@@ -132,11 +142,13 @@ func TestDaemonRemovesOnlyConsumedEphemeralRegistration(t *testing.T) {
 		{"ephemeral proxy 401 on fetch", true, false, nil, connect.NewError(connect.CodeUnauthenticated, errors.New("HTTP status 401 Unauthorized")), false},
 		{"ephemeral rejected on declare", true, false, errUnregisteredRunner, nil, true},
 		{"persistent rejected on declare", false, false, errUnregisteredRunner, nil, false},
+		{"ephemeral stopped during declare outage", true, true, connect.NewError(connect.CodeUnavailable, errors.New("bad gateway")), nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			_, handler := runnerv1connect.NewRunnerServiceHandler(&daemonTestService{declareErr: tc.declareErr, fetchErr: tc.fetchErr, beforeTask: tc.beforeTask, cancel: cancel})
+			service := &daemonTestService{declareErr: tc.declareErr, fetchErr: tc.fetchErr, beforeTask: tc.beforeTask, cancel: cancel}
+			_, handler := runnerv1connect.NewRunnerServiceHandler(service)
 			server := httptest.NewServer(http.StripPrefix("/api/actions", handler))
 			defer server.Close()
 			dir := t.TempDir()
@@ -145,11 +157,12 @@ func TestDaemonRemovesOnlyConsumedEphemeralRegistration(t *testing.T) {
 			require.NoError(t, os.WriteFile(configFile, []byte("runner:\n  file: "+regFile+"\n  idle_cleanup_interval: 0s\ncache:\n  enabled: false\n"), 0o600))
 			require.NoError(t, config.SaveRegistration(regFile, &config.Registration{Address: server.URL, UUID: "test", Name: "test", Token: "test", Labels: []string{"host:host"}, Ephemeral: tc.ephemeral}))
 			err := runDaemon(ctx, &daemonArgs{Once: true}, &configFile)(nil, nil)
-			if tc.declareErr == nil && tc.fetchErr == nil {
+			if tc.declareErr == nil && tc.fetchErr == nil || tc.beforeTask {
 				require.NoError(t, err)
 			} else {
 				require.Error(t, err)
 			}
+			require.Equal(t, int32(2), service.declareCalls.Load())
 			if tc.removed {
 				require.NoFileExists(t, regFile)
 			} else {
@@ -157,4 +170,28 @@ func TestDaemonRemovesOnlyConsumedEphemeralRegistration(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestShouldRetryDeclare(t *testing.T) {
+	for _, tc := range []struct {
+		err   error
+		retry bool
+	}{
+		{connect.NewError(connect.CodeUnavailable, errors.New("bad gateway")), true},
+		{connect.NewWireError(connect.CodeInternal, errors.New("update runner")), true},
+		{connect.NewError(connect.CodeUnavailable, &tls.CertificateVerificationError{Err: errors.New("unknown authority")}), false},
+		{connect.NewError(connect.CodeUnavailable, http.ErrSchemeMismatch), false},
+		{connect.NewError(connect.CodeUnavailable, tls.AlertError(42)), false},
+		{connect.NewError(connect.CodePermissionDenied, errors.New("forbidden")), false},
+		{connect.NewWireError(connect.CodeUnknown, errors.New("unregistered runner")), false},
+	} {
+		require.Equal(t, tc.retry, shouldRetryDeclare(tc.err), tc.err.Error())
+	}
+}
+
+// A dependency that reconfigures logrus's global logger when it is loaded makes its own log lines
+// show up twice or not at all, so this fails when upgrading one starts doing that. It does not
+// cover a dependency that does so later, while running.
+func TestLogrusBridgeSurvivesDependencies(t *testing.T) {
+	require.True(t, logging.LogrusBridgeIntact())
 }

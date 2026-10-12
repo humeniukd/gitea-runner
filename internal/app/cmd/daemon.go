@@ -5,8 +5,10 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"gitea.com/gitea/runner/act/common/logging"
 	"gitea.com/gitea/runner/internal/app/poll"
 	"gitea.com/gitea/runner/internal/app/run"
 	"gitea.com/gitea/runner/internal/pkg/client"
@@ -29,8 +32,9 @@ import (
 	"gitea.com/gitea/runner/internal/pkg/ver"
 
 	"connectrpc.com/connect"
+	runnerv1 "gitea.dev/actionslib/runner/v1"
+	"github.com/avast/retry-go/v5"
 	"github.com/mattn/go-isatty"
-	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
@@ -42,11 +46,11 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		}
 
 		initLogging(cfg)
-		log.Infoln("Starting runner daemon")
+		logging.Info("Starting runner daemon")
 
 		reg, err := config.LoadRegistration(cfg.Runner.File)
 		if os.IsNotExist(err) {
-			log.Error("registration file not found, please register the runner first")
+			logging.Error("registration file not found, please register the runner first")
 			return err
 		} else if err != nil {
 			return fmt.Errorf("failed to load registration file: %w", err)
@@ -58,13 +62,13 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		releaseLock, err := lock.TryLock(cfg.Runner.File)
 		switch {
 		case errors.Is(err, lock.ErrLocked):
-			log.Errorf("another gitea-runner process is already using %q; each runner process needs its own runner file (runner.file)", cfg.Runner.File)
+			logging.Errorf("another gitea-runner process is already using %q; each runner process needs its own runner file (runner.file)", cfg.Runner.File)
 			return err
 		case err != nil:
 			// Best-effort guard: if the lock file can't be created (e.g. a
 			// read-only runner-file mount), warn and start anyway rather than
 			// refusing to run.
-			log.Warnf("could not lock runner file %q, continuing without the single-process guard: %v", cfg.Runner.File, err)
+			logging.Warnf("could not lock runner file %q, continuing without the single-process guard: %v", cfg.Runner.File, err)
 		default:
 			// Held until shutdown finishes: the draining runner still owns this
 			// identity on the server, so releasing early would let a restart
@@ -74,13 +78,13 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 
 		shutdownTelemetry, err := telemetry.Setup(ctx, reg.UUID, reg.Name, metrics.Registry)
 		if err != nil {
-			log.WithError(err).Warn("OpenTelemetry export failed to start")
+			logging.WithError(err).Warn("OpenTelemetry export failed to start")
 		}
 		defer func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := shutdownTelemetry(ctx); err != nil {
-				log.WithError(err).Warn("OpenTelemetry export failed to flush")
+				logging.WithError(err).Warn("OpenTelemetry export failed to flush")
 			}
 		}()
 
@@ -90,13 +94,13 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		for _, l := range lbls {
 			label, err := labels.Parse(l)
 			if err != nil {
-				log.WithError(err).Warnf("ignored invalid label %q", l)
+				logging.WithError(err).Warnf("ignored invalid label %q", l)
 				continue
 			}
 			ls = append(ls, label)
 		}
 		if len(ls) == 0 {
-			log.Warn("no labels configured, runner may not be able to pick up jobs")
+			logging.Warn("no labels configured, runner may not be able to pick up jobs")
 		}
 
 		// Before the first Docker API call: the standard library resolves the proxy
@@ -104,7 +108,7 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		if dockerSocketPath, err := getDockerSocketPath(cfg.Container.DockerHost); err == nil {
 			run.BypassProxyForDockerHost(dockerSocketPath)
 		} else {
-			log.Debugf("cannot resolve the docker socket path, so Docker API calls are not exempted from the proxy: %v", err)
+			logging.Debugf("cannot resolve the docker socket path, so Docker API calls are not exempted from the proxy: %v", err)
 		}
 
 		if ls.RequireDocker() || cfg.Container.RequireDocker {
@@ -116,20 +120,20 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 				for keepRunning {
 					dockerSocketPath, err := getDockerSocketPath(cfg.Container.DockerHost)
 					if err != nil {
-						log.Errorf("Failed to get socket path: %s", err.Error())
+						logging.Errorf("Failed to get socket path: %s", err.Error())
 					} else if err = envcheck.CheckIfDockerRunning(tctx, dockerSocketPath); errors.Is(err, context.Canceled) {
-						log.Infof("Docker wait timeout of %s expired", timeout.String())
+						logging.Infof("Docker wait timeout of %s expired", timeout.String())
 						break
 					} else if err != nil {
-						log.Errorf("Docker connection failed: %s", err.Error())
+						logging.Errorf("Docker connection failed: %s", err.Error())
 					} else {
-						log.Infof("Docker is ready")
+						logging.Infof("Docker is ready")
 						break
 					}
 					select {
 					case <-time.After(time.Second):
 					case <-tctx.Done():
-						log.Infof("Docker wait timeout of %s expired", timeout.String())
+						logging.Infof("Docker wait timeout of %s expired", timeout.String())
 						keepRunning = false
 					}
 				}
@@ -165,7 +169,7 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			if err := config.SaveRegistration(cfg.Runner.File, reg); err != nil {
 				return fmt.Errorf("failed to save runner config: %w", err)
 			}
-			log.Infof("labels updated to: %v", reg.Labels)
+			logging.Infof("labels updated to: %v", reg.Labels)
 		}
 
 		cli := client.New(
@@ -180,24 +184,41 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 		runner := run.NewRunner(cfg, reg, cli)
 		defer func() {
 			if err := runner.Close(); err != nil {
-				log.Warnf("runner %s: cache server shutdown: %v", reg.Name, err)
+				logging.Warnf("runner %s: cache server shutdown: %v", reg.Name, err)
 			}
 		}()
 
 		// declare the labels of the runner before fetching tasks
-		resp, err := runner.Declare(ctx, ls.Names())
+		resp, err := retry.NewWithData[*connect.Response[runnerv1.DeclareResponse]](
+			retry.Context(ctx),
+			retry.UntilSucceeded(),
+			retry.Delay(declareRetryDelay),
+			retry.DelayType(retry.FixedDelay),
+			retry.RetryIf(shouldRetryDeclare),
+			retry.OnRetry(func(attempt uint, err error) {
+				if attempt == 0 {
+					logging.WithError(err).Warn("fail to invoke Declare, retrying until Gitea is reachable")
+				} else {
+					logging.WithError(err).Debug("fail to invoke Declare, retrying")
+				}
+			}),
+		).Do(func() (*connect.Response[runnerv1.DeclareResponse], error) {
+			return runner.Declare(ctx, ls.Names())
+		})
 		switch {
+		case err != nil && ctx.Err() != nil && !client.IsRegistrationRejected(err):
+			return nil
 		case err != nil && connect.CodeOf(err) == connect.CodeUnimplemented:
-			log.Errorf("Your Gitea version is too old to support runner declare, please upgrade to v1.21 or later")
+			logging.Errorf("Your Gitea version is too old to support runner declare, please upgrade to v1.21 or later")
 			return err
 		case err != nil:
-			log.WithError(err).Error("fail to invoke Declare")
+			logging.WithError(err).Error("fail to invoke Declare")
 			if client.IsRegistrationRejected(err) {
 				removeEphemeralRegistration(reg, cfg.Runner.File)
 			}
 			return err
 		default:
-			log.Infof("runner: %s, with version: %s, with labels: %v, declare successfully",
+			logging.Infof("runner: %s, with version: %s, with labels: %v, declare successfully",
 				resp.Msg.Runner.Name, resp.Msg.Runner.Version, resp.Msg.Runner.Labels)
 		}
 		runner.SetCapabilitiesFromDeclare(resp)
@@ -247,14 +268,14 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
 			}
 		}
 
-		log.Infof("runner: %s shutdown initiated, waiting %s for running jobs to complete before shutting down", resp.Msg.Runner.Name, cfg.Runner.ShutdownTimeout)
+		logging.Infof("runner: %s shutdown initiated, waiting %s for running jobs to complete before shutting down", resp.Msg.Runner.Name, cfg.Runner.ShutdownTimeout)
 
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.Runner.ShutdownTimeout)
 		defer cancel()
 
 		err = poller.Shutdown(ctx)
 		if err != nil {
-			log.Warnf("runner: %s cancelled in progress jobs during shutdown", resp.Msg.Runner.Name)
+			logging.Warnf("runner: %s cancelled in progress jobs during shutdown", resp.Msg.Runner.Name)
 		}
 
 		if poller.RegistrationRejected() {
@@ -274,9 +295,9 @@ func removeEphemeralRegistration(reg *config.Registration, file string) {
 		return
 	}
 	if err := os.Remove(file); err == nil {
-		log.Infof("removed the spent ephemeral registration %q", file)
+		logging.Infof("removed the spent ephemeral registration %q", file)
 	} else if !os.IsNotExist(err) {
-		log.WithError(err).Warn("failed to remove the spent ephemeral registration")
+		logging.WithError(err).Warn("failed to remove the spent ephemeral registration")
 	}
 }
 
@@ -307,7 +328,7 @@ func splitLabels(s string) []string {
 	return lbls
 }
 
-// initLogging setup the global logrus logger.
+// initLogging sets up the process-wide logger.
 func initLogging(cfg *config.Config) {
 	callPrettyfier := func(f *runtime.Frame) (string, string) {
 		// get function name
@@ -320,35 +341,49 @@ func initLogging(cfg *config.Config) {
 	}
 
 	isTerm := isatty.IsTerminal(os.Stdout.Fd())
-	format := &log.TextFormatter{
+	logging.SetTextFormat(logging.TextOptions{
 		DisableColors:    !isTerm,
 		FullTimestamp:    true,
 		CallerPrettyfier: callPrettyfier,
-	}
-	log.SetFormatter(report.MaskingFormatter(format))
+		Filter:           report.MaskGlobal,
+	})
 
 	l := cfg.Log.Level
 	if l == "" {
-		log.Infof("Log level not set, sticking to info")
+		logging.Infof("Log level not set, sticking to info")
 		return
 	}
 
-	level, err := log.ParseLevel(l)
+	level, err := logging.ParseLevel(l)
 	if err != nil {
-		log.WithError(err).
+		logging.WithError(err).
 			Errorf("invalid log level: %q", l)
 	}
 
 	// debug level
 	switch level {
-	case log.DebugLevel, log.TraceLevel:
-		log.SetReportCaller(true) // Only in debug or trace because it takes a performance toll
-		log.Infof("Log level %s requested, setting up report caller for further debugging", level)
+	case logging.LevelDebug, logging.LevelTrace:
+		logging.SetReportCaller(true) // Only in debug or trace because it takes a performance toll
+		logging.Infof("Log level %s requested, setting up report caller for further debugging", level)
 	}
 
-	if log.GetLevel() != level {
-		log.Infof("log level set to %v", level)
-		log.SetLevel(level)
+	if logging.GetLevel() != level {
+		logging.Infof("log level set to %v", level)
+		logging.SetLevel(level)
+	}
+}
+
+var declareRetryDelay = 30 * time.Second
+
+func shouldRetryDeclare(err error) bool {
+	if errors.As(err, new(*tls.CertificateVerificationError)) || errors.As(err, new(tls.AlertError)) || errors.Is(err, http.ErrSchemeMismatch) { // misconfigurations never heal
+		return false
+	}
+	switch connect.CodeOf(err) {
+	case connect.CodeUnauthenticated, connect.CodeUnimplemented, connect.CodePermissionDenied, connect.CodeInvalidArgument:
+		return false
+	default:
+		return !client.IsRegistrationRejected(err)
 	}
 }
 
