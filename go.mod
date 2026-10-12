@@ -7,7 +7,7 @@ toolchain go1.27.2
 require (
 	connectrpc.com/connect v1.21.0
 	dario.cat/mergo v1.0.2
-	gitea.dev/actionslib v1.3.0
+	gitea.dev/actionslib v1.4.0
 	github.com/avast/retry-go/v5 v5.0.0
 	github.com/bmatcuk/doublestar/v4 v4.10.2
 	github.com/coder/websocket v1.8.15
@@ -104,5 +104,3 @@ require (
 	golang.org/x/tools v0.49.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
-
-replace gitea.dev/actionslib => gitea.com/bircni/actionslib v1.3.1-0.20261012181443-09008e76c4cf
