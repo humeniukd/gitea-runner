@@ -40,8 +40,8 @@ fields.
 
 - The process-wide logger masks the secrets of every live task, the job logger masks its own.
   Going around either leaks them.
-- Libraries that log through logrus's global logger (`docker/cli`, `moby/go-archive`) are forwarded
-  to the process-wide one, so they follow its level and masking too, and stay on the runner host.
+- Libraries that log through logrus's or slog's global logger are forwarded to the process-wide
+  one, so they follow its level and masking too.
 - Two streams: what the job logger sends to the `Reporter` is uploaded and visible to the
   workflow author, what the process-wide logger writes stays on the runner host. Step output is
   always uploaded. The runner's own messages between steps are uploaded from `runner.log_report_level`
