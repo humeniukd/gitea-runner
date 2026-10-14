@@ -89,7 +89,7 @@ type Reporter struct {
 	logReportInterval   time.Duration
 	logReportMaxLatency time.Duration
 	logBatchSize        int
-	logReportLevel      *logging.Level // nil follows the process-wide level
+	logReportLevel      logging.Level
 	stateReportInterval time.Duration
 	// closeTimeout bounds each RPC attempt in the final flush, on a context
 	// detached from r.ctx so a server cancel can't abort the acknowledgement.
@@ -134,6 +134,7 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 		logReportInterval:   cfg.Runner.LogReportInterval,
 		logReportMaxLatency: cfg.Runner.LogReportMaxLatency,
 		logBatchSize:        cfg.Runner.LogReportBatchSize,
+		logReportLevel:      logging.GetLevel(),
 		stateReportInterval: cfg.Runner.StateReportInterval,
 		closeTimeout:        cfg.Runner.ReportCloseTimeout,
 		logNotify:           make(chan struct{}, 1),
@@ -147,8 +148,8 @@ func NewReporter(ctx context.Context, cancel context.CancelFunc, client client.C
 		jobLog:        openJobLog(cfg.Log.Job, task.Id, time.Now()),
 	}
 
-	if level, err := logging.ParseLevel(cfg.Runner.LogReportLevel); cfg.Runner.LogReportLevel != "" && err == nil {
-		rv.logReportLevel = &level
+	if level, err := logging.ParseLevel(cfg.Runner.LogReportLevel); err == nil { // unset keeps log.level
+		rv.logReportLevel = level
 	}
 
 	rv.daemonWait = 6 * rv.effectiveCloseTimeout()
@@ -959,13 +960,9 @@ func (r *Reporter) duringSteps() bool {
 
 // shouldAppendLogRow reports whether a non-raw_output entry should be written
 // to the job log: only when we are between steps and the entry's level is
-// within runner.log_report_level, or within log.level when that is unset.
+// within runner.log_report_level.
 func (r *Reporter) shouldAppendLogRow(entry logging.Record) bool {
-	level := logging.GetLevel()
-	if r.logReportLevel != nil {
-		level = *r.logReportLevel
-	}
-	return !r.duringSteps() && entry.Level >= level
+	return !r.duringSteps() && entry.Level >= r.logReportLevel
 }
 
 var stringToResult = map[string]runnerv1.Result{
