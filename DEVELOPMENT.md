@@ -40,10 +40,9 @@ fields.
 
 - The process-wide logger masks the secrets of every live task, the job logger masks its own.
   Going around either leaks them.
-- What the job logger sends to the `Reporter` is uploaded to the job log, the process-wide logger
-  stays on the runner host. Step output is always uploaded, the runner's own messages between steps
-  from `runner.log_report_level` up, which defaults to `log.level`. Keep operator-only detail (host
-  paths, internal addresses) off the job logger.
+- The job logger's output can reach the job log workflow authors see, the process-wide logger's
+  stays on the runner host, so keep operator-only detail (host paths, internal addresses) off the
+  job logger.
 - Libraries that log through logrus's or slog's global logger are forwarded to the process-wide
   one, so they follow its level and masking too.
 - That forwarding only works while logrus's global logger is left as `logging` configures it. A
