@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+trap "exit 143" TERM INT # as PID 1 bash ignores signals it does not trap
+
 if [[ ! -d /data ]]; then
   mkdir -p /data
 fi
@@ -41,7 +43,8 @@ if [[ ! -s "$RUNNER_STATE_FILE" ]]; then
       --instance "${GITEA_INSTANCE_URL}" \
       --token    "${GITEA_RUNNER_REGISTRATION_TOKEN}" \
       --name     "${GITEA_RUNNER_NAME:-`hostname`}" \
-      ${CONFIG_ARG} ${EXTRA_ARGS} --no-interactive 2>&1 | tee /tmp/reg.log
+      ${CONFIG_ARG} ${EXTRA_ARGS} --no-interactive 2>&1 | tee /tmp/reg.log &
+    wait $! # in the background, so a trapped signal ends the wait at once
 
     if grep -q 'Runner registered successfully' /tmp/reg.log; then
       echo "SUCCESS"
@@ -52,7 +55,8 @@ if [[ ! -s "$RUNNER_STATE_FILE" ]]; then
       exit 1
     fi
     echo "Waiting to retry ..."
-    sleep 5
+    sleep 5 &
+    wait $!
   done
 fi
 # Prevent reading the token from the gitea-runner process
