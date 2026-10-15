@@ -69,12 +69,13 @@ func FetchAction(ctx context.Context, input NewGitCloneExecutorInput) (string, s
 }
 
 func downloadArchive(ctx context.Context, input NewGitCloneExecutorInput, sha, etag string) (string, string, error) {
-	source, err := url.Parse(input.URL)
-	if err != nil || source.Scheme != "http" && source.Scheme != "https" || hexRefRegex.MatchString(input.Ref) { // git verifies a pinned commit's content and tells a short one from a branch
-		return "", "", errors.New("no archive")
+	rewritten, err := gitOutput(ctx, "", "ls-remote", "--get-url", input.URL)
+	if err != nil {
+		return "", "", err
 	}
-	if rewritten, err := gitOutput(ctx, "", "ls-remote", "--get-url", input.URL); err != nil || rewritten != input.URL {
-		return "", "", errors.New("the URL is rewritten by insteadOf")
+	source, err := url.Parse(rewritten)
+	if err != nil || source.Scheme != "http" && source.Scheme != "https" || hexRefRegex.MatchString(input.Ref) && !isFullObjectID(input.Ref) { // only git tells a short commit from a branch
+		return "", "", errors.New("no archive")
 	}
 	archive := source.JoinPath("archive", input.Ref+".tar.gz")
 	if source.Host == "github.com" {

@@ -143,25 +143,21 @@ func TestFetchAction(t *testing.T) {
 		assert.Equal(t, headers[1].Get("If-None-Match"), headers[2].Get("If-None-Match"))
 	})
 
-	t.Run("fetches a pinned commit through git once and rejects a short one", func(t *testing.T) {
+	t.Run("downloads a pinned commit once and rejects a short one", func(t *testing.T) {
 		serve("prefixed", 0)
 		sha := gitRevParse(t, remote, "main")
 		input := newInput(sha)
-		tree, got, err := FetchAction(t.Context(), input)
-		require.NoError(t, err)
-		assert.Equal(t, sha, got)
-		assert.FileExists(t, filepath.Join(tree, "action.yml"))
-		requests, headers := served()
-		assert.Positive(t, requests)
-		assert.Empty(t, headers)
-
-		serve("prefixed", 0)
-		_, _, err = FetchAction(t.Context(), input)
-		require.NoError(t, err)
-		_, _, err = FetchAction(t.Context(), newInput(sha[:7]))
+		for range 2 {
+			tree, got, err := FetchAction(t.Context(), input)
+			require.NoError(t, err)
+			assert.Equal(t, sha, got)
+			assert.FileExists(t, filepath.Join(tree, "action.yml"))
+		}
+		_, _, err := FetchAction(t.Context(), newInput(sha[:7]))
 		require.ErrorIs(t, err, ErrShortRef)
-		_, headers = served()
-		assert.Empty(t, headers)
+		_, headers := served()
+		assert.Len(t, headers, 1)
+		assert.NoDirExists(t, filepath.Join(input.Dir, "git"))
 	})
 
 	t.Run("retries a failing download and drops the token on a redirect to another origin", func(t *testing.T) {
@@ -177,7 +173,7 @@ func TestFetchAction(t *testing.T) {
 		assert.Empty(t, headers[3].Get("Authorization"))
 	})
 
-	t.Run("keeps an unprefixed archive whole and exports a clone without an archive, from an unreachable host, or where insteadOf rewrites the URL", func(t *testing.T) {
+	t.Run("keeps an unprefixed archive whole, downloads where insteadOf points and exports a clone without an archive or from an unreachable host", func(t *testing.T) {
 		for _, mode := range []string{"unprefixed", "none", "unreachable"} {
 			serve(mode, 0)
 			tree, sha, err := FetchAction(t.Context(), newInput("main"))
@@ -199,7 +195,8 @@ func TestFetchAction(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, gitRevParse(t, remote, "main"), sha)
 		_, headers := served()
-		assert.Empty(t, headers)
+		assert.Len(t, headers, 1)
+		assert.NoDirExists(t, filepath.Join(input.Dir, "git"))
 	})
 }
 
