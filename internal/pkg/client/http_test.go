@@ -5,10 +5,13 @@ package client
 
 import (
 	"crypto/tls"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -126,5 +129,109 @@ func TestNewRedirectKeepsExtraHeadersOnlyOnSameHost(t *testing.T) {
 		require.Equal(t, tc.kept, gotHeaders.Get("X-Proxy-Token") != "", "%s to %s", origin.URL, tc.host)
 		require.Equal(t, "the-token", gotHeaders.Get(protocol.TokenHeader))
 		require.Equal(t, "application/proto", gotHeaders.Get("Content-Type"))
+	}
+}
+
+func TestTransportReplacesSilentHTTP2Connection(t *testing.T) {
+	sendPing, ping := http2SendPingTimeout, http2PingTimeout
+	http2SendPingTimeout, http2PingTimeout = 100*time.Millisecond, 100*time.Millisecond
+	t.Cleanup(func() { http2SendPingTimeout, http2PingTimeout = sendPing, ping })
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.Proto))
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	addr, silence := startSilenceableProxy(t, server.Listener.Addr().String())
+
+	const timeout = 5 * time.Second
+	client := &http.Client{Transport: NewTransport("https://"+addr, server.Client().Transport.(*http.Transport).TLSClientConfig), Timeout: timeout}
+	get := func() (string, error) {
+		resp, err := client.Get("https://" + addr)
+		if err != nil {
+			return "", err
+		}
+		defer func(Body io.ReadCloser) {
+			err := Body.Close()
+			if err != nil {
+
+			}
+		}(resp.Body)
+		return resp.Proto, nil
+	}
+
+	proto, err := get()
+	require.NoError(t, err)
+	require.Equal(t, "HTTP/2.0", proto)
+
+	silence()
+	start := time.Now()
+	_, err = get()
+	require.Error(t, err)
+	require.Less(t, time.Since(start), timeout, "the silent connection was not closed by the ping health check")
+
+	proto, err = get()
+	require.NoError(t, err, "the next request must open a new connection")
+	require.Equal(t, "HTTP/2.0", proto)
+}
+
+// startSilenceableProxy forwards TCP connections to target. silence makes the connections it
+// already carries drop all traffic without closing, like a peer that vanished; new ones still pass.
+func startSilenceableProxy(t *testing.T, target string) (addr string, silence func()) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var quiet []*atomic.Bool
+	var conns []net.Conn
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			upstream, err := net.Dial("tcp", target)
+			if err != nil {
+				_ = conn.Close()
+				continue
+			}
+			silent := new(atomic.Bool)
+			mu.Lock()
+			quiet = append(quiet, silent)
+			conns = append(conns, conn, upstream)
+			mu.Unlock()
+			go forward(upstream, conn, silent)
+			go forward(conn, upstream, silent)
+		}
+	}()
+	return listener.Addr().String(), func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, silent := range quiet {
+			silent.Store(true)
+		}
+	}
+}
+
+func forward(dst, src net.Conn, silent *atomic.Bool) {
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 && !silent.Load() {
+			if _, err := dst.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
 	}
 }

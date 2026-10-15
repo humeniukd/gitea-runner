@@ -19,6 +19,10 @@ import (
 	"gitea.dev/actionslib/runner/v1/runnerv1connect"
 )
 
+// A connection that silently stops answering, as behind a proxy that dropped it, would otherwise
+// carry every request until the kernel gives up retransmitting, keeping the runner offline that long.
+var http2SendPingTimeout, http2PingTimeout = 30 * time.Second, 15 * time.Second
+
 func NewTransport(endpoint string, tlsConfig *tls.Config) *http.Transport {
 	transport := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
@@ -26,6 +30,7 @@ func NewTransport(endpoint string, tlsConfig *tls.Config) *http.Transport {
 		MaxIdleConnsPerHost: 10, // All requests go to one host; default is 2 which causes frequent reconnects.
 		IdleConnTimeout:     90 * time.Second,
 		ForceAttemptHTTP2:   true,
+		HTTP2:               &http.HTTP2Config{SendPingTimeout: http2SendPingTimeout, PingTimeout: http2PingTimeout},
 	}
 	if strings.HasPrefix(endpoint, "https://") {
 		transport.TLSClientConfig = tlsConfig

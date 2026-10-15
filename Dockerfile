@@ -14,59 +14,10 @@ WORKDIR /opt/src/runner
 
 RUN make clean && make build
 
-### DIND VARIANT
-#
-#
-FROM docker:29.7.2-dind AS dind
-
-ARG VERSION=dev
-
-LABEL org.opencontainers.image.source="https://gitea.com/gitea/runner"
-LABEL org.opencontainers.image.version="${VERSION}"
-
-RUN apk add --no-cache s6 bash git tzdata nftables
-
-COPY --from=builder /opt/src/runner/gitea-runner /usr/local/bin/gitea-runner
-COPY scripts/run.sh /usr/local/bin/run.sh
-COPY scripts/s6 /etc/s6
-
-VOLUME /data
-
-ENV TINI_SUBREAPER=1
-
-ENTRYPOINT ["s6-svscan","/etc/s6"]
-
-### DIND-ROOTLESS VARIANT
-#
-#
-FROM docker:29.7.2-dind-rootless AS dind-rootless
-
-ARG VERSION=dev
-
-LABEL org.opencontainers.image.source="https://gitea.com/gitea/runner"
-LABEL org.opencontainers.image.version="${VERSION}"
-
-USER root
-RUN apk add --no-cache s6 bash git tzdata nftables
-
-COPY --from=builder /opt/src/runner/gitea-runner /usr/local/bin/gitea-runner
-COPY scripts/run.sh /usr/local/bin/run.sh
-COPY scripts/s6 /etc/s6
-
-VOLUME /data
-
-RUN mkdir -p /data && chown -R rootless:rootless /etc/s6 /data
-
-ENV DOCKER_HOST=unix:///run/user/1000/docker.sock
-ENV TINI_SUBREAPER=1
-
-USER rootless
-ENTRYPOINT ["s6-svscan","/etc/s6"]
-
 ### BASIC VARIANT
 #
 #
-FROM alpine:3.24 AS basic
+FROM alpine:3.24
 
 ARG VERSION=dev
 

@@ -1,0 +1,56 @@
+Gitea runner on QNAP NAS: what it took
+=====================================================
+
+Host: kernel 5.10.60-qnap, cgroup v1, Docker 27.1.2-qnap8 (Container Station).
+Docker CLI is not on PATH over SSH:
+  export PATH=/share/CACHEDEV1_DATA/.qpkg/container-station/bin:$PATH
+
+1. Runner image
+   gitea-runner:reap-test, built on the NAS from branch enhance/reap-as-pid1
+   (runner repo, `docker build --target basic`). It runs without tini: the
+   runner reaps zombies itself as PID 1, and it replaces a dead HTTP/2
+   connection to Gitea (Cloudflare dropped one and the runner was offline ~20 min).
+
+2. Instance URL
+   INSTANCE_URL=https://git.loudyo.com (through Cloudflare). Gitea sits on
+   macvlan 172.28.3.50, which bridge-network containers cannot reach.
+
+3. Registration
+   Registration token is user-scoped to `lou`, so one runner serves all lou/* repos.
+   Secrets live in /opt/gitea/.env (0600): INSTANCE_URL, REGISTRATION_TOKEN,
+   RUNNER_NAME=qnap, RUNNER_LABELS=ubuntu-latest:docker://docker.gitea.com/runner-images:ubuntu-latest
+
+4. runner-config.yaml
+   runner.capacity: 1                  one job at a time
+   container.docker_host: "-"          jobs get no Docker socket (it is root on the NAS)
+   container.options: --security-opt seccomp=/seccomp-qnap.json
+
+5. seccomp-qnap.json (required, or jobs fail)
+   The QNAP kernel answers syscall 452 (fchmodat2) with EFAULT "Bad address"
+   instead of ENOSYS. glibc >= 2.39 (Ubuntu 24.04 job image) only falls back on
+   ENOSYS, so tar/chmod fail, e.g. actions/setup-node:
+     tar: ...: Cannot change mode to rwxr-xr-x: Bad address
+   The profile is Docker's default profile with fchmodat2 returning
+   ENOSYS (errno 38). It is mounted read-only into the runner container, which
+   passes it to every job container. Regenerate it from the new defaults if
+   Container Station upgrades Docker.
+
+   Regenerate (run in compose file folder; needs curl, python3):
+
+     V=$(docker version -f "{{.Server.Version}}" | cut -d- -f1)
+     curl -fsSL "https://raw.githubusercontent.com/moby/moby/v$V/profiles/seccomp/default.json" | python3 -c 'import json,sys; d=json.load(sys.stdin); [s["names"].remove("fchmodat2") for s in d["syscalls"] if "fchmodat2" in s.get("names",[])]; d["syscalls"].insert(0,{"names":["fchmodat2"],"action":"SCMP_ACT_ERRNO","errnoRet":38}); json.dump(d,sys.stdout,indent=1)' > seccomp-qnap.json
+     docker compose up -d --no-deps --force-recreate runner
+
+   Check (should print tar=0):
+
+     docker run --rm --security-opt seccomp=/opt/gitea/seccomp-qnap.json docker.gitea.com/runner-images:ubuntu-latest bash -c "mkdir -p /tmp/a/d && tar -C /tmp/a -cf /tmp/t.tar d && mkdir /tmp/b && tar -C /tmp/b -xf /tmp/t.tar; echo tar=\$?"
+
+6. Deploy
+   cd /opt/gitea && docker compose up -d --no-deps runner
+   (--no-deps leaves the Gitea server alone)
+
+Not viable here: rootless dind. It needs /dev/net/tun and /dev/fuse chmod,
+legacy iptables, no iptable_raw, and the vfs/native storage driver (overlayfs
+fails in a user namespace on 5.10, and fuse-overlayfs hits the same fchmodat2
+bug), and it then has no cgroup limits. Use plain dind or a VM if jobs ever
+need Docker.
